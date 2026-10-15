@@ -95,7 +95,7 @@ test('full Name resolves title collisions while suffix speakers and class metada
     assert.equal(index.memberships.get(rows[5].id).parentKey,sin.key);
 });
 
-test('explicit NPC links distinguish conversation participants without splitting ID families or changing their context parents',async()=>{
+test('explicit NPC participants keep complete ID families under a matching shared context parent',async()=>{
     const doryaniPath='Metadata/NPC/Four_Act4/DoryaniTownKingsmarchIntro',hoodPath='Metadata/NPC/Four_Act4/HoodedMentorKingsmarchIntro';
     const rows=freeze([npc(doryaniPath,'Doryani'),npc(hoodPath,'The Hooded One'),
         convo('DoryaniA4_Intro_A',{metadata:{NPC:doryaniPath}}),
@@ -115,16 +115,124 @@ test('explicit NPC links distinguish conversation participants without splitting
     const doryani=index.parents.find(parent=>parent.label==='Doryani'),intro=index.familyByKey.get('DoryaniA4_Intro');
     assert.deepEqual(intro.units,rows.slice(2,9),'NPC, other-participant and player turns retain workbook order in one family');
     assert.deepEqual(doryani.units,rows.slice(2));assert.equal(doryani.families.length,3);
-    assert.equal(index.parents.some(parent=>parent.label==='The Hooded One'),false,'A turn actor does not replace the ID-derived conversation parent');
+    assert.equal(index.parents.some(parent=>parent.label==='The Hooded One'),false,'A matching ID anchor resolves a multi-participant conversation parent');
     for(const row of intro.units){assert.equal(index.memberships.get(row.id).familyKey,intro.key);assert.equal(index.memberships.get(row.id).parentKey,doryani.key);}
     assert.equal(index.memberships.get(rows[7].id).turn,'i1');
     assert.equal(index.memberships.get(rows[10].id).familyKey,'Doryani_Inc_Intro');assert.equal(index.memberships.get(rows[10].id).turn,'a1');
     assert.notEqual(rows[3].id,rows[8].id);assert.equal(rows[3].recordId,rows[8].recordId);
     const withoutHints=rows.map(row=>({...row,metadata:Object.fromEntries(Object.entries(row.metadata).filter(([name])=>name!=='NPC'))}));
     const legacy=await build(withoutHints);
-    for(const row of index.units)assert.deepEqual(index.memberships.get(row.id),legacy.memberships.get(row.id),'NPC hints do not reinterpret existing family identity or parent evidence');
+    for(const row of index.units)for(const name of ['parentKey','familyKey','anchor','turn'])
+        assert.equal(index.memberships.get(row.id)[name],legacy.memberships.get(row.id)[name],'NPC hints preserve this established family context and exact turn identity');
     assert.equal(new Set(index.units.map(row=>row.id)).size,9);assert.equal(JSON.stringify(rows),before);
     assert.equal(intro.units[1],rows[3]);assert.equal(intro.units[6],rows[8]);
+});
+
+test('explicit NPC family ownership resolves Mort aliases and overrides misleading Renly ID prefixes',async()=>{
+    const mort='Metadata/NPC/Four_Act1/DogTrader',una='Metadata/NPC/Four_Act1/Una';
+    const rows=freeze([npc(mort,'Mortimer'),npc(una,'Una'),npc('Metadata/NPC/Four_Act1/Renly','Renly'),
+        convo('Mort_FirstTimeConvo_A1',{metadata:{NPC:mort}}),
+        convo('Mort_FirstTimeConvo_i1_Dex4',{metadata:{NPC:'',Character:'Metadata/Characters/Dex/DexFour'}}),
+        convo('Renly_Intro_A1',{metadata:{NPC:una}}),convo('Renly_Intro_B1_Dex4',{metadata:{NPC:'',Character:'Metadata/Characters/Dex/DexFour'}})]);
+    const before=JSON.stringify(rows),index=await build(rows),mortimer=index.parents.find(parent=>parent.label==='Mortimer'),unaParent=index.parents.find(parent=>parent.label==='Una');
+    assert.deepEqual(mortimer.units,rows.slice(3,5));assert.deepEqual(unaParent.units,rows.slice(5));
+    assert.equal(index.familyByKey.get('Mort_FirstTimeConvo').parentKey,mortimer.key);assert.equal(index.familyByKey.get('Mort_FirstTimeConvo').label,'FirstTimeConvo');
+    assert.equal(index.familyByKey.get('Renly_Intro').parentKey,unaParent.key);assert.equal(index.parents.some(parent=>parent.label==='Renly'),false);
+    const mortFamily=index.familyByKey.get('Mort_FirstTimeConvo');
+    assert.deepEqual(mortFamily.npcEvidence,{reason:'npc',references:[mort],participants:[{key:mortimer.key,label:'Mortimer',references:[mort]}],unresolved:[],ambiguous:[]});
+    for(const row of mortFamily.units) {
+        const member=index.memberships.get(row.id);assert.equal(member.npcEvidence,mortFamily.npcEvidence);assert.deepEqual(member.aliases,[]);assert.equal(member.aliasType,'');
+    }
+    assert.equal(index.units.length,4);assert.equal(JSON.stringify(rows),before);assert.equal(index.memberships.get(rows[4].id).turn,'i1');
+    const legacy=await build(rows.map(row=>({...row,metadata:{}})));
+    assert.equal(legacy.familyByKey.get('Mort_FirstTimeConvo').parentKey,'unassigned');
+    assert.equal(legacy.parentByKey.get(legacy.familyByKey.get('Renly_Intro').parentKey).label,'Renly','Workbooks without hints retain prefix ownership');
+});
+
+test('25 Doryani actor and player turns stay together regardless of first player, Gender role or input order',async()=>{
+    const doryani='Metadata/NPC/Four_Act4/DoryaniTown',hood='Metadata/NPC/Four_Act4/HoodedMentor';
+    const suffixes=['A','A_Sin','B','B_Dex4b','B_DexInt4b','B_Str4b','B_Int4','B_Int4b','B_StrDex4','B_StrDex4b','B_StrInt4','B_StrInt4b',
+        'C_Sin','C','D','D_Dex4b','D_DexInt4b','D_Str4b','D_Int4','D_Int4b','D_StrDex4','D_StrDex4b','D_StrInt4','D_StrInt4b','E'];
+    const turns=suffixes.map((suffix,index)=>convo('DoryaniA4_Intro_'+suffix,{...(index===3?{role:'gender'}:{}),metadata:suffix.endsWith('_Sin')?{NPC:hood}:
+        /^[A-Z]$/.test(suffix)?{NPC:doryani}:{NPC:'',Character:'Metadata/Characters/Dex/DexFourb'}}));
+    const ordered=[turns[3],...turns.slice(0,3),...turns.slice(4)],rows=freeze([npc(doryani,'Doryani'),npc(hood,'The Hooded One'),...ordered]),before=JSON.stringify(rows);
+    const index=await build([...rows,ordered[0]]),reversed=await build([...rows].reverse()),family=index.familyByKey.get('DoryaniA4_Intro');
+    assert.equal(index.units.length,25);assert.equal(index.families.length,1);assert.equal(family.units.length,25);assert.deepEqual(family.units,ordered);
+    assert.equal(index.parentByKey.get(family.parentKey).label,'Doryani');assert.equal(reversed.familyByKey.get(family.key).parentKey,family.parentKey);
+    assert.equal(family.npcEvidence.reason,'npc-anchor');assert.deepEqual(family.npcEvidence.references,[doryani,hood]);
+    assert.deepEqual(family.npcEvidence.participants.map(participant=>participant.label),['Doryani','The Hooded One']);
+    assert.deepEqual(family.npcEvidence,reversed.familyByKey.get(family.key).npcEvidence,'NPC evidence does not depend on the first line or participant frequency');
+    assert.deepEqual(reversed.familyByKey.get(family.key).units,[...ordered].reverse(),'Each input keeps its own worksheet row order');
+    for(const row of ordered) {
+        assert.equal(index.memberships.get(row.id).parentKey,family.parentKey);assert.equal(index.memberships.get(row.id).familyKey,family.key);
+        assert.equal(index.memberships.get(row.id).npcEvidence,family.npcEvidence);assert.deepEqual(index.memberships.get(row.id).aliases,['Doryani']);assert.equal(index.memberships.get(row.id).aliasType,'name');
+        assert.equal(reversed.memberships.get(row.id).parentKey,family.parentKey);
+    }
+    assert.equal(family.units[0],ordered[0]);assert.equal(ordered[0].role,'gender');assert.equal(new Set(index.units.map(row=>row.id)).size,25);assert.equal(JSON.stringify(rows),before);
+});
+
+test('multiple explicit participants need a matching ID anchor and never choose by row frequency',async()=>{
+    const renly='Metadata/NPC/Renly',una='Metadata/NPC/Una',doryani='Metadata/NPC/Doryani';
+    const rows=[npc(renly,'Renly'),npc(una,'Una'),npc(doryani,'Doryani'),
+        ...Array.from({length:8},(_,index)=>convo('Unknown_Intro_A'+(index+1),{metadata:{NPC:index===7?renly:una}})),
+        convo('Doryani_Conflict_A1',{metadata:{NPC:una}}),convo('Doryani_Conflict_B1',{metadata:{NPC:renly}})];
+    for(const input of [rows,[...rows].reverse()]) {
+        const index=await build(input);
+        assert.equal(index.familyByKey.get('Unknown_Intro').parentKey,'unassigned','A majority of Una turns does not establish the family owner');
+        assert.equal(index.familyByKey.get('Doryani_Conflict').parentKey,'unassigned','A unique ID prefix outside the explicit participant set cannot own the family');
+        for(const family of index.families) {
+            assert.equal(family.npcEvidence.reason,'multiple-npcs');assert.deepEqual(family.npcEvidence.participants.map(participant=>participant.label),['Renly','Una']);
+            for(const row of family.units)assert.equal(index.memberships.get(row.id).ambiguous,true);
+        }
+        assert.equal(index.parents.length,1);assert.equal(index.parents[0].units.length,10);
+    }
+});
+
+test('one hinted participant controls the whole mixed Normal/Gender family while original identities stay distinct',async()=>{
+    const una='Metadata/NPC/Una',rows=freeze([npc('Metadata/NPC/Renly','Renly'),npc(una,'Una'),
+        convo('Renly_Intro_A1',{role:'gender'}),convo('Renly_Intro_A1',{metadata:{NPC:una}}),convo('Renly_Intro_B1'),
+        unit('NPCTextAudio','Renly_Intro_A1',{metadata:{NPC:una}})]),before=JSON.stringify(rows),index=await build(rows),reversed=await build([...rows].reverse());
+    const family=index.familyByKey.get('Renly_Intro'),parent=index.parentByKey.get(family.parentKey);
+    assert.equal(parent.label,'Una');assert.deepEqual(family.units,rows.slice(2,5));assert.equal(index.units.length,3);
+    assert.equal(family.npcEvidence.reason,'npc');assert.deepEqual(family.npcEvidence.references,[una]);assert.equal(family.npcEvidence.participants[0].label,'Una');
+    assert.equal(new Set(family.units.map(row=>row.id)).size,3);assert.notEqual(rows[2].id,rows[3].id);assert.equal(rows[2].recordId,rows[3].recordId);
+    assert.equal(reversed.familyByKey.get(family.key).parentKey,parent.key);assert.equal(JSON.stringify(rows),before);
+    for(const row of family.units)assert.equal(index.memberships.get(row.id).parentKey,parent.key);
+});
+
+test('blank hinted families and any unresolved or ambiguous path keep the complete family unassigned',async()=>{
+    const renly='Metadata/NPC/Renly',missing='Metadata/NPC/Missing',ambiguous='Metadata/NPC/Shared';
+    const rows=[npc(renly,'Renly'),npc(ambiguous,'First Guide'),npc(ambiguous,'Second Guide','',{role:'gender'}),
+        convo('Renly_Player_A1',{metadata:{NPC:'',Character:'Metadata/Characters/Dex/DexFour'}}),
+        convo('Renly_Player_B1',{role:'gender'}),
+        convo('Renly_Missing_A1',{metadata:{NPC:missing}}),
+        convo('Renly_Partial_A1',{metadata:{NPC:renly}}),convo('Renly_Partial_B1',{metadata:{NPC:missing}}),
+        convo('Renly_Ambiguous_A1',{metadata:{NPC:ambiguous}}),convo('Renly_Ambiguous_B1',{metadata:{NPC:renly}})];
+    const index=await build(rows),reversed=await build([...rows].reverse());
+    assert.equal(index.parents.length,1);assert.equal(index.parents[0].units.length,7);
+    for(const family of index.families) {
+        assert.equal(family.parentKey,'unassigned');assert.equal(family.label,family.stem);assert.deepEqual(family.npcEvidence,reversed.familyByKey.get(family.key).npcEvidence);
+        for(const row of family.units) {
+            const member=index.memberships.get(row.id);assert.equal(member.npcEvidence,family.npcEvidence);assert.deepEqual(member.aliases,[]);assert.equal(member.aliasType,'');
+        }
+    }
+    assert.deepEqual(index.familyByKey.get('Renly_Player').npcEvidence,{reason:'no-npc',references:[],participants:[],unresolved:[],ambiguous:[]});
+    assert.equal(index.memberships.get(rows[3].id).ambiguous,false);
+    const absent=index.familyByKey.get('Renly_Missing').npcEvidence,partial=index.familyByKey.get('Renly_Partial').npcEvidence,conflict=index.familyByKey.get('Renly_Ambiguous').npcEvidence;
+    assert.equal(absent.reason,'unresolved-references');assert.deepEqual(absent.unresolved,[missing]);assert.deepEqual(absent.participants,[]);
+    assert.equal(partial.reason,'unresolved-references');assert.deepEqual(partial.references,[missing,renly]);assert.deepEqual(partial.unresolved,[missing]);assert.equal(partial.participants[0].label,'Renly');
+    assert.equal(conflict.reason,'unresolved-references');assert.deepEqual(conflict.ambiguous,[ambiguous]);assert.equal(conflict.participants[0].label,'Renly');
+    assert.equal(index.memberships.get(rows[8].id).ambiguous,true);
+});
+
+test('explicit participants never narrow an ambiguous global ID alias to manufacture a parent',async()=>{
+    const first='Metadata/NPC/First',second='Metadata/NPC/Second';
+    const rows=[npc(first,'First Guide','Guide'),npc(second,'Second Guide','Second'),npc('Metadata/NPC/Third','Third Guide','Guide'),
+        convo('Guide_Intro_A1',{metadata:{NPC:first}}),convo('Guide_Intro_B1',{metadata:{NPC:second}})];
+    const index=await build(rows),family=index.familyByKey.get('Guide_Intro');
+    assert.equal(family.parentKey,'unassigned');assert.equal(family.npcEvidence.reason,'multiple-npcs');assert.equal(family.units.length,2);
+    assert.deepEqual(family.npcEvidence.participants.map(participant=>participant.label),['First Guide','Second Guide']);
+    for(const row of family.units){assert.equal(index.memberships.get(row.id).ambiguous,true);assert.deepEqual(index.memberships.get(row.id).aliases,[]);}
 });
 
 test('longer ambiguous paths never fall back to a shorter unique full Name',async()=>{
@@ -201,7 +309,7 @@ test('duplicate full IDs are ignored, mapped parents sort stably and browser exp
 });
 
 test('cooperative work aborts obsolete contexts and yields for CPU budget rather than every fast batch',async()=>{
-    const rows=[npc('Metadata/NPC/Renly','Renly'),...Array.from({length:2000},(_,i)=>convo('Renly_Intro_A1_Variant'+i))],npcIndex=await N.buildNpcIndex(rows,{yield:async()=>{}});
+    const rows=[npc('Metadata/NPC/Renly','Renly'),...Array.from({length:2000},(_,i)=>convo('Renly_Intro_A1_Variant'+i,{metadata:{NPC:'Metadata/NPC/Renly'}}))],npcIndex=await N.buildNpcIndex(rows,{yield:async()=>{}});
     let current=true;
     await assert.rejects(C.buildConvoIndex(rows,npcIndex,{guard:()=>current,yield:async()=>{current=false;}}),error=>error.name==='AbortError'&&error.stale===true);
     const controller=new AbortController();controller.abort();

@@ -57,12 +57,16 @@
         return { language, role: /(?:^|[_.\s-])Gender(?=$|[_.\s-])/i.test(stem) ? 'gender' : 'normal' };
     }
     function groupFields(unit) {
-        const groups = [];
-        for (const field of unit?.fields || []) {
-            const key = field.kind === 'form' ? field.group || field.name : field.id;
+        const groups = [], fields = unit?.fields || [], classSources = new Set(fields.filter(isClassField)
+            .map(field => JSON.stringify([field.group || field.name, field.sourceCell])));
+        for (const field of fields) {
+            // Regular and class-specific targets can share one worksheet source.
+            // Keep the form group's key and all original field identities intact.
+            const key = field.kind === 'form' ? field.group || field.name : field.kind === 'text'
+                && classSources.has(JSON.stringify([field.name, field.sourceCell])) ? field.name : field.id;
             let group = groups.find(item => item.key === key);
             if (!group) groups.push(group = { key, name: field.name, source: field.source, fields: [], forms: field.kind === 'form' });
-            group.fields.push(field);
+            group.fields.push(field);if (field.kind === 'form') group.forms = true;
         }
         return groups;
     }
@@ -877,10 +881,27 @@
             ctConvoSeverityLabel(node) {return {error:'Missing or Error in related text',warning:'Outdated or Warning in related text'}[
                 this.ctConvoSeverities.get(this.ctConvoNodeKey(node.stem===undefined?'parent':'family',node.key))] || '';},
             ctConvoTooltip(node) {return [node.label,this.ctConvoSeverityLabel(node),node.stem?`ID stem: ${node.stem}`:'',
+                node.npcEvidence?`Family NPCs: ${node.npcEvidence.participants.map(participant=>participant.label).join(', ') || 'None resolved'}`:'',
                 `${node.units.length.toLocaleString('en-US')} related records`,...(node.paths || [])].filter(Boolean).join('\n');},
             ctConvoRelation(unit) {
                 const relation=this._ctConvoIndex?.memberships.get(unit?.id);if(!relation)return {label:'',tooltip:''};
-                const mapped=relation.parentKey!=='unassigned';
+                const mapped=relation.parentKey!=='unassigned',evidence=relation.npcEvidence;
+                if(evidence){
+                    const reason={npc:'The family references one NPC.', 'npc-anchor':'The ID anchor uniquely matches one of the NPCs referenced by this family.',
+                        'multiple-npcs':'The family references several NPCs without a unique participating ID anchor.',
+                        'no-npc':'The family has no explicit NPC references.',
+                        'unresolved-references':'Some family NPC references could not be resolved uniquely across the active workbooks.'}[evidence.reason];
+                    return {label:mapped?(evidence.reason==='npc-anchor'?'NPC + ID match':'NPC reference'):'ID family',tooltip:[
+                        `Parent: ${this._ctConvoIndex.parentByKey.get(relation.parentKey)?.label || 'Unassigned NPC'}`,reason,
+                        `Family NPCs: ${evidence.participants.map(participant=>participant.label).join(', ') || 'None resolved'}`,
+                        evidence.references.length?`NPC references: ${evidence.references.join(', ')}`:'',
+                        evidence.reason==='npc-anchor'?`Matched NPC aliases: ${relation.aliases.join(', ')}`:'',
+                        `ID anchor: ${relation.anchor}`,`ID stem: ${relation.familyKey}`,
+                        evidence.unresolved.length?`Unresolved NPC references: ${evidence.unresolved.join(', ')}`:'',
+                        evidence.ambiguous.length?`Ambiguous NPC references: ${evidence.ambiguous.join(', ')}`:'',
+                        'The parent applies to the complete family, including other NPC and player turns. It does not establish playback order.'
+                    ].filter(Boolean).join('\n')};
+                }
                 return {label:mapped?'ID match':'ID family',tooltip:[`ID anchor: ${relation.anchor}`,`ID stem: ${relation.familyKey}`,
                     mapped?`Matched NPC aliases: ${(relation.aliases || []).join(', ')}`:relation.ambiguous?'Several NPC aliases match this anchor.':'No unique NPC alias matches this anchor.',
                     'Related records are grouped by their text IDs. The anchor does not identify the speaker or conversation order.'].join('\n')};
@@ -3121,6 +3142,7 @@
                     </template>
                 </div>
                 <div v-if="side !== 'source'" class="ctFieldTranslation">
+                <ct-target v-for="field in group.fields.filter(field=>field.kind !== 'form')" :key="field.id" :host="host" :field="field" :compact="side !== 'both'"></ct-target>
                 <table v-if="group.forms && host.ctNamedForms(group).length" class="ctFormGrid ctNamedFormGrid"><thead><tr><th>Form</th><th>Translation</th></tr></thead><tbody>
                     <tr v-for="field in host.ctNamedForms(group)" :key="field.id"><th>{{ host.ctNamedFormLabel(field) }}</th><td><ct-target :host="host" :field="field" :compact="side !== 'both'"></ct-target></td></tr>
                 </tbody></table>
@@ -3136,7 +3158,6 @@
                     <label class="ctVariantPicker">All variants<select :value="host.ctSelectedVariant(group)?.id" aria-label="All worksheet class variants" @change="host.ctSelectVariant(group,$event.target.value)"><option v-for="field in host.ctClassFields(group)" :key="field.id" :value="field.id">{{ host.ctVariantLabel(field) }}</option></select><small>{{ host.ctSelectedVariant(group)?.targetCell }}</small></label>
                     <ct-target v-if="host.ctSelectedVariant(group)" :key="host.ctSelectedVariant(group).id" :host="host" :field="host.ctSelectedVariant(group)" :compact="side !== 'both'"></ct-target>
                 </section>
-                <template v-if="!group.forms"><ct-target v-for="field in group.fields" :key="field.id" :host="host" :field="field" :compact="side !== 'both'"></ct-target></template>
                 </div>
                 </div>
                 </div>

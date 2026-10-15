@@ -9,6 +9,7 @@
     const TURN = /^(?:[A-Z](?:\d+[a-z]?)?|[a-z]\d+[a-z]?)(?:=.+)?$/;
     const CLASS = /^(?:Str|Int|Dex|StrDex|DexInt|StrInt)4b?$/;
     const clean = value => String(value ?? '').normalize('NFKC').trim().replace(/\s+/gu, ' ');
+    const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
     const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
     const alphabetical = (a, b) => a.localeCompare(b, 'en', { sensitivity: 'base', numeric: true }) || compare(a, b);
     function tokens(value) {
@@ -46,7 +47,8 @@
             check(); return now() - lastYield >= 8;
         }
         await checkpoint();
-        const units = [], seen = new Set(), memberships = new Map(), familyByKey = new Map(), sourceParents = new Map();
+        const units = [], seen = new Set(), memberships = new Map(), familyByKey = new Map(), sourceParents = new Map(),
+            pathGroups = new Map(), familyHints = new Map(), familyMatches = new Map();
         const parentByKey = new Map([['unassigned', { key: 'unassigned', label: 'Unassigned NPC', paths: [], npcUnits: [], families: [], units: [] }]]);
         const aliasRoot = { next: new Map(), record: null }, anchorCache = new Map();
         for (const unit of input) {
@@ -72,6 +74,8 @@
         for (const group of npcIndex.groups) {
             sourceParents.set(group.key, group);
             for (const unit of group.npcUnits) {
+                if (!pathGroups.has(unit.recordId)) pathGroups.set(unit.recordId, new Set());
+                pathGroups.get(unit.recordId).add(group.key);
                 addAlias(group.key, 'path', terminal(unit.recordId));
                 if (!unit.recordId.startsWith('Metadata/NPC/Info/')) {
                     addAlias(group.key, 'name', sourceField(unit, 'Name'), true);
@@ -107,19 +111,72 @@
             }
             return parentByKey.get(key);
         }
+        // Collect the complete family before choosing its parent. Row order,
+        // player turns and repeated grammatical variants cannot vote for an NPC.
         for (const unit of units) {
-            const parsed = familyForId(unit.recordId), match = anchorFor(parsed.anchor), parent = parentFor(match.parentKey);
+            const parsed = familyForId(unit.recordId);
             let family = familyByKey.get(parsed.stem);
             if (!family) {
-                const separator = parsed.stem.indexOf('_');
                 family = { key: parsed.stem, stem: parsed.stem, anchor: parsed.anchor,
-                    label: parent.key === 'unassigned' || separator < 0 ? parsed.stem : parsed.stem.slice(separator + 1),
-                    parentKey: parent.key, units: [] };
-                familyByKey.set(family.key, family); parent.families.push(family);
+                    label: parsed.stem, parentKey: 'unassigned', units: [] };
+                familyByKey.set(family.key, family);
             }
-            family.units.push(unit); parent.units.push(unit);
-            memberships.set(unit.id, { parentKey: parent.key, familyKey: family.key, anchor: parsed.anchor,
-                turn: parsed.turn, aliases: match.aliases.slice(), aliasType: match.aliasType, ambiguous: match.ambiguous });
+            family.units.push(unit);
+            memberships.set(unit.id, { familyKey: family.key, anchor: parsed.anchor, turn: parsed.turn });
+            if (own(unit.metadata, 'NPC')) {
+                if (!familyHints.has(family.key)) familyHints.set(family.key, { references: new Set(), groups: new Map(), unresolved: new Set(), ambiguous: new Set() });
+                const hints = familyHints.get(family.key), references = npcIndex.referenceEvidence?.get(unit.id)?.references
+                    || (typeof unit.metadata.NPC === 'string' ? unit.metadata.NPC : '').split(/[,\r\n]+/u).map(value => value.trim()).filter(Boolean);
+                for (const reference of references) {
+                    hints.references.add(reference);
+                    const owners = pathGroups.get(reference);
+                    if (!owners?.size) hints.unresolved.add(reference);
+                    else if (owners.size !== 1) hints.ambiguous.add(reference);
+                    else {
+                        const key = owners.values().next().value;
+                        if (!hints.groups.has(key)) hints.groups.set(key, new Set());
+                        hints.groups.get(key).add(reference);
+                    }
+                    if (shouldYield()) await checkpoint();
+                }
+            }
+            if (shouldYield()) await checkpoint();
+        }
+        for (const family of familyByKey.values()) {
+            const idMatch = anchorFor(family.anchor), hints = familyHints.get(family.key);
+            let match = idMatch;
+            if (hints) {
+                const participants = [...hints.groups].map(([key, references]) => ({ key, label: sourceParents.get(key).label, references: [...references].sort(alphabetical) }))
+                    .sort((a, b) => alphabetical(a.label, b.label) || compare(a.key, b.key));
+                const evidence = { reason: 'no-npc', references: [...hints.references].sort(alphabetical), participants,
+                    unresolved: [...hints.unresolved].sort(alphabetical), ambiguous: [...hints.ambiguous].sort(alphabetical) };
+                match = { parentKey: 'unassigned', aliases: [], aliasType: '', ambiguous: hints.ambiguous.size > 0 };
+                if (hints.unresolved.size || hints.ambiguous.size) evidence.reason = 'unresolved-references';
+                else if (participants.length === 1) {
+                    evidence.reason = 'npc'; match.parentKey = participants[0].key;
+                } else if (participants.length > 1) {
+                    evidence.reason = 'multiple-npcs'; match.ambiguous = true;
+                    // ID evidence breaks a tie only among explicitly referenced
+                    // participants, never by narrowing an ambiguous ID alias.
+                    if (!idMatch.ambiguous && hints.groups.has(idMatch.parentKey)) {
+                        evidence.reason = 'npc-anchor'; match = idMatch;
+                    }
+                }
+                family.npcEvidence = evidence;
+            }
+            familyMatches.set(family.key, match);
+            const parent = parentFor(match.parentKey), separator = family.stem.indexOf('_');
+            family.parentKey = parent.key;
+            family.label = parent.key === 'unassigned' || separator < 0 ? family.stem : family.stem.slice(separator + 1);
+            parent.families.push(family);
+            if (shouldYield()) await checkpoint();
+        }
+        // Retain workbook order even when families are interleaved in a sheet.
+        for (const unit of units) {
+            const row = memberships.get(unit.id), family = familyByKey.get(row.familyKey), match = familyMatches.get(family.key);
+            parentByKey.get(family.parentKey).units.push(unit);
+            memberships.set(unit.id, { parentKey: family.parentKey, ...row, aliases: match.aliases.slice(), aliasType: match.aliasType,
+                ambiguous: match.ambiguous, ...(family.npcEvidence ? { npcEvidence: family.npcEvidence } : {}) });
             if (shouldYield()) await checkpoint();
         }
         const unassigned = parentByKey.get('unassigned'), parents = [unassigned, ...[...parentByKey.values()]

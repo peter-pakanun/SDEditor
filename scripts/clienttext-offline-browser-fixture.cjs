@@ -806,12 +806,56 @@ async function run() {
             const npcSearch = workspace.getByRole('searchbox', { name: 'Search ClientText', exact: true });
             await npcSearch.fill('DoryaniA4_Intro_B_Dex4b'); await npcSearch.press('Enter');
             await page.waitForFunction(id => !window.__offlineTestApp.ctBrowseBusy && window.__offlineTestApp.ctRows.some(unit => unit.id === id), playerNpc.id);
+            const originalMortTurns = originalParsed.units.filter(unit => unit.sheet === 'NPCTalkDialogueTextAudio' && unit.recordId.startsWith('Mort_FirstTime_'));
+            assert.equal(originalMortTurns.length, 17, 'The supplied Mort_FirstTime family contains 17 original turns');
+            const hintedMort = await browseConvoFamily('Thai hint conversation parent', 'Mort_FirstTime', originalMortTurns.length);
+            assert.equal(hintedMort.parentLabel, 'Mortimer', 'Explicit family NPC references map the Mort ID namespace to Mortimer');
+            assert.deepEqual(hintedMort.units.map(unit => unit.id).sort(), originalMortTurns.map(unit => unit.id).sort(), 'Mort family keeps every original NPC and player turn together');
+            const mortRelations = await page.evaluate(ids => {
+                const vm = window.__offlineTestApp;
+                return ids.map(id => vm.ctConvoRelation(vm._ctUnitIndex.get(id)));
+            }, hintedMort.units.map(unit => unit.id));
+            assert.ok(mortRelations.every(relation => relation.label === 'NPC reference'), 'All Mort NPC and player turns share the exact family-parent evidence');
+            for (const path of mortNpc.paths) assert.ok(mortRelations.every(relation => relation.tooltip.includes(path)), 'Mort family evidence retains exact path ' + path);
+            const mortRelation = workspace.locator('.ctTable tbody tr .ctConvoRelation').first();
+            assert.equal(await mortRelation.textContent(), 'NPC reference');
+            await mortRelation.focus(); await page.getByRole('tooltip').waitFor();
+            for (const path of mortNpc.paths) assert.ok((await page.getByRole('tooltip').textContent()).includes(path), 'Visible Mort conversation evidence includes ' + path);
+            const mortTree = workspace.getByRole('tree', { name: 'Conversations', exact: true });
+            const mortParent = mortTree.getByRole('treeitem', { name: 'Mortimer', exact: true });
+            await mortParent.focus(); await mortParent.press('Enter');
+            await page.waitForFunction(key => window.__offlineTestApp.ctConvoSelection === key && !window.__offlineTestApp.ctBrowseBusy, hintedMort.parentRowKey);
+            const mortAggregate = await page.evaluate(key => {
+                const vm = window.__offlineTestApp;
+                return { visible: vm.ctRows.map(unit => unit.id).sort(), aggregate: vm._ctConvoIndex.parentByKey.get(key).units.map(unit => unit.id).sort() };
+            }, hintedMort.parentKey);
+            assert.deepEqual(mortAggregate.visible, mortAggregate.aggregate, 'Selecting Mortimer opens the exact aggregate worklist of all his conversation families');
+            for (const unit of originalMortTurns) assert.ok(mortAggregate.visible.includes(unit.id), 'Mortimer aggregate retains original turn ' + unit.recordId);
+            await workspace.getByRole('tab', { name: 'NPCs', exact: true }).click();
+            await page.waitForFunction(() => window.__offlineTestApp.ctBrowseMode === 'npcs' && !window.__offlineTestApp.ctBrowseBusy);
             const hintedConvo = await browseConvoFamily('Thai hints preserve conversation context', 'DoryaniA4_Intro', 25);
-            assert.equal(hintedConvo.parentLabel, 'Doryani', 'Convo keeps the contextual NPC parent independently from per-turn NPC references');
+            assert.equal(hintedConvo.parentLabel, 'Doryani', 'The Doryani ID anchor chooses among explicitly referenced conversation participants');
             for (const id of [sinNpc.id, playerNpc.id]) assert.ok(hintedConvo.units.some(unit => unit.id === id), 'Doryani Intro retains both Hooded One and player turns');
+            const doryaniRelations = await page.evaluate(ids => {
+                const vm = window.__offlineTestApp;
+                return ids.map(id => ({ parentKey: vm._ctConvoIndex.memberships.get(id).parentKey, ...vm.ctConvoRelation(vm._ctUnitIndex.get(id)) }));
+            }, hintedConvo.units.map(unit => unit.id));
+            assert.ok(doryaniRelations.every(relation => relation.parentKey === hintedConvo.parentKey && relation.label === 'NPC + ID match'),
+                'Every Doryani, Hooded One and player turn shares one hint-supported parent with ID tie-break evidence');
+            for (const path of ['Metadata/NPC/Four_Act4/DoryaniTownKingsmarchIntro', 'Metadata/NPC/Four_Act4/HoodedMentorKingsmarchIntro'])
+                assert.ok(doryaniRelations.every(relation => relation.tooltip.includes(path)), 'Doryani family evidence includes participant path ' + path);
+            assert.ok(doryaniRelations.every(relation => relation.tooltip.includes('DoryaniA4')), 'Doryani family explains its unchanged ID anchor');
+            const sinConvoSelector = await page.evaluate(id => '[data-unit-id="' + CSS.escape(id) + '"]', sinNpc.id);
+            assert.equal(await workspace.locator(sinConvoSelector + ' .ctConvoRelation').textContent(), 'NPC + ID match');
+            await layout(page, workspace, 'Thai hint Convo parent evidence');
+            await workspace.locator(sinConvoSelector).getByRole('button', { name: 'DoryaniA4_Intro_A_Sin', exact: true }).click();
+            await workspace.locator('.ctFullEditor').waitFor();
+            assert.equal(await workspace.locator('.ctFullEditor .ctConvoRelation').textContent(), 'NPC + ID match', 'Full editor presents the same conversation-parent evidence');
+            await workspace.getByRole('button', { name: 'Close', exact: true }).click();
+            await page.waitForFunction(() => !window.__offlineTestApp.ctEditor);
             assert.deepEqual(await page.evaluate(() => ({ counts: window.__offlineTestApp.ctCounts, ids: window.__offlineTestApp.ctUnits.map(unit => unit.id) })), beforeNpcBrowsing,
                 'Explicit NPC browsing preserves workspace counts and every original unit identity');
-            results.push('Real hints: Una-only UnaRenlySon, Hooded One-only Doryani Sin, Mortimer via both DogTrader paths, blank-NPC player unassigned, and unchanged 25-turn Doryani Convo');
+            results.push('Real hints: exact per-row NPC associations, Mort conversation family under Mortimer, blank-NPC player unassigned in NPCs, and all 25 Doryani/Hooded One/player turns together under Doryani in Convo');
             await page.evaluate(() => window.__offlineTestApp.ctShowAllLoaded());
             await workspace.locator('.ctSheetList').getByRole('button', { name: 'NPCs', exact: true }).click();
             await page.waitForFunction(() => !window.__offlineTestApp.ctBrowseBusy && window.__offlineTestApp.ctRows.every(unit => unit.sheet === 'NPCs'));
@@ -984,6 +1028,7 @@ async function run() {
                 await workspace.getByRole('tab', { name: 'NPCs', exact: true }).click();
                 await page.waitForFunction(() => window.__offlineTestApp.ctBrowseMode === 'npcs' && !window.__offlineTestApp.ctBrowseBusy);
                 const realConvo = await browseConvoFamily(language + ' supplied Convo', 'DoryaniA4_Intro', 25);
+                assert.equal(realConvo.parentLabel, 'Doryani', language + ': no-hint conversations retain the original ID-derived parent');
                 assert.equal(realConvo.allConversations.families, 1106, language + ' supplied workbook exposes all 1,106 conversation families');
                 assert.equal(realConvo.allConversations.units, 11717, language + ' supplied workbook exposes all 11,717 conversation turns');
                 await workspace.getByRole('searchbox', { name: 'Filter conversations', exact: true }).fill('Doryani');

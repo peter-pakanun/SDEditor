@@ -78,6 +78,11 @@ const classUnit=Vue.markRaw({id:'class-layout-record',role:'normal',sheet:sheets
     target:form==='DexFour'?'Ranger raw translation':form==='DexFourb'?'Huntress raw translation':index<2?'Default '+form+' translation':'',
     targetCell:String.fromCharCode(68+index)+'2',required:index<2 || form==='IntFourb',originalMissing:form==='IntFourb',outdated:false
 }))});
+const regularClassUnit=Vue.markRaw({...classUnit,id:'regular-class-layout-record',fields:[
+    {...classUnit.fields[0],id:'class-regular',kind:'text',form:undefined,group:undefined,sourceCell:'N3',targetCell:'O3',target:'Regular Thai translation'},
+    ...['StrFour','IntFour','DexFour','StrDexFour','DexIntFour','StrIntFour','StrFourb','IntFourb','DexFourb','StrDexFourb','DexIntFourb','StrIntFourb']
+        .map((form,index)=>({...classUnit.fields[0],id:'regular-'+form,form,sourceCell:'N3',targetCell:(index<11?String.fromCharCode(80+index):'AA')+'3',target:'',required:false,originalMissing:false,outdated:false}))
+]});
 const characterUnits=Vue.markRaw([['Dex','DexFour','Ranger'],['Dex','DexFourb','Huntress'],['Int','IntFourb','Sorceress']].map(([attribute,form,source])=>({
     id:'character-'+form,role:'normal',sheet:'Characters',recordId:'Metadata/Characters/'+attribute+'/'+form,notes:[],
     fields:[{id:'Name',kind:'text',name:'Name',source,target:'Localized label '+form,targetCell:'D2',required:true,originalMissing:false,outdated:false}]
@@ -103,11 +108,12 @@ const app = Vue.createApp({
         async ctFlushDraft(){return true;},async ctFlushCommentDraft(){},
         ctStorage(){return {getDraft:async()=>null};},ctLoadHistory(){},ctLoadCommentDraft(){},ctRefreshDraftSummaries(){},
         ctPresence(){},scheduleClientTextDictionaryMatches(){},
-        ctStartClassVariantFixture(){
-            this.ctEditor=false;this.ctUnits=Vue.markRaw([classUnit,...characterUnits]);
+        ctStartClassVariantFixture(regular=false){
+            const current=regular?regularClassUnit:classUnit;
+            this.ctEditor=false;this.ctUnits=Vue.markRaw([current,...characterUnits]);
             this._ctUnitIndex=Vue.markRaw(new Map(this.ctUnits.map(unit=>[unit.id,unit])));
-            this.ctSelection=classUnit.id;this.ctValues=Object.fromEntries(classUnit.fields.map(field=>[field.id,field.target]));
-            this.ctVariantSelections={};this.ctFocusedField='class-MS';this.ctInitializeVariants();
+            this.ctSelection=current.id;this.ctValues=Object.fromEntries(current.fields.map(field=>[field.id,field.target]));
+            this.ctVariantSelections={};this.ctFocusedField=current.fields[0].id;this.ctInitializeVariants();
         },
         ctStartNamedFormFixture(){
             this.ctEditor=false;this.ctInlineClosed=false;this.ctSheet='';this.ctUnits=Vue.markRaw([namedFormUnit]);this.ctSaved=Vue.markRaw({});
@@ -522,6 +528,8 @@ async function run() {
             await page.evaluate(({theme,full})=>{document.documentElement.setAttribute('data-theme',theme);const host=window.__ctLayoutFixture;
                 host.mapClientTextClassNames=true;host.ctEditor=full;host.ctSelectVariant(host.ctFieldGroups[0],'class-DexFour',{focus:false});}, {theme,full});
             await settle();const name=theme+' class variants '+(full?'full':'inline'),input=page.locator('[data-ct-target="class-DexFour"]');
+            assert.equal(await page.locator('.ctSourceBlock').count(),1,name+': Gender defaults and class variants retain one English source');
+            assert.equal(await page.locator('.ctFormGrid [data-ct-target]').count(),2,name+': both Gender defaults remain visible');
             await input.fill('Draft @ raw\\n\ntranslation');await input.evaluate(element=>element.setSelectionRange(2,7,'backward'));
             await assertClassLabels(true,name);
             const before=await captureClassState();
@@ -540,6 +548,29 @@ async function run() {
                 const path=join(fixtureArtifacts,'sdeditor-clienttext-class-mapping-'+randomUUID()+'.png');
                 await page.screenshot({path});screenshots.push(path);
             }
+        }
+        for(const theme of ['light','grey','dark','modern-dark'])for(const full of [false,true]){
+            await page.setViewportSize({width:1100,height:900});
+            await page.evaluate(({theme,full})=>{document.documentElement.setAttribute('data-theme',theme);const host=window.__ctLayoutFixture;
+                host.ctStartClassVariantFixture(true);host.ctEditor=full;}, {theme,full});await settle();
+            const name=theme+' regular translation with class variants '+(full?'full':'inline'),regular=page.locator('[data-ct-target="class-regular"]'),
+                picker=page.getByRole('combobox',{name:'All worksheet class variants'});
+            assert.equal(await page.locator('.ctSourceBlock').count(),1,name+': a shared worksheet source renders once');
+            assert.equal(await page.locator('.ctFormGrid').count(),0,name+': no Gender grid is invented');
+            assert.equal(await regular.inputValue(),'Regular Thai translation',name+': primary target remains visible');
+            assert.equal(await picker.locator('option').count(),12,name+': all class variants remain available');
+            await regular.fill('Edited regular translation');await regular.press('Tab');await settle();
+            assert.equal(await page.locator('[data-ct-target="regular-StrFour"]').evaluate(element=>element===document.activeElement),true,name+': Tab enters the first class variant');
+            await picker.selectOption('regular-DexFourb');await settle();
+            const variant=page.locator('[data-ct-target="regular-DexFourb"]');await variant.fill('Independent Huntress translation');
+            assert.equal(await regular.inputValue(),'Edited regular translation',name+': changing a variant preserves the primary target');
+            assert.equal(await variant.inputValue(),'Independent Huntress translation');
+            const geometry=await page.evaluate(()=>{const source=document.querySelector('.ctSourceBlock textarea'),target=document.querySelector('[data-ct-target="class-regular"]');
+                return {source:source.getBoundingClientRect().top,target:target.getBoundingClientRect().top,width:document.documentElement.scrollWidth,viewport:innerWidth};});
+            assert.ok(Math.abs(geometry.source-geometry.target)<=2,name+': source and primary translation align');
+            assert.ok(geometry.width<=geometry.viewport+1,name+': fields fit the desktop viewport');
+            if(theme==='modern-dark' && !full){const path=join(fixtureArtifacts,'sdeditor-clienttext-shared-source-'+randomUUID()+'.png');await page.screenshot({path});screenshots.push(path);}
+            results.push({name:name+' one source, independent targets, all variants and worksheet Tab order'});
         }
         for(const theme of ['light','grey','dark','modern-dark'])for(const full of [false,true]){
             await page.setViewportSize({width:1100,height:900});

@@ -127,6 +127,48 @@ test('Convo uses only its original conversation records, shared row order, all-s
     assert.match(app.ctConvoRelation(a).tooltip,/does not identify the speaker or conversation order/);assert.equal(app.ctConvoRelation(app.other).label,'');
 });
 
+test('Convo relationship labels describe shared family NPC evidence rather than each turn actor',()=>{
+    const {app,convoIndex,intro,farewell,unknown,a,cSin,missing,bye,unassigned}=convoUiHarness(),renly='Metadata/NPC/Renly',una='Metadata/NPC/Una';
+    const participants=[{key:'renly',label:'Renly',references:[renly]},{key:'una',label:'Una',references:[una]}],
+        multi={reason:'npc-anchor',references:[renly,una],participants,unresolved:[],ambiguous:[]};
+    intro.npcEvidence=multi;
+    for(const row of intro.units)convoIndex.memberships.get(row.id).npcEvidence=multi;
+    cSin.metadata={NPC:una};missing.metadata={NPC:'',Character:'Metadata/Characters/Dex/DexFour'};
+    const relation=app.ctConvoRelation(a);assert.equal(relation.label,'NPC + ID match');assert.match(relation.tooltip,/ID anchor: RenlyP1/);
+    assert.match(relation.tooltip,/Family NPCs: Renly, Una/);assert.ok(relation.tooltip.includes(renly));assert.ok(relation.tooltip.includes(una));
+    assert.deepEqual(app.ctConvoRelation(cSin),relation);assert.deepEqual(app.ctConvoRelation(missing),relation,'Player and other-NPC turns use whole-family evidence');
+    assert.match(app.ctConvoTooltip(intro),/Family NPCs: Renly, Una/);
+    const single={...multi,reason:'npc',references:[renly],participants:participants.slice(0,1)};farewell.npcEvidence=single;
+    Object.assign(convoIndex.memberships.get(bye.id),{npcEvidence:single,aliases:[],aliasType:''});
+    assert.equal(app.ctConvoRelation(bye).label,'NPC reference');assert.doesNotMatch(app.ctConvoRelation(bye).tooltip,/Matched NPC aliases/);
+    const unresolved={reason:'unresolved-references',references:['Metadata/NPC/Omitted'],participants:[],unresolved:['Metadata/NPC/Omitted'],ambiguous:[]};
+    unknown.npcEvidence=unresolved;convoIndex.memberships.get(unassigned.id).npcEvidence=unresolved;
+    assert.equal(app.ctConvoRelation(unassigned).label,'ID family');assert.match(app.ctConvoRelation(unassigned).tooltip,/Unresolved NPC references: Metadata\/NPC\/Omitted/);
+    assert.match(app.ctConvoRelation(unassigned).tooltip,/complete family/);
+});
+
+test('hint-based Convo parents retain complete worklists, hidden severity and workspace totals',async()=>{
+    const h=convoUiHarness(),{app,window,names,cSin,a,gender,missing,c,una,bye,unassigned}=h;names.fields[0].source='Renly';
+    const unaName=clone(names);unaName.id=JSON.stringify(['normal','NPCs','Metadata/NPC/Una']);unaName.recordId='Metadata/NPC/Una';unaName.fields[0].source='Una';
+    for(const row of [cSin,a,c,una])row.metadata={NPC:unaName.recordId};
+    missing.metadata={NPC:'',Character:'Metadata/Characters/Dex/DexFour'};bye.metadata={NPC:names.recordId};unassigned.metadata={NPC:''};
+    app.ctUnits=[...app.ctUnits.filter(row=>row!==h.reply),unaName];app._ctUnitIndex=new Map(app.ctUnits.map(row=>[row.id,row]));
+    app._ctNpcIndex=await window.ClientTextNpcIndex.buildNpcIndex(app.ctUnits);
+    app._ctConvoIndex=await window.ClientTextConvoIndex.buildConvoIndex(app.ctUnits,app._ctNpcIndex);app.ctRevision++;
+    const index=app._ctConvoIndex,intro=index.familyByKey.get('RenlyP1_Intro'),parent=index.parentByKey.get(intro.parentKey),
+        renly=index.parents.find(parent=>parent.label==='Renly'),counts=clone(app.ctCounts),identities=app.ctUnits.map(row=>row.id);
+    assert.equal(parent.label,'Una');assert.equal(await app.ctSetBrowseMode('convo'),true);
+    assert.equal(await app.ctSetConvo('family',intro.key),true);assert.deepEqual(Array.from(app.ctRows),[cSin,a,gender,missing,c]);
+    assert.equal(app.ctConvoTotal,5);assert.equal(app.ctConvoBrowseTitle,'Una / Intro (RenlyP1)');
+    assert.equal(await app.ctSetConvo('parent',parent.key),true);assert.deepEqual(Array.from(app.ctRows),[cSin,a,gender,missing,c,una]);
+    app.ctSearch='no visible rows';app.ctApplySearch();assert.equal(app.ctRows.length,0);
+    assert.equal(app.ctConvoSeverities.get(app.ctConvoNodeKey('parent',parent.key)),'error');
+    assert.equal(app.ctConvoSeverities.get(app.ctConvoNodeKey('family',intro.key)),'error');
+    assert.equal(app.ctConvoSeverities.get(app.ctConvoNodeKey('parent',renly.key)),'');
+    assert.deepEqual(clone(app.ctCounts),counts);assert.deepEqual(app.ctUnits.map(row=>row.id),identities);
+    app.ctSearch='';app.ctApplySearch();assert.equal(await app.ctSetConvo('all'),true);assert.equal(app.ctConvoTotal,index.units.length);
+});
+
 test('Convo tree search temporarily reveals matching children and preserves stored expansion and selection',async()=>{
     const {app,intro,farewell,unknown,names,unassigned}=convoUiHarness();await app.ctSetBrowseMode('convo');
     assert.deepEqual(Array.from(app.ctConvoTree,row=>row.type),['parent','parent','parent']);
@@ -1848,6 +1890,35 @@ function classVariantUnit(id='ClassVariants',row=2){
         required:form==='MS'||form==='FS'||form==='IntFourb',originalMissing:form==='IntFourb',outdated:form==='StrFourb',sourceCell:'C'+row,
         targetCell:String.fromCharCode(68+index)+row}));return original;
 }
+
+test('a regular translation and class variants share one English group without merging unrelated source fields',()=>{
+    const original=classVariantUnit(),base=original.fields[0];
+    original.role='normal';original.id=JSON.stringify(['normal','NPCTextAudio',original.recordId]);original.sheet='NPCTextAudio';
+    original.fields=[{...base,id:JSON.stringify(['Text',null]),kind:'text',form:undefined,group:undefined,targetCell:'D2'},
+        ...original.fields.filter(field=>CLASS_VARIANT_FORMS.includes(field.form))];
+    const unrelated={...original.fields[0],id:JSON.stringify(['Other Text',null]),name:'Other Text',sourceCell:'AA2',targetCell:'AB2'};
+    original.fields.push(unrelated);const snapshot=clone(original),{app}=keyboardHarness(original);
+    const groups=app.ctFieldGroups,group=groups[0];
+    assert.equal(groups.length,2,'only targets belonging to the same worksheet source share a section');
+    assert.equal(group.key,'Text');assert.equal(group.forms,true);
+    assert.equal(group.fields[0],original.fields[0]);assert.equal(group.fields.length,13);
+    assert.equal(app.ctGroupSources(group).length,1);assert.equal(app.ctGroupSources(group)[0].text,base.source);
+    assert.deepEqual(Array.from(app.ctClassFields(group),field=>field.form),CLASS_VARIANT_FORMS);
+    assert.equal(app.ctDefaultForms(group).length,0,'class variants do not create Gender forms');
+    app.ctInitializeVariants();
+    assert.ok(app.ctDisplayedFields().includes(original.fields[0]),'the regular translation stays visible beside the selected class variant');
+    assert.equal(app.ctSelectVariant(group,app.ctClassFields(group)[1].id,{focus:false}),true);
+    assert.ok(app.ctDisplayedFields().includes(original.fields[0]));
+    assert.equal(groups[1].fields[0],unrelated);assert.deepEqual(original,snapshot,'grouping never rewrites workbook fields or values');
+});
+
+test('Gender defaults and class variants retain their existing group and every worksheet target',()=>{
+    const original=classVariantUnit(),snapshot=clone(original),{app}=keyboardHarness(original),groups=app.ctFieldGroups;
+    assert.equal(groups.length,1);assert.equal(groups[0].key,'Text');assert.equal(groups[0].forms,true);
+    assert.deepEqual(Array.from(app.ctDefaultForms(groups[0]),field=>field.form),['MS','FS']);
+    assert.equal(app.ctGroupSources(groups[0]).length,1);assert.equal(groups[0].fields.length,14);
+    assert.deepEqual(original,snapshot);
+});
 
 function characterNameUnit(form,source,options={}){
     const role=options.role || 'normal',sheet=options.sheet || 'Characters',attribute=form.replace(/Fourb?$/,''),
