@@ -170,6 +170,59 @@ test('a managed group transition disconnects the old room and blocks initializat
   assert.equal(e.collaborationWorkspaceReady(),false,'Clearing selection cannot remap an explicit group into a legacy room');
 });
 
+test('an activated managed group synchronizes Japanese when its legacy catalog label is missing or stale', async t => {
+  for (const catalogVersionId of [undefined, 'previous-version']) await t.test(catalogVersionId ? 'stale catalog label' : 'missing catalog label', async () => {
+    const { editor: e, window } = harness();
+    const source = description('japanese'); source.hasChanges = false;
+    delete source.translations.Japanese;
+    e.testMode = false; e.offlineStoreReady = true; e.editorVisible = false;
+    e.gameVersion = 'poe2'; e.lang = 'Japanese';
+    e.cloudSignedIn = true; e.cloudCanAccessAllLanguages = true;
+    e.cloudUser = { id: 'manager', role: 'manager', language: 'Thai', assignmentVersion: 1 };
+    e._cloud = { apiBase: 'http://api.test', context: () => ({}), request() {} };
+    e.activeContentGroup = { id: 'current-group', versionId: 'current-version', contentMode: 'statdescription' };
+    e.descs = [plain(source)]; e._workspaceSourceBaseline = [source];
+    e.localDescs = { descs: [], status: {}, sourceHash: e.sourceIdentity,
+      workspaceGroupId: 'current-group', workspaceVersionId: 'current-version', catalogVersionId: 'current-version' };
+    window.WorkspaceState.initializeWorkspace(e.localDescs, {
+      source: [source], sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang,
+    });
+    e.applyWorkspaceOverlay(); e.filterDesc();
+    assert.equal(e.statistic.hasChanges, 0); assert.equal(e.statistic.isMissing, 1);
+    const joins = [], background = new Map(), translations = ['共有された翻訳 {0}', '二行目'];
+    e.queueWorkspaceBackground = (key, callback) => { background.set(key, callback); return true; };
+    window.CollaborationSync = { Client: class {
+      constructor(options) { this.options = options; }
+      async connect(input) { joins.push(plain(input)); }
+      async startRemote() { await this.options.onRemote([{ filepath: source.filepath, translations, trackedForExport: true, revision: 2 }]); }
+      select() {} setAway() {} disconnect() {}
+    } };
+    e.localDescs.workspaceGroupId = 'previous-group';
+    await e.initializeCollaboration();
+    assert.equal(joins.length, 0, 'A matching catalog label cannot override another activated group.');
+    e.localDescs.workspaceGroupId = 'current-group'; e.localDescs.workspaceVersionId = 'previous-version';
+    await e.initializeCollaboration();
+    assert.equal(joins.length, 0, 'A matching group cannot override another activated version.');
+    e.localDescs.workspaceVersionId = 'current-version';
+    e._managedWorkspaceTransition = {};
+    await e.initializeCollaboration();
+    assert.equal(joins.length, 0, 'An in-progress activation must still block collaboration.');
+    e._managedWorkspaceTransition = null;
+    if (catalogVersionId === undefined) delete e.localDescs.catalogVersionId;
+    else e.localDescs.catalogVersionId = catalogVersionId;
+    await e.initializeCollaboration();
+    assert.equal(joins.length, 1, 'The exact activated group and version allow synchronization independently of the legacy catalog label.');
+    assert.equal(joins[0].language, 'Japanese'); assert.equal(joins[0].groupId, 'current-group');
+    assert.equal(joins[0].versionId, 'current-version'); assert.equal(joins[0].deferRemote, true);
+    assert.equal(background.has('shared-translations'), true);
+    await background.get('shared-translations')();
+    assert.deepEqual(plain(e.descs[0].translations.Japanese), translations);
+    assert.deepEqual(plain(e.localDescs.staged.Japanese[source.filepath].translations), translations);
+    assert.equal(e.statistic.hasChanges, 1); assert.equal(e.statistic.isMissing, 0);
+    assert.equal(e.localDescs.staged.Thai?.[source.filepath], undefined, 'Selected-language shared work remains scoped to Japanese.');
+  });
+});
+
 test('a transition begun during queued-save recovery fences a pending room initialization', async () => {
   const { editor: e, window } = harness(), held = deferred(), reached = deferred();
   e.testMode = false; e.offlineStoreReady = true; e.cloudSignedIn = true; e.cloudCanAccessAllLanguages = true;

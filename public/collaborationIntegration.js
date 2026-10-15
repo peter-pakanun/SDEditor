@@ -670,8 +670,13 @@
       collaborationWorkspaceReady() {
         const group=this.activeContentGroup;
         if(this._managedWorkspaceTransition || this.ctWorkspace)return false;
-        if(this.localDescs?.workspaceGroupId && (group?.id!==this.localDescs.workspaceGroupId || group?.versionId!==this.localDescs.workspaceVersionId))return false;
-        return !group || group.legacyVersionId || (group.contentMode==='statdescription' && this.localDescs?.catalogVersionId===group.versionId);
+        const workspaceGroupId=this.localDescs?.workspaceGroupId;
+        if(workspaceGroupId && (group?.id!==workspaceGroupId || group?.versionId!==this.localDescs.workspaceVersionId))return false;
+        // Activation records the exact stored group/version scope. Catalog
+        // association is older display metadata and can be absent or outdated
+        // in an otherwise valid cached group workspace.
+        return !group || group.legacyVersionId || (group.contentMode==='statdescription'
+          && (!!workspaceGroupId || this.localDescs?.catalogVersionId===group.versionId));
       },
       scheduleCollaboration() {
         if (this.ctActive) { clearTimeout(this._collabStartTimer); this._collaboration?.disconnect(); this._collaboration = null; this._collabKey = ''; return; }
