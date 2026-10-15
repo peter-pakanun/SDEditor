@@ -908,7 +908,7 @@
             },
             ctSetConvo(type,key) {
                 if(type!=='all' && !(type==='parent'?this._ctConvoIndex?.parentByKey:type==='family'?this._ctConvoIndex?.familyByKey:null)?.has(key))return Promise.resolve(false);
-                return this.ctChangeBrowse(()=>{this.ctConvoSelection=type==='all'?'all':this.ctConvoNodeKey(type,key);this.ctPage=1;});
+                return this.ctChangeBrowse(()=>{this.ctConvoSelection=type==='all'?'all':this.ctConvoNodeKey(type,key);this.ctPage=1;return this.ctCaptureBrowseScroll(true);});
             },
             ctConvoToggle(parentKey) {
                 if(this.ctBrowseBusy || this.ctBusy || this.ctEditor || this.ctConvoFilter.trim() || this.ctKeyboardOverlayOpen() || !this._ctConvoIndex?.parentByKey.has(parentKey))return false;
@@ -958,12 +958,12 @@
                     'ctNpcSelection','ctNpcKind','ctNpcFilter','ctConvoSelection','ctConvoFilter','ctConvoExpanded','ctConvoFocusKey']
                     .map(key=>[key,['ctSelectedFilters','ctConvoExpanded'].includes(key)?this[key].slice():this[key]]));
             },
-            ctCaptureBrowseScroll() {
-                const region=this.$refs?.ctFileTableRegion,scroll={top:Number(region?.scrollTop) || 0,left:Number(region?.scrollLeft) || 0};
+            ctCaptureBrowseScroll(resetTop=false) {
+                const region=this.$refs?.ctFileTableRegion,scroll={top:resetTop?0:Number(region?.scrollTop) || 0,left:Number(region?.scrollLeft) || 0};
                 const navigation=this.ctBrowseNavigation();if(navigation)scroll.navigation={top:Number(navigation.scrollTop) || 0,left:Number(navigation.scrollLeft) || 0};
                 // The table has horizontal overflow without a fixed height;
                 // ordinary vertical scrolling belongs to the page.
-                if(!(region?.scrollHeight>region?.clientHeight+1))scroll.windowTop=Number(root.scrollY) || 0;
+                if(!(region?.scrollHeight>region?.clientHeight+1))scroll.windowTop=resetTop?0:Number(root.scrollY) || 0;
                 return scroll;
             },
             ctBrowseViewSnapshot() {return {state:this.ctBrowseSnapshot(),scroll:this.ctCaptureBrowseScroll()};},
@@ -1016,7 +1016,7 @@
             ctSetSheet(key) {return this.ctChangeBrowse(()=>{this.ctSheet=key;this.ctPage=1;});},
             ctSetNpc(key) {
                 if(!['all','unassigned'].includes(key) && !this._ctNpcIndex?.groupByKey.has(key))return Promise.resolve(false);
-                return this.ctChangeBrowse(()=>{this.ctNpcSelection=key;this.ctPage=1;});
+                return this.ctChangeBrowse(()=>{this.ctNpcSelection=key;this.ctPage=1;return this.ctCaptureBrowseScroll(true);});
             },
             ctSetNpcKind(kind) {
                 if(!['','names','topics','dialogue','conversations'].includes(kind))return Promise.resolve(false);

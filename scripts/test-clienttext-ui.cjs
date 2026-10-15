@@ -446,8 +446,9 @@ test('Sheets and NPCs restore independent table and page scrolling without copyi
     assert.equal(await app.ctSetBrowseMode('npcs'),true);assert.deepEqual([region.scrollTop,region.scrollLeft,window.scrollY],[0,81,430]);assert.equal(app.ctPage,2);
     assert.equal(Object.hasOwn(app,'state'),false);assert.equal(Object.hasOwn(app,'scroll'),false);
     assert.deepEqual(clone(app._ctBrowseViews.sheets.scroll),{top:0,left:37,windowTop:240});
-    const count=scrolls.length;assert.equal(await app.ctSetNpc('renly'),true);assert.equal(await app.ctSetNpcKind('dialogue'),true);
-    assert.deepEqual([region.scrollLeft,window.scrollY],[81,430]);assert.equal(scrolls.length,count,'NPC/category choices do not restore an unrelated view scroll');
+    assert.equal(await app.ctSetNpc('renly'),true);assert.deepEqual([region.scrollTop,region.scrollLeft,window.scrollY],[0,81,0]);
+    window.scrollY=430;const count=scrolls.length;assert.equal(await app.ctSetNpcKind('dialogue'),true);
+    assert.deepEqual([region.scrollLeft,window.scrollY],[81,430]);assert.equal(scrolls.length,count,'category choices retain current scroll');
     region.scrollHeight=300;region.scrollTop=64;const snapshot=app.ctCaptureBrowseScroll();
     assert.deepEqual(clone(snapshot),{top:64,left:81},'a vertically scrolling table does not capture window scroll');
     await app.ctSetBrowseMode('sheets');region.scrollTop=12;window.scrollY=19;
