@@ -98,6 +98,15 @@
       },
       managedManagerAccess() { return this.managedCatalogAccess && !!this.cloudCanAccessAllLanguages; },
       managedOnlineAvailable() { return this.managedCatalogAccess && !!this._cloud; },
+      managedHeadVersion() {
+        const headId = this.managedBranch?.headVersionId;
+        return headId === null ? null : this.managedVersions.find(version => headId ? version.id === headId : version.isHead) || null;
+      },
+      managedNextVersionBlockedReason() {
+        const head = this.managedHeadVersion;
+        if (this.managedVersionsUnavailable || this.managedBranch?.headVersionId && !head) return 'HEAD could not be verified. Reconnect before uploading the next version.';
+        return head && !this.managedVersionEnded(head) ? 'End every team in HEAD “' + head.name + '” before uploading the next version.' : '';
+      },
       managedSingleLanguage() {
         return !this.cloudCanAccessAllLanguages && !['manager', 'admin'].includes(this.cloudUser?.role) ? this.cloudUser?.language || '' : '';
       },
@@ -773,6 +782,8 @@
             if (identity.zipHash !== version.zipHash) throw new Error('The downloaded ZIP does not match this published version. Existing work has been preserved.');
             const baseline = await task('Applying import choices and verifying baseline identity', () => this.buildImportedBaseline(identity, rawSource, [], archive));
             if (!current()) return;
+            if (root.SDBaselineFiles) await task('Caching the verified original ZIP', () => root.SDBaselineFiles.cacheOriginalZip(blob, baseline.archive, { current }));
+            if (!current()) return;
             const workspace = { descs: [], status: {}, branchId: scope.branchId, sourceHash: version.sourceHash, importArchive: baseline.archive, catalogVersionId: version.id };
             root.WorkspaceState.initializeWorkspace(workspace, { game: version.game, branchId: scope.branchId, sourceHash: version.sourceHash, source: baseline.source, language: targetLanguage });
             await task('Storing the verified source version locally', () => root.OfflineStore.saveSourceWorkspaceWithRevisions(copy(baseline.source), workspace, [], scope, baseline));
@@ -848,6 +859,7 @@
       managedDeadlineTooltip(instant) { return this.managedFormatDeadline(instant); },
       managedTimestampTooltip(instant) { return instant ? this.managedFormatDate(instant) + ' local' : ''; },
       managedReminder(instant) { return reminder(instant, this.managedNow); },
+      managedVersionIsHead(version) { return !!version && (version.isHead || this.managedBranch?.headVersionId === version.id); },
       managedVersionEnded(version) {
         if (!this.cloudCanAccessAllLanguages) return !!version.assignedTeam?.ended;
         const teamCount = version.teamCount || 12;
@@ -1023,12 +1035,12 @@
         finally { this.managedFinishOperation(operation); }
       },
       async managedWithdraw(version = this.managedSelectedVersion) {
-        if (!version || this.managedVersionBusy || !this.managedManagerAccess) return;
+        if (!version || this.managedVersionBusy || !this.managedManagerAccess || this.managedVersionIsHead(version)) return;
         const key = this.managedCatalogScope, requestId = id(), revision = version.revision, path = '/v1/versions/' + encodeURIComponent(version.id) + '/withdraw';
         const operation = this.managedBeginOperation(), current = () => key === this.managedCatalogScope && operation === this._managedOperation;
         try {
           if (!await this.appConfirm(`Withdraw "${version.name}" from ordinary selection? Existing translations, history, collections, and recovery access will be preserved. Shared saves will be paused.`, { title: 'Withdraw version?', confirmLabel: 'Withdraw and preserve work', danger: true })) return;
-          if (!current()) return;
+          if (!current() || this.managedVersionIsHead(version)) return;
           await this._cloud.request(path, { method: 'POST', body: { expectedRevision: revision, confirmed: true, idempotencyKey: requestId } });
           if (current()) { this.managedSetOperationError(path, ''); await this.refreshManagedVersions(); }
         } catch (error) { if (!error.stale && current()) this.managedSetOperationError(path, error); }
@@ -1058,6 +1070,7 @@
       },
       async openManagedUpload() {
         if (this.managedVersionBusy || !this.managedManagerAccess) return;
+        if (!this.managedUpload && this.managedNextVersionBlockedReason) { this.managedSetOperationError('next-version', this.managedNextVersionBlockedReason); return; }
         if (!this.managedUpload && !this._managedCreateId) { const d = defaults(this.gameVersion); this.managedUploadName = d.name; this.managedUploadDeadline = deadlineInput(d.deadlineAt); this.managedUploadFile = null; this.managedUploadBytes = 0; this.managedDuplicateChoices = {}; }
         this.managedUploadVisible = true; this.managedUploadError = ''; this.managedDuplicateVersion = null;
         if (!this.managedUpload?.id || !this.managedOnlineAvailable) return;
@@ -1194,16 +1207,7 @@
           await this.managedRememberUpload(scope); if (!current()) return;
           const path = '/v1/version-uploads/' + encodeURIComponent(this.managedUpload.id) + '/publish';
           const body = { expectedHeadId: this.managedUpload.parentVersionId || null, idempotencyKey: requestId };
-          let result;
-          try { result = await this._cloud.request(path, { method: 'POST', body }); }
-          catch (error) {
-            if (!current()) return;
-            if (!['UNFINISHED_TEAMS', 'VERSION_UNFINISHED_TEAMS', 'VERSION_TEAMS_UNFINISHED'].includes(error.code)) throw error;
-            const teams = error.details?.unfinishedTeams || error.details?.error?.unfinishedTeams || [];
-            if (!await this.appConfirm(`The previous HEAD still has open teams${teams.length ? ': ' + teams.join(', ') : ''}. Download and end them first, or explicitly publish using their captured shared work.`, { title: 'Previous version is still open', confirmLabel: 'Publish anyway', danger: false })) return;
-            if (!current()) return;
-            result = await this._cloud.request(path, { method: 'POST', body: { ...body, overrideUnfinished: true } });
-          }
+          const result = await this._cloud.request(path, { method: 'POST', body });
           if (!current()) return;
           if (await this.managedCompletePublication(scope, result, key, current)) { await this.refreshManagedVersions(); if (current()) await this.managedLoadLocal(); }
         } catch (error) { if (!error.stale && current()) { this.managedUploadError = error.message; this.managedDuplicateVersion = copy(error.details?.version || this.managedDuplicateVersion); } }

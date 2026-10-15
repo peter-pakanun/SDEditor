@@ -16,7 +16,8 @@
   // v18 also fences writers that cannot retain standalone carry repair outcomes.
   // v19 excludes writers that could stage incomplete StatDescription text.
   // v20 fences proof-producing pages/workers and retires baseline tree caches.
-  const DB_VERSION = 20;
+  // v21 fences pages/workers unaware of immutable on-demand SD source caches.
+  const DB_VERSION = 21;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
   const tmListeners = new Set();
@@ -73,6 +74,7 @@
   async function usesRecords(scope) { return !!(scope?.sourceHash && normalized && await normalized.available()); }
 
   const STORE_KV = 'kv';
+  const STORE_SD_ZIPS = 'statdescription_zips';
   const STORE_REVISIONS_LEGACY = 'revisions';
   const STORE_REVISIONS_POE1 = 'revisions_poe1';
   const STORE_REVISIONS_POE2 = 'revisions_poe2';
@@ -206,6 +208,7 @@
         if (!db.objectStoreNames.contains(STORE_KV)) {
           db.createObjectStore(STORE_KV, { keyPath: 'key' });
         }
+        if (!db.objectStoreNames.contains(STORE_SD_ZIPS)) db.createObjectStore(STORE_SD_ZIPS, { keyPath: 'key' });
 
         for (const storeName of REVISION_STORES) {
           if (!db.objectStoreNames.contains(storeName)) {
@@ -1774,6 +1777,37 @@
   const root = typeof window === 'object' ? window : self;
   root.OfflineStore = {
     openClientTextDb: openDb,
+    // Callers verify bytes in the SD source worker before marking an original
+    // ready. Blob records are shared by content hash, never by selected scope.
+    putStatDescriptionZip: async (hash, blob, evidence) => {
+      if (!/^[a-f0-9]{64}$/.test(hash) || evidence?.verified !== true || !Number.isSafeInteger(evidence.zipSize)
+        || evidence.zipSize <= 0 || (blob?.size ?? blob?.byteLength) !== evidence.zipSize) throw new Error('Verified immutable ZIP bytes are required.');
+      return withStore(STORE_SD_ZIPS, 'readwrite', store => {
+        store.put({ key: hash, blob, zipSize: evidence.zipSize, verified: true });
+        if (evidence.archive?.baselineId && evidence.archive.zipHash === hash) {
+          store.put({ key: 'archive:' + evidence.archive.baselineId, archive: evidence.archive });
+        }
+      });
+    },
+    getStatDescriptionZip: async hash => {
+      if (!/^[a-f0-9]{64}$/.test(hash || '')) return null;
+      const row = await withStore(STORE_SD_ZIPS, 'readonly', store => requestToPromise(store.get(hash)));
+      return row?.verified === true && (row.blob?.size ?? row.blob?.byteLength) === row.zipSize ? row.blob : null;
+    },
+    getBaselineFile: normalized ? ref => {
+      const scope = { game: normalizeGameVersion(ref.game), sourceHash: ref.baselineId || ref.sourceHash };
+      return normalized.transaction([normalized.stores.baseline], 'readonly', async tx => (await normalized.originalFiles(tx, scope, [ref.filepath]))[0]);
+    } : undefined,
+    getBaselineArchive: async ref => {
+      const scope = { game: normalizeGameVersion(ref.game), sourceHash: ref.baselineId || ref.sourceHash };
+      const binding = await withStore(STORE_SD_ZIPS, 'readonly', store => requestToPromise(store.get('archive:' + scope.sourceHash)));
+      if (binding?.archive) return binding.archive;
+      if (normalized && await normalized.available()) {
+        const value = await normalized.transaction([normalized.stores.assets], 'readonly', tx => normalized.get(tx, normalized.stores.assets, normalized.baselineKey(scope)));
+        if (value?.archive) return value.archive;
+      }
+      return (await kvGet(importedBaselineKey(scope.sourceHash, scope.game)))?.archive;
+    },
     isAvailable,
     normalizeGameVersion,
     setGameVersion,

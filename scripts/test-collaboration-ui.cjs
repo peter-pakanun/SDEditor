@@ -33,6 +33,34 @@ function editor(wrappers = {}) {
   return { app: instance, focus, mixin };
 }
 
+test('missing source context preserves shared history attribution and before/after translation detail', async () => {
+  const saved = event({ sourceRef: { baselineId: 'missing', filepath: 'stat.txt' } });
+  const { app } = editor({ collabLoadHistoryEntry: async () => saved,
+    hydrateSDHistorySource: async () => { throw new Error('Restore the missing source artifact to compare its English.'); } });
+  app.collaborationHistoryVisible = true; app.collaborationHistoryItems = [{ id: saved.id, actor: saved.actor }];
+  await app.collaborationSelectHistoryEvent(saved);
+  assert.equal(app.collaborationHistoryEvent, saved);
+  assert.deepEqual(app.collaborationHistoryEvent.before.translations, ['before']); assert.deepEqual(app.collaborationHistoryEvent.after.translations, ['after']);
+  assert.equal(app.collaborationHistoryEvent.actor.name, 'Alice'); assert.equal(app.collaborationHistoryItems.length, 1);
+  assert.match(app.collaborationHistoryError, /missing source artifact/); assert.equal(app.collaborationHistoryDetailLoading, false);
+});
+
+test('unavailable untouched originals are labeled honestly while authored history remains visible and restorable', async () => {
+  const saved = event({ before: { translations: null, valuesUnavailable: true }, canRestoreBefore: true,
+    after: { translations: ['Retained authored target'], sourceUnavailable: true } });
+  const { app } = editor({ collabLoadHistoryEntry: async () => saved });
+  app.collaborationHistoryVisible = true; await app.collaborationSelectHistoryEvent(saved);
+  assert.match(app.collaborationHistoryText(saved.before), /not retained/);
+  assert.match(app.collaborationHistoryText(saved.after), /Retained authored target/);
+  assert.equal(app.collaborationHistoryCanRestore('before'), false);
+  assert.equal(app.collaborationHistoryCanRestore('after'), true, 'Historical source loss does not disable a retained target.');
+  app.collaborationState.conflicts = [conflict({ shared: { ...state([], 1), valuesUnavailable: true } })];
+  app.collaborationConflictVisible = true; app.collaborationSelectConflict(app.collaborationState.conflicts[0].id);
+  assert.match(app.collaborationConflictText(0, 'shared'), /unavailable/);
+  app.collaborationChooseConflict(0, 'shared'); assert.notEqual(app.collaborationConflictChoices[0], 'shared');
+  app.collaborationChooseConflict(0, 'yours'); assert.equal(app.collaborationConflictChoices[0], 'yours');
+});
+
 test('unchanged compact state retains reactive identity while presence updates preserve conflict state', () => {
   const { app } = editor(); const previous = app.collaborationState;
   app.collabReceiveState(copy(previous));

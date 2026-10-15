@@ -422,6 +422,7 @@
             </div>
             <div v-if="historyLoading" class="historyLoading">Loading…</div>
             <div v-else>
+              <p v-if="sdHistorySourceError" role="alert">{{ sdHistorySourceError }}</p>
               <div class="historyList">
                 <div v-for="rev in historyItems" :key="rev.id" class="historyItem" :class="{ selectedA: historySelectedA && historySelectedA.id === rev.id, selectedB: historySelectedB && historySelectedB.id === rev.id }">
                   <button class="historyPick" :class="{ current: String(rev.note || '').includes('(current)') }" @click="pickHistoryRevision(rev)" :disabled="!!entryAlignment">{{ formatHistoryTime(rev.savedAt) }} {{ rev.note ? (' ' + rev.note) : '' }}</button>

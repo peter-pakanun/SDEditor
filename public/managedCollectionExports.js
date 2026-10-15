@@ -90,6 +90,7 @@
     }
     const source = await codec.applyDuplicateSelections(rawSource, archive.decisions, { language });
     checkpoint(current);
+    if (typeof window === 'object' && window.SDBaselineFiles) await window.SDBaselineFiles.cacheOriginalZip(blob, archive, { current });
     return verifyBaseline(source, archive, { current });
   }
   async function generate(manifest, baseline, JSZip, { current, type = 'blob', progress } = {}) {

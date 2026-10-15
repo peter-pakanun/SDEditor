@@ -25,6 +25,12 @@ test('preparation asks the API for release ancestry rather than guessing from ca
         assert.equal(calls[0].options.signal,app._ctAbort.signal);
     }
 });
+test('new release predecessor discovery is bound to the HEAD captured by the upload dialog',async()=>{
+    const app=harness();app.ctUploadVersion=null;app.ctUploadPredecessor={id:'captured-head',name:'Captured release'};
+    app._cloud={async request(url){assert.equal(new URL('http://fixture'+url).searchParams.get('expectedHeadId'),'captured-head');return prior();}};
+    assert.equal((await app.ctFindPreviousGroup({contentMode:'clienttext',language:'Thai'})).group.id,'previous-group');
+});
+
 test('late or mismatched predecessor discovery cannot become another upload scope',async()=>{
     const changes=[app=>app.managedCatalogScope='bob:poe2',app=>app.ctUploadVersion={id:'new-target'},app=>app.gameVersion='poe1',app=>app._ctAbort.abort()];
     for(const change of changes){const app=harness();app._cloud={async request(){change(app);return prior();}};

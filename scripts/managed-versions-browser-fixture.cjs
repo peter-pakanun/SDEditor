@@ -319,6 +319,84 @@ async function run() {
       assert.equal(traffic.includes('/v1/collections/' + collection.id + '/archive'), false, 'Browser produces its own translated ZIP');
     };
     await bootstrap(manager, 'manager');
+    if (process.argv.includes('--head-withdrawal-only') || process.argv.includes('--head-ended-only')) {
+      const versions = api.locals.versions;
+      const publish = async (archiveBytes, name) => {
+        const upload = versions.createUpload('fixture-manager', { game: 'poe2', name, idempotencyKey: randomUUID() });
+        await versions.receiveArchive(upload.upload.id, 'fixture-manager', Readable.from([archiveBytes]));
+        versions.prepare(upload.upload.id, 'fixture-manager', {}); await versions.idle();
+        return versions.publish(upload.upload.id, 'fixture-manager', { expectedHeadId: versions.branch('poe2').head_version_id, overrideUnfinished: true, idempotencyKey: randomUUID() }).version;
+      };
+      const first = await publish(bytes, 'Protected HEAD'), withdrawals = [];
+      manager.on('request', request => { if (new URL(request.url()).pathname.endsWith('/withdraw')) withdrawals.push(request); });
+      await manager.evaluate(() => window.__managedFixtureApp.refreshManagedVersions());
+      const firstRow = versionRow(manager, first.name);
+      const uploadNext = manager.getByRole('button', { name: 'Upload next version', exact: true });
+      assert.equal(await uploadNext.isDisabled(), true, 'An open HEAD blocks starting its successor');
+      await uploadNext.hover(); await manager.getByRole('tooltip').waitFor();
+      assert.match(await manager.getByRole('tooltip').textContent(), /End every team in HEAD/);
+      await manager.evaluate(() => window.__managedFixtureApp.ctOpenUpload());
+      assert.equal(await manager.locator('.ctUploadDialog').count(), 0, 'The direct action also blocks an open HEAD');
+      assert.equal(await firstRow.locator('.versionSecondaryActions').getByRole('button', { name: 'Withdraw', exact: true }).isDisabled(), true);
+      for (const language of api.locals.versions.detail(first.id, 'fixture-manager').teams.map(team => team.language)) {
+        versions.collect(first.id, language, 'fixture-manager', { format: 'manifest', idempotencyKey: randomUUID() });
+      }
+      await versions.idle();
+      await manager.evaluate(() => window.__managedFixtureApp.refreshManagedVersions());
+      assert.equal(await firstRow.locator('.versionBadge.ended').isVisible(), true);
+      for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
+        await manager.evaluate(theme => { const vm = window.__managedFixtureApp; vm.theme = theme; vm.applyTheme(theme); }, theme);
+        const withdraw = firstRow.locator('.versionSecondaryActions').getByRole('button', { name: 'Withdraw', exact: true });
+        assert.equal(await withdraw.isDisabled(), true, 'Ended HEAD remains protected in ' + theme);
+        await withdraw.hover(); await manager.getByRole('tooltip').waitFor();
+        assert.match(await manager.getByRole('tooltip').textContent(), /HEAD cannot be withdrawn/);
+        await manager.evaluate(async () => { const vm = window.__managedFixtureApp; await vm.managedWithdraw(vm.managedVersions.find(version => version.isHead)); });
+        assert.equal(await manager.locator('.appDialogOverlay').count(), 0);
+        await manager.screenshot({ path: join(directory, 'head-withdrawal-' + theme + '.png'), fullPage: true });
+        assert.equal(await uploadNext.isEnabled(), true);
+        await uploadNext.focus(); await manager.keyboard.press('Enter');
+        const predecessor = manager.getByLabel('Predecessor version', { exact: true });
+        await predecessor.waitFor(); assert.equal(await predecessor.isDisabled(), true);
+        assert.equal(await predecessor.inputValue(), first.name);
+        await manager.screenshot({ path: join(directory, 'head-predecessor-' + theme + '.png'), fullPage: true });
+        await manager.locator('.ctUploadDialog').getByRole('button', { name: 'Close', exact: true }).click();
+        await manager.setViewportSize({ width: 1100, height: 820 });
+        await manager.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        const actions = firstRow.locator('.versionActionMenu');
+        await actions.locator('summary').focus(); await manager.keyboard.press('Enter');
+        await actions.locator('.versionActionMenuItems').waitFor();
+        assert.equal(await actions.getByRole('button', { name: 'Withdraw', exact: true }).isDisabled(), true);
+        await manager.keyboard.press('Escape');
+        assert.equal(await actions.evaluate(element => element.open), false);
+        await manager.setViewportSize({ width: 1440, height: 1000 });
+      }
+      assert.equal(withdrawals.length, 0, 'HEAD attempts do not submit withdrawal requests');
+      await uploadNext.click();
+      const draftRequest = manager.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === '/v1/content-versions');
+      await manager.locator('.ctUploadDialog').getByRole('textbox', { name: 'Version name', exact: true }).fill('Successor metadata draft');
+      await manager.locator('.ctUploadDialog').getByRole('button', { name: 'Save version draft', exact: true }).click();
+      assert.equal((await draftRequest).postDataJSON().expectedHeadId, first.id);
+      await manager.waitForFunction(() => !window.__managedFixtureApp.ctUploading && window.__managedFixtureApp.ctUploadVersion?.status === 'draft');
+      assert.equal(versions.branch('poe2').head_version_id, first.id, 'Saving metadata does not advance HEAD');
+      await manager.locator('.ctUploadDialog').getByRole('button', { name: 'Close', exact: true }).click();
+      const successorZip = new JSZip(); successorZip.file(source.filepath, codec.descEncode(source));
+      const next = await publish(await successorZip.generateAsync({ type: 'nodebuffer' }), 'Successor HEAD');
+      await manager.evaluate(() => window.__managedFixtureApp.refreshManagedVersions());
+      assert.equal(await uploadNext.isDisabled(), true, 'The new open HEAD blocks another successor');
+      assert.equal(await versionRow(manager, next.name).locator('.versionSecondaryActions').getByRole('button', { name: 'Withdraw', exact: true }).isDisabled(), true);
+      const withdrawOlder = firstRow.locator('.versionSecondaryActions').getByRole('button', { name: 'Withdraw', exact: true });
+      assert.equal(await withdrawOlder.isEnabled(), true);
+      await withdrawOlder.click(); await manager.locator('.appDialogCancel').waitFor(); await manager.keyboard.press('Escape');
+      assert.equal(withdrawals.length, 0, 'Escape cancels withdrawal of an older version');
+      await withdrawOlder.click(); await manager.locator('.appDialogConfirm').click();
+      await manager.waitForFunction(() => !window.__managedFixtureApp.managedVersionBusy);
+      assert.equal(withdrawals.length, 1);
+      assert.equal(versions.branch('poe2').head_version_id, next.id);
+      assert.equal(versions.version(first.id, 'fixture-manager').status, 'withdrawn');
+      assert.deepEqual(failures, [], 'Browser script errors');
+      console.log(JSON.stringify({ status: 'PASS', headLifecycleOnly: true, results: ['Open HEAD blocks the next upload and Ended HEAD enables it', 'The disabled predecessor field shows the captured HEAD name in all four desktop themes; metadata creation sends its expected ID', 'Open and Ended HEAD withdrawal disabled with explanatory tooltips in all four desktop themes', 'Compact keyboard actions protect HEAD; direct handler sends no request', 'Publishing a successor enables the older version withdrawal; cancellation and confirmation preserve HEAD'] }, null, 2));
+      return;
+    }
     await bootstrap(translator, 'thai'); await importOffline(translator);
     await translator.waitForFunction(() => window.__managedFixtureApp._collaboration?.snapshot().roomId);
     const standaloneRoomId = await translator.evaluate(() => window.__managedFixtureApp._collaboration.snapshot().roomId);

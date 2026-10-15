@@ -200,6 +200,10 @@
       ...(file.sourceCarry ? { sourceCarry: copy(file.sourceCarry) } : {}),
       ...(file.invalidStageRecovery ? { invalidStageRecovery: copy(file.invalidStageRecovery) } : {}),
       ...(file.originalTranslationIssues ? { originalTranslationIssues: copy(file.originalTranslationIssues) } : {}),
+      ...(file.baselineRef ? { baselineRef: copy(file.baselineRef) } : {}),
+      ...(file.valuesUnavailable ? { valuesUnavailable: true } : {}),
+      ...(HEX.test(file.originalTargetHash || '') ? { originalTargetHash: file.originalTargetHash } : {}),
+      ...(strings(file.baselineTranslations) ? { baselineTranslations: copy(file.baselineTranslations) } : {}),
       ...(Array.isArray(file.beforeTranslations) ? { beforeTranslations: copy(file.beforeTranslations) } : {}) };
   }
   function contentEqual(a, b) {
@@ -244,7 +248,7 @@
     else if ((!base || !sameCarry(yours.sourceCarry, base.sourceCarry)) && yours.sourceCarry
       && equal(result.translations, yours.translations)) sourceCarry = yours.sourceCarry;
     if (sourceCarry) result.sourceCarry = copy(sourceCarry); else delete result.sourceCarry;
-    if (result.trackedForExport) delete result.stagingReset;
+    if (result.trackedForExport) { delete result.stagingReset; delete result.valuesUnavailable; }
     return { file: result, indexes, metadata, conflict: indexes.length > 0 || metadata.length > 0 };
   }
   function scopeKey(identity) {

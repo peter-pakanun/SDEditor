@@ -1159,3 +1159,81 @@ test('invalid stage recovery preserves exact bytes and source while isolating ma
   assert.equal(W.quarantineInvalidTranslations(clientText, { source: [source] }).changed, false);
   assert.deepEqual(W.stageTranslation(clientText, { filepath: 'a.txt', translations: [''] }, 'Thai', { source }).translations, ['']);
 });
+test('a same-generation partial Dropped view preserves exact local frozen source without uploading the partial snapshot', () => {
+  const source = sourceDesc(), workspace = modern(source, 'current');
+  const candidate = W.dropTranslation(workspace, source, 'Thai', { id: 'server-generation', revision: 2,
+    originSourceHash: 'older', translations: ['  Last translation\\nnext  '] });
+  workspace.droppedOutbox = [];
+  workspace.droppedArchive[candidate.id].targetSourceHashes.push('another-assigned-version');
+  const frozen = structuredClone(candidate.snapshot);
+  const partial = { ...structuredClone(candidate), snapshot: { translations: structuredClone(frozen.translations) },
+    sourceUnavailable: true, sourceError: 'The original ZIP is missing.',
+    sourceRef: { kind: 'sd-baseline', game: 'poe1', baselineId: 'older', filepath: source.filepath, candidateId: candidate.id },
+    targetSourceHashes: ['current'] };
+  const input = structuredClone(partial);
+  W.acceptDropped(workspace, [partial], { game: 'poe1', language: 'Thai' });
+  const retained = W.droppedForFile(workspace, source.filepath, 'Thai');
+  assert.deepEqual(retained.snapshot, frozen); assert.deepEqual(workspace.droppedArchive[candidate.id].snapshot, frozen);
+  assert.equal(retained.sourceUnavailable, true); assert.equal(retained.sourceError, partial.sourceError);
+  assert.deepEqual(retained.sourceRef, partial.sourceRef); assert.deepEqual(workspace.droppedOutbox, []);
+  assert.deepEqual(partial, input, 'Receiving a view does not mutate the response or its partial snapshot.');
+  W.acceptDropped(workspace, [structuredClone(candidate)], { game: 'poe1', language: 'Thai' });
+  const recovered = W.droppedForFile(workspace, source.filepath, 'Thai');
+  assert.equal(recovered.sourceUnavailable, undefined); assert.equal(recovered.sourceError, undefined);
+  assert.deepEqual(recovered.snapshot, frozen, 'Only a relevant complete source response clears the unavailable marker.');
+  workspace.droppedOutbox = [];
+  const compact = { ...structuredClone(candidate), snapshot: { translations: structuredClone(frozen.translations), sourceFacts: { entryCount: frozen.translations.length } } };
+  W.acceptDropped(workspace, [compact]);
+  assert.deepEqual(W.droppedForFile(workspace, source.filepath, 'Thai').snapshot, frozen, 'Normal compact reads also preserve cached exact source evidence.');
+  assert.deepEqual(workspace.droppedOutbox, [], 'A compact read never becomes a new source upload.');
+});
+test('a target-only Dropped view can be explicitly promoted against complete current source without old English', () => {
+  const source = sourceDesc(), original = modern(source, 'current');
+  const candidate = W.dropTranslation(original, source, 'Thai', { id: 'partial-only', revision: 3, originSourceHash: 'older', translations: ['Last authored translation'] });
+  const workspace = modern(source, 'current');
+  const partial = { ...structuredClone(candidate), snapshot: { translations: ['Last authored translation'] }, sourceUnavailable: true,
+    sourceError: 'Import the missing original ZIP to compare source.', sourceRef: { kind: 'sd-baseline', game: 'poe1', baselineId: 'older', filepath: source.filepath, candidateId: candidate.id } };
+  W.acceptDropped(workspace, [partial]);
+  const retained = W.droppedForFile(workspace, source.filepath, 'Thai');
+  assert.deepEqual(retained.snapshot.translations, partial.snapshot.translations); assert.equal(retained.snapshot.english, undefined);
+  assert.deepEqual(retained.sourceRef, partial.sourceRef); assert.equal(retained.sourceUnavailable, true);
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').isDropped, true);
+  assert.deepEqual(W.workspaceFile(workspace, source, 'Thai').translations, source.translations.Thai, 'Partial recovery never becomes active committed text.');
+  assert.deepEqual(workspace.droppedOutbox, []);
+  const before = structuredClone(workspace);
+  for (const translations of [[''], [], ['one', 'extra']]) {
+    assert.throws(() => W.stageTranslation(workspace, { filepath: source.filepath, translations }, 'Thai',
+      { source, promoteDropped: { id: candidate.id, revision: 3 } }), error => error.code === 'SD_TRANSLATION_INVALID');
+    assert.deepEqual(workspace, before, 'Current source completeness is required before consuming recovery.');
+  }
+  assert.throws(() => W.stageTranslation(workspace, { filepath: source.filepath, translations: ['Last authored translation'] }, 'Thai',
+    { source, promoteDropped: { id: candidate.id, revision: 2 } }), error => error.code === 'DROPPED_PROMOTION_CHANGED');
+  W.stageTranslation(workspace, { filepath: source.filepath, translations: ['Last authored translation'] }, 'Thai',
+    { source, promoteDropped: { id: candidate.id, revision: 3 } });
+  assert.deepEqual(workspace.staged.Thai[source.filepath].translations, ['Last authored translation']);
+  assert.equal(W.droppedForFile(workspace, source.filepath, 'Thai'), null);
+  assert.equal(workspace.droppedArchive[candidate.id].status, 'promoted');
+  assert.deepEqual(workspace.droppedArchive[candidate.id].snapshot, partial.snapshot, 'Promotion does not invent historical English.');
+});
+
+test('explicit source-less recovery retains its authored target and source reference in the retry outbox', () => {
+  const source = sourceDesc(), workspace = modern(source, 'current');
+  const sourceRef = { kind: 'sd-baseline', baselineId: 'older', filepath: source.filepath };
+  const candidate = W.dropTranslation(workspace, source, 'Thai', { id: 'explicit-target', recoveryId: 'explicit-target',
+    originSourceHash: 'older', originSourceAvailable: false, sourceRef, snapshot: { translations: ['Exact retained target'] } });
+  assert.deepEqual(candidate.sourceRef, sourceRef);
+  assert.deepEqual(workspace.droppedOutbox[0].candidate.sourceRef, sourceRef);
+  assert.deepEqual(workspace.droppedOutbox[0].candidate.snapshot, { translations: ['Exact retained target'] });
+  assert.equal(candidate.originSourceAvailable, false);
+});
+
+test('compact accepted metadata correction hashes retain scoped source-carry status without retaining metadata text', () => {
+  const desc = sourceDesc(), beforeHash = 'a'.repeat(64), afterHash = 'b'.repeat(64);
+  const entry = { sourceCarry: { fromSourceHash: 'previous', toSourceHash: 'current', metadataCorrection: { beforeHash, afterHash } } };
+  assert.equal(W.metadataCorrectionForSource(entry, desc, 'current'), true);
+  assert.equal(W.metadataCorrectionForSource(entry, desc, 'other'), false);
+  assert.equal(W.metadataCorrectionForSource(entry, { ...desc, sourceFacts: { metadataHash: afterHash } }, 'current'), true);
+  assert.equal(W.metadataCorrectionForSource(entry, { ...desc, sourceFacts: { metadataHash: beforeHash } }, 'current'), false);
+  assert.equal(W.metadataCorrectionForSource({ sourceCarry: { ...entry.sourceCarry, fromSourceHash: 'current' } }, desc, 'current'), false);
+  assert.equal(W.metadataCorrectionForSource({ sourceCarry: { ...entry.sourceCarry, metadataCorrection: { beforeHash, afterHash: beforeHash } } }, desc, 'current'), false);
+});

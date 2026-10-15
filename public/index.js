@@ -167,7 +167,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
 const config = Vue.defineComponent({
-  mixins: [window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}],
+  mixins: [window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -671,8 +671,11 @@ const config = Vue.defineComponent({
     },
     editorDroppedSourceDiff() {
       const candidate = this.editorDroppedCandidate;
-      if (!candidate || candidate.originSourceAvailable === false) return '';
-      return this.renderInlineDiffHtml((candidate.snapshot.english || []).map(this.decodeEscapedNewlines).join('\n'),
+      if (!candidate || candidate.originSourceAvailable === false && !this.sdDroppedSource || this.sdDroppedSourceLoading
+        || this.sdDroppedSourceError && !candidate.snapshot.english?.length) return '';
+      const english = this.sdDroppedSource?.translations?.English || candidate.snapshot.english || [];
+      if (!english.length) return '';
+      return this.renderInlineDiffHtml(english.map(this.decodeEscapedNewlines).join('\n'),
         (this.editorCurrentEditingDesc?.translations?.English || []).map(this.decodeEscapedNewlines).join('\n'));
     },
     editorDroppedTranslationDiff() {
@@ -685,6 +688,7 @@ const config = Vue.defineComponent({
       const candidate = this.editorDroppedCandidate;
       const desc = this.editorCurrentEditingDesc;
       return !!candidate && candidate.snapshot.translations?.length === desc?.translations?.English?.length
+        && candidate.snapshot.translations.every(text => typeof text === 'string' && text.trim())
         && !this.editorDroppedConflict && !!this.editorReady && !this.editorSaving && !this.entryAlignment && !this.editorHaveChanges();
     },
     browserWorkTooltip() {
@@ -1947,8 +1951,18 @@ const config = Vue.defineComponent({
       if (!this.editorCurrentEditingDesc) return;
       const filepath = this.editorCurrentEditingDesc.filepath;
       const candidate = this.editorDroppedCandidate || window.WorkspaceState.droppedForFile(this.localDescs, filepath, this.lang);
-      if (!candidate || candidate.originSourceAvailable === false) return;
-      const prevEng = candidate?.snapshot?.english || [];
+      if (!candidate || candidate.originSourceAvailable === false && !this.sdSourceReference?.(candidate)) return;
+      const desc = this.editorCurrentEditingDesc, scope = this.sdBaselineViewScope, identity = this.sdDroppedCandidateIdentity?.(candidate) || candidate;
+      const current = () => {
+        const selected = this.editorDroppedCandidate || window.WorkspaceState.droppedForFile(this.localDescs, filepath, this.lang);
+        return desc === this.editorCurrentEditingDesc && identity === (this.sdDroppedCandidateIdentity?.(selected) || selected) && scope === this.sdBaselineViewScope;
+      };
+      let resolved = this.sdDroppedSource;
+      if (this.sdSourceReference?.(candidate) && !resolved) resolved = await this.loadSDDroppedSource();
+      if (!current()) return;
+      if (this.sdSourceReference?.(candidate) && !resolved) return;
+      const prevEng = resolved?.translations?.English || candidate?.snapshot?.english || [];
+      if (!prevEng.length) return;
       const curEng = Array.isArray(this.editorCurrentEditingDesc?.translations?.English) ? this.editorCurrentEditingDesc.translations.English : [];
 
       for (let i = 0; i < (this.editorBlocks || []).length; i++) {
@@ -5781,6 +5795,10 @@ const config = Vue.defineComponent({
       try {
         this.importBaselineHashing = !!identity;
         importedBaseline = await this.buildImportedBaseline(identity, rawSource || parsed, options.decisions || [], acceptedArchive);
+        if (importedBaseline && file?.arrayBuffer && window.SDBaselineFiles) {
+          await prepare('Caching the verified original ZIP', () => window.SDBaselineFiles.cacheOriginalZip(file, importedBaseline.archive, { current: importCurrent }));
+          if (!importCurrent()) return;
+        }
         if (importedBaseline) { sourceHash = importedBaseline.archive.baselineId; nextSource = this.toPlainForStorage(importedBaseline.source); }
         else sourceHash = await window.CollaborationProtocol.sourceHash(nextSource);
       }
@@ -5909,7 +5927,8 @@ const config = Vue.defineComponent({
         if (!prevDesc || !arrayEquals(prevEng, nextEng)) {
           sourceRevisions.push({ filepath, filename: nextDesc.filename, filedir: nextDesc.filedir,
             lang: 'English', savedAt: now, note: prevDesc ? 'Source update' : 'Source import',
-            isMissing: false, translations: nextEng, sourceHash });
+            isMissing: false, translations: nextEng, sourceHash,
+            sourceRef: { kind: 'sd-baseline', game, baselineId: sourceHash, filepath } });
         }
       }
 
@@ -7306,7 +7325,7 @@ const config = Vue.defineComponent({
       this.historyMode = mode;
       if (this.sideTab === 'history') this.refreshHistory();
     },
-    pickHistoryRevision(rev) {
+    async pickHistoryRevision(rev) {
       if (!rev || this.entryAlignment) return;
       const cur = this.historyItems?.[0] || null;
       if (!cur) return;
@@ -7334,7 +7353,31 @@ const config = Vue.defineComponent({
       }
 
       this.historySelectedB = rev;
-      this.historyDiffHtml = this.buildHistoryDiffHtml(cur, rev);
+      const generation = this._sdHistorySourceRun = (this._sdHistorySourceRun || 0) + 1;
+      const scope = this.sdBaselineViewScope, mode = this.historyMode;
+      const current = () => generation === this._sdHistorySourceRun && scope === this.sdBaselineViewScope && mode === this.historyMode
+        && this.historySelectedB === rev && this.historyItems?.[0] === cur;
+      let a = cur, b = rev;
+      this.sdHistorySourceError = '';
+      try {
+        if (this.hydrateSDHistorySource && (this.sdSourceReference(cur) || this.sdSourceReference(rev))) {
+          [a, b] = await Promise.all([this.hydrateSDHistorySource(cur, { current, sourceMode: mode === 'source' }),
+            this.hydrateSDHistorySource(rev, { current, sourceMode: mode === 'source' })]);
+          if (!current()) return;
+        }
+      } catch (error) {
+        if (current() && !error.stale) {
+          this.sdHistorySourceError = error.message;
+          if (mode === 'source') {
+            this.historyDiffHtml = '';
+            if (this.editorCompareActive) this.exitEditorCompareMode();
+            return;
+          }
+        }
+        if (!current()) return;
+      }
+      this.historySelectedA = a; this.historySelectedB = b;
+      this.historyDiffHtml = this.buildHistoryDiffHtml(a, b);
       this.enterEditorCompareModeFromHistory();
     },
     enterEditorCompareModeFromHistory() {

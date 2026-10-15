@@ -434,6 +434,91 @@ test('first translator seeds a new workspace with bounded upload files', async (
   client.destroy();
 });
 
+test('compact legacy seeds hydrate only matching room-original target hashes and fresh saves retain exact original arrays', async t => {
+  const server = serverFixture(), original = copy(initial[0].translations);
+  const originalTargetHash = await P.zipHash(new TextEncoder().encode(JSON.stringify(original)));
+  server.files[0] = { ...server.files[0], translations: null, valuesUnavailable: true, sourceUnavailable: true, originalTargetHash };
+  const { client } = await fixture({ server }); t.after(() => client.destroy());
+  client.sdSourceStorage = 'zip-only-v1';
+  assert.deepEqual(client.fileBase('a.txt').translations, original);
+  assert.deepEqual(client.fileBase('a.txt').baselineTranslations, original);
+  assert.equal(client.room().outbox.length, 0, 'A matched virtual seed must not become an authored automatic join.');
+  await client.save({ files: [{ ...initial[0], translations: ['Fresh edit', 'Second'], trackedForExport: true }] });
+  const mutation = server.requests.find(request => request.path.endsWith('/mutations'));
+  assert.deepEqual(mutation.options.body.files[0].baselineTranslations, original);
+  assert.equal(mutation.options.body.files[0].baseline, undefined, 'Legacy compact source facts need only the original target overlay.');
+});
+
+test('unavailable legacy seed targets never project fake blanks or upload themselves while unrelated authored work syncs', async t => {
+  const server = serverFixture();
+  server.files[0] = { ...server.files[0], translations: null, valuesUnavailable: true, sourceUnavailable: true,
+    originalTargetHash: await P.zipHash(new TextEncoder().encode(JSON.stringify(['Another import target', 'Other second']))) };
+  const { client, store, remote } = await fixture({ server }); t.after(() => client.destroy());
+  assert.equal(client.fileBase('a.txt').valuesUnavailable, true);
+  assert.deepEqual(store.workspace.descs.find(file => file.filepath === 'a.txt').translations.Thai, initial[0].translations);
+  assert.equal(remote.flat().some(file => file.filepath === 'a.txt'), false, 'Unknown targets never replace visible committed text.');
+  assert.equal(client.room().outbox.length, 0); assert.equal(server.receipts.size, 0);
+  await client.save({ files: [{ ...initial[1], translations: ['Independent saved work'], trackedForExport: true }] });
+  assert.deepEqual(server.files[1].translations, ['Independent saved work']);
+  assert.equal(server.files[0].translations, null); assert.equal(client.room().outbox.length, 0);
+  client.sdSourceStorage = 'zip-only-v1';
+  await client.save({ files: [{ ...initial[0], translations: ['Explicit replacement', 'Complete second'], trackedForExport: true }] });
+  const explicit = server.requests.filter(request => request.path.endsWith('/mutations')).at(-1).options.body.files[0];
+  assert.equal(explicit.baselineTranslations, undefined, 'An unmatched local target overlay is never presented as the room original.');
+  assert.deepEqual(server.files[0].translations, ['Explicit replacement', 'Complete second']);
+  assert.equal(client.fileBase('a.txt').valuesUnavailable, undefined);
+});
+
+test('existing authored local work beside unknown legacy originals stays in explicit join recovery', async t => {
+  const server = serverFixture();
+  server.files[0] = { ...server.files[0], translations: null, valuesUnavailable: true,
+    originalTargetHash: await P.zipHash(new TextEncoder().encode(JSON.stringify(['Lost import', 'Lost second']))) };
+  const files = copy(initial); files[0].translations = ['Retained authored stage', 'Retained second']; files[0].trackedForExport = true;
+  const { client } = await fixture({ server, files }); t.after(() => client.destroy());
+  assert.equal(client.snapshot().conflicts.length, 1);
+  assert.deepEqual(client.snapshot().conflicts[0].yours.translations, files[0].translations);
+  assert.equal(client.snapshot().conflicts[0].shared.valuesUnavailable, true);
+  assert.deepEqual(client.room().outbox[0].files[0].yours.translations, files[0].translations);
+  assert.equal(server.receipts.size, 0);
+});
+
+test('a restarted legacy upload resends only requested identical source chunks with the same upload identity', async t => {
+  const files = Array.from({ length: 101 }, (_, index) => ({ filepath: index + '.txt', english: ['Original ' + index], translations: ['Target ' + index] }));
+  const chunks = [], requests = []; let finalizes = 0;
+  const client = new Client({ store: {}, WebSocket: null, request: async (path, options = {}) => {
+    requests.push({ path, options: copy(options) });
+    if (path.endsWith('/finalize')) {
+      if (++finalizes === 1) throw Object.assign(new Error('Resend transient source context.'), { code: 'SOURCE_CONTEXT_REQUIRED', status: 409,
+        details: { uploadId: 'exact-upload', missingChunks: [1] } });
+      return { created: true };
+    }
+    if (path.includes('/chunks/')) { chunks.push({ index: Number(path.split('/').at(-1)), body: copy(options.body) }); return {}; }
+    return { receivedChunks: chunks.length ? [0, 1] : [] };
+  } });
+  t.after(() => client.destroy()); client.key = 'legacy-room';
+  await client.uploadFiles('exact-upload', files, client.epoch);
+  const original = copy(chunks);
+  assert.deepEqual(await client.finalizeUpload('exact-upload', files, client.epoch), { created: true });
+  assert.equal(finalizes, 2); assert.deepEqual(chunks.map(chunk => chunk.index), [0, 1, 1]);
+  assert.deepEqual(chunks[2], original[1], 'Resent bodies keep the original ordering and source bytes for the retained server chunk hash.');
+  assert.equal(requests.every(request => request.path.startsWith('/v1/collaboration/uploads/exact-upload')), true);
+});
+
+test('upload status source-context requests resend received chunks proactively and finalize retries are bounded', async t => {
+  const files = [{ filepath: 'a.txt', english: ['Original'], translations: ['Target'] }];
+  let chunks = 0, finalizes = 0;
+  const client = new Client({ store: {}, WebSocket: null, request: async (path, options = {}) => {
+    if (path.endsWith('/finalize')) { finalizes++; throw Object.assign(new Error('Source required again.'),
+      { code: 'SOURCE_CONTEXT_REQUIRED', details: { uploadId: 'old-ticket', missingChunks: [0] } }); }
+    if (path.includes('/chunks/')) { chunks++; assert.deepEqual(options.body, { files }); return {}; }
+    return { receivedChunks: [0], sourceContextRequired: true, missingSourceChunks: [0] };
+  } });
+  t.after(() => client.destroy()); client.key = 'legacy-room';
+  await client.uploadFiles('old-ticket', files, client.epoch); assert.equal(chunks, 1);
+  await assert.rejects(client.finalizeUpload('old-ticket', files, client.epoch), /Source required again/);
+  assert.equal(finalizes, 2, 'Persistent failure remains actionable after one identical resend.'); assert.equal(chunks, 2);
+});
+
 test('first join differences require comparison and preserve a recovery copy without publishing', async () => {
   const files = copy(initial); files[0].translations[0] = 'my old workspace';
   const { client, server, store } = await fixture({ files });

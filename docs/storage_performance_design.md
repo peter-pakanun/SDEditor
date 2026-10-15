@@ -24,7 +24,7 @@ The current design therefore distinguishes durable records from materialized rea
 
 | Layer | Authority and lifetime | Rules |
 | --- | --- | --- |
-| Accepted original | Complete browser baseline tied to original hash and parser identity; StatDescription retains archive proofs, ClientText uses reusable workbook caches | Immutable. Includes original English, original translations and entry metadata. UI decoration, saves, shared edits and recovery do not rewrite it. |
+| Accepted original | Exact hashed original and accepted parser/duplicate configuration; complete browser baseline or verified reusable cache | Immutable source authority. Includes original English, original translations and entry metadata. StatDescription uses [ZIP-only source storage](sd_baseline_storage.md), without membership proofs or duplicate SD source text in SQLite. UI decoration, saves, shared edits and recovery do not rewrite it. |
 | Durable authored work | Per-language staged translations, recovery/provenance, drafts, submissions, history, operations and receipts | Persist facts with captured scopes and revisions. Dropped text is separate recovery evidence, never fallback current text. |
 | Workspace/editor views | Detached source, overlaid descriptions, computed statuses, search rows and editor models | Derived, independently mutable read views. Do not persist status booleans as authority. Rendering edits cannot mutate the baseline. |
 | Assistance cache | Dictionary/TM snapshots, compiled indexes and English matches | Rebuildable memory data. Same-scope older generations are valid until a completed replacement is applied; hard scope changes invalidate them. |

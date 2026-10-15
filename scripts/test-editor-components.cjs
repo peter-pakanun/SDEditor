@@ -10,6 +10,15 @@ vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/editorCompone
 vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/clientTextUi.js'), 'utf8'), { window });
 const { NativeField, TextField, Tools, Preview, Autocomplete, TranslationMemory, Lookup, Comments, History, DiagnosticScan } = window.EditorComponents;
 
+test('local history source errors remain inside the settled history branch and cannot hide translated revisions', () => {
+  assert.match(History.template, /<div v-if="historyLoading" class="historyLoading">Loading…<\/div>\s*<div v-else>\s*<p v-if="sdHistorySourceError" role="alert">/,
+    'Vue v-else must bind to historyLoading; the error belongs inside the visible settled history.');
+  const error = History.template.indexOf('<p v-if="sdHistorySourceError"'), list = History.template.indexOf('class="historyList"');
+  assert.ok(error >= 0 && list > error);
+  assert.doesNotMatch(History.template.slice(error, list), /v-else/,
+    'The revision list cannot depend on the absence of a source-context error.');
+});
+
 test('Lookup reference metadata displays mapped English with the shared focusable tooltip before notes', () => {
   assert.match(Lookup.template, /<ct-context :host="\$props\.controller" :items="lookupSelectedReference\.referenceMetadata \|\| \[\]"><\/ct-context>/);
   const context = window.ClientTextUI.contextComponent.template;

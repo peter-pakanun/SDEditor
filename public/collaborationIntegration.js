@@ -79,7 +79,18 @@
         return this._workspaceBaselineIndex.files.get(filepath);
       },
       droppedCandidateMatches(candidate, current) {
-        return window.WorkspaceState.sameDroppedContent(candidate, current);
+        if (window.WorkspaceState.sameDroppedContent(candidate, current)) return true;
+        // A ZIP-only read can omit historical English. The frozen generation
+        // and exact target text still identify an explicit review safely.
+        return !!candidate?.snapshot && !!current?.snapshot && !!candidate.id && candidate.id === current.id
+          && Number(candidate.revision || 0) === Number(current.revision || 0)
+          && candidate.originSourceHash === current.originSourceHash
+          && (candidate.branchId || 'default') === (current.branchId || 'default')
+          && ['game', 'language', 'filepath'].every(field => candidate[field] === current[field])
+          && (!candidate.snapshot.english?.length || !current.snapshot.english?.length)
+          && Array.isArray(candidate.snapshot.translations) && Array.isArray(current.snapshot.translations)
+          && (!candidate.sourceRef?.fingerprint || !current.sourceRef?.fingerprint || candidate.sourceRef.fingerprint === current.sourceRef.fingerprint)
+          && JSON.stringify(candidate.snapshot.translations) === JSON.stringify(current.snapshot.translations);
       },
       capturedDroppedPromotion(filepath, candidate = this.editorDroppedCandidate) {
         if (!candidate) return null;
@@ -114,7 +125,8 @@
         this._importZipIdentities ||= new WeakMap();
         let pending = this._importZipIdentities.get(file);
         if (!pending) {
-          pending = window.CollaborationProtocol.zipHash(file).then(zipHash => ({ zipHash, zipSize: file.size })).catch(error => {
+          pending = (window.SDBaselineFiles?.readZipIdentity ? window.SDBaselineFiles.readZipIdentity(file)
+            : window.CollaborationProtocol.zipHash(file).then(zipHash => ({ zipHash, zipSize: file.size }))).catch(error => {
             if (this._importZipIdentities.get(file) === pending) this._importZipIdentities.delete(file);
             throw error;
           });
@@ -692,6 +704,7 @@
         const originalBase = copy(this._editorCollabBase);
         let client, managedContext;
         client = new window.CollaborationSync.Client({ store: window.OfflineStore, apiBase: cloud.apiBase, allowLegacySeed: false,
+          contentPolicy: () => cloud.request('/v1/content-policy'),
           presenceEnabled: () => !this.versionChooserVisible,
           context: () => cloud.context(), request: (path, options, captured) => cloud.request(path, options, captured),
           onChange: state => {
@@ -1110,7 +1123,8 @@
                 { derivedStatus: true })),
               revisions: options.revisions || updates.map(({ desc }, index) => ({ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir,
                 lang: ctx.language, savedAt: now, note: origin, translations: files[index].translations,
-                isMissing: computeIsMissing(desc.translations.English.length, files[index].translations), sourceHash: ctx.source })),
+                isMissing: computeIsMissing(desc.translations.English.length, files[index].translations), sourceHash: ctx.source,
+                sourceRef: { kind: 'sd-baseline', game: ctx.game, baselineId: ctx.source, filepath: desc.filepath } })),
               ...(ctx.client?.room() ? { collaboration: { key: ctx.client.key, identity: copy(ctx.client.room().identity),
                 bases: copy(Object.fromEntries(files.map(file => [file.filepath,
                   Object.hasOwn(options.bases || {}, file.filepath) ? options.bases[file.filepath] : ctx.client.fileBase(file.filepath)]))), origin,
@@ -1163,7 +1177,7 @@
               { lastEditedAt: now, lastTranslatedAt: now });
             if (!options.revisions) revisions.push({ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir,
               lang: ctx.language, savedAt: now, note: origin, translations: lines, isMissing,
-              ...(ctx.source ? { sourceHash: ctx.source } : {}) });
+              ...(ctx.source ? { sourceHash: ctx.source, sourceRef: { kind: 'sd-baseline', game: ctx.game, baselineId: ctx.source, filepath: desc.filepath } } : {}) });
             const file = { filepath: desc.filepath, translations: lines, needsReview, trackedForExport: true };
             if (!localRecords) window.WorkspaceState.stageTranslation(workspace, file, ctx.language,
               { source: this.workspaceSourceFile(desc.filepath), sourceHash: ctx.source, game: ctx.game, promoteDropped: promotions[desc.filepath] });
@@ -1325,7 +1339,8 @@
             reason: 'Recovered translation', snapshot: { name: source.name || '', english: [...source.translations.English],
               variables: copy(source.variables || []), remarks: copy(source.remarks || []), stats: copy(source.stats || []), translations: [...lines] } };
           const revisions = [{ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir, lang: context.language,
-            savedAt: now, note: 'Recovered dropped translation', needsReview: true, translations: [...lines], sourceHash: context.source }];
+            savedAt: now, note: 'Recovered dropped translation', needsReview: true, translations: [...lines], sourceHash: context.source,
+            sourceRef: { kind: 'sd-baseline', game: context.game, baselineId: context.source, filepath: desc.filepath } }];
           let result;
           if (context.client?.registerDroppedCandidate) result = await context.client.registerDroppedCandidate(candidate, { revisions });
           else {
@@ -1357,6 +1372,7 @@
         if (!this.collaborationContextCurrent(context)) throw new Error('The workspace changed. Open history again in the intended workspace.');
         const file = event[version];
         if (!file) throw new Error('This history version has no translation to restore.');
+        if (file.valuesUnavailable || !Array.isArray(file.translations)) throw new Error('The untouched original translation was not retained. Choose a saved target version to restore.');
         const filepath = event.filepath || file.filepath;
         const base = client.fileBase(filepath);
         if (base.revision !== baseRevision) throw new Error('The shared file changed. Refresh the restore preview.');

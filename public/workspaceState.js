@@ -212,9 +212,13 @@
   }
   function metadataCorrectionForSource(entry, desc, sourceHash) {
     const carry = entry?.sourceCarry, correction = carry?.metadataCorrection;
-    return !!(carry?.fromSourceHash && carry.fromSourceHash !== sourceHash && carry.toSourceHash === sourceHash
-      && object(correction?.before) && object(correction?.after) && !equal(correction.before, correction.after)
-      && equal(correction.after, sourceMetadata(desc)));
+    if (!carry?.fromSourceHash || carry.fromSourceHash === sourceHash || carry.toSourceHash !== sourceHash) return false;
+    if (object(correction?.before) && object(correction?.after)) return !equal(correction.before, correction.after)
+      && equal(correction.after, sourceMetadata(desc));
+    const validHash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+    const acceptedHash = desc?.sourceFacts?.metadataHash || desc?.baselineFacts?.metadataHash;
+    return validHash(correction?.beforeHash) && validHash(correction?.afterHash) && correction.beforeHash !== correction.afterHash
+      && (!validHash(acceptedHash) || acceptedHash === correction.afterHash);
   }
   const droppedScopeCache = new WeakMap();
   function invalidateDroppedScopes(workspace) { droppedScopeCache.delete(workspace); }
@@ -321,6 +325,7 @@
         snapshot: copy(content), reason: options.reason || 'Source changed', signature, status: 'dropped',
         ...(recoveryId ? { recoveryId } : {}),
         originSourceAvailable: options.originSourceAvailable !== false,
+        ...(options.sourceRef ? { sourceRef: copy(options.sourceRef) } : {}),
         revision: Number(options.revision) || 0, createdAt: options.createdAt || Date.now(),
         ...(options.provenance ? { provenance: copy(options.provenance) } : {}),
         ...(options.baseline ? { baseline: copy(options.baseline), originArchive: copy(options.originArchive) } : {}) };
@@ -807,6 +812,10 @@
       const acknowledged = options.acknowledge && options.acknowledgeId ? workspace.droppedArchive[options.acknowledgeId] : null;
       const local = acknowledged?.language === remote.language && acknowledged?.filepath === remote.filepath && inWorkspaceScope(workspace, acknowledged)
         ? acknowledged : matchingLocal(remote);
+      const retainedSnapshot = remote.snapshot && !remote.snapshot.english?.length && local?.id === remote.id
+        && local.game === remote.game && local.language === remote.language && local.filepath === remote.filepath
+        && local.originSourceHash === remote.originSourceHash && (local.branchId || 'default') === (remote.branchId || 'default')
+        && local.snapshot?.english?.length && equal(local.snapshot.translations, remote.snapshot.translations) ? local.snapshot : null;
       const equivalentContent = !!local && sameDroppedContent(local, remote);
       const preserveOriginal = options.preserveOriginal || (equivalentContent
         && (!sameDroppedCopy(local, remote) || !equal(local.snapshot, remote.snapshot)));
@@ -820,8 +829,12 @@
       const record = { ...copy(preserveOriginal ? {} : local || {}), ...copy(remote),
         targetSourceHash: remote.targetSourceHash || local?.targetSourceHash || '',
         targetSourceHashes: candidateScopes(local, remote),
+        ...(retainedSnapshot ? { snapshot: copy(retainedSnapshot) } : {}),
         ...(remote.snapshot == null && local?.snapshot ? { snapshot: copy(local.snapshot) } : {}),
         ...(locallyResolved && remote.status === 'dropped' ? { status: local.status } : {}) };
+      if (!remote.sourceUnavailable && remote.snapshot?.english?.length) {
+        delete record.sourceUnavailable; delete record.sourceError;
+      }
       // A read/join only projects assignments established by an import/review.
       // Browsing another named version must not create new Dropped workload.
       workspace.droppedArchive[remote.id] = record;
@@ -843,7 +856,8 @@
           && (!active || active.id === local?.id || active.id === remote.id || timestamp(record.createdAt) >= timestamp(active.createdAt)))
           (workspace.dropped[remote.language] ||= {})[remote.filepath] = record;
       } else if (active && (active.id === remote.id || active.id === local?.id)) delete workspace.dropped[remote.language][remote.filepath];
-      if (record.snapshot && record.targetSourceHashes.some(hash => !candidateScopes(remote).includes(hash))
+      if ((remote.snapshot == null || remote.snapshot.english?.length) && record.snapshot
+        && record.targetSourceHashes.some(hash => !candidateScopes(remote).includes(hash))
         && !workspace.droppedConflicts?.[remote.language]?.[remote.filepath]) queueDropped(workspace, record);
     }
     invalidateDroppedScopes(workspace);

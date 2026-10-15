@@ -738,7 +738,7 @@ test('uncached opening stays under initialization while source parsing and its d
     assert.ok(labels.includes('Downloading the original source ZIP'));
     assert.ok(labels.includes('Unpacking the source ZIP'));
     assert.ok(labels.includes('Verifying the source ZIP identity'));
-    assert.ok(labels.includes('Applying import choices and verifying baseline proofs'));
+    assert.ok(labels.includes('Applying import choices and verifying baseline identity'));
   } finally { app.disposeWorkspaceInitialization(); }
 });
 
@@ -854,13 +854,14 @@ test('an uncached source still refuses changed server identities before any acti
 });
 
 function cachedContentGroupHarness(options = {}) {
-  const selected = version({ id: 'second-same-original', archive: { baselineId: hash('a'), treeRoot: 'verified-tree' } });
-  const group = { id: 'second-stat-group', versionId: selected.id, contentMode: 'statdescription', teams: [team()] };
+  const selected = version({ id: 'second-same-original', archive: { baselineId: hash('a'), zipHash: hash('b'), descriptionCount: 1, treeRoot: 'verified-tree' } });
+  const group = { id: 'second-stat-group', versionId: selected.id, contentMode: 'statdescription', teams: [team()],
+    assets: [{ role: 'source', descriptor: copy(selected.archive) }] };
   const source = [{ filepath: 'source/test.txt', name: 'Test', stats: ['stat'], variables: ['#'], remarks: [''],
     translations: { English: ['English'], Thai: ['Original Thai'] } }];
   const baseline = { archive: copy(selected.archive), tree: { root: 'verified-tree' }, source: copy(source) };
   const writes = [], reads = [];
-  const result = harness({ window: { WorkspaceState: require('../public/workspaceState.js') }, storage: {
+  const result = harness({ window: { WorkspaceState: require('../public/workspaceState.js'), CollaborationProtocol: require('../public/collaborationProtocol.js') }, storage: {
     async getVersionSource(scope) { reads.push({ type: 'source', scope: copy(scope) }); return copy(source); },
     async hasVersionWorkspace(scope) { reads.push({ type: 'readiness', scope: copy(scope) }); return false; },
     async getImportedBaseline(sourceHash, scope) { reads.push({ type: 'baseline', sourceHash, scope: copy(scope) }); return copy(baseline); },
@@ -904,10 +905,10 @@ test('an existing group workspace is opened without replacing its staged work fr
 
 test('a new cached group refuses absent or inconsistent retained baseline evidence', async () => {
   for (const retained of [null, { archive: { baselineId: hash('c') }, tree: { root: 'verified-tree' } },
-    { archive: { baselineId: hash('a') }, tree: { root: 'wrong-tree' } }]) {
+    { archive: { baselineId: hash('a') }, source: [] }]) {
     const f = cachedContentGroupHarness({ storage: { async getImportedBaseline() { return retained; } } });
     assert.equal(await f.app.continueManagedVersion(f.selected, 'Thai', f.group), false);
-    assert.match(f.app.managedOperationErrors.open, /cached original baseline is unavailable/i);
+    assert.match(f.app.managedOperationErrors.open, /cached original baseline is unavailable|baseline requires descriptions/i);
     assert.deepEqual(f.writes, []);
     assert.equal(f.events.some(event => ['metadata', 'open', 'activate'].includes(event.type)), false);
   }
@@ -1636,9 +1637,57 @@ test('account and branch changes clear previous upload IDs, collection IDs and c
   gate.resolve([]); await pending;
 });
 
+test('next version stays blocked until every HEAD team is ended and allows the first release', async () => {
+  const { app } = harness();
+  app.managedBranch = { headVersionId: 'weekly-1' };
+  app.managedVersions = [version({ teamCount: 3, endedTeamCount: 2 })];
+  assert.match(app.managedNextVersionBlockedReason, /End every team.*2026-10-05_POE2/);
+  await app.openManagedUpload(); assert.equal(app.managedUploadVisible, false);
+  app.managedVersions[0].endedTeamCount = 3;
+  assert.equal(app.managedNextVersionBlockedReason, '');
+  app.managedBranch.headVersionId = 'uncached-head';
+  assert.match(app.managedNextVersionBlockedReason, /could not be verified/);
+  app.managedBranch.headVersionId = null;
+  assert.equal(app.managedHeadVersion, null); assert.equal(app.managedNextVersionBlockedReason, '');
+});
+
+test('legacy publication reports an open HEAD without offering an override', async () => {
+  const failure = { code: 'VERSION_TEAMS_UNFINISHED', message: 'End every team in HEAD first.' };
+  const { app, requests, events } = harness({ request: async () => { throw failure; } });
+  app.managedUpload = { id: 'prepared-upload', status: 'prepared', parentVersionId: 'weekly-1' };
+  await app.publishManagedUpload();
+  assert.equal(requests.length, 1); assert.equal(requests[0].options.body.overrideUnfinished, undefined);
+  assert.equal(events.some(event => event.type === 'confirm'), false);
+  assert.equal(app.managedUploadError, failure.message);
+});
+
+test('withdrawal blocks HEAD before confirmation using either version metadata or the branch pointer', async t => {
+  for (const namedContentVersion of [true, false]) for (const source of ['version', 'branch']) await t.test((namedContentVersion ? 'named' : 'legacy') + ':' + source, async () => {
+    const { app, events, requests } = harness();
+    const target = version({ namedContentVersion, isHead: source === 'version', endedTeamCount: 12 });
+    app.managedBranch = { headVersionId: source === 'branch' ? target.id : 'another-version' };
+    await app.managedWithdraw(target);
+    assert.equal(events.some(event => event.type === 'confirm'), false);
+    assert.equal(requests.length, 0);
+    assert.equal(app.managedVersionBusy, false);
+  });
+});
+
+test('withdrawal aborts if the target becomes HEAD during confirmation', async () => {
+  const confirmation = deferred(), { app, requests } = harness();
+  const target = version({ isHead: false });
+  app.managedBranch = { headVersionId: 'another-version' };
+  app.appConfirm = () => confirmation.promise;
+  const pending = app.managedWithdraw(target);
+  app.managedBranch = { headVersionId: target.id };
+  confirmation.resolve(true); await pending;
+  assert.equal(requests.length, 0);
+  assert.equal(app.managedVersionBusy, false);
+});
+
 test('withdrawal confirms before requesting both named and legacy versions', async t => {
   for (const namedContentVersion of [true, false]) await t.test(namedContentVersion ? 'named' : 'legacy', async () => {
-    const confirmation = deferred(), target = version({ namedContentVersion });
+    const confirmation = deferred(), target = version({ namedContentVersion, isHead: false });
     const { app, requests } = harness({ request: async (route, options) => {
       assert.equal(options.body.confirmed, true, 'the first request must already contain explicit confirmation');
       return {};
@@ -1670,7 +1719,7 @@ test('withdrawal cancellation and scope changes during confirmation never submit
   for (const change of ['cancel', 'account', 'game', 'branch', 'access']) await t.test(change, async () => {
     const confirmation = deferred(), { app, requests } = harness();
     app.appConfirm = () => confirmation.promise;
-    const pending = app.managedWithdraw(version());
+    const pending = app.managedWithdraw(version({ isHead: false }));
     if (change === 'account') app.cloudProfileId = 'bob';
     if (change === 'game') app.gameVersion = 'poe1';
     if (change === 'branch') app.branchId = 'another';
@@ -1682,7 +1731,7 @@ test('withdrawal cancellation and scope changes during confirmation never submit
 });
 
 test('withdrawal preserves the confirmed target revision and reports a revision conflict without retrying', async () => {
-  const confirmation = deferred(), target = version(), failure = { code: 'VERSION_REVISION_CONFLICT', message: 'Version metadata changed.' };
+  const confirmation = deferred(), target = version({ isHead: false }), failure = { code: 'VERSION_REVISION_CONFLICT', message: 'Version metadata changed.' };
   const { app, requests } = harness({ request: async () => { throw failure; } });
   app.appConfirm = () => confirmation.promise;
   const pending = app.managedWithdraw(target);
@@ -1702,7 +1751,7 @@ test('stale manual operation completion cannot clear a newer scope operation bus
       app.managedUploadName = 'Weekly'; app.managedUploadDeadline = '2026-10-12T09:00'; app.managedUploadFile = { name: 'StatDescriptions.zip' };
       app.managedMetadataName = 'Weekly'; app.managedMetadataDeadline = '2026-10-12T09:00';
       if (method === 'publishManagedUpload') app.managedUpload = { id: 'old-upload', status: 'prepared', parentVersionId: null };
-      const args = method === 'managedAction' ? ['/old/action', {}] : method === 'managedCollect' ? [team()] : method === 'managedWithdraw' ? [version()] : [];
+      const args = method === 'managedAction' ? ['/old/action', {}] : method === 'managedCollect' ? [team()] : method === 'managedWithdraw' ? [version({ isHead: false })] : [];
       const old = app[method](...args); await settle();
       app.cloudProfileId = 'bob'; app.cloudUser = { ...app.cloudUser, id: 'bob' };
       app.refreshManagedVersions = async () => {};
@@ -1870,7 +1919,7 @@ test('successful same-original group opening keeps collaboration suppressed thro
   f.app.managedActivateWorkspace = async () => { reached.resolve(); return activation.promise; };
   const opening = f.app.managedOpenStatGroup(f.selected,
     { ...f.group, assets: [{ role: 'source', descriptor: f.selected.archive }] }, 'Thai');
-  await reached.promise;
+  await Promise.race([reached.promise, opening.then(result => { throw new Error('Group opening ended before workspace activation: ' + JSON.stringify({ result, errors: f.app.managedOperationErrors })); })]);
   assert.ok(f.app._managedWorkspaceTransition); assert.deepEqual(scheduled, [true]);
   assert.equal(f.writes.length, 1); assert.equal(f.app.activeContentGroup.id, f.group.id);
   activation.resolve(true); assert.equal(await opening, true);

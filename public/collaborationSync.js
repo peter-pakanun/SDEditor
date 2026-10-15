@@ -12,6 +12,7 @@
     && (!error.status || error.status >= 500 || error.status === 429 || error.code === 'UPLOAD_EXPIRED');
   const staleError = () => Object.assign(new Error('Collaboration workspace changed.'), { stale: true });
   const byPath = files => Object.fromEntries(files.map(file => [file.filepath, copy(file)]));
+  const emptyOriginal = Object.freeze([]);
   const inactiveOperation = operation => String(operation.status || '').startsWith('invalid_translation');
   function translationError(file, sourceFiles) {
     const count = sourceFiles?.get(file.filepath)?.english?.length;
@@ -37,6 +38,9 @@
       this.onCanonicalArchive = options.onCanonicalArchive || (() => {});
       this.presenceEnabled = options.presenceEnabled || (() => true);
       this.allowLegacySeed = options.allowLegacySeed !== false;
+      this.sdBaselineReferences = options.sdBaselineReferences === 1;
+      this.sdSourceStorage = options.sdSourceStorage;
+      this.contentPolicy = options.contentPolicy; this.contentPolicyLoad = null;
       this.projectWorkspace = options.projectWorkspace || P.projectWorkspace;
       this.WebSocket = options.WebSocket === undefined ? globalThis.WebSocket : options.WebSocket;
       this.uuid = options.uuid || (() => globalThis.crypto.randomUUID());
@@ -67,7 +71,7 @@
         droppedReviewPaths: [...new Set([...Object.keys(this.droppedConflicts), ...(room?.outbox || [])
           .filter(operation => ['candidate_conflict', 'needs_candidate_review'].includes(operation.status))
           .flatMap(operation => (operation.files || []).map(entry => entry.yours?.filepath).filter(Boolean))])],
-        ...(includeFiles ? { files: Object.values(copy(room?.local || {})) } : {}),
+        ...(includeFiles ? { files: Object.values(copy(room?.local || {})).filter(file => !file.valuesUnavailable) } : {}),
         peers: copy(this.peers), sessionId: this.sessionId, away: this.away, sequence: room?.sequence || 0 };
     }
     notify() {
@@ -208,7 +212,37 @@
     remoteFiles(files) {
       const room = this.room();
       return files.filter(file => room.mode !== 'sparse' || !this.carryProtected(room, file))
-        .map(file => copy(room.local[file.filepath] || (file.stagingReset ? file : null))).filter(Boolean);
+        .map(file => copy(room.local[file.filepath] || (file.stagingReset ? file : null))).filter(file => file && !file.valuesUnavailable);
+    }
+    async remoteFileState(file, epoch) {
+      if (!file?.valuesUnavailable || file.translations !== null) return fileState(file);
+      const shared = this.room()?.shared?.[file.filepath];
+      const original = this.sourceDescriptions?.get(file.filepath) || this.source?.find(row => row.filepath === file.filepath);
+      const candidates = [shared?.baselineTranslations, !shared?.trackedForExport && shared?.translations,
+        original?.translations?.[this.room()?.identity.language] || emptyOriginal].filter(Array.isArray);
+      this.originalTargetHashes ||= new WeakMap();
+      if (/^[a-f0-9]{64}$/.test(file.originalTargetHash || '')) for (const translations of candidates) {
+        const hashKey = translations.length ? translations : emptyOriginal;
+        if (!this.originalTargetHashes.has(hashKey)) this.originalTargetHashes.set(hashKey,
+          P.zipHash(new TextEncoder().encode(JSON.stringify(translations))));
+        const hash = await this.originalTargetHashes.get(hashKey);
+        if (!this.current(epoch)) throw staleError();
+        if (hash === file.originalTargetHash) return fileState({ ...file, translations,
+          valuesUnavailable: false, baselineTranslations: translations });
+      }
+      // This is an internal unknown-value marker, never an empty translation
+      // block to project or upload. Existing local work remains visible.
+      return fileState({ ...file, translations: [], valuesUnavailable: true });
+    }
+    async remoteFileStates(files, epoch) {
+      const result = []; let start = Date.now();
+      for (const file of files) {
+        if (!this.current(epoch)) throw staleError();
+        result.push(await this.remoteFileState(file, epoch));
+        if (result.length % 32 === 0 && Date.now() - start >= 4) { await new Promise(resolve => setTimeout(resolve, 0)); start = Date.now(); }
+      }
+      if (!this.current(epoch)) throw staleError();
+      return result;
     }
     stageLocalSave(batch) { this.stagedSaves.set(batch.jobId, batch); }
     withLocalWrite(action) {
@@ -662,18 +696,19 @@
           if (error.code === 'UPLOAD_EXPIRED') await this.update((state, current) => { delete current.seedUpload; }, {}, epoch);
           throw error;
         }
-        snapshot = await this.api('/uploads/' + encodeURIComponent(upload.id) + '/finalize', { method: 'POST' }, epoch);
+        snapshot = await this.finalizeUpload(upload.id, upload.files, epoch);
       }
       await this.acceptSnapshot(snapshot, epoch, !room.initialized || snapshot.sequence < room.sequence);
       this.startPresence(epoch);
     }
-    async uploadFiles(id, files, epoch) {
+    async uploadFiles(id, files, epoch, { missingChunks } = {}) {
       // Bound serialized bytes rather than only row count: individual translations
       // vary greatly in size. Server enforces its own independent limits.
       const chunks = []; let chunk = []; let bytes = 0;
       const status = await this.api('/uploads/' + encodeURIComponent(id), {}, epoch);
       if (status.completed) return;
       const received = new Set(status.receivedChunks || []);
+      const resend = new Set(missingChunks || (status.sourceContextRequired ? status.missingSourceChunks : []) || []);
       for (const file of files) {
         const size = new TextEncoder().encode(JSON.stringify(file)).length;
         if (size > 2 * 1024 * 1024) throw new Error('A description exceeds the collaboration upload limit: ' + file.filepath);
@@ -681,10 +716,26 @@
         chunk.push(file); bytes += size;
       }
       if (chunk.length) chunks.push(chunk);
-      for (let index = 0; index < chunks.length; index++) if (!received.has(index)) await this.api('/uploads/' + encodeURIComponent(id) + '/chunks/' + index,
+      if ([...resend].some(index => !Number.isSafeInteger(index) || index < 0 || index >= chunks.length)) throw new Error('The upload requested an unknown source chunk. Your original upload is retained.');
+      for (let index = 0; index < chunks.length; index++) if (!received.has(index) || resend.has(index)) await this.api('/uploads/' + encodeURIComponent(id) + '/chunks/' + index,
         { method: 'PUT', body: { files: chunks[index] } }, epoch);
     }
+    async finalizeUpload(id, files, epoch) {
+      const path = '/uploads/' + encodeURIComponent(id) + '/finalize';
+      try { return await this.api(path, { method: 'POST' }, epoch); }
+      catch (error) {
+        if (error.code !== 'SOURCE_CONTEXT_REQUIRED') throw error;
+        const details = error.details || error;
+        if (details.uploadId && details.uploadId !== id || !Array.isArray(details.missingChunks) || !details.missingChunks.length) throw error;
+        // A restarted API retains the exact chunk hashes, but source text is
+        // transient. Resend only the requested original chunks with the same
+        // IDs and bodies; never manufacture a new request or retry forever.
+        await this.uploadFiles(id, files, epoch, { missingChunks: details.missingChunks });
+        return this.api(path, { method: 'POST' }, epoch);
+      }
+    }
     projection(files, epoch, stagedWorkspace) {
+      files = files.filter(file => !file.valuesUnavailable);
       const identity = copy(this.room().identity);
       const source = files.map(file => this.sourceDescriptions?.get(file.filepath) || this.baselineFiles?.get(file.filepath)
         || this.source?.find(desc => desc.filepath === file.filepath)).filter(Boolean);
@@ -737,13 +788,13 @@
     }
     async acceptSnapshot(snapshot, epoch, initial = false) {
       if (!snapshot?.roomId || !Array.isArray(snapshot.files)) throw new Error('Invalid collaboration snapshot.');
-      const files = await this.prepareItems(snapshot.files, file => fileState(file), epoch);
-      let projected = files, records;
+      const files = await this.remoteFileStates(snapshot.files, epoch);
+      let projected = files.filter(file => !file.valuesUnavailable), records;
       if (this.room().mode === 'sparse') {
         const incoming = new Set(files.map(file => file.filepath)), room = this.room();
         const removed = Object.keys(room.shared || {}).filter(path => !incoming.has(path) && this.baselineStates[path])
           .map(path => ({ ...copy(this.baselineStates[path]), stagingReset: true }));
-        projected = [...files, ...removed];
+        projected = [...files.filter(file => !file.valuesUnavailable), ...removed];
         const affected = [...Object.keys(room.shared || {}), ...Object.keys(room.local || {}), ...Object.keys(room.carries || {}),
           ...room.outbox.flatMap(operation => operation.files.map(entry => entry.yours.filepath)),
           ...room.conflicts.map(conflict => conflict.filepath), ...(room.placeholderRepairs || []).map(repair => repair.filepath),
@@ -758,6 +809,7 @@
           const pendingPaths = new Set(room.outbox.filter(op => !inactiveOperation(op)).flatMap(op => op.files.map(entry => entry.yours.filepath)));
           for (const shared of files) {
             const yours = local[shared.filepath];
+            if (shared.valuesUnavailable && !yours?.trackedForExport) continue;
             if (yours && !contentEqual(yours, shared) && !pendingPaths.has(shared.filepath)) {
               const id = this.uuid();
               const merged = mergeFile(null, yours, shared);
@@ -781,7 +833,8 @@
         delete room.seedUpload;
         this.rebuild(room);
       }, { ...(records ? { records } : {}), projectWorkspace: this.projection(projected, epoch) }, epoch);
-      await this.onRemote(this.room().mode === 'sparse' ? this.remoteFiles([...projected, ...this.room().outbox.filter(op => !inactiveOperation(op)).flatMap(op => op.files.map(entry => entry.yours))]) : copy(Object.values(this.room().local)));
+      await this.onRemote(this.room().mode === 'sparse' ? this.remoteFiles([...projected, ...this.room().outbox.filter(op => !inactiveOperation(op)).flatMap(op => op.files.map(entry => entry.yours))])
+        : copy(Object.values(this.room().local).filter(file => !file.valuesUnavailable)));
       if (!this.current(epoch)) throw staleError();
     }
     async save({ workspace, revisions = [], files, origin = 'save', bases = {}, restore, promoteDropped, promoteDroppedByPath = {}, waitForSync = true }) {
@@ -1155,6 +1208,7 @@
           originSourceHash: candidate.originSourceHash, targetSourceHash: candidate.targetSourceHash,
           targetSourceHashes: [...new Set([...(candidate.targetSourceHashes || []), candidate.targetSourceHash].filter(Boolean))],
           snapshot: copy(candidate.snapshot), baseRevision: Number(candidate.revision) || 0,
+          ...(candidate.sourceRef ? { sourceRef: copy(candidate.sourceRef) } : {}),
           // Only the original user action may start a new generation. Peer
           // retargeting and provenance uploads must use ordinary deduplication.
           ...(candidate.recoveryId && operation.id === candidate.recoveryId ? { recoveryId: candidate.recoveryId } : {}),
@@ -1237,7 +1291,8 @@
           await this.acceptSnapshot(await this.api('/rooms/' + encodeURIComponent(room.roomId) + '/snapshot', {}, epoch), epoch);
           return;
         }
-        const events = result.events || [];
+        const events = [];
+        for (const event of result.events || []) events.push({ ...event, files: await this.remoteFileStates(event.files || [], epoch) });
         const changed = events.flatMap(event => event.files || []);
         if (events.length) {
           await this.update((state, current) => {
@@ -1486,7 +1541,8 @@
               paths.forEach(path => blocked.add(path)); break;
             }
             if (error.status !== 409 || (error.code && error.code !== 'REVISION_CONFLICT')) throw error;
-            const latest = error.current?.files ? error.current : await this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/snapshot', {}, epoch);
+            const latest = error.current?.files ? copy(error.current) : await this.api('/rooms/' + encodeURIComponent(this.room().roomId) + '/snapshot', {}, epoch);
+            latest.files = await this.remoteFileStates(latest.files, epoch);
             await this.update((state, room) => {
               for (const file of latest.files) if (!room.shared[file.filepath] || file.revision >= room.shared[file.filepath].revision) room.shared[file.filepath] = fileState(file);
               const pending = room.outbox.find(item => item.id === id);
@@ -1510,6 +1566,16 @@
       // neither a workspace read nor another IndexedDB write.
       if (!observed || ['conflict', 'candidate_conflict', 'needs_candidate_review'].includes(observed.status)) return;
       if (observed.wire && !observed.promoteDropped) return;
+      // Negotiate outside the write transaction, and only for a new request.
+      // Existing durable wire bytes never depend on a later capability result.
+      if (!observed.wire && this.contentPolicy && !this.contentPolicyLoad) {
+        this.contentPolicyLoad = Promise.resolve().then(() => this.contentPolicy()).then(policy => {
+          this.sdBaselineReferences = policy?.sdBaselineReferences === 1;
+          this.sdSourceStorage = policy?.sdSourceStorage;
+        }).catch(error => { this.contentPolicyLoad = null; if (error.stale) throw error; });
+      }
+      if (!observed.wire && this.contentPolicyLoad) await this.contentPolicyLoad;
+      if (!this.current(epoch)) throw staleError();
       const paths = observed.files.map(entry => entry.yours.filepath);
       const workspace = observed.promoteDropped ? await this.readWorkspace(this.room()?.identity, paths) : null;
       if (!this.current(epoch)) throw staleError();
@@ -1553,10 +1619,16 @@
           if (wireCarry) { delete wireCarry.baselineEquality; delete wireCarry.destinationSave; }
           files.push({ filepath: shared.filepath, baseRevision: shared.revision, translations: merged.file.translations,
             needsReview: merged.file.needsReview, trackedForExport: merged.file.trackedForExport,
+            ...(room.mode !== 'sparse' && this.sdSourceStorage === 'zip-only-v1' && Array.isArray(shared.baselineTranslations)
+              ? { baselineTranslations: copy(shared.baselineTranslations) } : {}),
             ...(room.mode === 'sparse' && op.kind === 'join' && wireCarry ? { sourceCarry: wireCarry,
               ...(op.previousBaselines?.[shared.filepath] ? { previousBaseline: copy(op.previousBaselines[shared.filepath]) } : {}) } : {}),
             ...(room.mode === 'sparse' && (shared.revision === 0 || op.resetStaging || op.kind === 'join' && merged.file.sourceCarry)
-              ? { baseline: P.witness(this.baselineFiles.get(shared.filepath)) } : {}) });
+              ? this.sdBaselineReferences && !op.repairInitialMerge && shared.baselineRef?.kind === 'sd-baseline'
+                && shared.baselineRef.baselineId === room.identity.sourceHash && shared.baselineRef.filepath === shared.filepath
+                && /^[a-f0-9]{64}$/.test(shared.baselineRef.fingerprint || '')
+                ? { baselineRef: copy(shared.baselineRef), baselineTranslations: copy(this.baselineFiles.get(shared.filepath)?.translations?.[room.identity.language] || []) }
+                : { baseline: P.witness(this.baselineFiles.get(shared.filepath)) } : {}) });
         }
         room.conflicts = room.conflicts.filter(conflict => conflict.mutationId !== id).concat(conflicts);
         if (conflicts.length) op.status = 'conflict';
@@ -1599,7 +1671,9 @@
           ...(file.previousBaseline ? { previousBaseline: copy(file.previousBaseline) } : {}) })) } }, epoch);
       if (op.resetStaging) return this.api(path + '/staged-deletions', { method: 'POST', body: { mutationId: op.id,
         files: op.wire.files.map(file => ({ filepath: file.filepath, baseRevision: file.baseRevision, translations: copy(file.translations),
-          ...(this.room().mode === 'sparse' ? { baseline: copy(file.baseline), ...(file.proof ? { proof: copy(file.proof) } : {}) } : {}) })) } }, epoch);
+          ...(file.baselineTranslations ? { baselineTranslations: copy(file.baselineTranslations) } : {}),
+          ...(this.room().mode === 'sparse' ? { ...(file.baselineRef ? { baselineRef: copy(file.baselineRef) } : { baseline: copy(file.baseline) }),
+            ...(file.proof ? { proof: copy(file.proof) } : {}) } : {}) })) } }, epoch);
       if (op.restore) return this.api(path + '/history/' + encodeURIComponent(op.restore.eventId) + '/restore', {
         method: 'POST', body: { mutationId: op.id, baseRevision: op.wire.files[0].baseRevision, version: op.restore.version,
           ...(op.wire.promoteDropped ? { promoteDropped: copy(op.wire.promoteDropped) } : {}) },
@@ -1624,7 +1698,7 @@
         await this.update((state, room) => { room.outbox.find(item => item.id === op.id).upload.complete = true; },
           { records: this.records('complete-upload', op.files.map(entry => entry.yours.filepath), [op.id]) }, epoch);
       }
-      return this.api('/uploads/' + encodeURIComponent(upload.id) + '/finalize', { method: 'POST' }, epoch);
+      return this.finalizeUpload(upload.id, op.wire.files, epoch);
     }
     async resolve(conflictId, resolution, options = {}) {
       const epoch = this.epoch;

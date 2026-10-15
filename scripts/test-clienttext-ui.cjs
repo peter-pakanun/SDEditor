@@ -3126,25 +3126,54 @@ test('collection creation stops before network after account changes during jour
     assert.equal(requests.length,0);
 });
 
+test('new upload refreshes and captures its predecessor while an open HEAD prevents opening',async()=>{
+    const head={id:'head-v1',name:'Finished release',game:'poe2',branchId:'default'},errors=[];
+    const {app,window}=harness({managedManagerAccess:true,managedHeadVersion:head,managedVersions:[head],managedNextVersionBlockedReason:'End every team in HEAD first.'});
+    window.ManagedVersions=require('../public/managedVersions.js');
+    let refreshes=0;app.refreshManagedVersions=async()=>{refreshes++;};app.managedSetOperationError=(key,error)=>errors.push({key,error});
+    app.ctRequireTrustedProtocol=async()=>{app.ctPolicy={clientTextRoles:{default:['normal'],French:['normal']}};};
+    assert.equal(await app.ctOpenUpload(),false);assert.equal(app.ctUploadVisible,false);assert.equal(refreshes,1);
+    assert.match(errors[0].error,/End every team/);
+    app.managedNextVersionBlockedReason='';assert.equal(await app.ctOpenUpload(),true);
+    assert.deepEqual(app.ctPolicy.clientTextRoles.French,['normal'],'The predecessor field preserves the server grouping policy');
+    assert.equal(app.ctUploadPredecessor.name,head.name);head.name='Renamed after opening';
+    assert.equal(app.ctUploadPredecessor.name,'Finished release','The displayed predecessor is captured, not a live catalog object');
+    app.ctCloseUpload();app.managedNextVersionBlockedReason='End every team in HEAD first.';
+    assert.equal(await app.ctOpenUpload({id:'existing',name:'Existing release',parentVersionId:'head-v1'}),true,'Adding an existing version group remains available');
+});
+
+test('a closed predecessor lookup cannot overwrite a newer upload dialog',async()=>{
+    const pending=deferred(),{app,window}=harness({managedManagerAccess:true,managedVersions:[]});
+    window.ManagedVersions=require('../public/managedVersions.js');
+    app.ctRequireTrustedProtocol=async()=>{app.ctPolicy={clientTextRoles:{default:['normal']}};};
+    app._cloud={async request(){return pending.promise;}};
+    const opening=app.ctOpenUpload({id:'existing',name:'Existing',parentVersionId:'old-parent'});await settle();
+    app.ctCloseUpload();await app.ctOpenUpload(null,true);
+    pending.resolve({version:{id:'old-parent',name:'Old predecessor'}});await opening;
+    assert.equal(app.ctUploadLocal,true);assert.equal(app.ctUploadPredecessor,null);
+});
+
 test('uncertain metadata creation retries its immutable journal body even after form edits',async()=>{
     const {app,window}=harness(),journal=new Map(),bodies=[];let fail=true;
     window.ManagedVersions={parseDeadline:value=>Number(value)};
-    app.cloudProfileId=scope.accountId;app.gameVersion=scope.game;app.branchId=scope.branchId;app.ctUploadVersion=null;app.ctUploadLocal=false;app.ctUploadName='First name';app.ctUploadDeadline='10';
+    app.cloudProfileId=scope.accountId;app.gameVersion=scope.game;app.branchId=scope.branchId;app.ctUploadVersion=null;app.ctUploadLocal=false;app.ctUploadName='First name';app.ctUploadDeadline='10';app.ctUploadPredecessor={id:'captured-head',name:'Captured predecessor'};
     app._ctStore={async putRequest(_,id,payload){journal.set(id,clone(payload));},async getRequest(_,id){return journal.has(id)?{requestId:id,payload:clone(journal.get(id))}:null;},async deleteRequest(_,id){journal.delete(id);}};
     app._cloud={async request(_,options){bodies.push(clone(options.body));if(fail){fail=false;throw new Error('Reply lost after acceptance');}return{version:{id:'created-once'}};}};
     app.refreshManagedVersions=async()=>{};
     await app.ctSaveMetadataDraft();assert.equal(app.ctUploadVersion,null);assert.equal(journal.size,1);
-    app.ctUploadName='Changed after uncertainty';app.ctUploadDeadline='20';await app.ctSaveMetadataDraft();
+    app.ctUploadName='Changed after uncertainty';app.ctUploadDeadline='20';app.ctUploadPredecessor={id:'new-head',name:'New predecessor'};await app.ctSaveMetadataDraft();
+    assert.equal(bodies[0].expectedHeadId,'captured-head');
     assert.deepEqual(bodies[1],bodies[0]);assert.equal(app.ctUploadVersion.id,'created-once');assert.equal(journal.size,0);
 });
 
 test('publication resume hydrates the durable journal instead of using its compact list header',async()=>{
-    const {app}=harness(),opened=[],payload={kind:'publication',name:'Release',deadline:'10',releaseRequest:'release-id',
+    const {app}=harness(),opened=[],payload={kind:'publication',name:'Release',deadline:'10',releaseRequest:'release-id',predecessor:{id:'captured',name:'Captured release'},
         groups:[{contentMode:'statdescription',carry:[{id:'unit',values:{field:'Exact carried text'}}],uploadId:'staged-upload'}]};
     app._ctStore={async getRequest(captured,id,options){assert.equal(captured.accountId,scope.accountId);assert.equal(id,'publication-id');assert.equal(options.guard(),true);return{requestId:id,payload};}};
-    app.ctOpenUpload=async(version,local)=>opened.push({version,local});
+    app.ctOpenUpload=async(version,local,test,options)=>opened.push({version,local,options});
     await app.ctResumePublication({requestId:'publication-id',payload:{...payload,groups:[{contentMode:'statdescription',carry:[]}]},storage:{format:1}});
     assert.equal(opened.length,1);assert.equal(app.ctUploadName,'Release');assert.equal(app._ctPublicationRequest,'publication-id');
+    assert.equal(opened[0].options.resume,true);assert.deepEqual(opened[0].options.predecessor,payload.predecessor);
     assert.equal(app._ctReleaseRequest,'release-id');assert.equal(app.ctPrepared[0].carry[0].values.field,'Exact carried text');
     assert.equal(app.ctPrepared[0].uploadId,'staged-upload');
 });

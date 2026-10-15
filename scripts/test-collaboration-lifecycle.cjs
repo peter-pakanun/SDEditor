@@ -2250,3 +2250,35 @@ test('a translated import waiting for local saves yields to a source import befo
   assert.equal(readsDuringSourceImport, 0); assert.equal(writesDuringSourceImport, 0);
   assert.equal(writes.length, 1); assert.equal(e.loadingProgress, 100); assert.equal(!!e._importingSource, false);
 });
+test('a local translation comparison keeps saved text and revisions when its historical source cannot load', async () => {
+  const { editor: e, writes } = harness();
+  const current = { id: 2, filepath: e.descs[0].filepath, lang: 'Thai', translations: ['Current saved translation'] };
+  const previous = { id: 1, filepath: current.filepath, lang: 'Thai', translations: ['Previous saved translation'], sourceRef: { baselineId: 'missing', filepath: current.filepath } };
+  e.editorCurrentEditingDesc = e.descs[0]; e.editorVisible = true; e.historyMode = 'translation'; e.historyItems = [current, previous];
+  e.sdBaselineViewScope = 'captured-history-scope'; e.sdSourceReference = record => record.sourceRef;
+  e.hydrateSDHistorySource = async () => { throw new Error('Restore the missing original to view historical source.'); };
+  let entered = 0;
+  e.enterEditorCompareModeFromHistory = () => { entered++; };
+  e.buildHistoryDiffHtml = (a, b) => { assert.equal(a, current); assert.equal(b, previous); return a.translations[0] + ' → ' + b.translations[0]; };
+  const before = plain(e.historyItems); await e.pickHistoryRevision(previous);
+  assert.equal(entered, 1); assert.match(e.sdHistorySourceError, /missing original/);
+  assert.match(e.historyDiffHtml, /Current saved translation.*Previous saved translation/);
+  assert.deepEqual(plain(e.historyItems), before); assert.equal(e.historySelectedB, previous); assert.equal(writes.length, 0);
+});
+test('a failed source-history selection exits an older source comparison and restores current editor text', async () => {
+  const { editor: e, writes } = harness();
+  const desc = e.descs[0], current = { id: 2, filepath: desc.filepath, lang: 'English', translations: [...desc.translations.English] };
+  const previous = { id: 1, filepath: desc.filepath, lang: 'English', translations: ['Unavailable historical source'], sourceRef: { baselineId: 'missing', filepath: desc.filepath } };
+  e.editorCurrentEditingDesc = desc; e.editorVisible = true; e.historyMode = 'source'; e.historyItems = [current, previous];
+  e.editorCompareActive = true; e.editorCompareTitle = 'Earlier source comparison'; e.historyDiffHtml = '<old-source-diff>';
+  e.editorBlocks = [{ english: 'Stale historical source', translation: 'Retained editor translation' }];
+  e.sdBaselineViewScope = 'captured-source-history'; e.sdSourceReference = record => record.sourceRef;
+  e.hydrateSDHistorySource = async () => { throw new Error('Historical source artifact unavailable.'); };
+  e.refreshEditorHLter = () => { e.editorBlocks[0].english = desc.translations.English[0]; };
+  e.autosizeEditorMultilineFields = e.refreshGamePreview = () => {};
+  e.buildHistoryDiffHtml = () => assert.fail('Missing historical source must not create a source comparison.');
+  const before = plain(e.historyItems); await e.pickHistoryRevision(previous);
+  assert.equal(e.editorCompareActive, false); assert.equal(e.editorCompareTitle, ''); assert.equal(e.historyDiffHtml, '');
+  assert.equal(e.editorBlocks[0].english, desc.translations.English[0]); assert.equal(e.editorBlocks[0].translation, 'Retained editor translation');
+  assert.match(e.sdHistorySourceError, /artifact unavailable/); assert.deepEqual(plain(e.historyItems), before); assert.equal(writes.length, 0);
+});

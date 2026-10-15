@@ -306,7 +306,7 @@
     <section v-if="!testMode && gameVersionSelected && versionChooserVisible && !needsInitialSettings" v-show="!workspaceInitializationActive" class="versionCatalog" :inert="showSetting || workspaceInitializationActive" aria-label="Source versions">
       <header class="versionCatalogHeader">
         <div><h1>{{ cloudCanAccessAllLanguages ? 'Manage version' : 'Choose a source version' }}</h1><p><a v-if="cloudCanAccessAllLanguages" class="workspaceContextLink" href="#select-game-version" @click.prevent="showGameVersionSelector" :aria-disabled="managedVersionBusy ? 'true' : undefined" title="Return to game version selection" :aria-label="'Return to game version selection from ' + gameVersionLabel">{{ gameVersionLabel }}</a><span v-else>{{ gameVersionLabel }}</span> · {{ cloudCanAccessAllLanguages ? (cloudUser?.isAdmin ? 'Admin' : 'Manager') : (cloudUser?.language || lang) }}</p></div>
-        <div class="versionActions"><button v-if="cloudCanAccessAllLanguages && managedOnlineAvailable" class="primaryAction" @click="ctOpenUpload()" :disabled="managedVersionBusy">Upload next version</button><button @click="openSettings()">Settings</button><span v-if="browserWorkTooltip" class="browserWorkStatus" role="img" :aria-label="browserWorkTooltip" v-tooltip="browserWorkTooltip"><span class="browserWorkSpinner" aria-hidden="true"></span></span></div>
+        <div class="versionActions"><button v-if="cloudCanAccessAllLanguages && managedOnlineAvailable" class="primaryAction" @click="ctOpenUpload()" :disabled="managedVersionBusy || ctUploading || !!managedNextVersionBlockedReason" v-tooltip="managedNextVersionBlockedReason">Upload next version</button><button @click="openSettings()">Settings</button><span v-if="browserWorkTooltip" class="browserWorkStatus" role="img" :aria-label="browserWorkTooltip" v-tooltip="browserWorkTooltip"><span class="browserWorkSpinner" aria-hidden="true"></span></span></div>
       </header>
       <p v-if="managedVisibleError" class="versionError" role="alert">{{ managedVisibleError }}</p>
       <div class="versionChooserColumns">
@@ -330,7 +330,7 @@
                   <div class="versionSecondaryActions">
                     <button v-if="version.zipHash" @click="managedDownloadOriginal(version)" :disabled="!managedOnlineAvailable">Download original ZIP</button>
                     <button v-if="cloudCanAccessAllLanguages" @click="openManagedMetadata(version)" :disabled="managedVersionBusy || !managedOnlineAvailable">Edit name/deadline</button>
-                    <button v-if="cloudCanAccessAllLanguages && version.status !== 'withdrawn'" @click="managedWithdraw(version)" :disabled="managedVersionBusy || !managedOnlineAvailable">Withdraw</button>
+                    <button v-if="cloudCanAccessAllLanguages && version.status !== 'withdrawn'" @click="managedWithdraw(version)" :disabled="managedVersionBusy || !managedOnlineAvailable || managedVersionIsHead(version)" v-tooltip="managedVersionIsHead(version) ? 'HEAD cannot be withdrawn. Publish a newer version first.' : ''">Withdraw</button>
                     <button v-if="cloudCanAccessAllLanguages && version.status === 'withdrawn'" @click="managedRestore(version)" :disabled="managedVersionBusy || !managedOnlineAvailable">Restore entry</button>
                   </div>
                   <details class="versionActionMenu" @toggle="managedVersionMenuToggle($event)" @keydown.esc.stop.prevent="$event.currentTarget.open = false; $event.currentTarget.querySelector('summary').focus()">
@@ -338,7 +338,7 @@
                     <div class="versionActionMenuItems">
                       <button v-if="version.zipHash" @click="managedDownloadOriginal(version)" :disabled="!managedOnlineAvailable">Download original ZIP</button>
                       <button v-if="cloudCanAccessAllLanguages" @click="openManagedMetadata(version)" :disabled="managedVersionBusy || !managedOnlineAvailable">Edit name/deadline</button>
-                      <button v-if="cloudCanAccessAllLanguages && version.status !== 'withdrawn'" @click="managedWithdraw(version)" :disabled="managedVersionBusy || !managedOnlineAvailable">Withdraw</button>
+                      <button v-if="cloudCanAccessAllLanguages && version.status !== 'withdrawn'" @click="managedWithdraw(version)" :disabled="managedVersionBusy || !managedOnlineAvailable || managedVersionIsHead(version)" v-tooltip="managedVersionIsHead(version) ? 'HEAD cannot be withdrawn. Publish a newer version first.' : ''">Withdraw</button>
                       <button v-if="cloudCanAccessAllLanguages && version.status === 'withdrawn'" @click="managedRestore(version)" :disabled="managedVersionBusy || !managedOnlineAvailable">Restore entry</button>
                     </div>
                   </details>
@@ -392,6 +392,7 @@
     <div v-if="ctUploadVisible" class="importDialogOverlay versionModalBackdrop" @click.self="ctCloseUpload">
       <section class="box ctUploadDialog" aria-label="Content upload">
         <h2>{{ ctUploadTest ? 'Test Sheet Offline' : ctUploadLocal ? 'Import ClientText locally' : ctUploadVersion ? 'Add content groups to '+ctUploadVersion.name : 'Publish a new version' }}</h2>
+        <label v-if="!ctUploadLocal" class="ctUploadField">Predecessor version<input id="ctUploadPredecessor" type="text" :value="ctUploadPredecessor?.name || 'None — first version'" disabled></label>
         <p v-if="ctUploadTest" class="versionMuted">Open local XLSM/XLSX files for one language. You can test a normal workbook, a Gender workbook, or both. Edits, saves, and history stay in memory. Download workbooks to keep saved edits; leaving the test or reloading clears the session.</p>
         <template v-if="!ctUploadVersion && !ctUploadTest">
           <label class="ctUploadField">Version name<input type="text" v-model="ctUploadName"></label>
@@ -1028,7 +1029,7 @@
             <details open>
               <summary :title="editorDroppedCandidate.originSourceHash">Compare dropped version → current version</summary>
               <div class="droppedComparison">
-                <section><h4>English source</h4><p v-if="editorDroppedCandidate.originSourceAvailable === false">The original English source was not preserved in this older workspace.</p><div v-else class="englishDiff" v-html="editorDroppedSourceDiff"></div></section>
+                <section><h4>English source</h4><p v-if="sdDroppedSourceError" role="alert">{{ sdDroppedSourceError }} <button @click="loadSDDroppedSource" :disabled="sdDroppedSourceLoading">Load original source</button></p><p v-if="sdDroppedSourceLoading">Loading original source…</p><p v-else-if="editorDroppedCandidate.originSourceAvailable === false && !sdDroppedSource">The original English source was not preserved in this older workspace.</p><div v-else class="englishDiff" v-html="editorDroppedSourceDiff"></div></section>
                 <section><h4>Translation</h4><div class="englishDiff" v-html="editorDroppedTranslationDiff"></div></section>
               </div>
               <p v-if="editorDroppedCandidate.snapshot.translations.length !== editorCurrentEditingDesc.translations.English.length">The source entry count changed. Review the dropped copy and save a replacement.</p>
@@ -1322,6 +1323,7 @@
             <select :value="collaborationConflictId" @change="collaborationSelectConflict($event.target.value)" :disabled="collaborationConflictBusy"><option v-for="conflict in collaborationConflicts" :key="conflict.id" :value="conflict.id">{{ conflict.filepath }}</option></select>
           </label>
           <p v-if="collaborationConflict.kind === 'join'" class="collaborationNotice">This browser has different saved translations and no shared base yet. Your local work has been preserved.</p>
+          <p v-if="collaborationConflict.shared?.valuesUnavailable" class="collaborationNotice" role="alert">The untouched original translation is unavailable. Your saved translation is preserved; review it against the current English before choosing your text.</p>
           <p v-if="collaborationConflictNotice" class="collaborationNotice" role="status">{{ collaborationConflictNotice }}</p>
           <div class="collaborationConflictEntries">
             <section v-for="entryIndex in collaborationConflictIndexes" :key="entryIndex" class="collaborationConflictEntry" :aria-labelledby="'collaborationEntry-' + entryIndex">
@@ -1330,7 +1332,7 @@
               <div class="collaborationVersions">
                 <section><h4>Base</h4><pre>{{ collaborationConflictText(entryIndex, 'base') }}</pre></section>
                 <section><h4>Yours</h4><pre>{{ collaborationConflictText(entryIndex, 'yours') }}</pre><button @click="collaborationChooseConflict(entryIndex, 'yours')" :disabled="collaborationConflictBusy" :aria-pressed="collaborationConflictChoices[entryIndex] === 'yours'">Use yours</button></section>
-                <section><h4>Shared</h4><pre>{{ collaborationConflictText(entryIndex, 'shared') }}</pre><button @click="collaborationChooseConflict(entryIndex, 'shared')" :disabled="collaborationConflictBusy" :aria-pressed="collaborationConflictChoices[entryIndex] === 'shared'">Use shared</button></section>
+                <section><h4>Shared</h4><pre>{{ collaborationConflictText(entryIndex, 'shared') }}</pre><button @click="collaborationChooseConflict(entryIndex, 'shared')" :disabled="collaborationConflictBusy || collaborationConflict.shared?.valuesUnavailable" :aria-pressed="collaborationConflictChoices[entryIndex] === 'shared'">Use shared</button></section>
               </div>
               <label class="collaborationResult" :for="'collaborationResult-' + entryIndex">Result <span>{{ collaborationConflictChoices[entryIndex] ? 'Ready to save' : 'Choose a version or edit the result' }}</span></label>
               <textarea :id="'collaborationResult-' + entryIndex" v-model="collaborationConflictDraft[entryIndex]" @input="collaborationEditConflict(entryIndex)" :disabled="collaborationConflictBusy" :lang="translationEditorBcp47" rows="3"></textarea>
@@ -1372,6 +1374,7 @@
         <section v-if="collaborationHistoryEvent" ref="collaborationHistoryDetail" class="collaborationHistoryDetail">
           <h3>{{ collaborationHistoryOrigin(collaborationHistoryEvent) }} by {{ collaborationHistoryActor(collaborationHistoryEvent) }}</h3>
           <p>{{ collaborationHistoryDate(collaborationHistoryEvent) }}</p>
+          <details v-if="collaborationHistoryEvent.english?.length || collaborationHistoryEvent.after?.english?.length"><summary>English source for this change</summary><pre>{{ (collaborationHistoryEvent.english || collaborationHistoryEvent.after.english).join('\n') }}</pre></details>
           <div class="collaborationVersions collaborationHistoryVersions">
             <section><h4>Before</h4><pre>{{ collaborationHistoryText(collaborationHistoryEvent.before) }}</pre><button @click="collaborationPrepareRestore('before')" :disabled="!collaborationHistoryCanRestore('before')">Restore before</button></section>
             <section><h4>After</h4><pre>{{ collaborationHistoryText(collaborationHistoryEvent.after) }}</pre><button @click="collaborationPrepareRestore('after')" :disabled="!collaborationHistoryCanRestore('after')">Restore after</button></section>
@@ -1448,6 +1451,8 @@
   <script src="cloudUi.js"></script>
   <script src="cloudHistoryUi.js"></script>
   <script src="collaborationProtocol.js"></script>
+  <script src="sdBaselineFiles.js"></script>
+  <script src="sdBaselineUi.js"></script>
   <script src="collaborationSync.js"></script>
   <script src="collaborationUi.js"></script>
   <script src="collaborationIntegration.js"></script>

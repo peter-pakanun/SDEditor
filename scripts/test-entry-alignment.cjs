@@ -48,6 +48,26 @@ test('unavailable old English and merely similar English require manual placemen
   assert.deepEqual(A.create(['One', 'Two'], ['one', 'two'], ['One']).slots, [0, null]);
 });
 
+test('the alignment UI accepts a target-only Dropped copy while historical ZIP comparison is unavailable', () => {
+  const fs = require('node:fs'), vm = require('node:vm');
+  const window = { EntryAlignment: A }, context = vm.createContext({ window });
+  vm.runInContext(fs.readFileSync(require.resolve('../public/entryAlignmentUi.js'), 'utf8'), context);
+  const mixin = window.EntryAlignmentUI.mixin;
+  const candidate = { id: 'preserved', revision: 4, filepath: 'a.txt', originSourceHash: 'old', sourceUnavailable: true,
+    sourceRef: { baselineId: 'old', filepath: 'a.txt' }, snapshot: { translations: ['one', 'removed', 'two'] } };
+  const app = { ...mixin.data(), ...mixin.methods, editorVisible: true, editorReady: true, lang: 'Thai',
+    editorDroppedCandidate: candidate, sdDroppedSourceError: 'The old ZIP is unavailable.',
+    editorCurrentEditingDesc: { filepath: 'a.txt', translations: { English: ['Current one', 'Current two'] } },
+    editorBlocks: [], editorDraftScope: () => ({}), captureCollaborationContext: () => ({}), serializeEditorTranslations: () => [], closeHlPopup() {} };
+  const frozen = structuredClone(candidate);
+  assert.equal(app.startEntryAlignment('dropped'), true);
+  assert.deepEqual(Array.from(app.entryAlignment.slots), [null, null], 'Old English is not fabricated from the current baseline.');
+  assert.equal(app.entryAlignment.items.every(item => item.english === null), true);
+  A.assign(app.entryAlignment, 0, 0); A.assign(app.entryAlignment, 2, 1); A.setObsolete(app.entryAlignment, 1, true);
+  assert.deepEqual(Array.from(A.translations(app.entryAlignment)), ['one', 'two']);
+  assert.deepEqual(candidate, frozen, 'Preparing manual alignment does not rewrite frozen recovery.');
+});
+
 test('moving a block returns the displaced block to the pool without swapping it', () => {
   const state = A.create(['One', 'Two', 'Three'], ['one', 'two', 'three'], ['One', 'Two', 'Three']);
   A.assign(state, 0, 1);

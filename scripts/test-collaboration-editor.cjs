@@ -938,6 +938,21 @@ test('history restore confirmation cannot write into a workspace selected while 
   e.gameVersion = 'poe2'; e.sourceIdentity = 'source-two'; answer(true); await restoring;
   assert.equal(writes.length, 0); assert.equal(e.editorSaving, false); assert.deepEqual(desc.translations.Thai, ['เดิม', 'สอง']);
 });
+test('saved target history restores against current source despite unavailable historical ZIP context', async () => {
+  const { editor: e, writes, desc } = saveFixture();
+  const revision = { id: 'retained-history', filepath: desc.filepath, lang: 'Thai', sourceHash: e.sourceIdentity,
+    sourceRef: { baselineId: 'unavailable-history-source', filepath: desc.filepath }, sourceUnavailable: true,
+    translations: ['Restored authored target', 'Second restored target'] };
+  e.sdHistorySourceError = 'Import the missing historical ZIP to compare English.';
+  e._workspaceSourceBaseline = [structuredClone(desc)];
+  e.refreshHistory = async () => {}; e.openEditorFile = () => {};
+  e.hydrateSDHistorySource = () => assert.fail('Target restore does not require historical English.');
+  await e.restoreHistoryRevision(revision);
+  assert.equal(writes.length, 1, e.collaborationNotice);
+  assert.deepEqual(Array.from(desc.translations.Thai), revision.translations);
+  assert.match(e.sdHistorySourceError, /missing historical ZIP/);
+  assert.equal(revision.english, undefined);
+});
 test('a mixed blank save preserves committed text and draft without writing history or closing', async () => {
   const { editor: e, writes, desc, alerts } = saveFixture();
   const before = [...desc.translations.Thai], blocks = e.editorBlocks;
@@ -1563,6 +1578,39 @@ test('Confirm unchanged can promote a Dropped copy beside complete current ZIP t
   assert.deepEqual(Array.from(desc.translations.Thai), previous.translations.Thai);
   assert.equal(desc.hasChanges, true); assert.equal(desc.isDropped, false);
   assert.equal(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai'), null);
+});
+
+test('target-only Dropped review confirms against current source while a missing historical ZIP stays an actionable comparison error', async () => {
+  const { editor: e, window, writes, desc, previous } = droppedReviewFixture();
+  const candidate = window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai');
+  candidate.snapshot = { translations: [...previous.translations.Thai] };
+  candidate.sourceRef = { kind: 'sd-baseline', baselineId: 'previous-source', filepath: desc.filepath, candidateId: candidate.id };
+  candidate.sourceUnavailable = true; candidate.revision = 3;
+  e.localDescs.droppedArchive[candidate.id] = structuredClone(candidate);
+  e.editorDroppedCandidate = structuredClone(candidate);
+  e.sdDroppedSourceError = 'Import the missing original ZIP to compare historical source.';
+  e.sdDroppedSourceLoading = true;
+  e.loadSDDroppedSource = () => assert.fail('Explicit target review must not wait for historical source.');
+  assert.equal(e.editorDroppedCanPromote, true);
+  await e.confirmTranslationUnchanged();
+  assert.equal(writes.length, 1, e.collaborationNotice);
+  assert.deepEqual(Array.from(desc.translations.Thai), previous.translations.Thai);
+  assert.equal(e.localDescs.droppedArchive[candidate.id].status, 'promoted');
+  assert.equal(e.localDescs.droppedArchive[candidate.id].snapshot.english, undefined);
+  assert.match(e.sdDroppedSourceError, /missing original ZIP/, 'A successful target save does not claim the historical source was recovered.');
+});
+
+test('target-only explicit review rejects a changed generation even when its translated text is equal', () => {
+  const { editor: e, window, desc } = droppedReviewFixture();
+  const current = window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai');
+  current.snapshot = { translations: [...current.snapshot.translations] }; current.revision = 3;
+  e.editorDroppedCandidate = structuredClone(current);
+  assert.equal(e.capturedDroppedPromotion(desc.filepath).revision, 3);
+  current.revision++;
+  assert.throws(() => e.capturedDroppedPromotion(desc.filepath), /dropped translation changed/);
+  current.revision--;
+  current.originSourceHash = 'different-origin';
+  assert.throws(() => e.capturedDroppedPromotion(desc.filepath), /dropped translation changed/);
 });
 
 test('a valid current ZIP draft cannot authorize promotion of a different Dropped copy with invalid tags', async () => {

@@ -108,7 +108,7 @@
             ctPreviewGggVars: {}, ctPreviewAffixes:previewAffixesFor(null), ctPreviewAffixExamples:previewAffixExamples,
             ctDictionaryPack:null, ctDraftSummaries:[], ctCommentPostError:'',
             ctPeers: [], ctLocalWorkspaces: [], ctRequests: [], ctUploadVisible: false, ctUploadLocal: false, ctUploadTest: false,
-            ctUploadVersion: null, ctUploadName: '', ctUploadDeadline: '', ctUploadFiles: raw([]), ctPrepared: raw([]),
+            ctUploadVersion: null, ctUploadPredecessor: null, ctUploadName: '', ctUploadDeadline: '', ctUploadFiles: raw([]), ctPrepared: raw([]),
             ctUploadHistory: false, ctUploadHistoryFiles: raw([]),
             ctUploadAssignments: teams.slice(), ctPolicy: null, ctPolicyText: '', ctUploadError: '', ctUploading: false, ctDuplicateChoices: {},
             activeContentGroup: null, ctTeamOptions: teams
@@ -1265,7 +1265,7 @@
                 this.ctWorkspace=null;this.ctUnits=raw([]);this.ctSaved=raw({});this.activeContentGroup=null;
                 this._ctUnitIndex=raw(new Map());this._ctWorkUnits=raw(new Map());this._ctSheets=raw([]);this.ctSheetFilter='';
                 this.ctResetHistory();
-                this.ctUploadVisible=false;this.ctUploading=false;this.ctRequests=[];
+                this.ctUploadVisible=false;this.ctUploading=false;this.ctUploadPredecessor=null;this._ctUploadOpenRun=null;this.ctRequests=[];
                 for(const [id,store] of this._ctTestStores || [])if(id!==keepTestGroupId){store.dispose();this._ctTestStores.delete(id);}
                 if(this.ctUploadTest){this.ctUploadFiles=raw([]);this.ctUploadHistoryFiles=raw([]);this.ctUploadHistory=false;this.ctPrepared=raw([]);}
                 if(exitingTest){
@@ -2694,20 +2694,32 @@
             },
             ctCloseUpload() {
                 if(this.ctUploading)return false;
-                this.ctUploadVisible=false;
+                this.ctUploadVisible=false;this._ctUploadOpenRun=null;
                 if(this.ctUploadTest){this.ctUploadFiles=raw([]);this.ctUploadHistoryFiles=raw([]);this.ctUploadHistory=false;this.ctPrepared=raw([]);}
                 return true;
             },
-            async ctOpenUpload(version = null, local = false, test = false) {
+            async ctOpenUpload(version = null, local = false, test = false, options = {}) {
                 if ((!test && !local && !this.managedManagerAccess) || this.ctUploading || this.ctBusy) return false;
                 if(test){local=true;version=null;}
+                const key=this.managedCatalogScope;
+                const run=this._ctUploadOpenRun={},current=()=>key===this.managedCatalogScope && this._ctUploadOpenRun===run;
+                if(!version && !local && !options.resume){
+                    await this.refreshManagedVersions();if(!current())return false;
+                    if(this.managedNextVersionBlockedReason){this.managedSetOperationError('next-version',this.managedNextVersionBlockedReason);return false;}
+                    this.managedSetOperationError('next-version','');
+                }
                 this._ctPublicationRequest=null;this._ctReleaseRequest=null;this._ctReleaseCommand=null;this.ctDuplicateChoices={};
                 this.ctUploadVisible = true; this.ctUploadVersion = version; this.ctUploadLocal = local; this.ctUploadTest = test; this.ctUploadFiles = raw([]); this.ctPrepared = raw([]); this.ctUploadError = ''; this.ctUploadAssignments = teams.slice();
+                const predecessorId=version ? version.parentVersionId : options.predecessor?.id || (!options.resume ? this.managedHeadVersion?.id : null);
+                this.ctUploadPredecessor=local ? null : copy(options.predecessor || this.managedVersions?.find(candidate=>candidate.id===predecessorId) || (predecessorId ? {id:predecessorId,name:predecessorId} : null));
                 this.ctUploadHistory=false;this.ctUploadHistoryFiles=raw([]);
                 const defaults = root.ManagedVersions.defaults(this.gameVersion); this.ctUploadName = version?.name || defaults.name; this.ctUploadDeadline = root.ManagedVersions.deadlineInput(version?.deadlineAt || defaults.deadlineAt);
-                const key=this.managedCatalogScope;
-                if (!local) try { const policy = await this.ctRequireTrustedProtocol();if(key!==this.managedCatalogScope)return;this.ctPolicyText = JSON.stringify(this.ctPolicy.clientTextRoles, null, 2); } catch (error) { if(key===this.managedCatalogScope)this.ctUploadError = error.message; }
-                else this.ctPolicy = { clientTextRoles: { default: ['normal'], ...Object.fromEntries(pairedLanguages.map(language=>[language,['normal','gender']])) } };
+                if (!local) {
+                    try { await this.ctRequireTrustedProtocol();if(!current())return false;this.ctPolicyText = JSON.stringify(this.ctPolicy.clientTextRoles, null, 2); }
+                    catch (error) { if(current())this.ctUploadError = error.message; }
+                    if(!current())return false;
+                    if(this.ctUploadPredecessor && (!this.ctUploadPredecessor.name || this.ctUploadPredecessor.name===predecessorId))try{const result=await this._cloud.request('/v1/versions/'+encodeURIComponent(predecessorId));if(!current())return false;this.ctUploadPredecessor=copy(result.version);}catch(error){if(current())this.ctUploadError=error.message;}
+                } else this.ctPolicy = { clientTextRoles: { default: ['normal'], ...Object.fromEntries(pairedLanguages.map(language=>[language,['normal','gender']])) } };
                 return true;
             },
             ctSetHistoryComparison(enabled) {
@@ -2804,8 +2816,8 @@
                 const key=this.managedCatalogScope;this.ctUploading=true;
                 try{
                     this._ctReleaseRequest ||= uuid();const scope=this.ctRequestScope(),client=this._cloud,existing=await this._ctStore.getRequest(scope,this._ctReleaseRequest);
-                    const command=existing?.payload.command || {game:scope.game,branchId:scope.branchId,name:this.ctUploadName.trim(),deadlineAt:root.ManagedVersions.parseDeadline(this.ctUploadDeadline),idempotencyKey:this._ctReleaseRequest};
-                    await this._ctStore.putRequest(scope,this._ctReleaseRequest,{kind:'metadata',name:command.name,deadline:this.ctUploadDeadline,command});if(key!==this.managedCatalogScope)return;
+                    const command=existing?.payload.command || {game:scope.game,branchId:scope.branchId,name:this.ctUploadName.trim(),deadlineAt:root.ManagedVersions.parseDeadline(this.ctUploadDeadline),expectedHeadId:this.ctUploadPredecessor?.id || null,idempotencyKey:this._ctReleaseRequest};
+                    await this._ctStore.putRequest(scope,this._ctReleaseRequest,{kind:'metadata',name:command.name,deadline:this.ctUploadDeadline,predecessor:existing?.payload.predecessor || copy(this.ctUploadPredecessor),command});if(key!==this.managedCatalogScope)return;
                     const response=await client.request('/v1/content-versions',{method:'POST',body:command});
                     if(key!==this.managedCatalogScope)return;
                     await this._ctStore.deleteRequest(this.ctRequestScope(),this._ctReleaseRequest);this._ctReleaseRequest=null;this.ctUploadVersion=response.version;await this.refreshManagedVersions();this.ctUploadError='';
@@ -2825,7 +2837,7 @@
                     requestId:prepared.requestId,uploadId:prepared.uploadId,createBody:prepared.createBody,finalizeBody:prepared.finalizeBody,published:prepared.published,
                     candidates:prepared.contentMode==='statdescription'?prepared.candidates:undefined,warnings:prepared.warnings,duplicateGroups:prepared.duplicateGroups}));
                 if(key!==this.managedCatalogScope || signal.aborted)throw Object.assign(new Error('Publication context changed'),{stale:true});
-                await this._ctStore.putRequest(this.ctRequestScope(),this._ctPublicationRequest,{kind:'publication',name:this.ctUploadName,deadline:this.ctUploadDeadline,version:this.ctUploadVersion ? copy(this.ctUploadVersion) : null,releaseRequest:this._ctReleaseRequest,releaseCommand:this._ctReleaseCommand,duplicateChoices:copy(this.ctDuplicateChoices),groups},{immutablePublicationData:true,guard:()=>key===this.managedCatalogScope && !signal.aborted});
+                await this._ctStore.putRequest(this.ctRequestScope(),this._ctPublicationRequest,{kind:'publication',name:this.ctUploadName,deadline:this.ctUploadDeadline,version:this.ctUploadVersion ? copy(this.ctUploadVersion) : null,predecessor:copy(this.ctUploadPredecessor),releaseRequest:this._ctReleaseRequest,releaseCommand:this._ctReleaseCommand,duplicateChoices:copy(this.ctDuplicateChoices),groups},{immutablePublicationData:true,guard:()=>key===this.managedCatalogScope && !signal.aborted});
             },
             async ctResumePublication(request) {
                 const key=this.managedCatalogScope,epoch=this._ctEpoch || 0,current=()=>key===this.managedCatalogScope && epoch===(this._ctEpoch || 0);
@@ -2833,7 +2845,10 @@
                     const requestScope=this.ctRequestScope(),stored=await this._ctStore.getRequest(requestScope,request.requestId,{guard:current});
                     if(!current())return;
                     if(!stored){await this.ctRefreshLocal();return;}
-                    const payload=stored.payload;await this.ctOpenUpload(payload.version || null,false);if(!current())return;this.ctUploadName=payload.name;this.ctUploadDeadline=payload.deadline;this._ctPublicationRequest=request.requestId;this._ctReleaseRequest=payload.releaseRequest || (payload.kind==='metadata'?request.requestId:null);this._ctReleaseCommand=payload.releaseCommand || payload.command || null;
+                    const payload=stored.payload,previousId=payload.releaseCommand?.expectedHeadId || payload.command?.expectedHeadId;
+                    const opened=await this.ctOpenUpload(payload.version || null,false,false,{resume:true,predecessor:payload.predecessor || (previousId ? {id:previousId} : null)});
+                    if(opened===false || !current())return;
+                    this.ctUploadName=payload.name;this.ctUploadDeadline=payload.deadline;this._ctPublicationRequest=request.requestId;this._ctReleaseRequest=payload.releaseRequest || (payload.kind==='metadata'?request.requestId:null);this._ctReleaseCommand=payload.releaseCommand || payload.command || null;
                     this.ctDuplicateChoices=payload.duplicateChoices || {};const prepared=[];
                     for(const group of payload.groups || []){
                         if(group.cacheScope){
@@ -2848,7 +2863,7 @@
             },
             async ctFindPreviousGroup(prepared) {
                 const key=this.managedCatalogScope,game=this.gameVersion,branchId=this.branchId || 'default',versionId=this.ctUploadVersion?.id || '',signal=this._ctAbort?.signal,client=this._cloud;
-                const query={game,branchId,contentMode:prepared.contentMode,...(prepared.contentMode==='clienttext'?{language:prepared.language}:{}),...(versionId?{versionId}:{}),...(prepared.logicalKey?{logicalKey:prepared.logicalKey}:{})};
+                const query={game,branchId,contentMode:prepared.contentMode,...(prepared.contentMode==='clienttext'?{language:prepared.language}:{}),...(versionId?{versionId}:{expectedHeadId:this.ctUploadPredecessor?.id || ''}),...(prepared.logicalKey?{logicalKey:prepared.logicalKey}:{})};
                 const result=await client.request('/v1/content-predecessor?'+Object.entries(query).map(([key,value])=>encodeURIComponent(key)+'='+encodeURIComponent(value)).join('&'),{signal});
                 if(key!==this.managedCatalogScope || game!==this.gameVersion || branchId!==(this.branchId || 'default') || versionId!==(this.ctUploadVersion?.id || '') || signal?.aborted)throw Object.assign(new Error('Content preparation was superseded.'),{name:'AbortError',stale:true});
                 if(!result.group && !result.version)return null;
@@ -2959,7 +2974,7 @@
                         this.ctUploadVisible = false; await this.ctRefreshLocal(); return;
                     }
                     let version = this.ctUploadVersion;
-                    this._ctReleaseRequest ||= uuid();if(!version)this._ctReleaseCommand ||= {game:this.gameVersion,branchId:this.branchId,name:this.ctUploadName.trim(),deadlineAt:root.ManagedVersions.parseDeadline(this.ctUploadDeadline),idempotencyKey:this._ctReleaseRequest};await this.ctRememberPublication();
+                    this._ctReleaseRequest ||= uuid();if(!version)this._ctReleaseCommand ||= {game:this.gameVersion,branchId:this.branchId,name:this.ctUploadName.trim(),deadlineAt:root.ManagedVersions.parseDeadline(this.ctUploadDeadline),expectedHeadId:this.ctUploadPredecessor?.id || null,idempotencyKey:this._ctReleaseRequest};await this.ctRememberPublication();
                     if (!version) {
                         this._ctReleaseRequest ||= uuid();
                         const result = await client.request('/v1/content-versions', { method: 'POST', body: this._ctReleaseCommand,signal:this._ctAbort.signal }); version = result.version;

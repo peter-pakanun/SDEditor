@@ -280,6 +280,7 @@
       },
       collaborationConflictText(index, side) {
         if (side === 'base' && !this.collaborationConflict?.base) return 'No shared base yet';
+        if (this.collaborationConflict?.[side]?.valuesUnavailable) return 'Original translation unavailable';
         const value = lines(this.collaborationConflict?.[side])[index];
         return value === '' ? '(Empty translation)' : decode(value);
       },
@@ -289,6 +290,7 @@
       },
       collaborationChooseConflict(index, side) {
         if (this.collaborationConflictBusy || !['yours', 'shared'].includes(side)) return;
+        if (this.collaborationConflict?.[side]?.valuesUnavailable) return;
         this.collaborationConflictDraft[index] = decode(lines(this.collaborationConflict?.[side])[index]);
         this.collaborationConflictChoices[index] = side;
         this.collaborationConflictEdited[index] = false;
@@ -380,6 +382,16 @@
           const result = await this.collabLoadHistoryEntry(event.id);
           if (!this.collaborationHistoryVisible || context !== this.collaborationContext || sequence !== this._collaborationHistoryDetailRequest) return;
           this.collaborationHistoryEvent = result;
+          if (this.hydrateSDHistorySource) {
+            const current = () => this.collaborationHistoryVisible && context === this.collaborationContext && sequence === this._collaborationHistoryDetailRequest;
+            const [before, after, detail] = await Promise.all([
+              result.before ? this.hydrateSDHistorySource(result.before, { current }) : null,
+              result.after ? this.hydrateSDHistorySource(result.after, { current }) : null,
+              this.hydrateSDHistorySource(result, { current }),
+            ]);
+            if (!current()) return;
+            this.collaborationHistoryEvent = { ...detail, before, after };
+          }
           await this.$nextTick();
           this.$refs.collaborationHistoryDetail?.scrollIntoView({ block: 'nearest' });
         } catch (error) {
@@ -399,11 +411,13 @@
       collaborationHistoryOrigin(event) { return originLabels[event?.origin] || text(event?.origin) || 'Translation change'; },
       collaborationHistoryText(state) {
         if (!state) return 'No earlier shared version is available.';
+        if (state.valuesUnavailable || !Array.isArray(state.translations)) return 'The untouched original translation was not retained. No target text is available for this version.';
         return lines(state).map((line, index) => `Entry ${index + 1}\n${line === '' ? '(Empty translation)' : decode(line)}`).join('\n\n');
       },
       collaborationHistoryCanRestore(version) {
         const event = this.collaborationHistoryEvent;
         if (!event || !event[version] || this.collaborationHistoryRestoring) return false;
+        if (event[version].valuesUnavailable || !Array.isArray(event[version].translations)) return false;
         return event[version === 'before' ? 'canRestoreBefore' : 'canRestoreAfter'] !== false;
       },
       collaborationPrepareRestore(version) {

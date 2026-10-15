@@ -61,13 +61,15 @@
         // Old English is evidence only for the exact preserved translation being aligned.
         const oldEnglish = kind === 'history' ? recovery.english || []
           : candidate?.originSourceAvailable !== false && candidate
-            && equal(lines, candidate.snapshot.translations) ? candidate.snapshot.english || [] : [];
+            && equal(lines, candidate.snapshot.translations) ? this.sdDroppedSource?.translations?.English || candidate.snapshot.english || [] : [];
         this.clearEntryAlignment();
         this._entryAlignmentBinding = { desc, blocks: this.editorBlocks, session: this._draftSession,
           scope: this.editorDraftScope(desc.filepath), context: this.captureCollaborationContext(),
           run: this._editorOpenRun, base: this._editorCollabBase, kind,
           english: JSON.stringify(desc.translations.English), lines: JSON.stringify(this.serializeEditorTranslations()),
-          oldSnapshot: candidate?.originSourceAvailable !== false && candidate && equal(lines, candidate.snapshot.translations) ? copy(candidate.snapshot) : null,
+          oldSnapshot: candidate?.originSourceAvailable !== false && candidate && equal(lines, candidate.snapshot.translations)
+            ? copy(this.sdDroppedSource ? { ...candidate.snapshot, english: this.sdDroppedSource.translations.English,
+              variables: this.sdDroppedSource.variables, remarks: this.sdDroppedSource.remarks } : candidate.snapshot) : null,
           candidate: kind === 'dropped' ? JSON.stringify(candidate) : null };
         this.entryAlignment = root.EntryAlignment.create(desc.translations.English, lines, oldEnglish);
         this.closeHlPopup();
