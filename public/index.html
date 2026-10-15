@@ -44,11 +44,10 @@
 <body>
   <div id="app" v-cloak>
     <div class="appRoot" :data-density="uiDensity">
-    <div v-if="storageMigrationMessage && !workspaceInitializationActive" class="storageMigrationNotice" role="status" aria-live="polite" aria-atomic="true">
-      <span v-if="storageMigrationBusy" class="browserWorkSpinner" aria-hidden="true"></span>
-      <span>{{ storageMigrationMessage }}</span>
-    </div>
-    <workspace-alerts v-if="versionChooserVisible || needsInitialSettings || (ctActive ? ctEditor : !gameVersionSelected || loadingProgress < 100 || editorVisible || workspaceInitializationActive)" class="workspaceAlertsFallback"></workspace-alerts>
+    <!-- Full editors render these messages inside their measured notice slot. -->
+    <app-notice-stack v-if="!(ctActive ? ctEditor : (editorVisible && !workspaceInitializationActive)) && (versionChooserVisible || needsInitialSettings || !gameVersionSelected || loadingProgress < 100 || workspaceInitializationActive)" sticky class="workspaceAlertsFallback">
+      <workspace-alerts></workspace-alerts>
+    </app-notice-stack>
 
     <form ref="importUpdateZipFileForm" style="display: none;">
       <input type="file" ref="importUpdateZipFile" accept="application/zip,.zip" @change="importUpdateZipChanged">
@@ -82,9 +81,9 @@
         <p>
           We found SDEditor data from before PoE1/PoE2 split storage. It looks like <strong>{{ formatGameVersion(pendingSingleVersionMigration.detectedVersion) }}</strong> data.
         </p>
-        <div class="multiInstanceGateWarning">
+        <app-notice tone="warning" class="multiInstanceGateWarning">
           This copies your old source, workspace, and revision history into the new {{ formatGameVersion(pendingSingleVersionMigration.detectedVersion) }} storage. The old data is left untouched as a backup.
-        </div>
+        </app-notice>
         <p>
           Source files: <strong>{{ pendingSingleVersionMigration.sourceCount }}</strong><br>
           Workspace files: <strong>{{ pendingSingleVersionMigration.workspaceCount }}</strong><br>
@@ -183,8 +182,8 @@
                 <p v-if="cloudCanAccessAllLanguages"><strong>{{ cloudUser.isAdmin ? 'Admin' : 'Manager' }}</strong> · Access to every language</p>
                 <p v-else-if="cloudUser.language">Assigned language: <strong>{{ cloudUser.language }}</strong><span v-if="lang && lang !== cloudUser.language"> · Current dictionary is local only</span></p>
               </div>
-              <p v-if="cloudSyncIssue" class="cloudStatus settingsNotice cloudWarning" role="alert">{{ cloudSyncIssue }}</p>
-              <p v-if="cloudNeedsDictionaryLanguage" class="cloudWarning">Choose your translation language in <button class="settingsTextButton" @click="setSettingsTab('general', true)">General</button> to keep your existing dictionary under that language before cloud backup.</p>
+              <app-notice tone="warning" v-if="cloudSyncIssue" class="cloudStatus settingsNotice cloudWarning" role="alert">{{ cloudSyncIssue }}</app-notice>
+              <app-notice tone="warning" v-if="cloudNeedsDictionaryLanguage" class="cloudWarning">Choose your translation language in <button class="settingsTextButton" @click="setSettingsTab('general', true)">General</button> to keep your existing dictionary under that language before cloud backup.</app-notice>
               <div class="cloudActions">
                 <button v-if="cloudSignedIn && cloudSyncIssue" @click="cloudRetry" :disabled="cloudBusy">Sync now</button>
                 <button @click="cloudOpenHistory()" :disabled="!cloudHistoryAvailable" :title="cloudHistoryUnavailableReason">Shared dictionary history</button>
@@ -230,7 +229,7 @@
           </section>
         </div>
         <footer class="settingsFooter">
-          <p v-if="settingsMessage" class="settingsMessage" role="alert">{{ settingsMessage }}</p>
+          <app-notice tone="error" v-if="settingsMessage" class="settingsMessage" role="alert">{{ settingsMessage }}</app-notice>
           <p v-else-if="needsInitialSettings && !lang" class="settingsHelp">Select a language in General to continue.</p>
           <button class="settingsActionPrimary" style="margin-left: auto;" @click="settingsSaveClose" :disabled="settingsSaving || !lang">{{ settingsSaving ? 'Saving…' : (needsInitialSettings ? 'Save and continue' : 'Save and close') }}</button>
         </footer>
@@ -244,9 +243,9 @@
         <p>
           You have <strong>more than one instance of SDEditor open</strong> in your browser. This can cause data loss or conflicts if you save translations simultaneously across multiple tabs or windows.
         </p>
-        <div class="multiInstanceGateWarning">
+        <app-notice tone="warning" class="multiInstanceGateWarning">
           <strong>Warning:</strong> Each instance maintains its own in-memory state and may have outdated translations from IndexedDB. Concurrent edits can cause data loss.
-        </div>
+        </app-notice>
         <h3 style="margin-top: calc(1.5em * var(--density)); margin-bottom: calc(0.75em * var(--density));">What should I do?</h3>
         <ul style="margin: calc(0.75em * var(--density)) 0; padding-left: calc(1.5em * var(--density)); color: var(--color-font); line-height: 1.6;">
           <li>Use only <strong>one instance at a time</strong> and close other tabs/windows before editing</li>
@@ -270,9 +269,9 @@
         <p>
           <strong>{{ duplicateLangImportWarning.fileName }}</strong> contains duplicated <code>lang</code> blocks. Choose the entry SDEditor should keep for each duplicate group, then confirm to continue importing.
         </p>
-        <div class="multiInstanceGateWarning">
+        <app-notice tone="warning" class="multiInstanceGateWarning">
           Review every language listed, even if it is not your selected translation language. SDEditor will keep the selected entries for this import and ignore the other duplicated blocks.
-        </div>
+        </app-notice>
         <h3 style="margin-top: calc(1.5em * var(--density)); margin-bottom: calc(0.75em * var(--density));">
           Duplicate groups ({{ duplicateLangImportWarning.groups.length }})
         </h3>
@@ -308,7 +307,7 @@
         <div><h1>{{ cloudCanAccessAllLanguages ? 'Manage version' : 'Choose a source version' }}</h1><p><a v-if="cloudCanAccessAllLanguages" class="workspaceContextLink" href="#select-game-version" @click.prevent="showGameVersionSelector" :aria-disabled="managedVersionBusy ? 'true' : undefined" title="Return to game version selection" :aria-label="'Return to game version selection from ' + gameVersionLabel">{{ gameVersionLabel }}</a><span v-else>{{ gameVersionLabel }}</span> · {{ cloudCanAccessAllLanguages ? (cloudUser?.isAdmin ? 'Admin' : 'Manager') : (cloudUser?.language || lang) }}</p></div>
         <div class="versionActions"><button v-if="cloudCanAccessAllLanguages && managedOnlineAvailable" class="primaryAction" @click="ctOpenUpload()" :disabled="managedVersionBusy || ctUploading || !!managedNextVersionBlockedReason" v-tooltip="managedNextVersionBlockedReason">Upload next version</button><button @click="openSettings()">Settings</button><span v-if="browserWorkTooltip" class="browserWorkStatus" role="img" :aria-label="browserWorkTooltip" v-tooltip="browserWorkTooltip"><span class="browserWorkSpinner" aria-hidden="true"></span></span></div>
       </header>
-      <p v-if="managedVisibleError" class="versionError" role="alert">{{ managedVisibleError }}</p>
+      <app-notice tone="error" v-if="managedVisibleError" class="versionError" role="alert">{{ managedVisibleError }}</app-notice>
       <div class="versionChooserColumns">
         <section class="versionPanel onlineVersions" aria-label="Online versions">
           <header class="versionPanelHeading"><h2>Online</h2><label v-if="managedManagerAccess"><input type="checkbox" v-model="managedShowWithdrawn"> Show withdrawn</label></header>
@@ -370,8 +369,8 @@
       </div>
       <section v-if="managedCatalogAccess && managedSelectedVersion" class="versionPanel versionDetails" aria-label="Selected version">
         <header class="versionPanelHeading selectedVersionHeader"><div><h2 class="versionTitleLine">{{ managedSelectedVersion.name }} <span v-if="managedSelectedVersion.isHead" class="versionBadge">HEAD</span></h2><p tabindex="0" v-tooltip="managedDeadlineTooltip(managedSelectedVersion.deadlineAt)" :aria-label="managedDeadlineTooltip(managedSelectedVersion.deadlineAt)">{{ managedFormatDeadline(managedSelectedVersion.deadlineAt) }}</p><p v-if="managedSelectedVersion.zipHash" class="versionHash" tabindex="0" v-tooltip="'ZIP SHA-256: ' + managedSelectedVersion.zipHash" :aria-label="'ZIP SHA-256: ' + managedSelectedVersion.zipHash">ZIP {{ managedSelectedVersion.zipHash?.slice(0, 16) }}</p></div><button v-if="managedManagerAccess" @click="ctOpenUpload(managedSelectedVersion)" :disabled="ctUploading">Add content group</button></header>
-        <p v-if="ctError" class="versionError" role="alert">{{ ctError }}</p>
-        <p v-if="managedSelectedVersion.status === 'withdrawn'" class="versionNotice">This version was withdrawn. Its work and history remain available for reference and recovery.</p>
+        <app-notice tone="error" v-if="ctError" class="versionError" role="alert">{{ ctError }}</app-notice>
+        <app-notice tone="info" v-if="managedSelectedVersion.status === 'withdrawn'" class="versionNotice">This version was withdrawn. Its work and history remain available for reference and recovery.</app-notice>
         <div v-if="ctAssignmentRows.length" class="versionTableScroll"><table class="versionTable teamVersionTable contentGroupTeamTable"><thead><tr><th scope="col" :aria-sort="managedTeamSort === 'language' ? (managedTeamSortDir === 'asc' ? 'ascending' : 'descending') : 'none'"><button class="tableSort" @click="managedSortTeams('language')">Assignment <span aria-hidden="true">{{ managedTeamSort === 'language' ? managedTeamSortIcon : '' }}</span></button></th><th scope="col" :aria-sort="managedTeamSort === 'progress' ? (managedTeamSortDir === 'asc' ? 'ascending' : 'descending') : 'none'"><button class="tableSort" @click="managedSortTeams('progress')">Progress <span aria-hidden="true">{{ managedTeamSort === 'progress' ? managedTeamSortIcon : '' }}</span></button></th><th scope="col">Online</th><th scope="col">Actions</th></tr></thead><tbody>
           <tr v-for="row in ctAssignmentRows" :key="row.key" class="ctGroupTeam" :data-content-group="row.group?.id" :data-language="row.team.language" @dblclick="row.legacy ? managedOpenTeam(managedSelectedVersion,row.team,$event) : !ctBusy && !managedRowActionTarget($event) && ctOpenGroup(managedSelectedVersion,row.group,row.team.language)">
             <td><span class="versionNameLine"><a class="teamEditorLink" href="#table" @click.prevent.stop="row.legacy ? managedOpenTeam(managedSelectedVersion,row.team) : !ctBusy && ctOpenGroup(managedSelectedVersion,row.group,row.team.language)" @dblclick.stop :aria-disabled="(row.legacy ? managedVersionBusy : ctBusy) ? 'true' : undefined" v-tooltip="row.group?.assets?.map(asset => asset.filename).filter(Boolean).join('\n')"><strong>{{ row.label }}</strong></a><span v-if="row.team.ended" class="versionBadge ended">Ended</span></span><small>{{ row.team.counts?.loaded ?? 0 }} {{ row.contentMode === 'clienttext' ? 'IDs' : 'files' }}</small><small v-if="row.team.changesAfterCollection" class="versionDropped">Changes since collection</small></td>
@@ -446,8 +445,8 @@
         </template>
         <fieldset v-if="ctUploadFiles.some(candidate=>candidate.file.name.toLowerCase().endsWith('.zip'))"><legend>StatDescription team assignments</legend><label v-for="team in ctTeamOptions" :key="team" style="display:inline-block;margin:8px"><input type="checkbox" v-model="ctUploadAssignments" :value="team" :disabled="ctUploading || ctPrepared.length">{{ team }}</label></fieldset>
         <details v-if="cloudUser?.isAdmin && !ctUploadLocal" class="ctUploadPolicy"><summary>Admin: required ClientText workbook roles</summary><p>Each team requires a complete group. Changing the policy applies to future groups.</p><textarea v-model="ctPolicyText" aria-label="Required workbook roles JSON"></textarea><button @click="ctSavePolicy" :disabled="ctUploading">Save grouping policy</button></details>
-        <div v-if="ctPrepared.length" class="ctUploadReport"><article v-for="(group,index) in ctPrepared" :key="index"><h3>{{ group.contentMode }} · {{ group.language || group.assignments.join(', ') }}</h3><p v-if="group.units">{{ group.units.length.toLocaleString() }} IDs · {{ group.assets.length }} workbook(s)</p><p v-for="(warning,i) in group.warnings" :key="i">{{ warning.message || warning }}</p><p v-if="group.published">Published</p></article></div>
-        <p v-if="ctUploadError" class="versionError" role="alert">{{ ctUploadError }}</p>
+        <div v-if="ctPrepared.length" class="ctUploadReport"><article v-for="(group,index) in ctPrepared" :key="index"><h3>{{ group.contentMode }} · {{ group.language || group.assignments.join(', ') }}</h3><p v-if="group.units">{{ group.units.length.toLocaleString() }} IDs · {{ group.assets.length }} workbook(s)</p><app-notice v-for="(warning,i) in group.warnings" :key="i" tone="warning">{{ warning.message || warning }}</app-notice><p v-if="group.published">Published</p></article></div>
+        <app-notice tone="error" v-if="ctUploadError" class="versionError" role="alert">{{ ctUploadError }}</app-notice>
         <div v-if="ctProgress" class="ctProgress" role="status">
           <div class="ctProgressMain">
             <span class="ctProgressLabel" :title="[ctProgress.phase,ctProgress.workbook,ctProgress.sheet].filter(Boolean).join(' · ')">{{ [ctProgress.phase,ctProgress.workbook,ctProgress.sheet].filter(Boolean).join(' · ') }}</span>
@@ -486,11 +485,14 @@
             <label v-for="option in ctStatusFilterOptions" :key="option.key" class="filterChip" :class="[{selected:ctSelectedFilters.includes(option.key)},option.tone]"><input type="checkbox" v-model="ctSelectedFilters" :value="option.key"><span>{{ option.label }}</span></label>
             <div class="filterSelectionActions"><button @click="ctSelectedFilters=ctStatusFilterOptions.map(option=>option.key)" :disabled="ctSelectedFilters.length===ctStatusFilterOptions.length">Select all</button><button @click="ctSelectedFilters=[]" :disabled="!ctSelectedFilters.length">Clear filters</button></div>
           </div></fieldset>
-          <workspace-alerts></workspace-alerts>
-          <p v-if="ctOfflineTest" class="ctTestBanner" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Saves are temporary. Download workbooks to keep saved edits. Leaving the test or reloading clears this session.</p>
+          <app-notice-stack class="workspaceNoticeStack">
+            <workspace-alerts></workspace-alerts>
+            <app-notice tone="info" v-if="ctOfflineTest" class="ctTestBanner" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Saves are temporary. Download workbooks to keep saved edits. Leaving the test or reloading clears this session.</app-notice>
+            <app-notice tone="error" v-if="ctError" class="collaborationError" role="alert">{{ ctError }}</app-notice>
+            <app-notice tone="info" v-if="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</app-notice>
+          </app-notice-stack>
         </template>
         <template #content>
-          <p v-if="ctError" class="collaborationError" role="alert">{{ ctError }}</p><p v-if="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</p>
           <div v-if="ctProgress" class="ctProgress" role="status"><div class="ctProgressMain"><span class="ctProgressLabel" :title="[ctProgress.phase,ctProgress.workbook,ctProgress.sheet].filter(Boolean).join(' · ')">{{ [ctProgress.phase,ctProgress.workbook,ctProgress.sheet].filter(Boolean).join(' · ') }}</span><progress :value="ctProgress.completed || 0" :max="ctProgress.total || 1" aria-label="Workbook operation progress"></progress><span class="ctProgressCount">{{ Math.round(ctProgress.completed || 0) }} / {{ ctProgress.total || '…' }}</span></div><button class="ctProgressCancel" @click="ctCancel">Cancel</button></div>
           <div class="ctWorkspaceBody" :class="{ctToolsOpen:inlineEditor && inlineSidebarVisible}">
             <nav class="ctNavigation" aria-label="Workbook navigation">
@@ -598,8 +600,11 @@
         </template>
       </editor-workspace-shell>
       <editor-full-shell v-if="ctEditor" class="ctFull ctFullEditor" :controller="sharedEditorController" preview-host-id="ctFullEditorPreviewHost" sidebar-host-id="ctFullEditorSidebarHost">
-        <template v-if="ctOfflineTest" #notice>
-          <p class="ctTestBanner" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Saves are temporary. Download workbooks to keep saved edits. Leaving the test or reloading clears this session.</p>
+        <template #notice>
+          <workspace-alerts></workspace-alerts>
+          <app-notice tone="info" v-if="ctOfflineTest" class="ctTestBanner" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Saves are temporary. Download workbooks to keep saved edits. Leaving the test or reloading clears this session.</app-notice>
+          <app-notice tone="error" v-if="ctError" class="collaborationError" role="alert">{{ ctError }}</app-notice>
+          <app-notice tone="info" v-if="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</app-notice>
         </template>
           <div class="twoSided editorActions ctEditorActions"><h1>🧾 Translation</h1><div class="ctEditorActionButtons"><button @click="ctSave()" :disabled="ctBusy">Save</button><button class="btnPrimary" @click="ctSave(true)" :disabled="ctBusy">Save &amp; close</button><button v-if="ctDraftBlocked" @click="ctDiscardDraft" :disabled="ctBusy">Discard draft</button><button @click="ctCloseEditor" :disabled="ctBusy" title="Close the file (Esc); keep unsaved edits">Close</button></div></div>
           <h3 class="editorFileIdentity"><span>📁 Filepath: {{ ctCurrentUnit?.role }} / {{ ctCurrentUnit?.sheet }} / {{ ctCurrentUnit?.recordId }}</span></h3>
@@ -607,7 +612,6 @@
           <p v-if="ctBrowseMode==='convo' && ctConvoRelation(ctCurrentUnit).label" class="ctNpcRecordFacts"><span>Conversation turn</span><span class="ctNpcRelation ctConvoRelation" tabindex="0" v-tooltip="ctConvoRelation(ctCurrentUnit).tooltip">{{ ctConvoRelation(ctCurrentUnit).label }}</span></p>
           <ct-context :host="$root" :items="ctReferenceMetadata()"></ct-context>
           <div class="ctEditorNavigation"><button @click="ctNavigate(-1)" :disabled="ctBusy">Previous</button><strong>{{ ctCurrentUnit?.recordId }}</strong><button @click="ctNavigate(1)" :disabled="ctBusy">Next</button><editor-attention-navigation :controller="sharedEditorController"></editor-attention-navigation></div>
-          <p v-if="ctError" class="collaborationError" role="alert">{{ ctError }}</p><p v-if="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</p>
           <ct-fields ref="ctEditorRegion" :host="$root"></ct-fields>
       </editor-full-shell>
 
@@ -636,10 +640,10 @@
           </div>
           <p class="versionMuted">Only work already shared with the server is shown here. Local drafts and saves awaiting upload remain in each translator’s browser.</p>
         </section>
-        <p v-if="managedUploadError" class="versionError" role="alert">{{ managedUploadError }}</p>
+        <app-notice tone="error" v-if="managedUploadError" class="versionError" role="alert">{{ managedUploadError }}</app-notice>
         <p v-if="managedDuplicateVersion"><button @click="managedOpenDuplicateVersion">Open {{ managedDuplicateVersion.name }}</button><span v-if="managedDuplicateVersion.status === 'withdrawn'"> · withdrawn; restore its existing entry to publish it again.</span></p>
-        <p v-if="managedUpload?.validation?.repairs?.length" class="versionNotice">{{ managedUpload.validation.repairs.length }} recoverable source repairs applied. The original ZIP bytes are retained unchanged.</p>
-        <ul v-if="managedUpload?.validation?.errors?.length" class="versionError"><li v-for="(error, index) in managedUpload.validation.errors" :key="index">{{ error.message || error }}</li></ul>
+        <app-notice tone="info" v-if="managedUpload?.validation?.repairs?.length" class="versionNotice">{{ managedUpload.validation.repairs.length }} recoverable source repairs applied. The original ZIP bytes are retained unchanged.</app-notice>
+        <app-notice v-if="managedUpload?.validation?.errors?.length" tone="error" class="versionError"><ul><li v-for="(error, index) in managedUpload.validation.errors" :key="index">{{ error.message || error }}</li></ul></app-notice>
         <div v-for="group in managedUploadGroups" :key="group.filepath + group.language" class="versionDuplicate">
           <strong>{{ group.filepath }} · {{ group.language || group.lang }}</strong>
           <label>Language block<select v-model="managedDuplicateChoices[group.filepath + '|' + (group.language || group.lang)]"><option value="">Choose a block</option><option v-for="option in group.options" :key="option.occurrence" :value="option.occurrence">Block {{ option.occurrence }} · {{ option.content?.length || 0 }} entries</option></select></label>
@@ -664,7 +668,7 @@
         </select>
         <input id="versionMetadataDeadline" type="datetime-local" v-model="managedMetadataDeadline">
       </div>
-      <p v-if="managedVisibleError" class="versionError" role="alert">{{ managedVisibleError }}</p>
+      <app-notice tone="error" v-if="managedVisibleError" class="versionError" role="alert">{{ managedVisibleError }}</app-notice>
       <div class="versionActions"><button @click="saveManagedMetadata" :disabled="managedVersionBusy">Save details</button><button @click="managedMetadataVisible = false" :disabled="managedVersionBusy">Cancel</button></div>
     </section></div>
     <div v-if="managedRecoveryVisible && managedVisibleRecoveryTeam" v-show="!workspaceInitializationActive" class="importDialogOverlay versionModalBackdrop"><section class="versionModal" @keydown="managedModalKeydown" role="dialog" aria-modal="true" aria-labelledby="versionRecoveryTitle"><header class="versionPanelHeading"><h2 id="versionRecoveryTitle">Preserved copies · {{ managedVisibleRecoveryTeam.language }}</h2><button id="versionRecoveryClose" @click="managedRecoveryVisible = false">Close</button></header><p>These predecessor copies are alternatives to existing room or Dropped work for files in the current source. Existing work remains authoritative. Review the preserved text before explicitly saving a correction.</p><article v-for="reference in managedVisibleRecoveryTeam.recoveries" :key="reference.id" class="versionDuplicate"><strong>{{ reference.filepath }}</strong><p>{{ reference.reason }}</p><p class="versionHash">Source {{ reference.originSourceHash }}</p><label>Preserved English</label><pre>{{ reference.snapshot?.english?.join('\n') }}</pre><label>Preserved translation</label><pre>{{ reference.snapshot?.translations?.join('\n') }}</pre><button @click="managedOpenRecoveryFile(reference)" :disabled="managedVersionBusy || reference.readOnly">{{ reference.readOnly ? 'Removed file · preserved above' : 'Open current file and history' }}</button></article></section></div>
@@ -769,7 +773,11 @@
             <div class="filterSelectionActions"><button @click="selectAllFileFilters" :disabled="allFileFiltersSelected">Select all</button><button @click="selectedFileFilters = []" :disabled="selectedFileFilters.length === 0">Clear filters</button></div>
           </div>
         </fieldset>
-        <workspace-alerts v-if="!workspaceInitializationActive"></workspace-alerts>
+        <app-notice-stack v-if="!workspaceInitializationActive" class="workspaceNoticeStack">
+          <workspace-alerts></workspace-alerts>
+          <collaboration-warning></collaboration-warning>
+          <app-notice v-if="collaborationUserNotice" tone="info" class="collaborationFooterMessage" role="status">{{ collaborationUserNotice }}</app-notice>
+        </app-notice-stack>
       </template>
 
       <template #content>
@@ -813,7 +821,7 @@
                 <button v-if="inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath && editorConsistencyDiagnostics.some(Boolean)" type="button" @click="openInlineFullEditor(desc.filepath, 'consistency')">Compare inconsistencies in editor</button>
                 <button v-if="desc.isDropped || desc.hasLocalRecovery || desc.hasSharedRecovery" type="button" class="inlineReviewLink" @click="openInlineFullEditor(desc.filepath, 'dropped')">{{ desc.hasSharedRecovery && !desc.isDropped ? 'Review shared recovery in editor' : desc.hasLocalRecovery && !desc.isDropped ? 'Review local recovery in editor' : 'Review dropped copies in editor' }}</button>
               </div>
-              <p v-if="inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath && editorLoadError" class="inlineFileFinding error" role="alert">{{ editorLoadError }}</p>
+              <app-notice tone="error" v-if="inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath && editorLoadError" class="inlineFileFinding error" role="alert">{{ editorLoadError }}</app-notice>
               <ul v-if="inlineFindingsFor(desc.filepath).length" class="inlineFileFindings" aria-label="Translation diagnostics"><li v-for="(finding, findingIndex) in inlineFindingsFor(desc.filepath)" :key="findingIndex" :class="finding.level">{{ finding.level === 'error' ? 'Error: ' : 'Warning: ' }}{{ finding.message || finding.code }}</li></ul>
             </td>
             <td data-label="English" class="inlineSourceCell">
@@ -861,11 +869,11 @@
       <section v-for="conflict in collaborationUnloadedDroppedConflicts" :key="conflict.filepath" class="droppedTranslationPanel" :aria-label="'Competing dropped translations for ' + conflict.filepath">
         <h3>{{ conflict.filepath }}</h3>
         <p>This file is absent from the current source. Choose which preserved copy to keep for later review.</p>
-        <div class="droppedTranslationBanner">
+        <app-notice tone="warning" class="droppedTranslationBanner">
           <strong>Competing dropped translations</strong>
-          <button @click="resolveDroppedTranslationConflict('local', conflict.filepath)" :disabled="editorSaving || navigationBusy">Keep this dropped copy</button>
-          <button @click="resolveDroppedTranslationConflict('shared', conflict.filepath)" :disabled="editorSaving || navigationBusy">Use shared dropped copy</button>
-        </div>
+          <template #actions><button @click="resolveDroppedTranslationConflict('local', conflict.filepath)" :disabled="editorSaving || navigationBusy">Keep this dropped copy</button>
+          <button @click="resolveDroppedTranslationConflict('shared', conflict.filepath)" :disabled="editorSaving || navigationBusy">Use shared dropped copy</button></template>
+        </app-notice>
         <p v-if="droppedConflictExplanation(conflict)">{{ droppedConflictExplanation(conflict) }}</p>
         <div class="droppedComparison">
           <section><h4>Your dropped copy</h4><p v-if="conflict.yours.originSourceAvailable === false">The original English source was not preserved.</p><pre class="englishDiff">{{ (conflict.yours.snapshot?.english || []).join('\n') }}</pre><pre class="englishDiff">{{ (conflict.yours.snapshot?.translations || []).join('\n') }}</pre></section>
@@ -896,16 +904,7 @@
           <a class="statusPill revised workspaceFilterLink" href="#table" @click.prevent="filterFilesByStatus('revised', $event)" v-tooltip="'Corrections to existing translations outside this version\'s Missing/Dropped assignment scope.\nClick to show Revised. Ctrl+click to add Revised to the current filter.'"><span class="statusDot" aria-hidden="true"></span>Revised <strong>{{ statistic.isRevised }}</strong></a>
           <a class="statusPill saved workspaceFilterLink" href="#table" @click.prevent="filterFilesByStatus('saved', $event)" v-tooltip="'Files with a staged translation for the selected language.\nClick to show Saved. Ctrl+click to add Saved to the current filter.'"><span class="statusDot" aria-hidden="true"></span>Saved <strong>{{ statistic.hasChanges }}</strong></a>
           <time v-if="managedActiveVersion?.deadlineAt" class="versionDeadline" tabindex="0" :datetime="managedActiveVersion.deadlineAt" v-tooltip="managedStatusDeadlineTooltip" :aria-label="managedStatusDeadlineTooltip">{{ managedReminder(managedActiveVersion.deadlineAt) }}</time>
-          <div class="collaborationStatus" v-if="collaborationNeedsAttention" aria-label="Translation collaboration warning">
-            <span class="collaborationConnection" :class="collaborationConnectionTone" aria-hidden="true"></span>
-            <span v-if="collaborationDroppedReviewWarning" role="alert"><a class="collaborationError collaborationDroppedReviewLink" href="#table" @click.prevent="collaborationOpenDroppedConflicts">{{ collaborationState.error || 'Conflicting dropped copies need review before these files can be shared.' }}</a></span>
-            <span v-else-if="!collaborationState.error" role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
-            <a v-else-if="entryAlignmentWarningPath" class="collaborationError" href="#table" role="alert" @click.prevent="openFileEntryAlignment(entryAlignmentWarningPath)">{{ collaborationState.error }} · Align entries</a>
-            <span v-else class="collaborationError" role="alert">{{ collaborationState.error }}</span>
-            <button v-if="collaborationConflicts.length" @click="collaborationOpenConflicts">Resolve translation conflicts ({{ collaborationConflicts.length }})</button>
-          </div>
         </div>
-        <p v-if="collaborationUserNotice" class="collaborationFooterMessage" role="status">{{ collaborationUserNotice }}</p>
         </div>
         <div class="workspaceFooterRight">
         <span class="browserWorkSlot"><span v-if="browserWorkTooltip" class="browserWorkStatus" tabindex="0" role="img" :aria-label="browserWorkTooltip" v-tooltip="browserWorkTooltip"><span class="browserWorkSpinner" aria-hidden="true"></span></span></span>
@@ -936,8 +935,8 @@
         </header>
         <p v-if="!commentsEligible && commentsUnavailableReason" class="commentsEmpty">{{ commentsUnavailableReason }}</p>
         <template v-else>
-          <p v-if="commentsAllError" class="commentsError" role="alert">{{ commentsAllError }}</p>
-          <p v-if="commentsUnreadError" class="commentsError" role="alert">{{ commentsUnreadError }}</p>
+          <app-notice tone="error" v-if="commentsAllError" class="commentsError" role="alert">{{ commentsAllError }}</app-notice>
+          <app-notice tone="error" v-if="commentsUnreadError" class="commentsError" role="alert">{{ commentsUnreadError }}</app-notice>
           <div ref="commentsAllList" class="commentsList" tabindex="0" aria-label="Comments from all files" :aria-busy="commentsAllBusy">
             <section v-for="group in commentsAllGroups" :key="group.key" class="commentCard commentFileGroup" :aria-label="'Comments on ' + group.filepath">
               <button type="button" class="commentFileLink" @click="commentsOpenFile(group.filepath)" :disabled="!commentsFileAvailable(group.filepath) || navigationBusy" :title="commentsFileAvailable(group.filepath) ? 'Open file comments' : 'This file is not in the loaded source version'">{{ commentsFileDisplayLabel(group.filepath) }}</button>
@@ -951,7 +950,7 @@
                 <button type="submit" class="commentsSendReply btnPrimary" :disabled="!commentsCanReply(group.filepath) || commentsReplyPosting(group.filepath) || !commentsReplyDraft(group.filepath).trim()" :aria-label="(commentsReplyPosting(group.filepath) ? 'Sending reply to ' : 'Send reply to ') + group.filepath" :title="commentsReplyPosting(group.filepath) ? 'Sending reply…' : 'Send reply'"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m3 3 18 9-18 9 4-9-4-9Z"></path><path d="M7 12h14"></path></svg></button>
                 <label class="commentsScopeOption"><input type="checkbox" :checked="commentsReplyAllLanguages(group.filepath)" @change="commentsSetReplyAllLanguages(group.filepath, $event.target.checked)" :disabled="!commentsCanReply(group.filepath) || commentsReplyPosting(group.filepath)">Post to all languages</label>
               </form>
-              <p v-if="commentsReplyError(group.filepath)" class="commentsError commentReplyError" role="alert">{{ commentsReplyError(group.filepath) }}</p>
+              <app-notice tone="error" v-if="commentsReplyError(group.filepath)" class="commentsError commentReplyError" role="alert">{{ commentsReplyError(group.filepath) }}</app-notice>
             </section>
             <p v-if="commentsAllFeed.loaded && !commentsAllItems.length && !commentsAllError" class="commentsEmpty">No comments yet. Open a file’s Comments tab to start a discussion.</p>
             <button v-if="commentsAllHasMore" type="button" class="commentsLoadMore" @click="commentsLoadMoreAll" :disabled="commentsAllFeed.loadingMore">Load older comments</button>
@@ -960,6 +959,13 @@
       </aside>
 
     <editor-full-shell :controller="sharedEditorController" preview-host-id="fullEditorPreviewHost" sidebar-host-id="fullEditorSidebarHost" v-if="editorVisible" v-show="!workspaceInitializationActive" :inert="workspaceInitializationActive" :aria-busy="editorLoading" aria-label="Translation editor" @keydown.esc="editorEsc" @keydown.shift.enter="editorShiftEnter">
+        <template #notice>
+          <workspace-alerts></workspace-alerts>
+          <app-notice tone="error" v-if="editorLoadError" class="collaborationError" role="alert">{{ editorLoadError }}</app-notice>
+          <collaboration-warning></collaboration-warning>
+          <app-notice tone="info" v-if="collaborationEditorNotice" class="collaborationNotice" role="status">{{ collaborationEditorNotice }}</app-notice>
+          <app-notice v-if="consistencyResolutionNotice" tone="info" class="consistencyResolutionNotice" role="status">{{ consistencyResolutionNotice }}</app-notice>
+        </template>
         <div class="twoSided editorActions">
           <h1 style="flex-grow: 1;">🧾 Translation <span v-if="managedStatusName && (managedActiveTeam?.ended || managedActiveVersion?.status === 'withdrawn')" class="editorVersionContext"><span v-if="managedActiveTeam?.ended" class="versionBadge ended" tabindex="0" v-tooltip="managedStatusTooltip" :aria-label="managedStatusTooltip">Ended</span><span v-if="managedActiveVersion?.status === 'withdrawn'" class="versionBadge withdrawn" tabindex="0" v-tooltip="managedStatusTooltip" :aria-label="managedStatusTooltip">Withdrawn</span></span></h1>
           <editor-attention-navigation :controller="sharedEditorController"></editor-attention-navigation>
@@ -983,33 +989,20 @@
             </button>
             <span class="srOnly" role="status">{{ editorFilePathCopied ? 'File path copied' : '' }}</span>
           </h3>
-          <p v-if="editorLoadError" class="collaborationError" role="alert">{{ editorLoadError }}</p>
-          <div class="collaborationEditorStatus" v-if="collaborationNeedsAttention" aria-label="Translation collaboration warning">
-            <div class="collaborationStatus">
-              <span class="collaborationConnection" :class="collaborationConnectionTone" aria-hidden="true"></span>
-              <span v-if="collaborationDroppedReviewWarning" role="alert"><a class="collaborationError collaborationDroppedReviewLink" href="#table" @click.prevent="collaborationOpenDroppedConflicts">{{ collaborationState.error || 'Conflicting dropped copies need review before these files can be shared.' }}</a></span>
-              <span v-else-if="!collaborationState.error" role="status" aria-live="polite">{{ collaborationStatusLabel }}</span>
-              <a v-else-if="entryAlignmentWarningPath" class="collaborationError" href="#table" role="alert" @click.prevent="openFileEntryAlignment(entryAlignmentWarningPath)">{{ collaborationState.error }} · Align entries</a>
-              <span v-else class="collaborationError" role="alert">{{ collaborationState.error }}</span>
-              <button v-if="collaborationConflicts.length" @click="collaborationOpenConflicts">Resolve translation conflicts ({{ collaborationConflicts.length }})</button>
-            </div>
-          </div>
             <div v-if="collaborationEditorPeers.length" class="collaborationPeerLabels collaborationEditorPeers" aria-label="Other translators editing this file">
               <span v-for="peer in collaborationEditorPeers" :key="peer.sessionId" class="collaborationPeer" :style="{ '--collaboration-color': collaborationPeerColor(peer) }">{{ collaborationPeerName(peer) }} · Editing this file</span>
             </div>
-          <p v-if="collaborationEditorNotice" class="collaborationNotice" role="status">{{ collaborationEditorNotice }}</p>
-          <div v-if="consistencyResolutionNotice" class="consistencyResolutionNotice" role="status">{{ consistencyResolutionNotice }}</div>
-          <div v-if="editorCompareActive" class="compareBanner">
+          <app-notice tone="info" v-if="editorCompareActive" class="compareBanner">
             <span>{{ editorCompareTitle }}</span>
-            <button v-if="draftRecoveryCandidate" @click="applyRecoveredDraft">Use translation</button>
-            <button @click="exitEditorCompareMode">Exit compare</button>
-          </div>
-          <div v-if="editorDroppedConflict" class="droppedTranslationPanel" role="alert">
-            <div class="droppedTranslationBanner">
+            <template #actions><button v-if="draftRecoveryCandidate" @click="applyRecoveredDraft">Use translation</button>
+            <button @click="exitEditorCompareMode">Exit compare</button></template>
+          </app-notice>
+          <div v-if="editorDroppedConflict" class="droppedTranslationPanel">
+            <app-notice tone="warning" class="droppedTranslationBanner">
               <strong>Competing dropped translations</strong>
-              <button @click="resolveDroppedTranslationConflict('local')" :disabled="editorSaving">Keep this dropped copy</button>
-              <button @click="resolveDroppedTranslationConflict('shared')" :disabled="editorSaving">Use shared dropped copy</button>
-            </div>
+              <template #actions><button @click="resolveDroppedTranslationConflict('local')" :disabled="editorSaving">Keep this dropped copy</button>
+              <button @click="resolveDroppedTranslationConflict('shared')" :disabled="editorSaving">Use shared dropped copy</button></template>
+            </app-notice>
             <p v-if="droppedConflictExplanation(editorDroppedConflict)">{{ droppedConflictExplanation(editorDroppedConflict) }}</p>
             <div class="droppedComparison">
               <section><h4>Your dropped copy</h4><p v-if="editorDroppedConflict.yours?.originSourceAvailable === false">The original English source was not preserved.</p><pre class="englishDiff">{{ (editorDroppedConflict.yours?.snapshot?.english || []).join('\n') }}</pre><pre class="englishDiff">{{ (editorDroppedConflict.yours?.snapshot?.translations || []).join('\n') }}</pre></section>
@@ -1018,31 +1011,31 @@
             <p v-if="editorDroppedConflict.kind === 'promotion'">Your saved result remains local. Resolve these copies, then Save again to share it.</p>
           </div>
           <details v-if="metadataCorrectionDetails(editorCurrentEditingDesc.filepath)" class="metadataCorrectionPanel"><summary>Metadata updated from English</summary><pre>{{ metadataCorrectionDetails(editorCurrentEditingDesc.filepath) }}</pre></details>
-          <p v-if="!editorDroppedConflict && collaborationDroppedReviewPaths.includes(editorCurrentEditingDesc.filepath)" class="collaborationNotice" role="status">Your saved result remains local. Review this translation, then Save &amp; close to share it.</p>
+          <app-notice tone="info" v-if="!editorDroppedConflict && collaborationDroppedReviewPaths.includes(editorCurrentEditingDesc.filepath)" class="collaborationNotice" role="status">Your saved result remains local. Review this translation, then Save &amp; close to share it.</app-notice>
           <div v-if="editorDroppedChoices.length > 1" class="droppedTranslationPanel">
-            <div class="droppedTranslationBanner">
+            <app-notice tone="warning" class="droppedTranslationBanner">
               <label>Recovery copy
                 <select aria-label="Recovery copy" :value="editorDroppedChoiceKey" @change="selectEditorDroppedCandidate($event.target.value)" :disabled="!editorReady || editorSaving || editorCompareActive || !!entryAlignment">
                   <option v-for="choice in editorDroppedChoices" :key="droppedChoiceKey(choice)" :value="droppedChoiceKey(choice)">{{ droppedOwnershipLabel(choice) }} · {{ (choice.originSourceHash || 'Unknown source').slice(0, 12) }}</option>
                 </select>
               </label>
               <span>Each copy is preserved separately. Choose one to review.</span>
-            </div>
+            </app-notice>
           </div>
           <div v-if="editorDroppedCandidate" class="droppedTranslationPanel">
-            <div class="droppedTranslationBanner">
+            <app-notice tone="warning" class="droppedTranslationBanner">
               <span><strong>{{ droppedOwnershipLabel(editorDroppedCandidate) }}</strong> · {{ editorDroppedCandidate.reason || 'Source changed' }}</span>
-              <button @click="useEditorDroppedCandidate" :disabled="!editorReady || editorSaving || editorCompareActive || !!entryAlignment">Use for editing</button>
+              <template #actions><button @click="useEditorDroppedCandidate" :disabled="!editorReady || editorSaving || editorCompareActive || !!entryAlignment">Use for editing</button>
               <button @click="toggleEditorEnglishDiff" :disabled="!editorReady">Toggle inline diff</button>
               <button @click="confirmTranslationUnchanged" :disabled="!editorDroppedCanPromote">Confirm unchanged</button>
               <button @click="startEntryAlignment('dropped')" :disabled="!editorReady || editorSaving || !!editorDroppedConflict || !!entryAlignment">Align dropped entries</button>
-              <button @click="discardDroppedTranslation" :disabled="!editorReady || editorSaving || !!editorDroppedConflict || !!entryAlignment">Discard dropped copy</button>
-            </div>
+              <button @click="discardDroppedTranslation" :disabled="!editorReady || editorSaving || !!editorDroppedConflict || !!entryAlignment">Discard dropped copy</button></template>
+            </app-notice>
             <details open>
               <summary :title="editorDroppedCandidate.originSourceHash">Compare dropped version → current version</summary>
               <p>Save, confirm, and discard affect only this selected recovery copy. Other copies remain available.</p>
               <div class="droppedComparison">
-                <section><h4>English source</h4><p v-if="sdDroppedSourceError" role="alert">{{ sdDroppedSourceError }} <button @click="loadSDDroppedSource" :disabled="sdDroppedSourceLoading">Load original source</button></p><p v-if="sdDroppedSourceLoading">Loading original source…</p><p v-else-if="editorDroppedCandidate.originSourceAvailable === false && !sdDroppedSource">The original English source was not preserved in this older workspace.</p><div v-else class="englishDiff" v-html="editorDroppedSourceDiff"></div></section>
+                <section><h4>English source</h4><app-notice tone="error" v-if="sdDroppedSourceError" role="alert">{{ sdDroppedSourceError }} <button @click="loadSDDroppedSource" :disabled="sdDroppedSourceLoading">Load original source</button></app-notice><p v-if="sdDroppedSourceLoading">Loading original source…</p><p v-else-if="editorDroppedCandidate.originSourceAvailable === false && !sdDroppedSource">The original English source was not preserved in this older workspace.</p><div v-else class="englishDiff" v-html="editorDroppedSourceDiff"></div></section>
                 <section><h4>Translation</h4><div class="englishDiff" v-html="editorDroppedTranslationDiff"></div></section>
               </div>
               <p v-if="editorDroppedCandidate.snapshot.translations.length !== editorCurrentEditingDesc.translations.English.length">The source entry count changed. Review the dropped copy and save a replacement.</p>
@@ -1050,10 +1043,10 @@
           </div>
         </div>
         <entry-alignment v-if="entryAlignment" :controller="$root"></entry-alignment>
-        <div v-else-if="editorEntryAlignmentRequired" class="entryAlignmentNotice" role="alert">
+        <app-notice tone="warning" v-else-if="editorEntryAlignmentRequired" class="entryAlignmentNotice" role="alert">
           <span>This translation has {{ editorBlocks.length }} blocks for {{ editorCurrentEditingDesc.translations.English.length }} English entries. Align them before editing or saving.</span>
-          <button type="button" @click="startEntryAlignment()" :disabled="!editorReady || editorSaving || !!editorDroppedConflict">Align translation entries</button>
-        </div>
+          <template #actions><button type="button" @click="startEntryAlignment()" :disabled="!editorReady || editorSaving || !!editorDroppedConflict">Align translation entries</button></template>
+        </app-notice>
         <template v-if="!entryAlignment && !editorEntryAlignmentRequired">
         <div class="editBlock" v-for="(editorBlock, index) in editorBlocks" :key="index">
           <div class="inputField">
@@ -1198,7 +1191,7 @@
           <p class="consistencyDiffLegend"><span class="diffInlineDel">Removed from this entry</span><span class="diffInlineAdd">Added in compared version</span></p>
           <div class="englishDiff" v-html="consistencyDiffHtml" :lang="translationEditorBcp47"></div>
         </section>
-        <p v-if="consistencyResolverError" class="consistencyResolverError" role="alert">{{ consistencyResolverError }}</p>
+        <app-notice tone="error" v-if="consistencyResolverError" class="consistencyResolverError" role="alert">{{ consistencyResolverError }}</app-notice>
         <footer class="consistencyDialogFooter">
           <p v-if="consistencyResolverBusy" role="status">Saving matching translations…</p>
           <p>Choosing a version saves matching entries immediately. Other edits stay in your draft.</p>
@@ -1210,7 +1203,7 @@
     <div v-if="tmManagerVisible" class="cloudResolverBackdrop tmBackdrop" data-inline-focus-surface @keydown.stop @keydown.esc.prevent="tmManagerVisible = false">
       <section class="cloudResolver tmDialog" role="dialog" aria-modal="true" aria-labelledby="tmManagerTitle">
         <div class="tmDialogHeading"><div><h2 id="tmManagerTitle">Translation Memory</h2><p>{{ lang }} · {{ tmUnits.length.toLocaleString() }} entries · {{ tmCloudAvailable ? 'Shared with your language team' : 'Local to this profile' }}</p></div><button @click="tmManagerVisible = false" :disabled="tmBusy" aria-label="Close TM manager">✕</button></div>
-        <p v-if="tmLocalIssue || tmIssue" class="tmIssue" role="alert">{{ tmLocalIssue || tmIssue }}</p>
+        <app-notice tone="error" v-if="tmLocalIssue || tmIssue" class="tmIssue" role="alert">{{ tmLocalIssue || tmIssue }}</app-notice>
         <div v-if="tmConflicts.length" class="tmConflicts">
           <h3>Corrections need your choice</h3>
           <article v-for="conflict in tmConflicts" :key="conflict.id"><div class="tmConflictColumns"><section><h4>My correction</h4><small>{{ tmGameLabel(conflict.local?.gameScope) }} · {{ tmMatchContext(conflict.local) }}</small><pre>{{ tmText(conflict.local?.source) }}</pre><pre>{{ tmText(conflict.local?.deleted ? 'Deleted' : conflict.local?.target) }}</pre><button @click="resolveTMConflict(conflict, 'local')">{{ conflict.local?.deleted ? 'Keep my deletion' : 'Use my correction' }}</button></section><section><h4>Shared correction</h4><template v-if="conflict.shared"><small>{{ tmGameLabel(conflict.shared.gameScope) }} · {{ tmMatchContext(conflict.shared) }}</small><pre>{{ tmText(conflict.shared.source) }}</pre><pre>{{ tmText(conflict.shared.deleted ? 'Deleted' : conflict.shared.target) }}</pre></template><p v-else>Entry absent from shared TM.</p><button @click="resolveTMConflict(conflict, 'shared')">{{ !conflict.shared ? 'Keep shared absence' : conflict.shared.deleted ? 'Keep shared deletion' : 'Use shared correction' }}</button></section></div></article>
@@ -1233,7 +1226,7 @@
     <div v-if="tmSeedVisible" class="cloudResolverBackdrop tmBackdrop tmPreviewBackdrop" data-inline-focus-surface @keydown.stop @keydown.esc.prevent="tmSeedVisible = false">
       <section class="cloudResolver tmDialog" role="dialog" aria-modal="true" aria-labelledby="tmSeedTitle">
         <div class="tmDialogHeading"><div><h2 id="tmSeedTitle">Review TM import</h2><p>{{ lang }} · {{ tmSeedSelectedCount }} selected · {{ tmSeedSkipped }} blank or incompatible entries skipped</p></div><button @click="tmSeedVisible = false" :disabled="tmBusy" aria-label="Close TM import">✕</button></div>
-        <p v-if="tmLocalIssue" class="tmIssue" role="alert">{{ tmLocalIssue }}</p><p>New entries are selected. Corrections and deleted entries require your selection. Importing TM does not change workspace translations.</p>
+        <app-notice tone="error" v-if="tmLocalIssue" class="tmIssue" role="alert">{{ tmLocalIssue }}</app-notice><p>New entries are selected. Corrections and deleted entries require your selection. Importing TM does not change workspace translations.</p>
         <div class="tmToolbar"><button @click="tmSeedRows.forEach(row => row.selected = !row.existing && !row.imported)" :disabled="tmBusy">Select additions</button><button @click="tmSeedRows.forEach(row => row.selected = false)" :disabled="tmBusy">Clear selection</button><button @click="applyTMSeed" :disabled="tmBusy || !tmSeedSelectedCount">{{ tmBusy ? 'Importing…' : 'Import selected entries' }}</button></div>
         <article class="tmSeedRow" v-for="(row, rowIndex) in tmVisibleSeedRows" :key="row.unit.id"><label><input type="checkbox" v-model="row.selected" :disabled="tmBusy || row.imported">{{ row.action }} · {{ tmGameLabel(row.unit.gameScope) }}</label><pre>{{ tmText(row.unit.source) }}</pre><div class="tmEditColumns"><section v-if="row.existing"><h4>Remembered translation</h4><pre>{{ tmText(row.existing.target) }}</pre></section><section><h4>Incoming translation</h4><pre>{{ tmText(row.unit.target) }}</pre></section></div><small>{{ tmMatchContext(row.unit) }}</small></article>
         <p v-if="!tmSeedRows.length" class="tmEmpty">No new or changed eligible pairs.</p><div class="tmToolbar"><span>Page {{ tmSeedPage }} of {{ Math.max(1, Math.ceil(tmSeedRows.length / 40)) }}</span><div><button @click="tmSeedPage--" :disabled="tmSeedPage <= 1">Previous</button> <button @click="tmSeedPage++" :disabled="tmSeedPage * 40 >= tmSeedRows.length">Next</button></div></div>
@@ -1245,7 +1238,7 @@
     </div>
 
     <div v-if="tmHistoryVisible" class="cloudResolverBackdrop tmBackdrop tmPreviewBackdrop" data-inline-focus-surface @keydown.stop @keydown.esc.prevent="tmHistoryVisible = false">
-      <section class="cloudResolver tmDialog" role="dialog" aria-modal="true" aria-labelledby="tmHistoryTitle"><div class="tmDialogHeading"><div><h2 id="tmHistoryTitle">TM history</h2><p>{{ tmHistoryRemote ? 'Shared and local history' : 'Local history' }}</p></div><button @click="tmHistoryVisible = false" aria-label="Close TM history">✕</button></div><p v-if="tmLocalIssue" class="tmIssue" role="alert">{{ tmLocalIssue }}</p><article v-for="event in tmHistoryEvents" :key="(event.remote ? 'shared:' : 'local:') + (event.id || event.key)" class="tmSeedRow"><p>{{ event.remote ? 'Shared' : 'Local' }} · {{ event.origin || event.action || event.kind || 'Correction' }} · {{ event.actorName || event.author?.name || event.author || '' }} · {{ new Date(event.createdAt || event.at || event.timestamp || 0).toLocaleString() }}</p><div class="tmEditColumns"><section><h4>Before</h4><pre>{{ tmText(event.before?.target ?? event.before?.unit?.target ?? 'Open to preview') }}</pre><button @click="restoreTMHistory(event, 'before')">Restore before…</button></section><section><h4>After</h4><pre>{{ tmText(event.after?.target ?? event.after?.unit?.target ?? 'Open to preview') }}</pre><button @click="restoreTMHistory(event, 'after')">Restore after…</button></section></div></article><p v-if="!tmHistoryEvents.length" class="tmEmpty">No history for this entry.</p><button v-if="tmHistoryCursor" @click="loadOlderTMHistory" :disabled="tmHistoryLoading">{{ tmHistoryLoading ? 'Loading…' : 'Load older shared history' }}</button></section>
+      <section class="cloudResolver tmDialog" role="dialog" aria-modal="true" aria-labelledby="tmHistoryTitle"><div class="tmDialogHeading"><div><h2 id="tmHistoryTitle">TM history</h2><p>{{ tmHistoryRemote ? 'Shared and local history' : 'Local history' }}</p></div><button @click="tmHistoryVisible = false" aria-label="Close TM history">✕</button></div><app-notice tone="error" v-if="tmLocalIssue" class="tmIssue" role="alert">{{ tmLocalIssue }}</app-notice><article v-for="event in tmHistoryEvents" :key="(event.remote ? 'shared:' : 'local:') + (event.id || event.key)" class="tmSeedRow"><p>{{ event.remote ? 'Shared' : 'Local' }} · {{ event.origin || event.action || event.kind || 'Correction' }} · {{ event.actorName || event.author?.name || event.author || '' }} · {{ new Date(event.createdAt || event.at || event.timestamp || 0).toLocaleString() }}</p><div class="tmEditColumns"><section><h4>Before</h4><pre>{{ tmText(event.before?.target ?? event.before?.unit?.target ?? 'Open to preview') }}</pre><button @click="restoreTMHistory(event, 'before')">Restore before…</button></section><section><h4>After</h4><pre>{{ tmText(event.after?.target ?? event.after?.unit?.target ?? 'Open to preview') }}</pre><button @click="restoreTMHistory(event, 'after')">Restore after…</button></section></div></article><p v-if="!tmHistoryEvents.length" class="tmEmpty">No history for this entry.</p><button v-if="tmHistoryCursor" @click="loadOlderTMHistory" :disabled="tmHistoryLoading">{{ tmHistoryLoading ? 'Loading…' : 'Load older shared history' }}</button></section>
     </div>
 
     <div v-if="settingsImportDraft" class="cloudResolverBackdrop" @keydown.esc="cancelSettingsImport">
@@ -1271,7 +1264,7 @@
             <div class="cloudConflictCell cloudResultCell"><h3>TL note</h3><pre>{{ cloudResult ? (cloudResult.tlnote || '—') : 'Entry deleted' }}</pre><small v-if="cloudResult && cloudConflict.noteConflict && !cloudNoteChoice">Preview · choose a side</small></div>
             <div class="cloudConflictCell"><h3>TL note</h3><pre>{{ cloudConflict.remoteNote || '—' }}</pre><button v-if="cloudConflict.noteConflict" :disabled="!cloudResult" :aria-pressed="cloudNoteChoice === 'remote'" @click="cloudNoteChoice = 'remote'">Keep remote note</button><span v-else>Automatically merged</span></div>
           </div>
-          <p v-if="cloudError" class="cloudWarning" role="alert">{{ cloudStatus }}</p>
+          <app-notice tone="warning" v-if="cloudError" class="cloudWarning" role="alert">{{ cloudStatus }}</app-notice>
           <div class="cloudResolverActions"><button @click="cloudNextConflict(-1)" :disabled="cloudConflictIndex === 0 || cloudBusy">Previous</button><button @click="cloudNextConflict(1)" :disabled="cloudConflictIndex >= cloudConflicts.length - 1 || cloudBusy">Next</button><button class="cloudSaveResolution" @click="cloudSaveResolution" :disabled="!cloudResolutionReady || cloudBusy || !cloudSignedIn">{{ cloudBusy ? 'Saving…' : 'Save result' }}</button></div>
         </template>
         <p v-else>No dictionary conflicts remain.</p>
@@ -1294,8 +1287,8 @@
           <label>Through date (UTC)<input type="date" v-model="cloudHistoryFilters.to" :disabled="cloudHistoryRestoring"></label>
           <div class="cloudHistoryFilterActions"><button type="submit" :disabled="cloudHistoryLoading || cloudHistoryRestoring">Apply filters</button><button type="button" @click="cloudClearHistoryFilters" :disabled="cloudHistoryLoading || cloudHistoryRestoring">Clear</button></div>
         </form>
-        <p v-if="cloudHistoryError" class="cloudWarning" role="alert">{{ cloudHistoryError }}</p>
-        <p v-if="cloudHistoryNotice" role="status">{{ cloudHistoryNotice }}</p>
+        <app-notice tone="warning" v-if="cloudHistoryError" class="cloudWarning" role="alert">{{ cloudHistoryError }}</app-notice>
+        <app-notice v-if="cloudHistoryNotice" tone="info" role="status">{{ cloudHistoryNotice }}</app-notice>
         <div class="cloudHistoryList" aria-label="Shared dictionary changes" :aria-busy="cloudHistoryLoading">
           <button v-for="event in cloudHistoryItems" :key="event.id" type="button" class="cloudHistoryItem" :class="{ selected: cloudHistoryEvent && cloudHistoryEvent.id === event.id }" @click="cloudSelectHistoryEvent(event)" :disabled="cloudHistoryRestoring" :aria-pressed="!!cloudHistoryEvent && cloudHistoryEvent.id === event.id">
             <span class="cloudHistoryItemTitle"><strong>{{ event.find || '(empty Find)' }}</strong><span class="cloudHistoryTag">{{ cloudHistoryAction(event) }}</span><span v-if="event.origin !== 'edit'" class="cloudHistoryTag">{{ cloudHistoryOrigin(event) }}</span></span>
@@ -1318,7 +1311,7 @@
             <h3>Review shared restore</h3>
             <p>This changes the shared entry for all {{ cloudHistoryLanguage }} translators and keeps the same entry ID. Your current local version is preserved in a recovery copy.</p>
             <div class="cloudHistoryVersions"><div><h4>Currently shared · revision {{ cloudHistoryEvent.currentRevision }}</h4><pre>{{ cloudHistorySnapshotText(cloudHistoryEvent.current) }}</pre></div><div><h4>Result after restore</h4><pre>{{ cloudHistorySnapshotText(cloudHistoryRestoreEntry) }}</pre></div></div>
-            <p v-if="!cloudHistoryRestoreEntry" class="cloudWarning">The selected version has no entry. Restoring it deletes this entry from the shared dictionary.</p>
+            <app-notice tone="warning" v-if="!cloudHistoryRestoreEntry" class="cloudWarning">The selected version has no entry. Restoring it deletes this entry from the shared dictionary.</app-notice>
             <p>If the shared dictionary changes before saving, review a fresh version before trying again.</p>
             <div class="cloudResolverActions"><button @click="cloudHistoryRestoreVersion = ''" :disabled="cloudHistoryRestoring">Cancel restore</button><button class="cloudSaveResolution" @click="cloudConfirmHistoryRestore" :disabled="cloudHistoryRestoring">{{ cloudHistoryRestoring ? 'Restoring…' : 'Confirm shared restore' }}</button></div>
           </div>
@@ -1335,9 +1328,9 @@
           <label class="collaborationFilePicker">File to review
             <select :value="collaborationConflictId" @change="collaborationSelectConflict($event.target.value)" :disabled="collaborationConflictBusy"><option v-for="conflict in collaborationConflicts" :key="conflict.id" :value="conflict.id">{{ conflict.filepath }}</option></select>
           </label>
-          <p v-if="collaborationConflict.kind === 'join'" class="collaborationNotice">This browser has different saved translations and no shared base yet. Your local work has been preserved.</p>
-          <p v-if="collaborationConflict.shared?.valuesUnavailable" class="collaborationNotice" role="alert">The untouched original translation is unavailable. Your saved translation is preserved; review it against the current English before choosing your text.</p>
-          <p v-if="collaborationConflictNotice" class="collaborationNotice" role="status">{{ collaborationConflictNotice }}</p>
+          <app-notice tone="info" v-if="collaborationConflict.kind === 'join'" class="collaborationNotice">This browser has different saved translations and no shared base yet. Your local work has been preserved.</app-notice>
+          <app-notice tone="error" v-if="collaborationConflict.shared?.valuesUnavailable" class="collaborationNotice" role="alert">The untouched original translation is unavailable. Your saved translation is preserved; review it against the current English before choosing your text.</app-notice>
+          <app-notice tone="info" v-if="collaborationConflictNotice" class="collaborationNotice" role="status">{{ collaborationConflictNotice }}</app-notice>
           <div class="collaborationConflictEntries">
             <section v-for="entryIndex in collaborationConflictIndexes" :key="entryIndex" class="collaborationConflictEntry" :aria-labelledby="'collaborationEntry-' + entryIndex">
               <h3 :id="'collaborationEntry-' + entryIndex">Entry {{ entryIndex + 1 }}</h3>
@@ -1360,8 +1353,8 @@
               <button @click="collaborationChooseMetadata(field, 'shared')" :disabled="collaborationConflictBusy" :aria-pressed="collaborationConflictMetadataChoices[field] === 'shared'">Shared: {{ collaborationConflict.shared[field] ? 'Yes' : 'No' }}</button>
             </div>
           </section>
-          <p v-if="collaborationConflictIndexes.length === 0 && collaborationConflictMetadata.length === 0" class="collaborationNotice">Translation text has already merged. Save the result to finish reconciling this file.</p>
-          <p v-if="collaborationConflictError" class="collaborationError" role="alert">{{ collaborationConflictError }}</p>
+          <app-notice tone="info" v-if="collaborationConflictIndexes.length === 0 && collaborationConflictMetadata.length === 0" class="collaborationNotice">Translation text has already merged. Save the result to finish reconciling this file.</app-notice>
+          <app-notice tone="error" v-if="collaborationConflictError" class="collaborationError" role="alert">{{ collaborationConflictError }}</app-notice>
           <footer class="collaborationDialogFooter"><span>Result drafts stay in this tab when you close or switch files. Save result to keep them after a reload or account/workspace change. Original saved conflict versions remain in browser storage.</span><button class="btnPrimary" @click="collaborationSubmitConflict" :disabled="!collaborationConflictReady || collaborationConflictBusy">{{ collaborationConflictBusy ? 'Saving…' : 'Save result' }}</button></footer>
         </template>
         <p v-else role="status">No translation conflicts remain.</p>
@@ -1374,10 +1367,10 @@
           <div><h2 id="collaborationHistoryTitle">Shared translation history</h2><p>{{ collaborationHistoryFilepath }}</p></div>
           <button ref="collaborationHistoryClose" @click="collaborationCloseHistory">Close</button>
         </header>
-        <p class="collaborationNotice">Changes for this game, source version, and language. Earlier local history stays in this browser and is not uploaded.</p>
+        <app-notice tone="info" class="collaborationNotice">Changes for this game, source version, and language. Earlier local history stays in this browser and is not uploaded.</app-notice>
         <div class="collaborationHistoryToolbar"><button @click="collaborationRefreshHistory()" :disabled="collaborationHistoryLoading || collaborationHistoryRestoring">Refresh history</button><span v-if="collaborationHistoryLoading" role="status">Loading history…</span></div>
-        <p v-if="collaborationHistoryError" class="collaborationError" role="alert">{{ collaborationHistoryError }}</p>
-        <p v-if="collaborationHistoryNotice" class="collaborationNotice" role="status">{{ collaborationHistoryNotice }}</p>
+        <app-notice tone="error" v-if="collaborationHistoryError" class="collaborationError" role="alert">{{ collaborationHistoryError }}</app-notice>
+        <app-notice tone="info" v-if="collaborationHistoryNotice" class="collaborationNotice" role="status">{{ collaborationHistoryNotice }}</app-notice>
         <ol class="collaborationHistoryList" aria-label="Shared translation changes">
           <li v-for="event in collaborationHistoryItems" :key="event.id"><button @click="collaborationSelectHistoryEvent(event)" :disabled="collaborationHistoryRestoring" :class="{ active: collaborationHistoryEvent && collaborationHistoryEvent.id === event.id }"><strong>{{ collaborationHistoryActor(event) }}</strong><span>{{ collaborationHistoryDate(event) }}</span><span>{{ collaborationHistoryOrigin(event) }} · Revision {{ event.revision }}</span></button></li>
         </ol>
@@ -1483,34 +1476,48 @@
   <script src="clientTextUi.js"></script>
   <script src="editorSession.js"></script>
   <script src="tmUi.js"></script>
+  <script type="text/x-template" id="collaboration-warning-template">
+    <app-notice v-if="$root.collaborationNeedsAttention" :tone="$root.collaborationState.error ? 'error' : 'warning'" class="collaborationStatus" role="alert" aria-label="Translation collaboration warning">
+      <span class="collaborationConnection" :class="$root.collaborationConnectionTone" aria-hidden="true"></span>
+      <a v-if="$root.collaborationDroppedReviewWarning" class="collaborationError collaborationDroppedReviewLink" href="#table" @click.prevent="$root.collaborationOpenDroppedConflicts">{{ $root.collaborationState.error || 'Conflicting dropped copies need review before these files can be shared.' }}</a>
+      <span v-else-if="!$root.collaborationState.error">{{ $root.collaborationStatusLabel }}</span>
+      <a v-else-if="$root.entryAlignmentWarningPath" class="collaborationError" href="#table" @click.prevent="$root.openFileEntryAlignment($root.entryAlignmentWarningPath)">{{ $root.collaborationState.error }} · Align entries</a>
+      <span v-else class="collaborationError">{{ $root.collaborationState.error }}</span>
+      <template v-if="$root.collaborationConflicts.length" #actions><button @click="$root.collaborationOpenConflicts">Resolve translation conflicts ({{ $root.collaborationConflicts.length }})</button></template>
+    </app-notice>
+  </script>
   <script type="text/x-template" id="workspace-alerts-template">
-    <div v-if="$root.localSaveError || $root.dictionaryWorkerError || ($root.cloudStorageError && !$root.dictionaryPreparationOwnsStorageError) || $root.inlineDraftError || $root.deferredDraftSaveError" class="workspaceAlerts" role="group" aria-label="Workspace errors">
-      <div v-if="$root.localSaveError" class="cloudStorageError" role="alert">
+    <div v-if="($root.storageMigrationMessage && !$root.workspaceInitializationActive) || $root.localSaveError || $root.dictionaryWorkerError || ($root.cloudStorageError && !$root.dictionaryPreparationOwnsStorageError) || $root.inlineDraftError || $root.deferredDraftSaveError" class="workspaceAlerts" role="group" aria-label="Workspace notices">
+      <app-notice v-if="$root.storageMigrationMessage && !$root.workspaceInitializationActive" tone="info" class="storageMigrationNotice" role="status" aria-atomic="true">
+        <span v-if="$root.storageMigrationBusy" class="browserWorkSpinner" aria-hidden="true"></span>
+        <span>{{ $root.storageMigrationMessage }}</span>
+      </app-notice>
+      <app-notice v-if="$root.localSaveError" tone="error" class="cloudStorageError" role="alert">
         <span>Could not finish saving your translations. Your edits remain in this tab. {{ $root.localSaveError }}</span>
-        <div class="workspaceAlertActions"><button @click="$root.retryPendingSaves">Retry saving</button><button @click="$root.downloadPendingSaves">Download pending edits</button></div>
-      </div>
-      <div v-if="$root.dictionaryWorkerError" class="cloudStorageError" role="alert">
+        <template #actions><button @click="$root.retryPendingSaves">Retry saving</button><button @click="$root.downloadPendingSaves">Download pending edits</button></template>
+      </app-notice>
+      <app-notice v-if="$root.dictionaryWorkerError" tone="error" class="cloudStorageError" role="alert">
         <span>Could not prepare Dictionary matches. {{ $root.dictionaryWorkerError }}</span>
-        <div class="workspaceAlertActions"><button @click="$root.retryDictionaryPreparation" :disabled="$root.dictionaryPreparationRetrying">Retry preparation</button></div>
-      </div>
-      <div v-if="$root.cloudStorageError && !$root.dictionaryPreparationOwnsStorageError" class="cloudStorageError" role="alert">
+        <template #actions><button @click="$root.retryDictionaryPreparation" :disabled="$root.dictionaryPreparationRetrying">Retry preparation</button></template>
+      </app-notice>
+      <app-notice v-if="$root.cloudStorageError && !$root.dictionaryPreparationOwnsStorageError" tone="error" class="cloudStorageError" role="alert">
         <span>{{ $root.cloudStorageError }}</span>
-        <div class="workspaceAlertActions"><button @click="$root.saveSettings">Retry local save</button></div>
-      </div>
-      <div v-if="$root.inlineDraftError" class="cloudStorageError" role="alert">
+        <template #actions><button @click="$root.saveSettings">Retry local save</button></template>
+      </app-notice>
+      <app-notice v-if="$root.inlineDraftError" tone="error" class="cloudStorageError" role="alert">
         <span>{{ $root.inlineDraftError }}</span>
-        <div class="workspaceAlertActions"><button @click="$root.openDraftRecovery">Review retained edits</button></div>
-      </div>
-      <div v-if="$root.deferredDraftSaveError" class="cloudStorageError" role="alert">
+        <template #actions><button @click="$root.openDraftRecovery">Review retained edits</button></template>
+      </app-notice>
+      <app-notice v-if="$root.deferredDraftSaveError" tone="error" class="cloudStorageError" role="alert">
         <span>{{ $root.deferredDraftSaveError }}</span>
-        <div class="workspaceAlertActions">
+        <template #actions>
           <button v-if="!$root.hasStagedDeletionReview || $root.hasDeferredDraftReview" @click="$root.openDraftRecovery">Review retained edits</button>
           <template v-if="$root.hasStagedDeletionReview">
             <button @click="$root.reviewStagedDeletion" :disabled="$root.stagedDeletionReviewBusy">Review saved translation</button>
             <button @click="$root.cancelStagedDeletionReviews" :disabled="$root.stagedDeletionReviewBusy">Cancel deletion requests</button>
           </template>
-        </div>
-      </div>
+        </template>
+      </app-notice>
     </div>
   </script>
   <script src="index.js"></script>

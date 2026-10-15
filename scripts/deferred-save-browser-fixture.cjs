@@ -1,5 +1,6 @@
 // Disposable normal-mode acceptance check: real IndexedDB, draft records and save worker.
 // Run with PLAYWRIGHT_MODULE_PATH when Playwright is outside this checkout.
+// Use --notice-layout-only for the normal-mode notice and recovery-action layout checks.
 const assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
 const { resolve, join } = require('node:path');
@@ -169,7 +170,7 @@ async function run() {
               return { top: box.top, bottom: box.bottom, left: box.left, right: box.right, height: box.height };
             };
             return { stackCount: document.querySelectorAll('.workspaceAlerts').length,
-              alertCount: alerts.querySelectorAll('[role="alert"]').length, header: rect(header), nav: rect(nav), stack: rect(alerts),
+              alertCount: alerts.querySelectorAll('[role="alert"]').length, header: rect(header), nav: rect(nav), stack: rect(alerts.closest('.appNoticeStack')),
               banners: [...alerts.children].map(rect), viewportWidth: innerWidth, viewportHeight: innerHeight,
               navHit: [...nav.querySelectorAll('button')].every(button => {
                 const box = button.getBoundingClientRect();
@@ -209,13 +210,13 @@ async function run() {
     await page.keyboard.press('Escape'); await settings.waitFor({ state: 'hidden' });
     await settingsButton.focus(); await page.keyboard.press('Enter'); await settings.waitFor();
     await page.keyboard.press('Escape'); await settings.waitFor({ state: 'hidden' });
-    await page.locator('.workspaceAlerts').getByRole('button', { name: 'View local drafts', exact: true }).last().click();
-    const draftsDialog = page.getByRole('dialog', { name: 'Local drafts', exact: true });
+    await page.locator('.workspaceAlerts').getByRole('button', { name: 'Review retained edits', exact: true }).last().click();
+    const draftsDialog = page.getByRole('dialog', { name: 'Retained edits', exact: true });
     await draftsDialog.waitFor();
     assert.equal(await draftsDialog.evaluate(element => {
       const box = element.getBoundingClientRect();
       return element.contains(document.elementFromPoint(box.left + 20, box.top + 20));
-    }), true, 'Local drafts modal displays above errors');
+    }), true, 'Retained edits modal displays above errors');
     await draftsDialog.getByRole('button', { name: 'Close', exact: true }).click();
     await page.evaluate(async filepath => {
       const vm = window.__deferredSaveApp;
@@ -224,7 +225,7 @@ async function run() {
       await vm.$nextTick();
     }, first);
     const deletionBanner = page.locator('.workspaceAlerts [role="alert"]').filter({ hasText: 'Fixture staged deletion needs review' });
-    assert.equal(await deletionBanner.getByRole('button', { name: 'View local drafts', exact: true }).count(), 0,
+    assert.equal(await deletionBanner.getByRole('button', { name: 'Review retained edits', exact: true }).count(), 0,
       'Rejected deletion directs to saved translation instead of a missing draft');
     for (const name of ['Review saved translation', 'Cancel deletion requests']) {
       assert.equal(await deletionBanner.getByRole('button', { name, exact: true }).isEnabled(), true, name + ' available for rejected deletion');
@@ -241,30 +242,37 @@ async function run() {
         message: 'Fixture deferred draft save needs review before staging.' }] };
       await vm.$nextTick();
     }, second);
-    assert.equal(await deletionBanner.getByRole('button', { name: 'View local drafts', exact: true }).isEnabled(), true,
+    assert.equal(await deletionBanner.getByRole('button', { name: 'Review retained edits', exact: true }).isEnabled(), true,
       'Mixed deletion and draft reviews retain both recovery routes');
-    results.push('Rejected deletion banner offers Review saved translation and Cancel deletion requests; busy state prevents duplicates and mixed draft reviews preserve View local drafts.');
+    results.push('Rejected deletion banner offers Review saved translation and Cancel deletion requests; busy state prevents duplicates and mixed draft reviews preserve Review retained edits.');
     await setLayoutErrors(false);
     await page.evaluate(() => {
       const vm = window.__deferredSaveApp; vm.fileFiltersVisible = false; vm.uiDensity = 'compact'; vm._cloudApplying = false;
       document.querySelector('.workspaceMain').style.minHeight = ''; window.scrollTo(0, 0);
     });
     await page.setViewportSize({ width: 1440, height: 1000 });
-    results.push('Navbar remained pointer/keyboard accessible with five stacked errors while scrolled, in four themes, both densities and 1440/1000/800 px desktop windows; Settings and Local drafts dialogs displayed above the banners.');
+    results.push('Navbar remained pointer/keyboard accessible with five stacked errors while scrolled, in four themes, both densities and 1440/1000/800 px desktop windows; Settings and Retained edits dialogs displayed above the banners.');
     await open(first);
     await setLayoutErrors(true);
     assert.equal(await page.locator('.workspaceHeader').count(), 0, 'Full editor has no workspace navbar');
-    assert.equal(await page.locator('.workspaceAlerts').count(), 1, 'Full editor renders one fallback error stack');
-    assert.equal(await page.locator('.workspaceAlertsFallback [role="alert"]').count(), 5, 'Fallback preserves every error in the full editor');
-    assert.equal(await page.evaluate(() => {
+    assert.equal(await page.locator('.workspaceAlerts').count(), 1, 'Full editor renders one measured error stack');
+    assert.equal(await page.locator('.editorNotice .workspaceAlerts [role="alert"]').count(), 5, 'The measured notice area preserves every error in the full editor');
+    assert.equal(await page.locator('.workspaceAlertsFallback').count(), 0, 'A separate fallback cannot cover editor tool tabs');
+    const fullEditorGeometry = await page.evaluate(async () => {
       document.querySelector('.editor .edit').style.minHeight = '1400px'; window.scrollTo(0, 800);
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       const button = [...document.querySelectorAll('.editorActions button')].find(element => element.textContent === 'Save & close');
       const box = button.getBoundingClientRect();
-      return button.contains(document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2));
-    }), true, 'Full editor Save control remains pointer accessible below fallback errors after scrolling');
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return { accessible: button.contains(hit), button: { top: box.top, bottom: box.bottom },
+        noticeHeight: getComputedStyle(document.querySelector('.editor')).getPropertyValue('--editor-notice-height'),
+        notice: document.querySelector('.editorNotice').getBoundingClientRect().toJSON(), hit: hit?.className };
+    });
+    assert.equal(fullEditorGeometry.accessible, true,
+      'Full editor Save control remains pointer accessible below measured errors after scrolling: ' + JSON.stringify(fullEditorGeometry));
     await setLayoutErrors(false);
     await page.evaluate(() => { document.querySelector('.editor .edit').style.minHeight = ''; window.scrollTo(0, 0); });
-    results.push('Full editor retained a single visible fallback error stack without duplicating the navbar banners.');
+    results.push('Full editor retained a single measured error stack without duplicating the navbar banners or covering tool tabs.');
     for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
       await page.evaluate(theme => { window.__deferredSaveApp.theme = theme; document.documentElement.setAttribute('data-theme', theme); }, theme);
       assert.equal(await field().isVisible(), true, theme + ': editable field visible');
@@ -273,6 +281,11 @@ async function run() {
         theme + ': editor fits desktop viewport');
     }
     results.push('Four desktop themes: editable field and Save control visible/enabled; editor fits viewport.');
+    if (process.argv.includes('--notice-layout-only')) {
+      assert.deepEqual(pageErrors, [], 'No uncaught browser errors');
+      console.log(JSON.stringify({ ok: true, results }, null, 2));
+      return;
+    }
     await edit('First queued translation'); await hold();
     const startClose = Date.now();
     await page.getByRole('button', { name: 'Save & close', exact: true }).click();
@@ -420,11 +433,11 @@ async function run() {
     await inlineField(first).fill('Inline queued translation');
     assert.equal(await page.evaluate(() => window.__deferredSaveApp.flushEditorDraft()), true);
     const reviewBanner = page.locator('[role="alert"]').filter({ hasText: 'The committed translation or local draft changed' });
-    await reviewBanner.getByRole('button', { name: 'View local drafts', exact: true }).click();
-    await page.getByRole('dialog', { name: 'Local drafts', exact: true }).waitFor();
+    await reviewBanner.getByRole('button', { name: 'Review retained edits', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Retained edits', exact: true }).waitFor();
     assert.equal(await page.getByRole('navigation', { name: 'Preserved drafts' }).getByRole('button').filter({ hasText: third }).count(), 1);
-    await page.getByRole('dialog', { name: 'Local drafts', exact: true }).getByRole('button', { name: 'Close', exact: true }).click();
-    results.push('Injected DRAFT_BASE_CHANGED retained the private inline draft, displayed its scoped review warning, left another row editable and opened View local drafts successfully.');
+    await page.getByRole('dialog', { name: 'Retained edits', exact: true }).getByRole('button', { name: 'Close', exact: true }).click();
+    results.push('Injected DRAFT_BASE_CHANGED retained the private inline draft, displayed its scoped review warning, left another row editable and opened Review retained edits successfully.');
     assert.deepEqual(pageErrors, [], 'No uncaught browser errors');
     results.push('No uncaught browser errors.');
     console.log(JSON.stringify({ origin, results }, null, 2));

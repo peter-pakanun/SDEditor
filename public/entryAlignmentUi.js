@@ -242,7 +242,7 @@
           <p role="status">{{ c.entryAlignmentPending.unresolved }} English entries need a decision · {{ c.entryAlignmentPending.unassigned }} blocks need a position or an unused decision</p>
           <button type="button" class="btnPrimary" @click="c.applyEntryAlignment" :disabled="!c.entryAlignmentReady || c.entryAlignmentApplying">{{ c.entryAlignmentApplying ? 'Preparing…' : 'Continue editing' }}</button>
           <button type="button" @click="c.clearEntryAlignment" :disabled="c.entryAlignmentApplying">Cancel alignment</button>
-          <p v-if="c.entryAlignmentError" class="collaborationError" role="alert">{{ c.entryAlignmentError }}</p>
+          <app-notice v-if="c.entryAlignmentError" tone="error" class="collaborationError" role="alert">{{ c.entryAlignmentError }}</app-notice>
         </div>
       </section>`,
   };

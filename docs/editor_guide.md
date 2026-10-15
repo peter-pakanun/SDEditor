@@ -9,6 +9,8 @@ SDEditor is desktop-first. Use a desktop or laptop browser with a keyboard and m
 
 The editor helps you translate StatDescription and ClientText content while maintaining formatting, variables, and special tags. It shows the original English and provides terminology, lookup and Translation Memory assistance.
 
+Workspace errors, warnings and persistent notices appear beneath the workspace navigation or above the full editor's preview. Long stacks scroll within their own area, keeping Save, Dictionary, TM and other tools accessible. Focus a scrollable notice area to use the arrow, Page Up/Down, Home and End keys. Recovery and retry buttons remain beside the relevant message.
+
 ## Getting Started
 
 ### Choosing PoE1 Or PoE2

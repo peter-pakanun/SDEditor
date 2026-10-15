@@ -53,8 +53,8 @@
 .versionLoading { display: flex; align-items: center; gap: 9px; min-height: 32px; }
 .versionLoading .browserWorkSpinner { flex: none; }
 .versionHash { color: var(--ui-muted); font-family: monospace; font-size: 12px; overflow-wrap: anywhere; }
-.versionError { color: var(--ui-error); padding: 12px; border: 1px solid var(--ui-error); border-radius: 6px; white-space: pre-wrap; }
-.versionNotice { color: var(--ui-warning); }
+.versionError:not(.appNotice) { color: var(--ui-error); padding: 12px; border: 1px solid var(--ui-error); border-radius: 6px; white-space: pre-wrap; }
+.versionNotice:not(.appNotice) { color: var(--ui-warning); }
 .versionNameField { display: flex; gap: 8px; margin: 8px 0; }
 .versionNameField input { min-width: 0; flex: 1; }
 .offlineVersion .versionActions { margin-top: 15px; }

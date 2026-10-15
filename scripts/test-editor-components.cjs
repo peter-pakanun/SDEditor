@@ -10,10 +10,66 @@ vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/editorCompone
 vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/clientTextUi.js'), 'utf8'), { window });
 const { NativeField, TextField, Tools, Preview, Autocomplete, TranslationMemory, Lookup, Comments, History, DiagnosticScan } = window.EditorComponents;
 
+test('shared notices preserve severity semantics and explicit roles', () => {
+  const { Notice } = window.EditorComponents;
+  for (const [tone, role] of [['error', 'alert'], ['warning', 'alert'], ['info', 'status'], ['neutral', 'note']]) {
+    assert.equal(Notice.computed.noticeRole.call({ tone, role: null }), role);
+    assert.equal(Notice.props.tone.validator(tone), true);
+  }
+  assert.equal(Notice.props.tone.validator('unknown'), false);
+  assert.equal(Notice.computed.noticeRole.call({ tone: 'info', role: 'note' }), 'note');
+  assert.match(Notice.template, /class="appNoticeContent"><slot><\/slot>/);
+  assert.match(Notice.template, /v-if="\$slots.actions" class="appNoticeActions"><slot name="actions">/);
+});
+
+test('notice stacks measure wrapping and overflow, expose keyboard access, and release observers on unmount', () => {
+  const observed = [], disconnected = [], listeners = new Map(), emitted = [], localWindow = {};
+  let notifyResize, boxHeight = 73.25;
+  class ResizeObserver {
+    constructor(callback) { notifyResize = callback; }
+    observe(element) { observed.push(element); }
+    disconnect() { disconnected.push(true); }
+  }
+  localWindow.addEventListener = (type, listener) => listeners.set(type, listener);
+  localWindow.removeEventListener = (type, listener) => { assert.equal(listeners.get(type), listener); listeners.delete(type); };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/editorComponents.js'), 'utf8'), { window: localWindow, ResizeObserver });
+  const { NoticeStack } = localWindow.EditorComponents;
+  const element = { scrollHeight: 250, clientHeight: 74, getBoundingClientRect: () => ({ height: boxHeight }) }, content = {};
+  const component = { $el: element, $refs: { content }, overflowing: false, $emit: (...args) => emitted.push(args) };
+  component.measure = NoticeStack.methods.measure.bind(component);
+  NoticeStack.mounted.call(component);
+  assert.deepEqual(observed, [element, content]);
+  assert.equal(component.overflowing, true);
+  assert.deepEqual(emitted, [['resize', 74]]);
+  notifyResize(); assert.equal(emitted.length, 1, 'Identical observer measurements do not loop through the parent');
+  boxHeight = 118; notifyResize(); assert.deepEqual(emitted.at(-1), ['resize', 118]);
+  element.scrollHeight = 118; element.clientHeight = 118; listeners.get('resize')();
+  assert.equal(component.overflowing, false);
+  boxHeight = 0; NoticeStack.updated.call(component); assert.deepEqual(emitted.at(-1), ['resize', 0]);
+  assert.match(NoticeStack.template, /:tabindex="overflowing \? 0 : undefined"/);
+  assert.match(NoticeStack.template, /:role="overflowing \? 'region' : undefined" :aria-label="overflowing \? label : undefined"/);
+  NoticeStack.beforeUnmount.call(component);
+  assert.deepEqual(disconnected, [true]); assert.equal(listeners.size, 0);
+  assert.deepEqual(emitted.at(-1), ['resize', 0], 'Unmount removes the old owner offset');
+});
+
+test('notice scrolling keeps native keyboard behavior without triggering workspace file navigation', () => {
+  const { NoticeStack } = window.EditorComponents;
+  const stopped = [], prevented = [], element = {};
+  for (const key of ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ', 'Escape', 'Tab', 's']) {
+    NoticeStack.methods.keydown.call({ overflowing: true, $el: element }, {
+      key, target: element, currentTarget: element,
+      stopPropagation: () => stopped.push(key), preventDefault: () => prevented.push(key),
+    });
+  }
+  assert.deepEqual(stopped, ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ']);
+  assert.deepEqual(prevented, [], 'The browser retains native scrolling, button activation and focus navigation');
+});
+
 test('local history source errors remain inside the settled history branch and cannot hide translated revisions', () => {
-  assert.match(History.template, /<div v-if="historyLoading" class="historyLoading">Loading…<\/div>\s*<div v-else>\s*<p v-if="sdHistorySourceError" role="alert">/,
+  assert.match(History.template, /<div v-if="historyLoading" class="historyLoading">Loading…<\/div>\s*<div v-else>\s*<app-notice v-if="sdHistorySourceError" tone="error">/,
     'Vue v-else must bind to historyLoading; the error belongs inside the visible settled history.');
-  const error = History.template.indexOf('<p v-if="sdHistorySourceError"'), list = History.template.indexOf('class="historyList"');
+  const error = History.template.indexOf('<app-notice v-if="sdHistorySourceError"'), list = History.template.indexOf('class="historyList"');
   assert.ok(error >= 0 && list > error);
   assert.doesNotMatch(History.template.slice(error, list), /v-else/,
     'The revision list cannot depend on the absence of a source-context error.');

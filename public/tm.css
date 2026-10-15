@@ -4,7 +4,7 @@
 .tmToolbar label { display: flex; align-items: center; gap: 5px; }
 .tmToolbar input[type="number"] { width: 56px; min-width: 0; }
 .tmEmpty, .tmProvenance { color: var(--ui-muted); line-height: 1.6; }
-.tmIssue, .tmWarnings { color: var(--color-font); background: var(--color-diagnostic-warning); border: 1px solid var(--color-diagnostic-warning-border); border-radius: 6px; padding: 10px; line-height: 1.5; }
+.tmIssue:not(.appNotice), .tmWarnings { color: var(--color-font); background: var(--color-diagnostic-warning); border: 1px solid var(--color-diagnostic-warning-border); border-radius: 6px; padding: 10px; line-height: 1.5; }
 .tmWarnings { padding-left: 26px; }
 .tmResultList { display: flex; flex-direction: column; gap: 6px; }
 .tmResultList > button { display: block; text-align: left; width: 100%; border: 1px solid var(--ui-border); background: var(--color-element); border-radius: 7px; padding: 10px; }

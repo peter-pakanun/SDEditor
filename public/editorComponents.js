@@ -2,6 +2,63 @@
 (function (global) {
   'use strict';
 
+  // Notices stay in their owning surface. The stack bounds the occupied space
+  // and publishes it so sticky editor controls can sit below the messages.
+  const Notice = {
+    name: 'AppNotice',
+    props: {
+      tone: { type: String, default: 'error', validator: value => ['error', 'warning', 'info', 'neutral'].includes(value) },
+      role: { type: String, default: null },
+    },
+    computed: {
+      noticeRole() { return this.role || (this.tone === 'error' || this.tone === 'warning' ? 'alert' : this.tone === 'info' ? 'status' : 'note'); },
+    },
+    template: `<div class="appNotice" :class="'appNotice--' + tone" :role="noticeRole">
+      <div class="appNoticeContent"><slot></slot></div>
+      <div v-if="$slots.actions" class="appNoticeActions"><slot name="actions"></slot></div>
+    </div>`,
+  };
+  const NoticeStack = {
+    name: 'AppNoticeStack',
+    props: { sticky: Boolean, label: { type: String, default: 'Workspace notices' } },
+    emits: ['resize'],
+    data() { return { overflowing: false }; },
+    mounted() {
+      this._noticeResizeObserver = new ResizeObserver(() => this.measure());
+      this._noticeResizeObserver.observe(this.$el);
+      this._noticeResizeObserver.observe(this.$refs.content);
+      this._noticeWindowResize = () => this.measure();
+      window.addEventListener('resize', this._noticeWindowResize);
+      this.measure();
+    },
+    updated() { this.measure(); },
+    beforeUnmount() {
+      this._noticeResizeObserver?.disconnect();
+      window.removeEventListener('resize', this._noticeWindowResize);
+      this.$emit('resize', 0);
+    },
+    methods: {
+      keydown(event) {
+        // Native scrolling belongs to this focused region, including when the
+        // workspace's file navigation listens for the same keys above it.
+        if (['Home', 'End', 'PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', ' '].includes(event.key)) event.stopPropagation();
+      },
+      measure() {
+        const element = this.$el;
+        const overflowing = element.scrollHeight > element.clientHeight + 1;
+        if (overflowing !== this.overflowing) this.overflowing = overflowing;
+        const height = Math.ceil(element.getBoundingClientRect().height);
+        if (height !== this._noticeMeasuredHeight) {
+          this._noticeMeasuredHeight = height;
+          this.$emit('resize', height);
+        }
+      },
+    },
+    template: `<div class="appNoticeStack" :class="{ appNoticeStackSticky: sticky }" :tabindex="overflowing ? 0 : undefined" :role="overflowing ? 'region' : undefined" :aria-label="overflowing ? label : undefined" @keydown="keydown">
+      <div ref="content" class="appNoticeStackContent"><slot></slot></div>
+    </div>`,
+  };
+
   // The descriptor owns raw values and mode-specific actions. This component
   // owns only the native control and SD's highlight overlay presentation.
   const NativeField = {
@@ -248,13 +305,15 @@
   };
   const FullEditorShell = {
     name: 'EditorFullShell',
+    components: { 'app-notice-stack': NoticeStack },
     props: { controller: { type: Object, required: true }, previewHostId: { type: String, required: true },
       sidebarHostId: { type: String, required: true } },
-    data() { return { previewDragHeight: null, previewMeasuredHeight: 0, previewMinHeight: 160, previewMaxHeight: 450 }; },
+    data() { return { noticeHeight: 0, previewDragHeight: null, previewMeasuredHeight: 0, previewMinHeight: 160, previewMaxHeight: 450 }; },
     computed: {
       previewStyle() {
         const height = this.previewDragHeight ?? this.controller.fullEditorPreviewHeight;
         return {
+          '--editor-notice-height': this.noticeHeight + 'px',
           '--editor-preview-requested-height': Number.isFinite(height) ? height + 'px' : '',
           '--editor-preview-default-height': this.controller.gamePreviewTargetRows?.length > 1
             ? 'calc(340px * var(--density))' : 'calc(200px * var(--density))',
@@ -262,17 +321,14 @@
       },
     },
     mounted() {
-      this._noticeObserver = new ResizeObserver(() => this.measureNotice());
       this._previewObserver = new ResizeObserver(() => this.measurePreview());
       this._previewObserver.observe(this.$refs.previewPane);
       this._previewWindowResize = () => this.measurePreview();
       window.addEventListener('resize', this._previewWindowResize);
-      this.syncNotice();
       this.measurePreview();
     },
-    updated() { this.syncNotice(); },
     beforeUnmount() {
-      this._noticeObserver?.disconnect(); this._previewObserver?.disconnect();
+      this._previewObserver?.disconnect();
       window.removeEventListener('resize', this._previewWindowResize);
       this.finishPreviewResize();
     },
@@ -317,23 +373,9 @@
           : this.$refs.previewPane.getBoundingClientRect().height + steps[event.key];
         this.rememberPreviewHeight(this.clampPreviewHeight(height));
       },
-      syncNotice() {
-        const notice = this.$refs.notice;
-        if (notice !== this._observedNotice) {
-          this._noticeObserver?.disconnect();
-          this._observedNotice = notice;
-          if (notice) this._noticeObserver?.observe(notice);
-        }
-        this.measureNotice();
-      },
-      measureNotice() {
-        const height = Math.ceil(this.$refs.notice?.getBoundingClientRect().height || 0) + 'px';
-        if (this.$el.style.getPropertyValue('--editor-notice-height') !== height)
-          this.$el.style.setProperty('--editor-notice-height', height);
-      },
     },
     template: `<div class="editor" :class="{ clipboardHidden: controller.hideEditorClipboard, editorPreviewResizing: previewDragHeight != null }" :style="previewStyle" aria-label="Translation editor">
-      <div v-if="$slots.notice" ref="notice" class="editorNotice"><slot name="notice"></slot></div>
+      <app-notice-stack v-if="$slots.notice" class="editorNotice" sticky label="Editor notices" @resize="noticeHeight = $event"><slot name="notice"></slot></app-notice-stack>
       <div class="edit"><div ref="previewPane" class="editorPreviewPane">
         <div :id="previewHostId"></div>
         <div class="editorPreviewResizeHandle" role="separator" aria-orientation="horizontal" aria-label="Preview height" tabindex="0"
@@ -354,6 +396,7 @@
   // working across component and teleport boundaries.
   const sharedSurface = (name, template, teleport = false) => ({
     name,
+    components: { 'app-notice': Notice },
     props: {
       controller: { type: Object, required: true },
       ...(teleport ? { target: { type: String, required: true } } : {}),
@@ -377,7 +420,7 @@
   const TranslationMemory = sharedSurface('EditorTranslationMemory', String.raw`<section v-if="sideTab === 'tm'" id="tmResultsPanel" ref="tmResultsPanel" class="tmResultsPanel" tabindex="0" @keydown.stop="tmPanelKeydown" aria-label="Translation memory suggestions">
           <div class="tmToolbar"><label>Minimum match <input type="number" v-model.number="tmThreshold" min="1" max="99" aria-label="Minimum TM match percentage">%</label><button v-if="tmManageAvailable !== false" @click="openTMManager">Manage TM</button></div>
           <div class="tmToolbar"><span>Entry {{ (editorFocusedIndex || 0) + 1 }} · {{ tmUnits.length.toLocaleString() }} remembered</span><button v-if="tmPrefillAvailable !== false" @click="previewTMPrefill" :disabled="tmBusy || editorTranslationReadOnly">Prefill blanks…</button></div>
-          <p v-if="tmLocalIssue || tmIssue" class="tmIssue" role="alert">{{ tmLocalIssue || tmIssue }}</p>
+          <app-notice v-if="tmLocalIssue || tmIssue" class="tmIssue" tone="warning">{{ tmLocalIssue || tmIssue }}</app-notice>
           <p v-if="!tmEditorKey" class="tmEmpty">Focus an entry to see remembered translations.</p>
           <p v-else-if="!tmMatches.length" class="tmEmpty">No matching translation. Save translated entries or build TM from existing work.</p>
           <div class="tmResultList" role="listbox" aria-label="TM matches">
@@ -413,7 +456,7 @@
               <button v-if="!lookupPreparing" type="button" @click="lookupPrepareReferences">Prepare missing references<template v-if="lookupMissingReferenceCount"> ({{ lookupMissingReferenceCount }})</template></button>
               <template v-else><span role="status">Preparing reference groups…</span><button type="button" @click="lookupCancelPreparation">Cancel</button></template>
             </div>
-            <p v-if="lookupPreparationError" class="cloudWarning" role="alert">{{ lookupPreparationError }}</p>
+            <app-notice v-if="lookupPreparationError" class="cloudWarning" tone="error">{{ lookupPreparationError }}</app-notice>
             <div class="lookupPagination sidePagination" aria-label="Reference result pages">
               <span role="status">{{ lookupRangeLabel }}</span>
               <button type="button" @click="lookupGoToPage(lookupPage - 1)" :disabled="lookupPage <= 1" aria-label="Previous reference results">Previous</button>
@@ -451,8 +494,8 @@
           <header class="commentsPanelHeader"><div><h2>File comments</h2><p class="commentsFilepath">{{ commentsFileLabel || commentsFilepath }}</p></div></header>
           <p v-if="!commentsEligible && commentsUnavailableReason" class="commentsEmpty">{{ commentsUnavailableReason }}</p>
           <template v-else>
-            <p v-if="commentsFileError" class="commentsError" role="alert">{{ commentsFileError }}</p>
-            <p v-if="commentsUnreadError" class="commentsError" role="alert">{{ commentsUnreadError }}</p>
+            <app-notice v-if="commentsFileError" class="commentsError" tone="error">{{ commentsFileError }}</app-notice>
+            <app-notice v-if="commentsUnreadError" class="commentsError" tone="error">{{ commentsUnreadError }}</app-notice>
             <div ref="commentsFileList" class="commentsList" tabindex="0" aria-label="Comments on this file" :aria-busy="commentsFileBusy">
               <article v-for="comment in commentsFileItems" :key="comment.id" class="commentCard" :class="{ unread: comment.unread }" :data-comment-id="comment.id" data-comments-surface="file">
                 <div class="commentByline"><strong>{{ comment.actorName }}</strong><span v-if="comment.language" class="commentLanguage" title="Comment language">{{ comment.language }}</span><span v-if="commentsIsGlobal(comment)" class="commentScope">All languages</span></div>
@@ -465,7 +508,7 @@
             <form class="commentsComposer" @submit.prevent="commentsSubmit">
               <textarea id="fileCommentDraft" v-model="commentsFileDraft" rows="3" maxlength="10000" aria-label="Add a comment" placeholder="Add a comment..." :disabled="!commentsCanPost" @keydown.ctrl.enter.prevent="commentsSubmit" @keydown.meta.enter.prevent="commentsSubmit"></textarea>
               <p v-if="!commentsIdentity.sourceHash" class="commentsEmpty">Load a source version to post a comment.</p>
-              <p v-if="commentsPostError" class="commentsError" role="alert">{{ commentsPostError }}</p>
+              <app-notice v-if="commentsPostError" class="commentsError" tone="error">{{ commentsPostError }}</app-notice>
               <div class="commentsComposerActions">
                 <label class="commentsScopeOption"><input type="checkbox" v-model="commentsFileAllLanguages" :disabled="!commentsCanPost || commentsPosting">Post to all languages</label>
                 <button type="submit" class="btnPrimary" :disabled="!commentsCanPost || commentsPosting || !commentsFileDraft.trim()">{{ commentsPosting ? 'Posting…' : 'Post comment' }}</button>
@@ -490,7 +533,7 @@
             </div>
             <div v-if="historyLoading" class="historyLoading">Loading…</div>
             <div v-else>
-              <p v-if="sdHistorySourceError" role="alert">{{ sdHistorySourceError }}</p>
+              <app-notice v-if="sdHistorySourceError" tone="error">{{ sdHistorySourceError }}</app-notice>
               <div class="historyList">
                 <div v-for="rev in historyItems" :key="rev.id" class="historyItem" :class="{ selectedA: historySelectedA && historySelectedA.id === rev.id, selectedB: historySelectedB && historySelectedB.id === rev.id }">
                   <button class="historyPick" :class="{ current: String(rev.note || '').includes('(current)') }" @click="pickHistoryRevision(rev)" :disabled="!!entryAlignment">{{ formatHistoryTime(rev.savedAt) }} {{ rev.note ? (' ' + rev.note) : '' }}</button>
@@ -779,6 +822,7 @@
   };
   const FieldToolbar = {
     name: 'EditorFieldToolbar', props: { controller: { type: Object, required: true } },
+    components: { 'app-notice': Notice },
     methods:{closeMenu(){this.controller.closeMenu();this.$nextTick(()=>this.$refs.menuButton?.focus({preventScroll:true}));},toolbarKeydown(event){if(event.key==='Escape' && event.target.closest('.editorFieldToolbar,.editorFieldComparisonControls,.fieldHistoryMenu')){event.preventDefault();event.stopPropagation();this.closeMenu();}}},
     template: `<div class="editorFieldTools" :data-comparison-side="controller.side" data-inline-focus-surface @click.stop @dblclick.stop @keydown="toolbarKeydown($event)">
       <div class="editorFieldFrame" :class="controller.tone"><slot></slot>
@@ -789,12 +833,12 @@
         <button ref="menuButton" type="button" class="fieldHistoryMenuButton" :class="{active:controller.menuOpen}" @click="controller.menu()" :disabled="controller.disabled" :aria-expanded="controller.menuOpen" aria-label="Comparison options and revision history" title="Comparison options and revision history"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9.5 2-.6 2.4-1.8 1-2.4-.7-2.5 4.3 1.8 1.7v2l-1.8 1.7 2.5 4.3 2.4-.7 1.8 1 .6 2.4h5l.6-2.4 1.8-1 2.4.7 2.5-4.3-1.8-1.7v-2l1.8-1.7-2.5-4.3-2.4.7-1.8-1-.6-2.4Z"/><circle cx="12" cy="12" r="3"/></svg></button>
       </div></div>
       <div v-if="controller.open" class="editorFieldComparisonControls"><select :value="controller.reference" @change="controller.select($event.target.value)" :disabled="controller.disabled" :title="controller.choices.find(choice=>choice.key===controller.reference)?.label" :aria-label="controller.side === 'source' ? 'English version to compare' : 'Translation revision to compare'"><option v-if="!controller.choices.length" value="">Earlier original unavailable</option><optgroup v-for="group in controller.groups" :key="group" :label="group"><option v-for="choice in controller.choices.filter(value=>value.group===group)" :key="choice.key" :value="choice.key">{{ choice.label }}</option></optgroup></select><span class="fieldDiffArrow" aria-hidden="true">→</span><span class="fieldDiffLatest">Latest</span></div>
-      <p v-if="controller.open && controller.error" class="ctHistoryError" role="alert">{{ controller.error }}</p>
+      <app-notice v-if="controller.open && controller.error" class="ctHistoryError" tone="error">{{ controller.error }}</app-notice>
       <p v-if="controller.open && !controller.parts" class="fieldDiffUnavailable">{{ controller.busy ? 'Preparing earlier original…' : 'Earlier original unavailable. Open the menu to load previous versions.' }}</p>
       <pre v-if="controller.open && controller.side === 'translation' && controller.parts" class="ctInlineDiff ctTranslationDiff" aria-label="Translation differences"><span v-for="(part,index) in controller.parts" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ controller.display(part.value) }}</span></pre>
       <section v-if="controller.menuOpen" class="fieldHistoryMenu" aria-label="Revision history and comparison options">
         <div class="fieldHistoryOptions"><label><input type="checkbox" :checked="controller.whitespace" @change="controller.options('whitespace',$event.target.checked)"> Show whitespace</label><label><input type="checkbox" :checked="controller.characters" @change="controller.options('characters',$event.target.checked)"> Character differences</label><button type="button" @click="closeMenu()" aria-label="Close revision menu">Close</button></div>
-        <p v-if="controller.error" class="ctHistoryError" role="alert">{{ controller.error }}</p>
+        <app-notice v-if="controller.error" class="ctHistoryError" tone="error">{{ controller.error }}</app-notice>
         <button v-if="controller.moreVersions" type="button" @click="controller.olderVersions()" :disabled="controller.busy">{{ controller.busy ? 'Preparing earlier original…' : 'Load earlier version' }}</button>
         <button v-if="controller.moreHistory" type="button" @click="controller.olderHistory()" :disabled="controller.busy">Load older history</button>
         <p>Restoring creates a saved revision of the whole record.</p>
@@ -803,5 +847,5 @@
       </section>
     </div>`
   };
-  global.EditorComponents = { FieldToolbar, NativeField, TextField, WorkspaceShell, FullEditorShell, Preview: SharedPreview, Assistance, DictionaryEntries, TranslationMemory, Lookup, Comments, History, Tools, Autocomplete, DiagnosticMeta, DiagnosticScan, AttentionNavigation };
+  global.EditorComponents = { Notice, NoticeStack, FieldToolbar, NativeField, TextField, WorkspaceShell, FullEditorShell, Preview: SharedPreview, Assistance, DictionaryEntries, TranslationMemory, Lookup, Comments, History, Tools, Autocomplete, DiagnosticMeta, DiagnosticScan, AttentionNavigation };
 })(typeof window !== 'undefined' ? window : globalThis);

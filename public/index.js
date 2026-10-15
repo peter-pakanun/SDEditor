@@ -8176,6 +8176,8 @@ if (window.EditorComponents?.Autocomplete) app.component('editor-autocomplete', 
 if (window.EditorComponents?.NativeField) app.component('editor-native-field', window.EditorComponents.NativeField);
 if (window.EditorComponents?.FieldToolbar) app.component('editor-field-toolbar', window.EditorComponents.FieldToolbar);
 if (window.EditorComponents?.WorkspaceShell) app.component('editor-workspace-shell', window.EditorComponents.WorkspaceShell);
+if (window.EditorComponents?.Notice) app.component('app-notice', window.EditorComponents.Notice);
+if (window.EditorComponents?.NoticeStack) app.component('app-notice-stack', window.EditorComponents.NoticeStack);
 if (window.EditorComponents?.FullEditorShell) app.component('editor-full-shell', window.EditorComponents.FullEditorShell);
 if (window.EditorComponents?.DiagnosticMeta) app.component('editor-diagnostic-meta', window.EditorComponents.DiagnosticMeta);
 if (window.EditorComponents?.DiagnosticScan) app.component('editor-diagnostic-scan', window.EditorComponents.DiagnosticScan);
@@ -8184,6 +8186,7 @@ if (window.EntryAlignmentUI?.component) app.component('entry-alignment', window.
 
 app.component('app-tooltip', AppTooltip);
 app.component('workspace-alerts', { template: '#workspace-alerts-template' });
+app.component('collaboration-warning', { template: '#collaboration-warning-template' });
 app.component('app-dialog', window.AppDialogs?.component || {});
 
 app.directive('tooltip', {

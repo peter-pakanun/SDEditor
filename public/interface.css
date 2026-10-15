@@ -122,7 +122,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
   box-shadow: 0 3px 12px rgba(0, 0, 0, .04);
 }
 .workspaceBrand { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.workspaceHeader > .workspaceAlerts { grid-column: 1 / -1; }
+.workspaceHeader > .workspaceNoticeStack { grid-column: 1 / -1; }
 .brandMark {
   display: block;
   width: 34px;
@@ -267,7 +267,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .browserWorkStatus { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; color: var(--ui-muted); border-radius: 50%; }
 .browserWorkStatus:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 2px; }
 .browserWorkSpinner { width: 13px; height: 13px; box-sizing: border-box; border: 2px solid var(--ui-border); border-top-color: var(--ui-accent); border-radius: 50%; animation: browserWorkSpin .8s linear infinite; }
-.storageMigrationNotice { position: fixed; right: 24px; bottom: 24px; z-index: 19000; display: flex; align-items: center; gap: 12px; max-width: min(420px, calc(100vw - 72px)); padding: 14px 18px; background: var(--color-element); color: var(--color-font); border: 1px solid var(--ui-border); border-radius: 8px; box-shadow: 0 4px 20px #0003; font-size: 13px; line-height: 1.55; pointer-events: none; }
+.storageMigrationNotice .appNoticeContent { display: flex; align-items: center; gap: 12px; }
 .storageMigrationNotice .browserWorkSpinner { flex: 0 0 13px; }
 @keyframes browserWorkSpin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .browserWorkSpinner { animation: none; border-right-color: var(--ui-accent); } }
@@ -351,6 +351,21 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .attentionNavigation .attentionArrow { color: var(--ui-warning); }
 .attentionNavigationTarget:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 2px; }
 .sideHeader { flex-wrap: wrap; }
+/* Shared notices own wrapping and actions; stacks alone own scrolling/sticking. */
+.appNotice { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; box-sizing: border-box; min-width: 0; max-width: 100%; margin: 8px 0; padding: calc(8px * var(--density)) calc(12px * var(--density)); border: 0; border-left: 3px solid var(--ui-border); border-radius: 0; background: var(--color-element); color: var(--color-font); font-size: calc(13px * var(--density)); font-weight: normal; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; }
+.appNotice--error { border-left-color: var(--color-diagnostic-error-border); background: color-mix(in srgb, var(--color-diagnostic-error) 35%, var(--color-element)); }
+.appNotice--warning { border-left-color: var(--color-diagnostic-warning-border); background: color-mix(in srgb, var(--color-diagnostic-warning) 35%, var(--color-element)); }
+.appNotice--info { border-left-color: var(--ui-accent); background: var(--ui-accent-soft); }
+.appNoticeContent { flex: 1 1 320px; min-width: 0; max-width: 100%; }
+.appNoticeContent > :first-child { margin-top: 0; }
+.appNoticeContent > :last-child { margin-bottom: 0; }
+.appNoticeActions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; flex: 0 1 auto; min-width: 0; max-width: 100%; }
+.appNoticeActions button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.appNoticeStack { box-sizing: border-box; min-width: 0; max-width: 100%; max-height: min(240px, 30dvh); overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-width: thin; background: var(--color-element); }
+.appNoticeStackContent { display: flow-root; min-width: 0; }
+.appNoticeStack .appNotice { margin: 0; }
+.appNoticeStackSticky { position: sticky; top: 0; z-index: 42; }
+.appNoticeStack:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: -2px; }
 .editor {
   --editor-preview-height: clamp(min(calc(160px * var(--density)), 50dvh), var(--editor-preview-requested-height, var(--editor-preview-default-height)), 50dvh);
 }
@@ -391,6 +406,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 @media (prefers-reduced-motion: reduce) { .editorCopyFilePath.copied svg { animation: none; } }
 .editor .editorActions { position: sticky; top: calc(var(--editor-preview-height) + var(--editor-notice-height, 0px)); z-index: 41; flex-wrap: wrap; padding: 8px 0; background: var(--color-bg); border-bottom: 1px solid var(--ui-border); }
 .editor > .editorNotice { position: sticky; top: 0; z-index: 42; padding: 0; }
+.editor > .appNoticeStack::-webkit-scrollbar { width: 10px; }
 .editor .editorActions button, .editor .applyRegexButton { flex-shrink: 0; white-space: nowrap; }
 @media (max-width: 1200px) {
   .workspaceHeader { grid-template-columns: max-content minmax(0, 1fr); }
@@ -524,8 +540,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 [data-theme="modern-dark"] .workspace :is(#table, .fileTable) > tbody > tr > td.collaborationCell.collaborationEditing { background-image: linear-gradient(rgba(0, 0, 0, .28), rgba(0, 0, 0, .28)); }
 .collaborationEditorStatus { margin: 9px 0; padding: 9px 12px; border: 1px solid var(--ui-border); border-radius: 6px; background: var(--color-element); }
 .collaborationEditorPeers { margin: 9px 0; }
-.collaborationNotice { padding: 9px 12px; margin: 10px 0; border-left: 3px solid var(--ui-accent); background: var(--ui-accent-soft); color: var(--color-font); font-size: 13px; line-height: 1.6; }
-.collaborationError { color: var(--ui-missing); white-space: pre-wrap; overflow-wrap: anywhere; }
+.collaborationNotice:not(.appNotice) { padding: 9px 12px; margin: 10px 0; border-left: 3px solid var(--ui-accent); background: var(--ui-accent-soft); color: var(--color-font); font-size: 13px; line-height: 1.6; }
+.collaborationError:not(.appNotice) { color: var(--ui-missing); white-space: pre-wrap; overflow-wrap: anywhere; }
 .collaborationDroppedReviewLink { text-decoration: underline; text-underline-offset: 2px; }
 .collaborationDroppedReviewLink:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; border-radius: 2px; }
 .collaborationLocalHistoryLabel { color: var(--ui-muted); font-size: 12px; margin: 5px 0 8px; }

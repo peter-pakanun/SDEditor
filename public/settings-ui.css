@@ -104,7 +104,7 @@
 .settingsToggle strong { font-weight: 600; }
 .settingsToggle small { opacity: .7; font-size: 12px; }
 .settingsPanel h3.settingsSubheading { margin-top: 23px; }
-.settingsDialog .settingsNotice { padding: 12px 14px; border-radius: 8px; background: var(--color-bg2); }
+.settingsDialog .settingsNotice:not(.appNotice) { padding: 12px 14px; border-radius: 8px; background: var(--color-bg2); }
 .settingsAccount { margin: 16px 0; padding: 12px; border: 1px solid var(--color-element-alt); border-radius: 9px; overflow-wrap: anywhere; }
 .settingsAccount > span { display: block; opacity: .7; }
 .settingsAccount p:last-child { margin-bottom: 0; }
@@ -119,7 +119,7 @@
 .settingsFooter { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 23px; border-top: 1px solid var(--color-element-alt); background: var(--color-bg); }
 .settingsFooter p { margin: 0; font-size: 12px; }
 .settingsFooter button { flex: none; }
-.settingsMessage { color: var(--color-diagnostic-error-border); }
+.settingsMessage:not(.appNotice) { color: var(--color-diagnostic-error-border); }
 .settingsLogText { display: block; width: 100%; height: clamp(180px, 40vh, 380px); box-sizing: border-box; resize: vertical; padding: 14px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--color-bg); color: var(--color-font); font: 13px/1.7 Consolas, "Cascadia Mono", "Courier New", monospace; font-variant-numeric: tabular-nums; }
 
 @media (max-width: 640px) {
