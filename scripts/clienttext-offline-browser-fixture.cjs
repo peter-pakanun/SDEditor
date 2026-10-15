@@ -433,6 +433,17 @@ async function run() {
             assert.equal(new Set(related.related.map(unit => unit.id)).size, related.related.length, label + ': original units appear once');
             for (const sheet of ['NPCs', 'NPCTalk', 'NPCTextAudio', 'NPCTalkDialogueTextAudio']) assert.ok(related.related.some(unit => unit.sheet.replace(/_Gender$/, '') === sheet), label + ': Renly spans ' + sheet);
             assert.equal(related.related.length, related.total, label + ': all statuses expose the complete related worklist');
+            const fallback = await page.evaluate(async () => {
+                const vm = window.__offlineTestApp, unit = vm.ctRows.find(unit => unit.sheet.replace(/_Gender$/, '') === 'NPCTextAudio' && !Object.hasOwn(unit.metadata || {}, 'NPC'));
+                if (!unit) return null;
+                await vm.ctSetPage(Math.floor(vm.ctRows.indexOf(unit) / vm.ctEffectivePageSize) + 1); await vm.$nextTick();
+                return { id: unit.id, relation: vm.ctNpcRelation(unit) };
+            });
+            assert.ok(fallback, label + ': the no-hint export retains an ID-based dialogue association');
+            assert.equal(fallback.relation.label, 'ID match', label + ': absent NPC metadata retains the ID match label');
+            assert.match(fallback.relation.tooltip, /Renly/, label + ': fallback tooltip explains the matched immutable alias');
+            const fallbackSelector = await page.evaluate(id => '[data-unit-id="' + CSS.escape(id) + '"]', fallback.id);
+            assert.equal(await workspace.locator(fallbackSelector + ' .ctNpcRelation').textContent(), 'ID match', label + ': list presents fallback evidence as ID match');
             await npcFilter.press('Escape');
             await layout(page, workspace, label + ' NPC worklist');
             await sheetsTab.click();
@@ -746,6 +757,61 @@ async function run() {
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctUnits.length), 43777, 'Hint export imports every original record across all four worksheets');
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctUnits.filter(unit => unit.sheet === 'NPCs').some(unit => unit.fields.some(field => field.kind === 'gender'))), false,
                 'Italic NPCs Gender is never an editable target in the real hint workbook');
+            const beforeNpcBrowsing = await page.evaluate(() => ({ counts: window.__offlineTestApp.ctCounts, ids: window.__offlineTestApp.ctUnits.map(unit => unit.id) }));
+            async function hintedNpcExample(recordId, sheet, expectedLabel, excludedLabel) {
+                const info = await page.evaluate(({ recordId, sheet }) => {
+                    const vm = window.__offlineTestApp, unit = vm.ctUnits.find(unit => unit.recordId === recordId && unit.sheet === sheet), memberships = vm._ctNpcIndex.memberships.get(unit.id);
+                    return { id: unit.id, paths: unit.metadata.NPC.split(',').map(path => path.trim()).filter(Boolean),
+                        groups: [...memberships.keys()].map(key => ({ key, label: vm._ctNpcIndex.groupByKey.get(key).label })), relation: vm.ctNpcRelation(unit) };
+                }, { recordId, sheet });
+                assert.deepEqual(info.groups.map(group => group.label), [expectedLabel], recordId + ': exact NPC references replace misleading ID aliases');
+                assert.equal(info.relation.label, 'NPC reference', recordId + ': explicit hint uses the NPC reference evidence label');
+                for (const path of info.paths) assert.ok(info.relation.tooltip.includes(path), recordId + ': evidence includes the matched full NPC path ' + path);
+                await workspace.getByRole('tab', { name: 'NPCs', exact: true }).click();
+                await page.waitForFunction(() => window.__offlineTestApp.ctBrowseMode === 'npcs' && !window.__offlineTestApp.ctBrowseBusy);
+                const npcFilter = workspace.getByRole('searchbox', { name: 'Filter NPCs', exact: true });
+                await npcFilter.fill(expectedLabel); await workspace.getByRole('button', { name: expectedLabel, exact: true }).click();
+                await page.waitForFunction(key => window.__offlineTestApp.ctNpcSelection === key && !window.__offlineTestApp.ctBrowseBusy, info.groups[0].key);
+                const search = workspace.getByRole('searchbox', { name: 'Search ClientText', exact: true });
+                await search.fill(recordId); await search.press('Enter');
+                await page.waitForFunction(id => !window.__offlineTestApp.ctBrowseBusy && window.__offlineTestApp.ctRows.some(unit => unit.id === id), info.id);
+                const selector = await page.evaluate(id => '[data-unit-id="' + CSS.escape(id) + '"]', info.id), relation = workspace.locator(selector + ' .ctNpcRelation');
+                assert.equal(await relation.textContent(), 'NPC reference', recordId + ': worklist displays exact reference evidence');
+                assert.equal(await relation.locator('input,textarea,select').count(), 0, 'Relationship evidence remains read-only');
+                await relation.focus(); await page.getByRole('tooltip').waitFor();
+                for (const path of info.paths) assert.ok((await page.getByRole('tooltip').textContent()).includes(path), recordId + ': visible tooltip contains ' + path);
+                if (excludedLabel) {
+                    await npcFilter.fill(excludedLabel); await workspace.getByRole('button', { name: excludedLabel, exact: true }).click();
+                    await page.waitForFunction(label => window.__offlineTestApp.ctNpcBrowseTitle === label && !window.__offlineTestApp.ctBrowseBusy, excludedLabel);
+                    assert.equal(await page.evaluate(id => window.__offlineTestApp.ctRows.some(unit => unit.id === id), info.id), false, recordId + ': misleading ID name does not add an extra NPC membership');
+                }
+                return info;
+            }
+            await hintedNpcExample('UnaRenlySon', 'NPCTextAudio', 'Una', 'Renly');
+            const sinNpc = await hintedNpcExample('DoryaniA4_Intro_A_Sin', 'NPCTalkDialogueTextAudio', 'The Hooded One', 'Doryani');
+            const mortNpc = await hintedNpcExample('Mort_FirstTime_A1', 'NPCTalkDialogueTextAudio', 'Mortimer');
+            assert.deepEqual(mortNpc.paths, ['Metadata/NPC/Four_Act1/DogTrader', 'Metadata/Monsters/NPC/DogtraderRiverbank'], 'Both DogTrader instance paths resolve despite the Mort ID prefix');
+            const playerNpc = await page.evaluate(() => {
+                const vm = window.__offlineTestApp, unit = vm.ctUnits.find(unit => unit.sheet === 'NPCTalkDialogueTextAudio' && unit.recordId === 'DoryaniA4_Intro_B_Dex4b');
+                return { id: unit.id, npc: unit.metadata.NPC, character: unit.metadata.Character, memberships: vm._ctNpcIndex.memberships.get(unit.id).size,
+                    unassigned: vm._ctNpcIndex.unassigned.includes(unit), relation: vm.ctNpcRelation(unit) };
+            });
+            assert.equal(playerNpc.npc, '', 'Player reply has an explicit blank NPC hint');
+            assert.equal(playerNpc.character, 'Metadata/Characters/Dex/DexFourb');
+            assert.equal(playerNpc.memberships, 0, 'Explicit blank NPC prevents ID-derived NPC association');
+            assert.equal(playerNpc.unassigned, true, 'Player reply remains accessible in Unassigned dialogue');
+            assert.equal(playerNpc.relation.label, 'Unassigned');
+            await workspace.getByRole('button', { name: 'Unassigned dialogue', exact: true }).click();
+            await page.waitForFunction(() => window.__offlineTestApp.ctNpcSelection === 'unassigned' && !window.__offlineTestApp.ctBrowseBusy);
+            const npcSearch = workspace.getByRole('searchbox', { name: 'Search ClientText', exact: true });
+            await npcSearch.fill('DoryaniA4_Intro_B_Dex4b'); await npcSearch.press('Enter');
+            await page.waitForFunction(id => !window.__offlineTestApp.ctBrowseBusy && window.__offlineTestApp.ctRows.some(unit => unit.id === id), playerNpc.id);
+            const hintedConvo = await browseConvoFamily('Thai hints preserve conversation context', 'DoryaniA4_Intro', 25);
+            assert.equal(hintedConvo.parentLabel, 'Doryani', 'Convo keeps the contextual NPC parent independently from per-turn NPC references');
+            for (const id of [sinNpc.id, playerNpc.id]) assert.ok(hintedConvo.units.some(unit => unit.id === id), 'Doryani Intro retains both Hooded One and player turns');
+            assert.deepEqual(await page.evaluate(() => ({ counts: window.__offlineTestApp.ctCounts, ids: window.__offlineTestApp.ctUnits.map(unit => unit.id) })), beforeNpcBrowsing,
+                'Explicit NPC browsing preserves workspace counts and every original unit identity');
+            results.push('Real hints: Una-only UnaRenlySon, Hooded One-only Doryani Sin, Mortimer via both DogTrader paths, blank-NPC player unassigned, and unchanged 25-turn Doryani Convo');
             await page.evaluate(() => window.__offlineTestApp.ctShowAllLoaded());
             await workspace.locator('.ctSheetList').getByRole('button', { name: 'NPCs', exact: true }).click();
             await page.waitForFunction(() => !window.__offlineTestApp.ctBrowseBusy && window.__offlineTestApp.ctRows.every(unit => unit.sheet === 'NPCs'));

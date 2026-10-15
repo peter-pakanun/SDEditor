@@ -845,11 +845,17 @@
                 return ordered.filter(unit=>cache.ids.has(unit.id));
             },
             ctNpcRelation(unit) {
-                const memberships=this._ctNpcIndex?.memberships.get(unit?.id);
-                if(!memberships?.size)return {label:'Unassigned',tooltip:'No NPC relationship was found in the workbook paths or text IDs.'};
+                const memberships=this._ctNpcIndex?.memberships.get(unit?.id),evidence=this._ctNpcIndex?.referenceEvidence?.get(unit?.id),
+                    details=evidence?[evidence.unresolved.length?`Unresolved NPC references: ${evidence.unresolved.join(', ')}`:'',
+                        evidence.ambiguous.length?`Ambiguous NPC references: ${evidence.ambiguous.join(', ')}`:''].filter(Boolean):[];
+                if(!memberships?.size)return {label:'Unassigned',tooltip:evidence
+                    ? [evidence.references.length?'No unique NPC reference could be resolved from the active workbooks.':'The workbook NPC reference is blank.',...details].join('\n')
+                    : 'No NPC relationship was found in the workbook paths or text IDs.'};
                 const matching=this.ctNpcSelection==='all' ? [...memberships.entries()] : [...memberships.entries()].filter(([key])=>key===this.ctNpcSelection),
                     selected=matching.length?matching:[...memberships.entries()];
-                const inferred=selected.some(([,relation])=>relation.aliases?.length),labels=selected.map(([key])=>this._ctNpcIndex.groupByKey.get(key)?.label || key);
+                const inferred=selected.some(([,relation])=>relation.aliases?.length),labels=selected.map(([key])=>this._ctNpcIndex.groupByKey.get(key)?.label || key),
+                    references=[...new Set(selected.flatMap(([,relation])=>relation.references || []))];
+                if(references.length)return {label:'NPC reference',tooltip:[`Linked to ${labels.join(', ')} by NPC reference: ${references.join(', ')}.`,...details].join('\n')};
                 return {label:inferred?'ID match':'Exact link',tooltip:inferred
                     ? `Related to ${labels.join(', ')} by text ID: ${[...new Set(selected.flatMap(([,relation])=>relation.aliases || []))].join(', ')}. This does not identify the speaker or conversation order.`
                     : `Linked to ${labels.join(', ')} by an exact NPC record or menu-topic path. This does not identify the dialogue speaker.`};

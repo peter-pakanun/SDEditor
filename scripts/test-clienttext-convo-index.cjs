@@ -95,6 +95,38 @@ test('full Name resolves title collisions while suffix speakers and class metada
     assert.equal(index.memberships.get(rows[5].id).parentKey,sin.key);
 });
 
+test('explicit NPC links distinguish conversation participants without splitting ID families or changing their context parents',async()=>{
+    const doryaniPath='Metadata/NPC/Four_Act4/DoryaniTownKingsmarchIntro',hoodPath='Metadata/NPC/Four_Act4/HoodedMentorKingsmarchIntro';
+    const rows=freeze([npc(doryaniPath,'Doryani'),npc(hoodPath,'The Hooded One'),
+        convo('DoryaniA4_Intro_A',{metadata:{NPC:doryaniPath}}),
+        convo('DoryaniA4_Intro_A_Sin',{metadata:{NPC:hoodPath}}),
+        convo('DoryaniA4_Intro_B_Dex4b',{metadata:{NPC:'',Character:'Metadata/Characters/Dex/DexFourb'}}),
+        convo('DoryaniA4_Intro_C_Sin',{metadata:{NPC:hoodPath}}),convo('DoryaniA4_Intro_C',{metadata:{NPC:doryaniPath}}),
+        convo('DoryaniA4_Intro_i1_StrDex4b',{metadata:{NPC:'',Character:'Metadata/Characters/StrDex/StrDexFourb'}}),
+        convo('DoryaniA4_Intro_A_Sin',{role:'gender',metadata:{NPC:hoodPath}}),
+        convo('DoryaniInterlude_Intro_A1',{metadata:{NPC:doryaniPath}}),
+        convo('Doryani_Inc_Intro_a1',{metadata:{NPC:doryaniPath}})]);
+    const before=JSON.stringify(rows),npcIndex=await N.buildNpcIndex(rows,{yield:async()=>{}}),index=await C.buildConvoIndex(rows,npcIndex);
+    const participantLabels=row=>[...npcIndex.memberships.get(row.id).keys()].map(key=>npcIndex.groupByKey.get(key).label);
+    assert.deepEqual(participantLabels(rows[2]),['Doryani']);assert.deepEqual(participantLabels(rows[3]),['The Hooded One']);
+    assert.deepEqual(participantLabels(rows[4]),[]);assert.deepEqual(participantLabels(rows[7]),[]);
+    assert.deepEqual(participantLabels(rows[8]),['The Hooded One']);
+    assert.deepEqual(npcIndex.unassigned,[rows[4],rows[7]],'Player character turns remain accessible without a guessed NPC actor');
+    const doryani=index.parents.find(parent=>parent.label==='Doryani'),intro=index.familyByKey.get('DoryaniA4_Intro');
+    assert.deepEqual(intro.units,rows.slice(2,9),'NPC, other-participant and player turns retain workbook order in one family');
+    assert.deepEqual(doryani.units,rows.slice(2));assert.equal(doryani.families.length,3);
+    assert.equal(index.parents.some(parent=>parent.label==='The Hooded One'),false,'A turn actor does not replace the ID-derived conversation parent');
+    for(const row of intro.units){assert.equal(index.memberships.get(row.id).familyKey,intro.key);assert.equal(index.memberships.get(row.id).parentKey,doryani.key);}
+    assert.equal(index.memberships.get(rows[7].id).turn,'i1');
+    assert.equal(index.memberships.get(rows[10].id).familyKey,'Doryani_Inc_Intro');assert.equal(index.memberships.get(rows[10].id).turn,'a1');
+    assert.notEqual(rows[3].id,rows[8].id);assert.equal(rows[3].recordId,rows[8].recordId);
+    const withoutHints=rows.map(row=>({...row,metadata:Object.fromEntries(Object.entries(row.metadata).filter(([name])=>name!=='NPC'))}));
+    const legacy=await build(withoutHints);
+    for(const row of index.units)assert.deepEqual(index.memberships.get(row.id),legacy.memberships.get(row.id),'NPC hints do not reinterpret existing family identity or parent evidence');
+    assert.equal(new Set(index.units.map(row=>row.id)).size,9);assert.equal(JSON.stringify(rows),before);
+    assert.equal(intro.units[1],rows[3]);assert.equal(intro.units[6],rows[8]);
+});
+
 test('longer ambiguous paths never fall back to a shorter unique full Name',async()=>{
     const rows=[npc('Metadata/NPC/Doryani','Doryani'),npc('Metadata/Monsters/Past/DoryaniPast','Doryani, Royal Thaumaturge','Doryani'),
         npc('Metadata/Monsters/Other/DoryaniPast','Kulka, Vaal Thaumaturge','Kulka'),convo('DoryaniPast_Intro_A1')];

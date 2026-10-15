@@ -65,6 +65,87 @@ test('word boundaries find related responses while excluding free text and class
     assert.deepEqual(index.unassigned,rows.slice(6));
 });
 
+test('explicit NPC paths own audio records before misleading related-name aliases',async()=>{
+    const doryani='Metadata/NPC/Four_Act4/DoryaniTown',hood='Metadata/NPC/Four_Act4/HoodedMentor',una='Metadata/NPC/Four_Act1/Una';
+    const rows=freeze([npc(doryani,'Doryani'),npc(hood,'The Hooded One'),npc(una,'Una'),npc('Metadata/NPC/Four_Act1/Renly','Renly'),
+        unit('NPCTalkDialogueTextAudio','DoryaniA4_Intro_A_Sin',{metadata:{NPC:hood}}),
+        unit('NPCTextAudio','UnaRenlySon',{metadata:{NPC:una}}),
+        unit('NPCTextAudio','UnknownAssetName',{metadata:{NPC:doryani}})]),before=JSON.stringify(rows),index=await N.buildNpcIndex(rows);
+    assert.deepEqual(labels(index,rows[4]),['The Hooded One']);assert.deepEqual(labels(index,rows[5]),['Una']);assert.deepEqual(labels(index,rows[6]),['Doryani']);
+    assert.deepEqual(index.memberships.get(rows[4].id).get(group(index,'The Hooded One').key),{kind:'conversations',aliases:[],references:[hood]});
+    assert.deepEqual(index.memberships.get(rows[5].id).get(group(index,'Una').key),{kind:'dialogue',aliases:[],references:[una]});
+    assert.deepEqual(index.referenceEvidence.get(rows[4].id),{references:[hood],unresolved:[],ambiguous:[]});
+    assert.equal(index.unassigned.length,0);assert.equal(index.units.length,rows.length);assert.equal(JSON.stringify(rows),before);
+    assert.equal(index.units[4],rows[4]);assert.equal(group(index,'The Hooded One').units.at(-1),rows[4]);
+});
+
+test('explicit comma and newline NPC lists deduplicate paths and each group membership',async()=>{
+    const renly1='Metadata/NPC/Four_Act1/Renly',renly4='Metadata/NPC/Four_Act4/Renly',una='Metadata/NPC/Four_Act1/Una';
+    const rows=[npc(renly1,'Renly'),npc(renly4,' Renly '),npc(una,'Una'),unit('NPCTextAudio','UnrelatedID',{
+        metadata:{NPC:' '+renly4+', '+renly1+', '+renly4+'\r\n'+una+', , '+una+'\n '}})];
+    const index=await N.buildNpcIndex(rows),renly=group(index,'Renly'),entry=rows[3];
+    assert.deepEqual(labels(index,entry),['Renly','Una']);assert.equal(index.memberships.get(entry.id).size,2);
+    assert.deepEqual(index.memberships.get(entry.id).get(renly.key),{kind:'dialogue',aliases:[],references:[renly1,renly4]});
+    assert.deepEqual(index.memberships.get(entry.id).get(group(index,'Una').key),{kind:'dialogue',aliases:[],references:[una]});
+    assert.equal(renly.units.filter(row=>row===entry).length,1);assert.deepEqual(index.referenceEvidence.get(entry.id),{references:[renly1,una,renly4],unresolved:[],ambiguous:[]});
+});
+
+test('hint membership preserves complete roles and sheets when record IDs and referenced paths repeat',async()=>{
+    const npcPath='Metadata/NPC/Guide',rows=[npc(npcPath,'Guide'),unit('NPCs_Gender',npcPath,{role:'gender',fields:[{name:'Name',source:'Guide',target:'Guide translated'}]}),
+        ...['NPCTextAudio','NPCTalkDialogueTextAudio'].flatMap(sheet=>[
+            unit(sheet,'RepeatedID',{metadata:{NPC:npcPath}}),unit(sheet+'_Gender','RepeatedID',{role:'gender',metadata:{NPC:npcPath}})])];
+    const originalIDs=rows.map(row=>row.id),index=await N.buildNpcIndex([...rows,rows[2]]),guide=group(index,'Guide');
+    assert.equal(index.units.length,6);assert.equal(guide.npcUnits.length,2);assert.equal(guide.units.length,6);
+    assert.deepEqual(index.units.map(row=>row.id),originalIDs);assert.equal(new Set(guide.units.map(row=>row.id)).size,6);
+    for(const entry of rows.slice(2)) {
+        assert.equal(guide.units.includes(entry),true);assert.equal(index.memberships.get(entry.id).size,1);
+        assert.deepEqual(index.memberships.get(entry.id).get(guide.key),{kind:entry.sheet.startsWith('NPCTalkDialogue')?'conversations':'dialogue',aliases:[],references:[npcPath]});
+    }
+});
+
+test('exact NPC hints resolve Monster and generic Info identities without using shared labels',async()=>{
+    const monster='Metadata/Monsters/Masters/Einhar',tablet1='Metadata/NPC/Info/First/Tablet',tablet2='Metadata/NPC/Info/Second/Tablet';
+    const rows=[npc(monster,'Einhar'),npc(tablet1,'Inscription'),npc(tablet2,'Inscription'),
+        unit('NPCTextAudio','InscriptionText',{metadata:{NPC:tablet2}}),unit('NPCTalkDialogueTextAudio','Unknown_A1',{metadata:{NPC:monster}})];
+    const index=await N.buildNpcIndex(rows);
+    assert.deepEqual(labels(index,rows[3]),['Inscription — Second/Tablet']);assert.deepEqual(labels(index,rows[4]),['Einhar']);
+    assert.deepEqual(index.memberships.get(rows[3].id).get(group(index,'Inscription — Second/Tablet').key),{kind:'dialogue',aliases:[],references:[tablet2]});
+    assert.equal(group(index,'Inscription — First/Tablet').units.length,1);
+});
+
+test('nonblank unresolved and ambiguous NPC hints stay unassigned without alias or terminal fallback',async()=>{
+    const valid='Metadata/NPC/Renly',ambiguous='Metadata/NPC/SharedPath',missing='Metadata/NPC/Missing';
+    const rows=[npc(valid,'Renly'),npc(ambiguous,'First NPC'),npc(ambiguous,'Second NPC','',{role:'gender'}),
+        unit('NPCTextAudio','RenlyMissing',{metadata:{NPC:missing}}),unit('NPCTextAudio','RenlyAmbiguous',{metadata:{NPC:ambiguous}}),
+        unit('NPCTextAudio','RenlyCaseMismatch',{metadata:{NPC:'metadata/NPC/Renly'}}),unit('NPCTextAudio','RenlyTerminalOnly',{metadata:{NPC:'Renly'}}),
+        unit('NPCTalkDialogueTextAudio','RenlyMixed_A1',{metadata:{NPC:missing+', '+valid+', '+ambiguous}})];
+    const index=await N.buildNpcIndex(rows);
+    assert.deepEqual(index.unassigned,rows.slice(3,7));for(const entry of rows.slice(3,7))assert.equal(index.memberships.get(entry.id).size,0);
+    assert.deepEqual(index.referenceEvidence.get(rows[3].id),{references:[missing],unresolved:[missing],ambiguous:[]});
+    assert.deepEqual(index.referenceEvidence.get(rows[4].id),{references:[ambiguous],unresolved:[],ambiguous:[ambiguous]});
+    assert.deepEqual(labels(index,rows[7]),['Renly'],'An independent unique reference survives other missing or ambiguous references');
+    assert.deepEqual(index.memberships.get(rows[7].id).get(group(index,'Renly').key),{kind:'conversations',aliases:[],references:[valid]});
+    assert.deepEqual(index.referenceEvidence.get(rows[7].id),{references:[missing,valid,ambiguous],unresolved:[missing],ambiguous:[ambiguous]});
+});
+
+test('only absent NPC columns use ID fallback while blank hints and Character or class paths never imply ownership',async()=>{
+    const path='Metadata/NPC/Renly',character='Metadata/Characters/Dex/DexFour';
+    const rows=[npc(path,'Renly'),npc('Metadata/NPC/DexFour','DexFour'),
+        unit('NPCTextAudio','RenlyAbsent',{metadata:{Character:character,'Character Class':'Metadata/Characters/Renly'}}),
+        unit('NPCTextAudio','RenlyBlank',{metadata:{NPC:' \r\n ',Character:character}}),
+        unit('NPCTextAudio','RenlyEmpty',{metadata:{NPC:'',Character:character}}),
+        unit('NPCTextAudio','UnrelatedCharacterOnly',{metadata:{Character:'Metadata/Characters/Renly','Character Class':'Metadata/Characters/DexFour'}}),
+        unit('NPCTextAudio','RenlyInvalidNPCPath',{metadata:{NPC:character,Character:path,'Character Class':path}})];
+    const index=await N.buildNpcIndex(rows),renly=group(index,'Renly');
+    assert.deepEqual(labels(index,rows[2]),['Renly']);assert.deepEqual(index.memberships.get(rows[2].id).get(renly.key),{kind:'dialogue',aliases:['Renly']});
+    assert.equal(index.referenceEvidence.has(rows[2].id),false,'A workbook without NPC hints retains evidence from the immutable audio ID');
+    for(const entry of rows.slice(3,5)) {
+        assert.equal(index.memberships.get(entry.id).size,0,'A blank explicit NPC cell does not assign a player line by conversation owner');
+        assert.deepEqual(index.referenceEvidence.get(entry.id),{references:[],unresolved:[],ambiguous:[]});
+    }
+    assert.deepEqual(index.unassigned,rows.slice(3));assert.equal(group(index,'DexFour').units.length,1);
+});
+
 test('source aliases use articles, short names, metadata leaves, Unicode and numeric boundaries',async()=>{
     const rows=[npc('Metadata/NPC/HoodedMentor','The Hooded One'),npc('Metadata/Monsters/Masters/Einhar','Einhar, Beastmaster','Einhar'),
         npc('Metadata/NPC/FullWidth','Ｒｅｎｌｙ'),npc('Metadata/NPC/Numbered2','Numbered 2'),

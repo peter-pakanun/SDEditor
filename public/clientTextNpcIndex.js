@@ -8,6 +8,7 @@
     const KINDS = Object.freeze({ NPCs: 'names', NPCTalk: 'topics', NPCTextAudio: 'dialogue', NPCTalkDialogueTextAudio: 'conversations' });
     const clean = value => String(value ?? '').normalize('NFKC').trim().replace(/\s+/gu, ' ');
     const normalized = value => clean(value).toLowerCase();
+    const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
     const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
     const alphabetical = (a, b) => a.localeCompare(b, 'en', { sensitivity: 'base', numeric: true }) || compare(a, b);
 
@@ -47,7 +48,7 @@
         // Small inputs also yield once, while large inputs yield for elapsed
         // CPU time instead of paying a timer delay at every fixed row batch.
         await checkpoint();
-        const units = [], seen = new Set(), memberships = new Map(), groupByKey = new Map(), pathGroups = new Map();
+        const units = [], seen = new Set(), memberships = new Map(), referenceEvidence = new Map(), groupByKey = new Map(), pathGroups = new Map();
         const aliasRoot = { next: new Map(), record: null };
         for (const unit of input) {
             if (kindFor(unit) && typeof unit.id === 'string' && unit.id && !seen.has(unit.id)) {
@@ -55,10 +56,13 @@
             }
             if (shouldYield()) await checkpoint();
         }
-        function member(unit, key, kind, aliases = []) {
+        function member(unit, key, kind, aliases = [], references) {
             const rows = memberships.get(unit.id), existing = rows.get(key);
-            if (existing) existing.aliases = [...new Set([...existing.aliases, ...aliases])].sort(alphabetical);
-            else rows.set(key, { kind, aliases: [...new Set(aliases)].sort(alphabetical) });
+            if (existing) {
+                existing.aliases = [...new Set([...existing.aliases, ...aliases])].sort(alphabetical);
+                if (references) existing.references = [...new Set([...(existing.references || []), ...references])].sort(alphabetical);
+            } else rows.set(key, { kind, aliases: [...new Set(aliases)].sort(alphabetical),
+                ...(references ? { references: [...new Set(references)].sort(alphabetical) } : {}) });
         }
         function addAlias(key, value, allowArticle = false) {
             const label = clean(value), parts = tokens(label);
@@ -97,7 +101,21 @@
         }
         for (const unit of units) {
             const kind = kindFor(unit);
-            if (kind === 'topics') {
+            if (kind !== 'names' && own(unit.metadata, 'NPC')) {
+                // The column is authoritative even when blank (for example a
+                // player turn). Missing NPC records never become ID guesses.
+                const references = [...new Set((typeof unit.metadata.NPC === 'string' ? unit.metadata.NPC : '')
+                    .split(/[,\r\n]+/u).map(value => value.trim()).filter(Boolean))].sort(alphabetical);
+                const evidence = { references, unresolved: [], ambiguous: [] };
+                referenceEvidence.set(unit.id, evidence);
+                for (const reference of references) {
+                    const owners = pathGroups.get(reference);
+                    if (!owners?.size) evidence.unresolved.push(reference);
+                    else if (owners.size !== 1) evidence.ambiguous.push(reference);
+                    else member(unit, owners.values().next().value, kind, [], [reference]);
+                    if (shouldYield()) await checkpoint();
+                }
+            } else if (kind === 'topics') {
                 const parent = /^(.+)::\d+$/.exec(unit.recordId)?.[1];
                 for (const key of pathGroups.get(parent) || []) member(unit, key, kind);
             } else if (kind === 'dialogue' || kind === 'conversations') {
@@ -154,7 +172,7 @@
         }
         groups.sort((a, b) => alphabetical(a.label, b.label) || compare(a.key, b.key));
         check();
-        return { groups, groupByKey: new Map(groups.map(group => [group.key, group])), units, unassigned, memberships };
+        return { groups, groupByKey: new Map(groups.map(group => [group.key, group])), units, unassigned, memberships, referenceEvidence };
     }
     return { kindFor, buildNpcIndex };
 });

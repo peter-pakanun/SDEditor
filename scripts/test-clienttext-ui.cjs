@@ -337,6 +337,44 @@ test('NPC browse preserves full record identity, all-status context, classificat
     assert.ok(app.ctNpcGroupTooltip(index.groups[0]).includes('Metadata/NPC/Renly'));
 });
 
+test('NPC relationship labels distinguish explicit references, partial matches and absent-hint ID fallback',()=>{
+    const {app,index,dialogue,reply,gender,unassigned}=npcUiHarness(),renly='Metadata/NPC/Renly',una='Metadata/NPC/Una',
+        missing='Metadata/NPC/Missing',ambiguous='Metadata/NPC/Ambiguous';
+    index.referenceEvidence=new Map([
+        [dialogue.id,{references:[renly,una,missing,ambiguous],unresolved:[missing],ambiguous:[ambiguous]}],
+        [reply.id,{references:[],unresolved:[],ambiguous:[]}],
+        [unassigned.id,{references:[missing,ambiguous],unresolved:[missing],ambiguous:[ambiguous]}]
+    ]);
+    index.memberships.set(dialogue.id,new Map([['renly',{kind:'dialogue',aliases:[],references:[renly]}],['una',{kind:'dialogue',aliases:[],references:[una]}]]));
+    index.memberships.set(reply.id,new Map());app.ctNpcSelection='una';
+    let relation=app.ctNpcRelation(dialogue);assert.equal(relation.label,'NPC reference');assert.match(relation.tooltip,/Linked to Una/);
+    assert.ok(relation.tooltip.includes(una));assert.equal(relation.tooltip.includes(renly),false);
+    assert.ok(relation.tooltip.includes('Unresolved NPC references: '+missing));assert.ok(relation.tooltip.includes('Ambiguous NPC references: '+ambiguous));
+    app.ctNpcSelection='all';relation=app.ctNpcRelation(dialogue);assert.match(relation.tooltip,/Linked to Renly, Una/);
+    assert.equal(app.ctNpcRelation(reply).label,'Unassigned');assert.match(app.ctNpcRelation(reply).tooltip,/NPC reference is blank/);
+    assert.match(app.ctNpcRelation(unassigned).tooltip,/No unique NPC reference/);assert.ok(app.ctNpcRelation(unassigned).tooltip.includes(missing));
+    assert.equal(app.ctNpcRelation(gender).label,'ID match');assert.match(app.ctNpcRelation(gender).tooltip,/by text ID/);
+});
+
+test('hinted NPC worklists and hidden-record severity use resolved memberships without changing workspace counts',async()=>{
+    const {app,window,names,dialogue,reply,gender}=npcUiHarness();names.fields[0].source='Renly';
+    const una=clone(names);una.id=JSON.stringify(['normal','NPCs','Metadata/NPC/Una']);una.recordId='Metadata/NPC/Una';una.fields[0].source='Una';
+    dialogue.metadata={NPC:una.recordId};reply.metadata={NPC:'',Character:'Metadata/Characters/Dex/DexFour'};
+    app.ctUnits=[...app.ctUnits,una];app._ctUnitIndex=new Map(app.ctUnits.map(unit=>[unit.id,unit]));
+    app._ctNpcIndex=await window.ClientTextNpcIndex.buildNpcIndex(app.ctUnits);app.ctRevision++;
+    app.ctDiagnostics={[dialogue.id]:[{severity:'error',message:'Existing diagnostic'}]};
+    const counts=clone(app.ctCounts),renlyGroup=app._ctNpcIndex.groups.find(group=>group.label==='Renly'),unaGroup=app._ctNpcIndex.groups.find(group=>group.label==='Una');
+    assert.equal(await app.ctSetBrowseMode('npcs'),true);assert.equal(await app.ctSetNpc(renlyGroup.key),true);
+    assert.ok(app.ctRows.includes(gender),'The older sheet without NPC hints retains its ID relationship');
+    assert.equal(app.ctRows.includes(dialogue),false);assert.equal(app.ctRows.includes(reply),false);
+    assert.equal(await app.ctSetNpc(unaGroup.key),true);assert.ok(app.ctRows.includes(dialogue));
+    app.ctSearch='no visible rows';app.ctApplySearch();assert.equal(app.ctRows.length,0);
+    assert.equal(app.ctNpcSeverities.get(unaGroup.key),'error');assert.equal(app.ctNpcSeverities.get(renlyGroup.key),'');
+    assert.deepEqual(clone(app.ctCounts),counts,'Grouping and filtering never alter workspace progress');
+    app.ctSearch='';app.ctApplySearch();assert.equal(await app.ctSetNpc('unassigned'),true);assert.ok(app.ctRows.includes(reply));
+    assert.deepEqual(clone(app.ctCounts),counts);assert.equal(app.ctNpcTotal,app._ctNpcIndex.unassigned.length);
+});
+
 test('Sheets and NPCs restore independent session queries, filters, sorting, pages and selected context',async()=>{
     const {app,dialogue}=npcUiHarness({ctSheet:'sheet-selection',ctSheetFilter:'sheet query',ctSearch:'sheet text',ctAppliedSearch:'sheet text',
         ctFilter:'saved',ctSelectedFilters:['saved'],ctSort:'filename',ctSortDir:'desc',ctPage:3,ctTool:'history',ctHistory:[{key:'retained'}],ctDraftDirty:true}),
