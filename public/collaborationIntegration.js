@@ -143,6 +143,8 @@
           if (snapshot[field] !== undefined) this.localDescs[field] = snapshot[field];
         }
         else window.WorkspaceState.acceptDropped(this.localDescs, records, { game: this.gameVersion, language: lang, acknowledge: true });
+        if (snapshot) for (const field of ['invalidTranslationArchive', 'droppedConflictArchive']) if (snapshot[field])
+          this.localDescs[field] = { ...this.localDescs[field], ...snapshot[field] };
         window.WorkspaceState.attachLocalDroppedCandidates?.(this.localDescs, retainedLocal);
         const descriptions = this.collaborationFileIndexes().descriptions;
         const paths = [...affected].filter(path => descriptions.has(path));
@@ -1381,6 +1383,7 @@
           if (!this.collaborationContextCurrent(context)) return { stale: true };
           const now = Date.now();
           const source = copy(this.workspaceSourceFile(desc.filepath) || desc);
+          window.WorkspaceState.assertCompleteTranslation(lines, source.translations.English.length, desc.filepath);
           const id = crypto.randomUUID();
           const candidate = { id, recoveryId: id, ownership: 'local', game: context.game, language: context.language, filepath: desc.filepath,
             originSourceHash: context.source, targetSourceHash: context.source, originSourceAvailable: true,

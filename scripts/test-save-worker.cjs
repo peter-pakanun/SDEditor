@@ -132,7 +132,9 @@ test('aligned shared recovery saves accept the exact unstaged ZIP projection wit
     original.translations.Thai = Array.from({ length: retained }, (_, i) => 'Preserved translation ' + i);
     workspace.descs = copy(source); f.kv.set('source_poe1', copy(source));
     W.initializeWorkspace(workspace, { source, sourceHash: 'source', game: 'poe1', language: 'Thai' });
-    W.dropTranslation(workspace, original, 'Thai', { id: 'shared-drop', game: 'poe1', ownership: 'online',
+    const previous = { ...original, translations: { ...original.translations,
+      English: Array.from({ length: retained }, (_, i) => 'Previous English ' + i) } };
+    W.dropTranslation(workspace, previous, 'Thai', { id: 'shared-drop', game: 'poe1', ownership: 'online',
       originSourceHash: 'older-source', targetSourceHash: 'source', revision: 4 });
     const projected = { filepath: original.filepath, translations: original.translations.Thai.slice(0, count),
       trackedForExport: false, needsReview: false, revision: 0 };

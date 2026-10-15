@@ -302,8 +302,14 @@ test('real API and client recover identical resolved history as a new generation
   const second = W.droppedForFile(store.workspace, input.filepath, 'Thai');
   assert.ok(second && second.id !== first.id);
   assert.equal(store.workspace.droppedArchive[first.id].status, 'discarded');
+  const firstReceipt = db.prepare('SELECT * FROM collaboration_dropped_recoveries WHERE recovery_id=?').get(input.recoveryId);
   const replay = await client.registerDroppedCandidate(input);
-  assert.equal(replay.candidate.id, first.id); assert.equal(replay.candidate.status, 'discarded');
+  assert.equal(replay.status, 'synced');
+  assert.equal(store.workspace.droppedAliases[input.id].id, first.id, 'The durable receipt binds retries to their original canonical generation.');
+  assert.equal(store.workspace.droppedArchive[first.id].status, 'discarded');
+  assert.deepEqual(db.prepare('SELECT * FROM collaboration_dropped_recoveries WHERE recovery_id=?').get(input.recoveryId), firstReceipt);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collaboration_dropped_recoveries').get().n, 2,
+    'Replaying the first action cannot create a third recovery generation.');
   assert.equal(W.droppedForFile(store.workspace, input.filepath, 'Thai').id, second.id);
   const candidates = await client.api('/dropped?' + new URLSearchParams({ game: 'poe1', language: 'Thai', includeResolved: '1' }), {}, client.epoch);
   assert.equal(candidates.items.filter(candidate => candidate.status === 'dropped').length, 1);
@@ -311,9 +317,9 @@ test('real API and client recover identical resolved history as a new generation
   assert.equal(store.workspace.droppedOutbox.length, 0);
 });
 
-test('real API coalesces identical unavailable legacy copies across source hashes without staging or changing shared provenance', async t => {
-  const [{ openDatabase, CloudStore }, { loadConfig }, { createApp }] = await Promise.all([
-    load('src/database.js'), load('src/config.js'), load('src/app.js'),
+test('real API keeps identical unavailable local recovery independent from accepted Shared Dropped assignments', async t => {
+  const [{ openDatabase, CloudStore }, { loadConfig }, { createApp }, { droppedInput }] = await Promise.all([
+    load('src/database.js'), load('src/config.js'), load('src/app.js'), load('src/dropped-store.js'),
   ]);
   const config = loadConfig({ ADMIN_GOOGLE_SUB: 'admin' }), db = openDatabase(':memory:');
   const cloud = new CloudStore(db, config);
@@ -351,11 +357,14 @@ test('real API coalesces identical unavailable legacy copies across source hashe
     workspace, archive, baselineSource: source });
   const oldTarget = 'b'.repeat(64), localTarget = 'c'.repeat(64), legacyOrigin = 'a'.repeat(64);
   const snapshot = { name: '', english: ['One'], stats: ['fixture'], variables: ['#'], remarks: [''], translations: ['Historical Thai'] };
-  const receipt = await client.api('/dropped', { method: 'PUT', body: {
+  // Managed advancement establishes online assignments on the server. An
+  // ordinary browser import must neither create nor extend those assignments.
+  const receipt = app.locals.collaboration.upsertDropped(user.user.id, droppedInput({
     game: 'poe1', language: 'Thai', filepath: source[0].filepath, originSourceHash: archive.baselineId,
-    originSourceAvailable: true, targetSourceHash: oldTarget, snapshot, baseRevision: 0, reason: 'Shared preserved copy',
+    originSourceAvailable: true, targetSourceHash: archive.baselineId, targetSourceHashes: [archive.baselineId, oldTarget],
+    snapshot, baseRevision: 0, reason: 'Shared preserved copy',
     baseline: P.witness(source[0]), originArchive: archive,
-  } }, client.epoch);
+  }));
   const shared = receipt.candidate;
   assert.equal(shared.originVerified, true);
   let local;
@@ -366,17 +375,26 @@ test('real API coalesces identical unavailable legacy copies across source hashe
       provenance: { legacy: true } });
     return current;
   });
+  await assert.rejects(client.api('/dropped', { method: 'PUT', body: {
+    game: 'poe1', language: 'Thai', filepath: source[0].filepath, originSourceHash: legacyOrigin,
+    originSourceAvailable: false, targetSourceHash: archive.baselineId, targetSourceHashes: [archive.baselineId, localTarget],
+    snapshot, baseRevision: 0, reason: 'Preserved legacy review translation',
+  } }, client.epoch), error => error.code === 'CANDIDATE_LOCAL_ONLY');
   client.lastDroppedSync = 0;
   await client.retry();
   await client.retry();
-  assert.equal(requests.filter(request => request.error === 'CANDIDATE_CONFLICT').length, 1);
+  assert.equal(requests.filter(request => request.error === 'CANDIDATE_LOCAL_ONLY').length, 1);
+  assert.equal(requests.filter(request => request.error === 'CANDIDATE_CONFLICT').length, 0);
   assert.deepEqual(client.snapshot().droppedReviewPaths, []);
-  assert.equal(W.droppedForFile(store.workspace, source[0].filepath, 'Thai').id, shared.id);
+  assert.equal(W.droppedForFile(store.workspace, source[0].filepath, 'Thai', 'local').id, local.id);
+  assert.equal(W.droppedForFile(store.workspace, source[0].filepath, 'Thai', 'online').id, shared.id);
+  assert.deepEqual(new Set(W.droppedCandidatesForFile(store.workspace, source[0].filepath, 'Thai').map(candidate => candidate.ownership)),
+    new Set(['local', 'online']));
   assert.deepEqual(store.workspace.staged, {});
   assert.deepEqual(W.workspaceFile(store.workspace, source[0], 'Thai').translations, ['ZIP translation']);
   assert.equal(store.workspace.droppedOutbox.length, 0);
   const preserved = store.workspace.droppedArchive[local.id], canonical = store.workspace.droppedArchive[shared.id];
-  assert.equal(preserved.status, 'replaced');
+  assert.equal(preserved.status, 'dropped');
   assert.equal(preserved.originSourceHash, legacyOrigin);
   assert.equal(preserved.originSourceAvailable, false);
   assert.deepEqual(preserved.snapshot, snapshot);
@@ -385,8 +403,9 @@ test('real API coalesces identical unavailable legacy copies across source hashe
   assert.equal(canonical.originSourceAvailable, true);
   assert.equal(canonical.originVerified, true);
   assert.equal(canonical.provenance, undefined);
-  assert.equal(store.workspace.droppedAliases[local.id].requiresReview, true);
-  const expectedTargets = new Set([archive.baselineId, oldTarget, localTarget]);
+  assert.equal(store.workspace.droppedAliases?.[local.id], undefined);
+  assert.deepEqual(new Set(preserved.targetSourceHashes), new Set([archive.baselineId, localTarget]));
+  const expectedTargets = new Set([archive.baselineId, oldTarget]);
   assert.deepEqual(new Set(canonical.targetSourceHashes), expectedTargets);
   const current = await client.api('/dropped?' + new URLSearchParams({ game: 'poe1', language: 'Thai', includeResolved: '1' }), {}, client.epoch);
   assert.equal(current.items.length, 1);
@@ -396,12 +415,15 @@ test('real API coalesces identical unavailable legacy copies across source hashe
   assert.equal(current.items[0].originSourceAvailable, true);
   assert.equal(current.items[0].originVerified, true);
   assert.deepEqual(new Set(current.items[0].targetSourceHashes), expectedTargets);
-  const provenanceUpload = requests.find(request => request.pathname.endsWith('/dropped') && request.options.method === 'PUT'
-    && request.options.body.originSourceHash === archive.baselineId && !request.options.body.baseline);
-  assert.ok(provenanceUpload);
-  assert.equal(provenanceUpload.options.body.replace, undefined);
-  assert.equal(provenanceUpload.options.body.recoveryId, undefined);
-  assert.deepEqual(new Set(provenanceUpload.options.body.targetSourceHashes), expectedTargets);
+  assert.equal(requests.filter(request => request.pathname.endsWith('/dropped') && request.options.method === 'PUT').length, 1,
+    'Only the explicitly rejected legacy request reaches the API; polling never uploads local recovery.');
+  await client.discardDropped(source[0].filepath, { id: local.id, ownership: 'local', revision: local.revision, targetSourceHash: archive.baselineId });
+  assert.equal(W.droppedForFile(store.workspace, source[0].filepath, 'Thai', 'local'), null);
+  assert.equal(W.droppedForFile(store.workspace, source[0].filepath, 'Thai', 'online').id, shared.id);
+  assert.equal(store.workspace.droppedArchive[local.id].status, 'discarded');
+  assert.equal(requests.some(request => request.pathname.endsWith('/discard')), false);
+  const afterDiscard = await client.api('/dropped?' + new URLSearchParams({ game: 'poe1', language: 'Thai', includeResolved: '1' }), {}, client.epoch);
+  assert.deepEqual(afterDiscard.items, current.items, 'Discarding Local recovery leaves the online generation and assignments exact.');
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collaboration_files').get().n, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM collaboration_history').get().n, 0);
   assert.equal(requests.filter(request => request.pathname.endsWith('/mutations')).length, 0);

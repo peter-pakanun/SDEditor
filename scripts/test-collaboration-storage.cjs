@@ -216,7 +216,7 @@ test('wire preparation uses the newest alias from the real atomic workspace tran
   f.store.setWorkspaceContext({ ...identity, branchId: 'default' });
   const workspaceKey = 'workspace_version_v1:' + JSON.stringify(['user', 'poe1', 'default', identity.sourceHash]);
   f.kv.set(workspaceKey, { descs: [], sourceHash: identity.sourceHash, collaborationAccountId: 'user', stagedVersion: 1, statusMetadataVersion: 1,
-    invalidTranslationPolicyVersion: 1, placeholderRepairVersion: 1,
+    invalidTranslationPolicyVersion: 1, invalidDroppedTranslationPolicyVersion: 1, placeholderRepairVersion: 1,
     droppedAliases: { local: { id: 'server', fromRevision: 0, revision: 1 } } });
   const state = { version: 1, rooms: { [key]: { identity, outbox: [op], shared: { 'a.txt': base }, local: { 'a.txt': base }, conflicts: [] } } };
   f.kv.set('collaboration_v1', state);

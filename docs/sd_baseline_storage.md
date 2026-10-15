@@ -1,6 +1,6 @@
 # ZIP-only StatDescription source storage
 
-The frontend uses IndexedDB v22 and the companion API uses schema v24. Deploy
+The frontend uses IndexedDB v22 and the companion API uses schema v25. Deploy
 the API first. This replaces the undeployed per-file-fragment design; production
 has not been migrated by agent work.
 
@@ -87,6 +87,18 @@ cache only when needed for comparison. Losing that source does not lose the
 frozen target or prevent explicit recovery against the verified current baseline.
 Explicit history recovery can also create a Dropped candidate with a stable
 recovery ID; advancement is the main automatic trigger, not its only origin.
+
+Blank or incomplete SD targets remain in recovery archives and never become
+active Dropped work. Browser activation and API schema v25 quarantine existing
+invalid candidates, retaining exact frozen targets, candidate IDs, source
+references, original retry evidence and history. Valid current translations and
+independent complete copies remain unchanged. Quarantined generations contribute
+no Dropped assignment and cannot revive through a stale import or compact reply.
+Original entry counts come from retained origin English or accepted source facts,
+never the destination layout or synthetic legacy fallback English. A changed
+destination count or unavailable old ZIP does not invalidate otherwise complete
+old work; nonblank targets with an unknown original count remain available for
+explicit review and destination validation. ClientText blank fields stay valid.
 
 Ownership also identifies the version chain. Browser-created automatic copies
 belong to the standalone local import chain and remain local recovery records.

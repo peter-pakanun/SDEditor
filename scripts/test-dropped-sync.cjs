@@ -916,6 +916,81 @@ async function persistedReviewedPromotion(t, status = 'needs_candidate_review') 
   return { ...fixtureState, original, pending, shared };
 }
 
+test('an invalid shared promotion conflict preserves the rejected request and shares the complete authored save', async t => {
+  const { client, store, server, pending, shared } = await persistedReviewedPromotion(t, 'pending');
+  await client.prepare(pending.id, client.epoch);
+  const rejected = copy(store.state.rooms[client.key].outbox[0]);
+  assert.ok(rejected.wire);
+  shared.snapshot.translations = ['']; server.records = [shared];
+  const request = server.request.bind(server);
+  client.request = async (path, options) => {
+    if (path.endsWith('/mutations') && options.body.promoteDropped) {
+      server.requests.push({ path, options: copy(options) });
+      assert.deepEqual(options.body, rejected.wire, 'An uncertain prepared request first replays its exact original body.');
+      throw candidateConflict(shared);
+    }
+    return request(path, options);
+  };
+  await client.retry();
+  assert.equal(client.room().outbox.length, 0);
+  assert.deepEqual(client.snapshot().droppedReviewPaths, []);
+  assert.equal(store.workspace.droppedConflicts.Thai?.['a.txt'], undefined);
+  assert.equal(store.workspace.droppedArchive[shared.id].status, 'quarantined');
+  assert.deepEqual(store.workspace.staged.Thai['a.txt'].translations, ['reviewed']);
+  assert.deepEqual(server.file.translations, ['reviewed']);
+  assert.deepEqual(server.records, [shared], 'The authored save does not resolve the invalid shared recovery.');
+  const recovery = client.room().recovery.find(entry => entry.id === 'quarantined-promotion:' + rejected.id);
+  assert.deepEqual(recovery.operation, rejected);
+  assert.deepEqual(recovery.candidate, shared);
+  const mutations = server.requests.filter(request => request.path.endsWith('/mutations'));
+  assert.equal(mutations.length, 2);
+  assert.deepEqual(mutations[0].options.body, rejected.wire);
+  assert.equal(mutations[1].options.body.mutationId, rejected.id);
+  assert.equal(mutations[1].options.body.files[0].baseRevision, rejected.files[0].base.revision);
+  assert.equal(mutations[1].options.body.promoteDropped, undefined);
+  client.state = copy(store.state); client.lastDroppedSync = 0;
+  await client.retry();
+  assert.deepEqual(client.room().recovery.find(entry => entry.id === recovery.id), recovery);
+  assert.equal(server.requests.filter(request => request.path.endsWith('/mutations')).length, 2);
+});
+
+test('persisted invalid shared promotion conflicts resume complete saves with their original shared-file guard', async t => {
+  for (const status of ['candidate_conflict', 'needs_candidate_review']) for (const changedShared of [false, true])
+    await t.test(status + ', changed shared:' + changedShared, async t => {
+      const { client, store, server, pending, shared } = await persistedReviewedPromotion(t, 'pending');
+      await client.prepare(pending.id, client.epoch);
+      const stored = store.state.rooms[client.key].outbox[0]; stored.status = status;
+      stored.upload = { originalRequestEvidence: 'retain exact prepared upload state' };
+      const rejected = copy(stored);
+      shared.snapshot.translations = ['']; server.records = [shared];
+      if (changedShared) {
+        server.file = P.fileState({ filepath: 'a.txt', translations: ['newer remote translation'], revision: rejected.files[0].base.revision + 1 });
+        store.state.rooms[client.key].shared['a.txt'] = copy(server.file);
+      }
+      client.state = copy(store.state);
+      await client.retry();
+      assert.deepEqual(client.snapshot().droppedReviewPaths, []);
+      const recovery = client.room().recovery.find(entry => entry.id === 'quarantined-promotion:' + rejected.id);
+      assert.deepEqual(recovery.operation, rejected);
+      assert.equal(store.workspace.droppedArchive[shared.id].status, 'quarantined');
+      assert.deepEqual(store.workspace.staged.Thai['a.txt'].translations, ['reviewed']);
+      const mutations = server.requests.filter(request => request.path.endsWith('/mutations'));
+      if (changedShared) {
+        assert.equal(mutations.length, 0, 'A fresh shared-file conflict requires review before publishing.');
+        assert.equal(client.room().outbox[0].status, 'conflict');
+        assert.deepEqual(client.room().conflicts[0].base, rejected.files[0].base);
+        assert.deepEqual(server.file.translations, ['newer remote translation']);
+      } else {
+        assert.equal(client.room().outbox.length, 0);
+        assert.equal(mutations.length, 1);
+        assert.equal(mutations[0].options.body.mutationId, rejected.id);
+        assert.equal(mutations[0].options.body.files[0].baseRevision, rejected.files[0].base.revision);
+        assert.equal(mutations[0].options.body.promoteDropped, undefined);
+        assert.deepEqual(server.file.translations, ['reviewed']);
+      }
+    });
+});
+
 test('persisted equivalent review flags resume the exact saved promotion with or without a conflict record', async t => {
   for (const scenario of ['needs-with-conflict', 'needs-without-conflict', 'candidate-without-conflict']) await t.test(scenario, async t => {
     const { client, store, server, original, pending, shared } = await persistedReviewedPromotion(t,

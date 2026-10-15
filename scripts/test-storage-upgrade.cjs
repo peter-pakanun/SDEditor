@@ -505,6 +505,31 @@ test('loading archives invalid stages and fences their retry state in the same d
   assert.deepEqual(fixture.snapshot(), before, 'Reload must not queue another repair or rewrite settled records.');
 });
 
+test('legacy reload archives invalid Dropped copies even after stage cleanup has settled without reviving drafts', async () => {
+  const fixture = versionedStorage(), kv = fixture.tables.get('kv'), original = copy(source[0]);
+  const candidate = { id: 'old-blank', ownership: 'online', game: 'poe1', language: 'Thai', filepath: original.filepath,
+    originSourceHash: 'current', targetSourceHash: 'current', targetSourceHashes: ['current'], status: 'dropped', revision: 4,
+    snapshot: { english: copy(original.translations.English), translations: [''] }, reason: 'Preserved local review translation' };
+  const command = { id: candidate.id, kind: 'put', revision: 4, candidate: copy(candidate), preparedRequest: { body: 'original bytes' } };
+  kv.set('workspace_poe1', { key: 'workspace_poe1', value: { sourceHash: 'current', game: 'poe1', stagedVersion: 1,
+    statusMetadataVersion: 1, placeholderRepairVersion: 1, invalidTranslationPolicyVersion: 1, sourceBaseline: { sourceHash: 'current' },
+    descs: [original], status: {}, staged: {}, dropped: { Thai: { [original.filepath]: copy(candidate) } },
+    droppedArchive: { [candidate.id]: copy(candidate) }, droppedOutbox: [copy(command)] } });
+  const revisions = copy([...fixture.tables.get('revisions_poe1')]);
+  const { store } = loadStore(fixture), workspace = await store.getWorkspace('poe1', 'English');
+  assert.equal(workspace.invalidDroppedTranslationPolicyVersion, 1);
+  assert.equal(workspace.dropped.Thai?.[original.filepath], undefined);
+  assert.equal(workspace.droppedArchive[candidate.id].status, 'quarantined');
+  const archive = Object.values(workspace.invalidTranslationArchive)[0];
+  assert.deepEqual(copy(archive.candidate), candidate); assert.deepEqual(copy(archive.operations), [command]);
+  assert.deepEqual(copy(workspace.droppedOutbox), []);
+  assert.deepEqual([...fixture.tables.get('revisions_poe1')], revisions);
+  assert.equal([...kv.keys()].some(key => key.startsWith('translation_draft_v1:')), false);
+  const settled = fixture.snapshot();
+  assert.deepEqual(copy(await loadStore(fixture).store.getWorkspace('poe1', 'Thai')), copy(workspace));
+  assert.deepEqual(fixture.snapshot(), settled);
+});
+
 test('loading excludes already shared invalid stages while retaining the accepted shared bytes for recovery', async () => {
   const { fixture, kv } = storedPlaceholder({ shared: true });
   const loaded = await loadStore(fixture).store.getWorkspace('poe1', 'Thai');

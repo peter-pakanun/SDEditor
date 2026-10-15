@@ -120,6 +120,60 @@ async function readDeletedRecoveryCleanup(value) {
     } finally { db.close(); }
 }
 
+async function seedInvalidDroppedRecoveryCleanup() {
+    const N = NormalizedStore, scope = { accountId: 'invalid-dropped-recovery-fixture', game: 'poe2', branchId: 'default', language: 'German', sourceHash: '3'.repeat(64) };
+    const id = N.scopeKey(scope), baseId = N.baselineKey(scope), copy = structuredClone;
+    const request = req => new Promise((resolve, reject) => { req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
+    const done = tx => new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = tx.onabort = () => reject(tx.error); });
+    const source = ['blank.txt', 'partial.txt', 'valid.txt'].map(filepath => ({ filepath, name: filepath, variables: ['#'], stats: ['stat'], remarks: [''],
+        translations: { English: ['Current English'], German: ['Current original German'] } }));
+    const candidates = source.map((file, index) => ({ id: 'native-old-' + index, filepath: file.filepath, language: scope.language, game: scope.game,
+        ownership: index === 0 ? 'online' : 'local', status: 'dropped', revision: index + 3,
+        originSourceHash: index === 0 ? scope.sourceHash : '4'.repeat(64), originSourceAvailable: false,
+        targetSourceHash: scope.sourceHash, targetSourceHashes: [scope.sourceHash], reason: 'Preserved local review translation',
+        snapshot: { english: index === 1 ? ['Old first', 'Old second'] : ['Old English'],
+            translations: index === 0 ? [''] : index === 1 ? ['Useful predecessor text', ''] : ['Valid predecessor text'] } }));
+    const operations = candidates.map(candidate => ({ id: candidate.id, kind: 'put', revision: candidate.revision, candidate: copy(candidate),
+        preparedRequest: { body: 'original retry bytes for ' + candidate.id } }));
+    const stage = { sourceHash: scope.sourceHash, translations: ['Current complete saved German'], before: ['Current original German'], savedAt: 91, saveOrigin: 'save' };
+    const history = { accountId: scope.accountId, game: scope.game, branchId: scope.branchId, sourceHash: scope.sourceHash, filepath: source[0].filepath,
+        lang: scope.language, savedAt: 91, translations: copy(stage.translations), note: 'Current authored save survives invalid recovery cleanup' };
+    const db = await request(indexedDB.open('sdeditor'));
+    const tx = db.transaction([N.stores.meta, N.stores.baseline, N.stores.files, N.stores.records, N.stores.migration, 'revisions_poe2'], 'readwrite'), ready = done(tx);
+    tx.objectStore(N.stores.meta).put({ key: id, scope: id, value: { ...scope, stagedVersion: 1, languageStatusVersion: 1, statusMetadataVersion: 1,
+        invalidTranslationPolicyVersion: 1, placeholderRepairVersion: 1 } });
+    tx.objectStore(N.stores.migration).put({ key: id, scope: id, value: { state: 'ready' } });
+    tx.objectStore(N.stores.migration).put({ key: JSON.stringify(['invalid-statdescription-stage-v1', id]), scope: id, value: { state: 'ready' } });
+    const put = (field, entry, data, language, order) => tx.objectStore(N.stores.records).put({ key: JSON.stringify([id, language ? [field, language, entry] : [field, entry]]), scope: id,
+        kindScope: JSON.stringify([id, field]), pathKey: JSON.stringify([id, data.filepath || data.candidate?.filepath || entry]),
+        value: { field, entry, data: copy(data), ...(language ? { language } : {}), ...(order === undefined ? {} : { order }) } });
+    source.forEach((file, order) => {
+        tx.objectStore(N.stores.baseline).put({ key: JSON.stringify([baseId, file.filepath]), scope: baseId, value: copy(file), order });
+        tx.objectStore(N.stores.files).put({ key: JSON.stringify([id, file.filepath]), scope: id, pathKey: JSON.stringify([id, file.filepath]), value: { filepath: file.filepath, overrides: {} } });
+        put('dropped', file.filepath, candidates[order], scope.language); put('droppedArchive', candidates[order].id, candidates[order]);
+        put('droppedOutbox', JSON.stringify([operations[order].id, operations[order].kind]), operations[order], undefined, order);
+    });
+    put('staged', source[0].filepath, stage, scope.language);
+    tx.objectStore('revisions_poe2').add(history);
+    await ready; db.close();
+    return { scope, id, source, candidates, operations, stage, history };
+}
+
+async function readInvalidDroppedRecoveryCleanup(value) {
+    const N = NormalizedStore, W = WorkspaceState;
+    const bundle = await OfflineStore.getWorkspaceSnapshot(value.scope, value.scope.language), workspace = bundle.workspace;
+    const request = req => new Promise((resolve, reject) => { req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
+    const db = await request(indexedDB.open('sdeditor'));
+    try {
+        const tx = db.transaction([N.stores.records, N.stores.drafts, N.stores.migration, 'revisions_poe2'], 'readonly');
+        const [records, drafts, migration, history] = await Promise.all([request(tx.objectStore(N.stores.records).getAll()), request(tx.objectStore(N.stores.drafts).getAll()),
+            request(tx.objectStore(N.stores.migration).get(JSON.stringify(['invalid-statdescription-dropped-v1', value.id]))), request(tx.objectStore('revisions_poe2').getAll())]);
+        return { workspace, source: bundle.source, records: records.filter(row => row.scope === value.id), drafts: drafts.filter(row => row.scope === value.id), migration,
+            states: bundle.source.map(file => ({ filepath: file.filepath, isDropped: W.workspaceFile(workspace, file, value.scope.language).isDropped })),
+            history: history.filter(row => row.accountId === value.scope.accountId) };
+    } finally { db.close(); }
+}
+
 async function readAfterPageReopen(scopes) {
     const results = [];
     for (const { scenario, scope, key, original } of scopes) {
@@ -280,6 +334,8 @@ async function readOwnedAfterPageReopen(cases) {
         const initial = await first.evaluate(seedAndRecover);
         const owned = await first.evaluate(seedOwnedAndLinked);
         const deleted = await first.evaluate(seedDeletedRecoveryCleanup);
+        const invalidDropped = await first.evaluate(seedInvalidDroppedRecoveryCleanup);
+        const repairedInvalidDropped = await first.evaluate(readInvalidDroppedRecoveryCleanup, invalidDropped);
         await first.close();
         const reopened = await context.newPage();
         reopened.on('pageerror', error => errors.push(error.message));
@@ -287,6 +343,23 @@ async function readOwnedAfterPageReopen(cases) {
         const persisted = await reopened.evaluate(readAfterPageReopen, initial.map(({ scenario, scope, key, original }) => ({ scenario, scope, key, original })));
         const persistedOwned = await reopened.evaluate(readOwnedAfterPageReopen, owned);
         const persistedDeleted = await reopened.evaluate(readDeletedRecoveryCleanup, deleted);
+        const persistedInvalidDropped = await reopened.evaluate(readInvalidDroppedRecoveryCleanup, invalidDropped);
+        assert.deepEqual(persistedInvalidDropped, repairedInvalidDropped, 'Native IndexedDB reload retains the exact settled invalid Dropped repair.');
+        assert.deepEqual(persistedInvalidDropped.states, [{ filepath: 'blank.txt', isDropped: false }, { filepath: 'partial.txt', isDropped: false }, { filepath: 'valid.txt', isDropped: true }]);
+        assert.equal(persistedInvalidDropped.migration.value.state, 'ready');
+        assert.deepEqual(persistedInvalidDropped.source, invalidDropped.source, 'Recovery cleanup preserves the immutable current source.');
+        assert.deepEqual(persistedInvalidDropped.workspace.staged.German['blank.txt'], invalidDropped.stage);
+        for (const candidate of invalidDropped.candidates.slice(0, 2)) {
+            assert.equal(persistedInvalidDropped.workspace.droppedArchive[candidate.id].status, 'quarantined');
+            const archive = Object.values(persistedInvalidDropped.workspace.invalidTranslationArchive).find(entry => entry.candidate?.id === candidate.id);
+            assert.deepEqual(archive.candidate, candidate); assert.deepEqual(archive.operations, [invalidDropped.operations.find(operation => operation.id === candidate.id)]);
+            assert.equal(persistedInvalidDropped.records.some(row => row.value.field === 'dropped' && row.value.data.id === candidate.id), false);
+        }
+        assert.deepEqual(persistedInvalidDropped.workspace.droppedArchive[invalidDropped.candidates[2].id], invalidDropped.candidates[2]);
+        assert.deepEqual(persistedInvalidDropped.workspace.droppedOutbox, [invalidDropped.operations[2]]);
+        assert.deepEqual(persistedInvalidDropped.drafts, [], 'Archived invalid Dropped copies cannot reopen as drafts.');
+        const [{ id: historyId, ...persistedHistory }] = persistedInvalidDropped.history;
+        assert.ok(historyId); assert.deepEqual(persistedHistory, invalidDropped.history);
         assert.deepEqual(persistedDeleted.current.map(row => row.value.data.id), ['keep'], 'Native IndexedDB contains no deleted-path recovery copies after reopening.');
         assert.deepEqual(persistedDeleted.previous[0].value.data.translations, ['Earlier saved translation']);
         assert.equal(persistedDeleted.receipts[0].value.requestHash, 'original-retry-hash');
@@ -350,6 +423,7 @@ async function readOwnedAfterPageReopen(cases) {
         }
         assert.deepEqual(errors, []);
         console.log('PASS: deleted-path recovery records are physically absent after page reopen; predecessor Saved text, history and receipts remain.');
+        console.log('PASS: native IndexedDB archives old blank/incomplete Dropped copies after settled stage cleanup; page reopen preserves exact recovery and retries, current saves/history, valid alternatives and no active invalid workload or draft.');
         console.log('PASS: native IndexedDB orphan recovery survives page reopen, retains original recovery/staged text/baseline metadata, blocks different copies and preserves shared-file revision review.');
         console.log('PASS: native IndexedDB linked local/managed discard and worker promotion survive page reopen, preserve shared candidates/history, replay one durable save receipt, and atomically roll back stale linked recovery.');
     } finally {

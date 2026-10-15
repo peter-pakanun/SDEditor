@@ -762,6 +762,7 @@
       const id = scopeKey(scope), paths = filepaths || workspace.descs.map(file => file.filepath);
       const originals = new Map((await originalFiles(tx, scope, paths)).filter(Boolean).map(desc => [desc.filepath, desc]));
       W.quarantineInvalidTranslations(workspace, { source: [...originals.values()] });
+      W.quarantineInvalidDroppedTranslations(workspace);
       const parts = splitWorkspace(scope, workspace, originals), beforeMeta = await get(tx, stores.meta, id);
       if (filepaths != null) parts.records = parts.records.filter(item => item.value.field !== 'importRecovery');
       let oldFiles, oldRecords;
@@ -840,6 +841,7 @@
           }
           W.initializeWorkspace(workspace, { source, sourceHash: scope.sourceHash, game: scope.game });
           W.quarantineInvalidTranslations(workspace, { source, archivedAt: Number(workspace.lastModified) || 1 });
+          W.quarantineInvalidDroppedTranslations(workspace, { archivedAt: Number(workspace.lastModified) || 1 });
           W.pruneWorkspaceStatus(workspace);
           const originals = new Map(source.map(desc => [desc.filepath, desc])), parts = splitWorkspace(scope, workspace, originals);
           const baseId = baselineKey(scope);
@@ -1190,7 +1192,7 @@
                   if (!record || record.scope !== id) continue;
                   if (record.value.field === 'invalidTranslationArchive') {
                     const archived = record.value.data;
-                    if (archived?.sourceHash === captured.sourceHash) {
+                    if (!archived?.candidate && archived?.sourceHash === captured.sourceHash) {
                       const original = await get(tx, stores.baseline, key(baselineKey(captured), archived.filepath));
                       await retainInvalidDraft(tx, captured, archived.language, archived.filepath, archived.stage?.translations, original, archived.id || record.value.entry);
                     }
@@ -1266,16 +1268,61 @@
       invalidRepairs.set(id, work);
       try { return await work; } finally { invalidRepairs.delete(id); }
     }
+    const invalidDroppedRepairs = new Map();
+    const invalidDroppedRepairKey = scope => key('invalid-statdescription-dropped-v1', scopeKey(scope));
+    async function repairInvalidDroppedTranslations(scope) {
+      const captured = normalizeScope ? normalizeScope(scope) : { ...scope }, id = scopeKey(captured);
+      if (invalidDroppedRepairs.has(id)) return invalidDroppedRepairs.get(id);
+      const work = (async () => {
+        const markerKey = invalidDroppedRepairKey(captured);
+        const pending = await transaction([stores.meta, stores.migration], 'readonly', async tx => {
+          const [ready, marker, meta] = await Promise.all([get(tx, stores.migration, id), get(tx, stores.migration, markerKey), get(tx, stores.meta, id)]);
+          return ready?.state === 'ready' && !!meta && marker?.state !== 'ready'
+            && !String(meta.contentMode || meta.mode || '').toLowerCase().startsWith('clienttext');
+        });
+        if (!pending) return { changed: false, removed: [] };
+        return transaction([stores.meta, stores.records, stores.migration], 'readwrite', async tx => {
+          const [ready, marker, meta] = await Promise.all([get(tx, stores.migration, id), get(tx, stores.migration, markerKey), get(tx, stores.meta, id)]);
+          if (ready?.state !== 'ready' || !meta || marker?.state === 'ready'
+            || String(meta.contentMode || meta.mode || '').toLowerCase().startsWith('clienttext')) return { changed: false, removed: [] };
+          const fields = fieldMaps.filter(field => field.startsWith('dropped') || field === 'invalidTranslationArchive');
+          const records = (await Promise.all(fields.map(field => request(tx.objectStore(stores.records).index('by_kind').getAll(key(id, field)))))).flat();
+          const workspace = assembleWorkspace(meta, [], records, new Map(), false);
+          // Old recovery text is checked against its frozen origin facts. The
+          // current baseline must not invalidate a legitimate older layout.
+          const result = W.quarantineInvalidDroppedTranslations(workspace, { archivedAt: Number(meta.lastModified) || 1 });
+          if (result.changed) {
+            const next = splitWorkspace(captured, workspace).records.filter(record => fields.includes(record.value.field));
+            await writeDifference(tx, stores.records, records, next);
+          }
+          if (meta.invalidDroppedTranslationPolicyVersion !== 1) tx.objectStore(stores.meta).put({ key: id, scope: id,
+            value: { ...meta, invalidDroppedTranslationPolicyVersion: 1 } });
+          tx.objectStore(stores.migration).put({ key: markerKey, scope: id, value: { state: 'ready' } });
+          return result;
+        });
+      })();
+      invalidDroppedRepairs.set(id, work);
+      try { return await work; } finally { invalidDroppedRepairs.delete(id); }
+    }
     async function removeDeletedRecoveries(scope) {
       if (!W?.removeDeletedRecoveryCopies || !scope?.sourceHash) return { removed: [] };
       const captured = { ...scope }, id = scopeKey(captured), baseId = baselineKey(captured);
+      const fields = fieldMaps.filter(field => field.startsWith('dropped'));
+      // Empty recovery scopes need no baseline asset read or writer lock.
+      const hasRecords = await transaction([stores.records], 'readonly', async tx => {
+        const index = tx.objectStore(stores.records).index('by_kind');
+        const counts = await Promise.all(fields.map(field => request(index.count ? index.count(key(id, field)) : index.getAll(key(id, field)))));
+        return counts.some(value => Array.isArray(value) ? value.length > 0 : value > 0);
+      });
+      if (!hasRecords) return { removed: [] };
       return transaction([stores.meta, stores.records, stores.baseline, stores.assets, stores.migration], 'readwrite', async tx => {
-        const meta = await get(tx, stores.meta, id), asset = await get(tx, stores.assets, baseId), archive = asset?.archive;
+        const meta = await get(tx, stores.meta, id);
         const migration = await get(tx, stores.migration, id);
-        if (!meta || migration?.state !== 'ready' || archive?.baselineId !== captured.sourceHash || !Number.isSafeInteger(archive.descriptionCount)) return { removed: [] };
-        const fields = fieldMaps.filter(field => field.startsWith('dropped'));
+        if (!meta || migration?.state !== 'ready') return { removed: [] };
         const records = (await Promise.all(fields.map(field => request(tx.objectStore(stores.records).index('by_kind').getAll(key(id, field)))))).flat();
         if (!records.length) return { removed: [] };
+        const asset = await get(tx, stores.assets, baseId), archive = asset?.archive;
+        if (archive?.baselineId !== captured.sourceHash || !Number.isSafeInteger(archive.descriptionCount)) return { removed: [] };
         const baselineIndex = tx.objectStore(stores.baseline).index('by_scope');
         const count = baselineIndex.count ? await request(baselineIndex.count(baseId)) : (await request(baselineIndex.getAll(baseId))).length;
         // An incomplete or unavailable immutable cache cannot prove removal.
@@ -1292,6 +1339,7 @@
     async function workspace(scope, options = {}) {
       await ensure(scope);
       if (options.filepaths == null || options.allDropped) await removeDeletedRecoveries(scope);
+      await repairInvalidDroppedTranslations(scope);
       await repairInvalidStages(scope);
       if (options.filepaths == null) await repairCarriedStages(scope);
       return transaction([stores.meta, stores.files, stores.records, stores.baseline, stores.assets], 'readonly', tx => readWorkspace(tx, scope, options.filepaths, options.includeDropped, options.allDropped));
@@ -1417,6 +1465,7 @@
       const captured = { ...scope };
       await ensure(captured);
       await removeDeletedRecoveries(captured);
+      await repairInvalidDroppedTranslations(captured);
       await repairInvalidStages(captured);
       await repairCarriedStages(captured);
       const id = scopeKey(captured), baseId = baselineKey(captured);
@@ -1478,6 +1527,7 @@
         tx.objectStore(stores.migration).put({ key: id, scope: id, value: { state: 'ready' } });
         tx.objectStore(stores.migration).delete(carryRepairKey(scope));
         tx.objectStore(stores.migration).delete(invalidRepairKey(scope));
+        tx.objectStore(stores.migration).delete(invalidDroppedRepairKey(scope));
       });
       return committed;
     }
@@ -1796,7 +1846,7 @@
       });
     }
     return { stores, dependencies, available, ensure, migrate, workspace, source, activation, saveWorkspace, transaction, get, all, originalFiles, selectedRows, row, key, scopeKey, baselineKey, readWorkspace, writeWorkspace,
-      importScope, assets, hasScope, scopeAvailable, clearScope, mergeWorkspaceRecords, beginBatch, fingerprint, normalizeHistory, trackMigration, repairCarriedStages, repairInvalidStages, removeDeletedRecoveries,
+      importScope, assets, hasScope, scopeAvailable, clearScope, mergeWorkspaceRecords, beginBatch, fingerprint, normalizeHistory, trackMigration, repairCarriedStages, repairInvalidStages, repairInvalidDroppedTranslations, removeDeletedRecoveries,
       draftGet, draftUpdate, draftList, draftRow, hydrateDraft, putSubmission, listSubmissions, updateSubmission, copy, same,
       tmStores, tmCapture, getTranslationMemory, getTranslationMemoryState, putTranslationMemoryUnits, deleteTranslationMemoryUnit, getTranslationMemoryPending,
       applyTranslationMemoryRemote, acknowledgeTranslationMemoryWrite, rejectTranslationMemoryWrite, resolveTranslationMemoryConflict,

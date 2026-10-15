@@ -192,6 +192,97 @@
     }
     return { changed: removed.length > 0, removed };
   }
+  function droppedTranslationIssues(candidate) {
+    const content = candidate?.snapshot, values = content?.translations;
+    // A destination layout can differ legitimately. Only the frozen origin's
+    // count can establish that a preserved translation is incomplete.
+    // Old carries sometimes copied destination English as display context while
+    // explicitly recording an unknown origin. That is not an origin count.
+    const unknownOrigin = candidate?.originSourceAvailable === false && !candidate.originSourceHash
+      && !candidate.sourceRef?.baselineId && !candidate.sourceRef?.sourceHash;
+    const count = unknownOrigin ? undefined : [content?.sourceFacts?.entryCount, candidate?.sourceFacts?.entryCount,
+      content?.entryCount, content?.sourceRef?.entryCount, candidate?.sourceRef?.entryCount,
+      content?.english?.length || undefined].find(value => Number.isInteger(value) && value >= 0);
+    return translationIssues(values, Math.max(count ?? values?.length ?? 0, 1));
+  }
+  function archiveInvalidDroppedTranslation(workspace, candidate, options = {}) {
+    if (!object(workspace) || !statDescription(workspace) || !candidate?.id || !inWorkspaceScope(workspace, candidate)
+      || droppedTranslationIssues(candidate).valid) return null;
+    const language = candidate.language || options.language, filepath = candidate.filepath || options.filepath;
+    if (!languageName(language) || !filepath) return null;
+    const issues = droppedTranslationIssues(candidate);
+    const archive = archiveInvalidTranslation(workspace, {
+      sourceHash: candidate.originSourceHash || '', translations: copy(candidate.snapshot?.translations),
+    }, language, { ...options, source: undefined, filepath, expectedCount: issues.expectedCount,
+      operationId: 'dropped:' + droppedOwnership(candidate) + ':' + candidate.id + ':' + invalidArchiveId(candidate) });
+    if (archive) archive.candidate ||= copy(candidate);
+    return archive;
+  }
+  function quarantineInvalidDroppedTranslations(workspace, options = {}) {
+    const removed = [];
+    if (!object(workspace) || !statDescription(workspace)) return { changed: false, removed };
+    let changed = false;
+    const invalid = new Map(), key = candidate => droppedOwnership(candidate) + ':' + candidate.id;
+    const scopes = new Map();
+    for (const [language, entries] of Object.entries(workspace.dropped || {})) for (const [filepath, candidate] of Object.entries(entries))
+      if (candidate?.id) scopes.set(key(candidate), { language, filepath });
+    for (const [language, conflicts] of Object.entries(workspace.droppedConflicts || {})) for (const [filepath, conflict] of Object.entries(conflicts))
+      for (const candidate of [conflict.yours, conflict.shared]) if (candidate?.id) scopes.set(key(candidate), { language, filepath });
+    const quarantine = candidate => {
+      if (!candidate?.id || candidate.status && candidate.status !== 'dropped') return null;
+      const archive = archiveInvalidDroppedTranslation(workspace, candidate, { ...options, ...scopes.get(key(candidate)) });
+      if (!archive) return null;
+      const identity = key(candidate), previous = invalid.get(identity);
+      changed = true;
+      invalid.set(identity, archive);
+      if (!previous) removed.push({ language: archive.language, filepath: archive.filepath,
+        ownership: droppedOwnership(candidate), candidate: copy(candidate), archive });
+      return { ...copy(candidate), status: 'quarantined', invalidTranslationRecoveryId: archive.id };
+    };
+    for (const [id, candidate] of Object.entries(workspace.droppedArchive || {})) {
+      const retained = quarantine(candidate);
+      if (retained) workspace.droppedArchive[id] = retained;
+    }
+    for (const entries of Object.values(workspace.dropped || {})) for (const [filepath, candidate] of Object.entries(entries)) {
+      const retained = quarantine(candidate);
+      if (retained) { retainDropped(workspace, retained); delete entries[filepath]; }
+      else if (candidate?.status === 'quarantined') { delete entries[filepath]; changed = true; }
+    }
+    for (const [language, conflicts] of Object.entries(workspace.droppedConflicts || {})) for (const [filepath, conflict] of Object.entries(conflicts)) {
+      const yours = quarantine(conflict.yours), shared = quarantine(conflict.shared);
+      if (!yours && !shared && ![conflict.yours, conflict.shared].some(candidate => candidate?.status === 'quarantined')) continue;
+      (workspace.droppedConflictArchive ||= {})[invalidArchiveId(conflict)] = copy(conflict);
+      changed = true;
+      for (const candidate of [yours || conflict.yours, shared || conflict.shared]) if (candidate?.id) retainDropped(workspace, candidate);
+      if (!yours && shared) for (const operation of workspace.droppedOutbox || []) {
+        if (!operation.conflict || operation.id !== conflict.yours?.id || !operation.candidate
+          || !equal(operation.candidate.snapshot, conflict.yours.snapshot)
+          || !droppedTranslationIssues(operation.candidate).valid) continue;
+        const archive = invalid.get(key(conflict.shared));
+        archive.operations ||= [];
+        if (!archive.operations.some(previous => equal(previous, operation))) archive.operations.push(copy(operation));
+        delete operation.conflict;
+      }
+      delete conflicts[filepath];
+    }
+    const outbox = workspace.droppedOutbox || [];
+    const pending = outbox.filter(operation => {
+      const retained = quarantine(operation.candidate);
+      const archive = invalid.get(key(operation.candidate || operation))
+        || (operation.candidate?.invalidTranslationRecoveryId && workspace.invalidTranslationArchive?.[operation.candidate.invalidTranslationRecoveryId])
+        || archiveInvalidDroppedTranslation(workspace, operation.candidate, options);
+      if (!archive) return true;
+      archive.operations ||= [];
+      if (!archive.operations.some(previous => equal(previous, operation))) archive.operations.push(copy(operation));
+      if (retained && !workspace.droppedArchive?.[retained.id]) retainDropped(workspace, retained);
+      changed = true;
+      return false;
+    });
+    if (pending.length !== outbox.length) workspace.droppedOutbox = pending;
+    workspace.invalidDroppedTranslationPolicyVersion = 1;
+    if (changed) invalidateDroppedScopes(workspace);
+    return { changed, removed };
+  }
   const snapshot = (desc, language, translations) => ({ english: lines(desc?.translations?.English),
     variables: copy(desc?.variables || []), remarks: copy(desc?.remarks || []), stats: copy(desc?.stats || []),
     name: String(desc?.name || ''), translations: lines(translations ?? desc?.translations?.[language]) });
@@ -279,13 +370,16 @@
       if (!previous || Number(record.revision || 0) > Number(previous.revision || 0)
         || Number(record.revision || 0) === Number(previous.revision || 0) && (!previous.status || previous.status === 'dropped')) selected.set(key, record);
     }
-    const activeOnline = active && droppedOwnership(active) === 'online' && (!active.status || active.status === 'dropped') ? active.id : null;
+    const activeOnline = active && droppedOwnership(active) === 'online' && (!active.status || active.status === 'dropped')
+      && (!statDescription(workspace) || droppedTranslationIssues(active).valid) ? active.id : null;
     return [...selected.values()].filter(record => (!record.status || record.status === 'dropped')
+      && (!statDescription(workspace) || droppedTranslationIssues(record).valid)
       && (record.ownership !== 'online' || !activeOnline || record.id === activeOnline)).sort((a, b) => Number(b.ownership === preferred) - Number(a.ownership === preferred)
       || Number(b === active) - Number(a === active)
       || timestamp(b.createdAt) - timestamp(a.createdAt));
   }
   function retainDropped(workspace, record) {
+    workspace.droppedArchive ||= {};
     const ownership = droppedOwnership(record), current = workspace.droppedArchive[record.id];
     if (current && droppedOwnership(current) !== ownership) workspace.droppedArchive[droppedOwnership(current) + ':' + current.id] = copy(current);
     const key = current && droppedOwnership(current) !== ownership && ownership === 'local' ? 'local:' + record.id : record.id;
@@ -309,6 +403,7 @@
       }
       retainDropped(workspace, { ...copy(incoming), ownership: 'local' });
     }
+    quarantineInvalidDroppedTranslations(workspace);
     invalidateDroppedScopes(workspace);
     return workspace;
   }
@@ -337,6 +432,7 @@
       const byLanguage = new Map();
       for (const record of Object.values(workspace.droppedArchive || {})) {
         if (!inWorkspaceScope(workspace, record) || droppedOwnership(record) !== workspaceDroppedOwnership(workspace) || !candidateScopes(record).includes(workspace.sourceHash)
+          || record.status === 'quarantined' || (!record.status || record.status === 'dropped') && statDescription(workspace) && !droppedTranslationIssues(record).valid
           || !record.filepath || !languageName(record.language)) continue;
         if (!byLanguage.has(record.language)) byLanguage.set(record.language, new Set());
         byLanguage.get(record.language).add(record.filepath);
@@ -447,17 +543,24 @@
       rememberDroppedScope(candidate, targetSourceHash);
       candidate.targetSourceHash = targetSourceHash;
     } else {
-      const id = options.id || recoveryId || globalThis.crypto?.randomUUID?.() || ('local-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+      const invalid = statDescription(workspace) && !droppedTranslationIssues({ snapshot: content, originSourceHash,
+        originSourceAvailable: options.originSourceAvailable, sourceRef: options.sourceRef }).valid;
+      const id = options.id || recoveryId || (invalid ? invalidArchiveId(['dropped', signature]) : globalThis.crypto?.randomUUID?.())
+        || ('local-' + Date.now() + '-' + Math.random().toString(36).slice(2));
       candidate = { id, ownership, game, language, ...(branchId === 'default' ? {} : { branchId }), filepath: desc.filepath, originSourceHash, targetSourceHash,
         targetSourceHashes: candidateScopes(options),
         snapshot: copy(content), reason: options.reason || 'Source changed', signature, status: 'dropped',
         ...(recoveryId ? { recoveryId } : {}),
         originSourceAvailable: options.originSourceAvailable !== false,
         ...(options.sourceRef ? { sourceRef: copy(options.sourceRef) } : {}),
-        revision: Number(options.revision) || 0, createdAt: options.createdAt || Date.now(),
+        revision: Number(options.revision) || 0, createdAt: options.createdAt || (invalid ? 1 : Date.now()),
         ...(options.provenance ? { provenance: copy(options.provenance) } : {}),
         ...(options.baseline ? { baseline: copy(options.baseline), originArchive: copy(options.originArchive) } : {}) };
       rememberDroppedScope(candidate, targetSourceHash);
+    }
+    if (statDescription(workspace) && !droppedTranslationIssues(candidate).valid) {
+      archiveInvalidDroppedTranslation(workspace, candidate, options);
+      return null;
     }
     if (active && active.id !== candidate.id) workspace.droppedArchive[active.id] = copy(rememberDroppedScope(active, workspace.sourceHash));
     (workspace.dropped[language] ||= {})[desc.filepath] = candidate;
@@ -547,6 +650,7 @@
     if (!workspace.accountId && options.accountId) workspace.accountId = String(options.accountId);
     if (!workspace.branchId && options.branchId) workspace.branchId = options.branchId;
     separateDroppedCopies(workspace);
+    quarantineInvalidDroppedTranslations(workspace, options);
     if (Number(workspace.stagedVersion) >= 1) {
       if (!workspace.sourceBaseline?.sourceHash && options.sourceHash) {
         workspace.sourceHash ||= options.sourceHash;
@@ -867,9 +971,11 @@
   function mergeSourceImportWorkspace(existing, incoming, options = {}) {
     incoming = copy(incoming);
     quarantineInvalidTranslations(incoming, options);
+    quarantineInvalidDroppedTranslations(incoming, options);
     if (!existing) return incoming;
     existing = copy(existing);
     quarantineInvalidTranslations(existing, options);
+    quarantineInvalidDroppedTranslations(existing, options);
     if (!object(incoming) || existing.sourceHash !== incoming.sourceHash)
       throw new Error('Source imports can merge only the same destination workspace.');
     if ((existing.branchId || 'default') !== (incoming.branchId || 'default')
@@ -962,6 +1068,7 @@
   }
   function acceptDropped(workspace, records, options = {}) {
     maps(workspace); workspace.droppedAliases ||= {};
+    quarantineInvalidDroppedTranslations(workspace, options);
     let byFingerprint;
     const fingerprint = record => serialized([record.game || workspace.game, record.language, record.filepath, record.originSourceHash || '', record.snapshot, record.recoveryId || '']);
     const matchingLocal = remote => {
@@ -981,6 +1088,21 @@
     for (const incoming of records || []) {
       const remote = { ...incoming, ownership: 'online' };
       if (!remote?.id || !inWorkspaceScope(workspace, remote) || (options.game && remote.game !== options.game) || (options.language && remote.language !== options.language)) continue;
+      const known = workspace.droppedArchive[remote.id];
+      if (known && droppedOwnership(known) === 'online' && inWorkspaceScope(workspace, known)
+        && known.filepath === remote.filepath && known.language === remote.language
+        && Number(known.revision || 0) > Number(remote.revision || 0)) continue;
+      if (known?.status === 'quarantined' && droppedOwnership(known) === 'online' && inWorkspaceScope(workspace, known)
+        && known.filepath === remote.filepath && known.language === remote.language
+        && Number(known.revision || 0) === Number(remote.revision || 0)
+        && known.originSourceHash === remote.originSourceHash && equal(known.snapshot?.translations, remote.snapshot?.translations)) continue;
+      const invalid = (!remote.status || remote.status === 'dropped') && archiveInvalidDroppedTranslation(workspace, remote, options);
+      if (invalid) {
+        retainDropped(workspace, { ...copy(remote), status: 'quarantined', invalidTranslationRecoveryId: invalid.id });
+        const current = workspace.dropped[remote.language]?.[remote.filepath];
+        if (current?.id === remote.id && droppedOwnership(current) === 'online') delete workspace.dropped[remote.language][remote.filepath];
+        continue;
+      }
       const active = droppedForFile(workspace, remote.filepath, remote.language, 'online');
       const acknowledged = options.acknowledge && options.acknowledgeId ? workspace.droppedArchive[options.acknowledgeId] : null;
       const local = droppedOwnership(acknowledged) === 'online' && acknowledged?.language === remote.language && acknowledged?.filepath === remote.filepath && inWorkspaceScope(workspace, acknowledged)
@@ -1030,6 +1152,7 @@
           (workspace.dropped[remote.language] ||= {})[remote.filepath] = record;
       } else if (active && (active.id === remote.id || active.id === local?.id)) delete workspace.dropped[remote.language][remote.filepath];
     }
+    quarantineInvalidDroppedTranslations(workspace, options);
     invalidateDroppedScopes(workspace);
     return workspace;
   }
@@ -1044,6 +1167,7 @@
       if (conflict.shared.status === 'dropped') rememberDroppedScope(workspace.droppedArchive[conflict.shared.id], workspace.sourceHash);
     }
     for (const operation of workspace.droppedOutbox) if (operation.id === conflict.yours?.id) operation.conflict = true;
+    quarantineInvalidDroppedTranslations(workspace);
     invalidateDroppedScopes(workspace);
     return workspace;
   }
@@ -1160,6 +1284,7 @@
     initializeWorkspace, workspaceFile, translationBaseMatches, stageTranslation, repairLegacyPlaceholders, classifySourceCarry, repairRedundantCarriedStages,
     sourceMetadata, metadataCorrectionForSource, carriedBaselineReplay, mergeSourceImportWorkspace,
     translationIssues, assertCompleteTranslation, archiveInvalidTranslation, quarantineInvalidTranslations, resolveDroppedPromotion,
+    droppedTranslationIssues, archiveInvalidDroppedTranslation, quarantineInvalidDroppedTranslations,
     dropTranslation, droppedForFile, droppedCandidatesForFile, droppedOwnership, workspaceDroppedOwnership,
     attachLocalDroppedCandidates, separateDroppedCopies, droppedRecoveryPaths, removeDeletedRecoveryCopies, upgradeSource, discardDropped, acceptDropped,
     recordDroppedConflict, resolveDroppedConflict, sameDroppedContent, sameDroppedCopy, droppedComparisonRecord, coalesceDroppedConflict };

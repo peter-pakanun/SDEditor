@@ -108,7 +108,8 @@ const online = (source = sourceDesc(), hash = 'old') => Object.assign(modern(sou
 
 test('overflowing immutable SD originals match their exact local and collaboration baseline views without changing recovery', () => {
   const source = sourceDesc('One', { Thai: ['one', 'removed translation'] }), workspace = online(source, 'current');
-  const candidate = W.dropTranslation(workspace, source, 'Thai', { id: 'shared-overflow', ownership: 'online', revision: 3,
+  const previous = { ...source, translations: { English: ['One', 'Removed'], Thai: ['older one', 'older removed'] } };
+  const candidate = W.dropTranslation(workspace, previous, 'Thai', { id: 'shared-overflow', ownership: 'online', revision: 3,
     originSourceHash: 'previous', translations: ['older one', 'older removed'] });
   const raw = { filepath: source.filepath, translations: ['one', 'removed translation'], revision: 0,
     needsReview: false, trackedForExport: false };
@@ -1326,4 +1327,139 @@ test('compact accepted metadata correction hashes retain scoped source-carry sta
   assert.equal(W.metadataCorrectionForSource(entry, { ...desc, sourceFacts: { metadataHash: beforeHash } }, 'current'), false);
   assert.equal(W.metadataCorrectionForSource({ sourceCarry: { ...entry.sourceCarry, fromSourceHash: 'current' } }, desc, 'current'), false);
   assert.equal(W.metadataCorrectionForSource({ sourceCarry: { ...entry.sourceCarry, metadataCorrection: { beforeHash, afterHash: beforeHash } } }, desc, 'current'), false);
+});
+
+test('invalid Dropped creation archives exact targets without creating workload or changing saved text', () => {
+  const source = sourceDesc(); source.translations.English = ['First', 'Second']; source.translations.Thai = ['first', 'second'];
+  for (const translations of [[], ['', ''], ['first', ' '], ['first'], ['first', 'second', 'extra'], ['first', '@\\n\u200b']]) {
+    const workspace = modern(source, 'current');
+    W.stageTranslation(workspace, { filepath: source.filepath, translations: ['saved first', 'saved second'] }, 'Thai', { source, saveOrigin: 'save' });
+    const before = structuredClone(workspace.staged);
+    assert.equal(W.dropTranslation(workspace, source, 'Thai', { id: 'invalid-copy', translations, originSourceHash: 'old' }), null);
+    assert.equal(W.droppedForFile(workspace, source.filepath, 'Thai'), null);
+    const archived = Object.values(workspace.invalidTranslationArchive);
+    assert.equal(archived.length, 1);
+    assert.deepEqual(archived[0].candidate.snapshot.translations, translations);
+    assert.deepEqual(archived[0].stage.translations, translations);
+    assert.deepEqual(workspace.staged, before);
+    assert.equal(W.workspaceFile(workspace, source, 'Thai').isRevised, true);
+  }
+});
+
+test('legacy blank review carries go to archives while nonblank unknown-origin targets survive', () => {
+  const source = sourceDesc(); source.translations.English = ['First', 'Second']; source.translations.Thai = ['current', 'second'];
+  for (const translations of [['', ''], ['first', ''], ['first'], ['first', 'second']]) {
+    const workspace = { sourceHash: 'current', collaborationAccountId: 'a', descs: [], status: {} };
+    W.initializeWorkspace(workspace, { source: [source], sourceHash: 'current', game: 'poe1', language: 'Thai', accountId: 'a',
+      collaboration: { rooms: { legacy: { identity: { accountId: 'a', game: 'poe1', sourceHash: 'current', language: 'Thai' },
+        carries: { old: { filepath: source.filepath, translations } } } } } });
+    const valid = translations.length > 0 && translations.every(Boolean);
+    assert.equal(!!W.droppedForFile(workspace, source.filepath, 'Thai'), valid);
+    assert.equal(Object.keys(workspace.invalidTranslationArchive || {}).length, valid ? 0 : 1);
+  }
+});
+
+test('repeated invalid automatic recovery does not create archive generations', () => {
+  const source = sourceDesc(), workspace = modern(source, 'current');
+  for (let index = 0; index < 3; index++) W.dropTranslation(workspace, source, 'Thai', { translations: [''], originSourceHash: 'old' });
+  assert.equal(Object.keys(workspace.invalidTranslationArchive).length, 1);
+});
+
+test('existing invalid Dropped copies quarantine idempotently with conflicts and retry bytes preserved', () => {
+  const source = sourceDesc(), workspace = online(source, 'current');
+  const valid = W.dropTranslation(workspace, source, 'Thai', { id: 'valid', ownership: 'local', originSourceHash: 'old' });
+  const candidate = { ...structuredClone(valid), id: 'invalid', ownership: 'online', snapshot: { english: ['One', 'Two'], translations: ['kept', ''] }, revision: 4 };
+  workspace.droppedArchive.invalid = structuredClone(candidate);
+  workspace.dropped.Thai[source.filepath] = structuredClone(candidate);
+  workspace.droppedOutbox.push({ id: 'invalid', kind: 'put', candidate: structuredClone(candidate), wire: '{exact legacy request}' });
+  const operation = structuredClone(workspace.droppedOutbox[0]);
+  const conflict = { game: 'poe1', language: 'Thai', filepath: source.filepath, yours: structuredClone(candidate), shared: structuredClone(valid) };
+  workspace.droppedConflicts.Thai = { [source.filepath]: conflict };
+  workspace.droppedAliases = { old: { id: 'invalid', fromRevision: 3, revision: 4 } };
+  const aliases = structuredClone(workspace.droppedAliases), history = workspace.history = [{ translations: ['older'] }];
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').isDropped, false, 'Invalid online work is filtered before durable repair.');
+  const result = W.quarantineInvalidDroppedTranslations(workspace, { archivedAt: 20 });
+  assert.equal(result.changed, true); assert.equal(result.removed.length, 1);
+  assert.deepEqual(result.removed[0].archive.candidate, candidate);
+  assert.deepEqual(result.removed[0].archive.operations, [operation]);
+  assert.equal(workspace.droppedArchive.invalid.status, 'quarantined');
+  assert.equal(workspace.droppedOutbox.length, 0);
+  assert.equal(workspace.droppedConflicts.Thai[source.filepath], undefined);
+  assert.deepEqual(Object.values(workspace.droppedConflictArchive), [conflict]);
+  assert.deepEqual(workspace.droppedAliases, aliases); assert.equal(workspace.history, history);
+  assert.equal(W.droppedForFile(workspace, source.filepath, 'Thai').id, 'valid');
+  W.stageTranslation(workspace, { filepath: source.filepath, translations: ['corrected current'] }, 'Thai', { source });
+  assert.equal(W.workspaceFile(workspace, source, 'Thai').isRevised, true, 'Quarantine is outside this version\'s Dropped workload.');
+  assert.equal(W.quarantineInvalidDroppedTranslations(workspace).changed, false);
+});
+
+test('invalid remote copies cannot resurrect workload while complete historical layouts and source-less targets survive', () => {
+  const source = sourceDesc(), workspace = online(source, 'current');
+  for (const [id, snapshot] of [['blank', { translations: [' '] }], ['partial', { translations: ['one'], sourceFacts: { entryCount: 2 } }]]) {
+    const incoming = { id, game: 'poe1', language: 'Thai', filepath: source.filepath, originSourceHash: 'old', targetSourceHash: 'current', status: 'dropped', snapshot };
+    W.acceptDropped(workspace, [incoming]); W.acceptDropped(workspace, [incoming]);
+    assert.equal(W.droppedForFile(workspace, source.filepath, 'Thai'), null);
+    assert.equal(workspace.droppedArchive[id].status, 'quarantined');
+  }
+  assert.equal(Object.keys(workspace.invalidTranslationArchive).length, 2);
+  W.acceptDropped(workspace, [{ id: 'partial', game: 'poe1', language: 'Thai', filepath: source.filepath,
+    originSourceHash: 'old', targetSourceHash: 'current', status: 'dropped', snapshot: { translations: ['one'] } }]);
+  assert.equal(workspace.droppedArchive.partial.status, 'quarantined', 'A compact same-generation response cannot erase known invalid origin facts.');
+  assert.equal(W.droppedForFile(workspace, source.filepath, 'Thai'), null);
+  const previous = { ...source, translations: { English: ['First', 'Second'], Thai: ['first', 'second'] } };
+  const valid = W.dropTranslation(workspace, previous, 'Thai', { id: 'valid-layout', originSourceHash: 'old' });
+  assert.equal(valid.snapshot.translations.length, 2);
+  assert.equal(W.quarantineInvalidDroppedTranslations(workspace).changed, false);
+  W.acceptDropped(workspace, [{ id: 'target-only', game: 'poe1', language: 'Thai', filepath: source.filepath,
+    originSourceHash: 'lost', targetSourceHash: 'current', status: 'dropped', snapshot: { translations: ['one', 'two', 'three'] } }]);
+  assert.ok(W.droppedCandidatesForFile(workspace, source.filepath, 'Thai').some(candidate => candidate.id === 'target-only'));
+  const clientText = { contentMode: 'clienttext', dropped: { Thai: { [source.filepath]: { ...valid, snapshot: { translations: [''] } } } } };
+  assert.equal(W.quarantineInvalidDroppedTranslations(clientText).changed, false);
+});
+
+test('quarantining an invalid shared conflict preserves and unblocks the complete recovery retry', () => {
+  const source = sourceDesc(), workspace = online(source, 'current');
+  const valid = W.dropTranslation(workspace, source, 'Thai', { id: 'complete', recoveryId: 'complete', ownership: 'online', originSourceHash: 'old' });
+  const invalid = { ...structuredClone(valid), id: 'invalid-shared', snapshot: { english: ['One'], translations: [''] } };
+  const operation = workspace.droppedOutbox[0];
+  operation.wire = { originalRequest: 'unchanged' };
+  const request = structuredClone(operation.wire);
+  W.recordDroppedConflict(workspace, { kind: 'upload', game: 'poe1', language: 'Thai', filepath: source.filepath,
+    yours: structuredClone(valid), shared: invalid, targetSourceHash: 'current' });
+  assert.equal(workspace.droppedConflicts.Thai[source.filepath], undefined);
+  assert.equal(workspace.droppedOutbox.length, 1); assert.equal(workspace.droppedOutbox[0].conflict, undefined);
+  assert.deepEqual(workspace.droppedOutbox[0].wire, request);
+  assert.equal(W.droppedForFile(workspace, source.filepath, 'Thai').id, valid.id);
+  assert.ok(Object.values(workspace.invalidTranslationArchive)[0].operations[0].conflict);
+});
+
+test('receiving shared revisions never suppresses an independent local copy with the same ID', () => {
+  const source = sourceDesc(), workspace = online(source, 'current');
+  W.dropTranslation(workspace, source, 'Thai', { id: 'same-id', ownership: 'local', revision: 8, originSourceHash: 'old' });
+  W.acceptDropped(workspace, [{ id: 'same-id', game: 'poe1', language: 'Thai', filepath: source.filepath, originSourceHash: 'old',
+    targetSourceHash: 'current', revision: 2, status: 'dropped', snapshot: { english: ['One'], translations: ['shared'] } }]);
+  assert.equal(W.droppedForFile(workspace, source.filepath, 'Thai', 'local').revision, 8);
+  assert.equal(W.droppedForFile(workspace, source.filepath, 'Thai', 'online').revision, 2);
+});
+
+test('an invalid active pointer cannot hide another complete shared recovery before repair', () => {
+  const source = sourceDesc(), workspace = online(source, 'current');
+  const valid = W.dropTranslation(workspace, source, 'Thai', { id: 'complete-shared', ownership: 'online', originSourceHash: 'old' });
+  workspace.dropped.Thai[source.filepath] = { ...structuredClone(valid), id: 'invalid-active', snapshot: { translations: [''] } };
+  assert.equal(W.droppedForFile(workspace, source.filepath, 'Thai', 'online').id, valid.id);
+  W.quarantineInvalidDroppedTranslations(workspace);
+  assert.equal(W.droppedForFile(workspace, source.filepath, 'Thai', 'online').id, valid.id);
+});
+
+test('old keyed Dropped records retain their exact payload when language and filepath fields were omitted', () => {
+  const source = sourceDesc(), workspace = modern(source, 'current');
+  const candidate = { id: 'old-keyed', status: 'dropped', snapshot: { english: ['One'], translations: [''] }, targetSourceHash: 'current' };
+  workspace.dropped.Thai = { [source.filepath]: structuredClone(candidate) };
+  workspace.droppedArchive[candidate.id] = structuredClone(candidate);
+  const result = W.quarantineInvalidDroppedTranslations(workspace);
+  assert.equal(result.changed, true);
+  assert.equal(result.removed[0].language, 'Thai'); assert.equal(result.removed[0].filepath, source.filepath);
+  assert.deepEqual(result.removed[0].archive.candidate, candidate);
+  assert.equal(workspace.dropped.Thai[source.filepath], undefined);
+  assert.equal(W.quarantineInvalidDroppedTranslations(workspace).changed, false);
 });

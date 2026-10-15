@@ -154,6 +154,7 @@
     if (Number(workspace?.stagedVersion) >= 1) {
       WorkspaceState.pruneWorkspaceStatus(workspace);
       WorkspaceState.quarantineInvalidTranslations(workspace);
+      WorkspaceState.quarantineInvalidDroppedTranslations(workspace);
     }
     return workspace;
   }
@@ -369,7 +370,7 @@
     const selectedKey = capturedSelection?.workspaceKey || workspaceKey(version);
     if ((!language || language === 'English') && !frozen && !capturedSelection?.checkInvalidTranslations) {
       const workspace = await kvGet(selectedKey);
-      if (workspace?.invalidTranslationPolicyVersion !== 1 && Number(workspace?.stagedVersion) >= 1)
+      if ((workspace?.invalidTranslationPolicyVersion !== 1 || workspace?.invalidDroppedTranslationPolicyVersion !== 1) && Number(workspace?.stagedVersion) >= 1)
         return getLegacyWorkspaceView(version, language || 'English', frozen, { ...capturedSelection, workspaceKey: selectedKey, checkInvalidTranslations: true });
       if (Number(workspace?.stagedVersion) >= 1 && workspace.statusMetadataVersion !== 1) {
         if (capturedSelection) return withStore(STORE_KV, 'readwrite', async store => {
@@ -391,7 +392,7 @@
     req.onsuccess = () => {
       try {
         result = req.result?.value;
-        if (result && (Number(result.stagedVersion) < 1 || result.statusMetadataVersion !== 1 || result.placeholderRepairVersion !== 1 || result.invalidTranslationPolicyVersion !== 1)) {
+        if (result && (Number(result.stagedVersion) < 1 || result.statusMetadataVersion !== 1 || result.placeholderRepairVersion !== 1 || result.invalidTranslationPolicyVersion !== 1 || result.invalidDroppedTranslationPolicyVersion !== 1)) {
           const beforeMigration = JSON.stringify(result);
           let source, collaboration, receipts, waiting = 4;
           const revisions = [], originSources = {};
@@ -405,6 +406,7 @@
                   migrationId: (filepath, lang, origin) => 'migration-' + stableRepairId([scopedVersion(version), filepath, lang, origin]) } : {}) });
               else WorkspaceState.pruneWorkspaceStatus(result);
               WorkspaceState.quarantineInvalidTranslations(result, { source: source || result.descs || [], archivedAt: Number(result.lastModified) || 1 });
+              WorkspaceState.quarantineInvalidDroppedTranslations(result, { archivedAt: Number(result.lastModified) || 1 });
               let invalidCommands = false;
               const originals = new Map((source || result.descs || []).map(file => [file.filepath, file]));
               const selectedScope = capturedSelection?.scope || scopedVersion(version);
@@ -438,6 +440,7 @@
               }
               if (!frozen) retainLegacyInvalidDrafts(store, result, originals, normalizeGameVersion(version), error => { failure = error; tx.abort(); });
               result.invalidTranslationPolicyVersion = 1;
+              result.invalidDroppedTranslationPolicyVersion = 1;
               const repaired = WorkspaceState.repairLegacyPlaceholders(result, { source, collaboration, receipts, revisions,
                 game: normalizeGameVersion(version), evidenceComplete: !!history.openCursor,
                 ...(frozen ? { repairId: (filepath, lang) => stableRepairId([scopedVersion(version), filepath, lang]), repairAt: Number(result.lastModified) || 0 } : {}) });
@@ -487,7 +490,7 @@
   function retainLegacyInvalidDrafts(store, workspace, originals, game, fail) {
     const groups = new Map();
     for (const archived of Object.values(workspace.invalidTranslationArchive || {})) {
-      if (!archived.sourceHash || archived.sourceHash !== workspace.sourceHash) continue;
+      if (archived.candidate || !archived.sourceHash || archived.sourceHash !== workspace.sourceHash) continue;
       const scope = { profile: archived.accountId || workspace.accountId || workspace.collaborationAccountId || 'guest',
         game: archived.game || game, sourceHash: archived.sourceHash, language: archived.language, filepath: archived.filepath,
         branchId: archived.branchId || workspace.branchId || DEFAULT_BRANCH,

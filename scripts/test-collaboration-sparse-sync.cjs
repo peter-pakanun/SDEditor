@@ -358,7 +358,8 @@ test('aligned Shared Dropped promotion retains its revision guard with excess or
     beforeConnect({ store, archive }) {
       W.initializeWorkspace(store.workspace, { source: baselineSource, sourceHash: archive.baselineId,
         game: 'poe1', language: 'German' });
-      candidate = W.dropTranslation(store.workspace, original, 'German', { id: 'shared-german', ownership: 'online',
+      const previous = { ...original, translations: { English: ['Previous', 'Deleted old source'] } };
+      candidate = W.dropTranslation(store.workspace, previous, 'German', { id: 'shared-german', ownership: 'online',
         revision: 4, game: 'poe1', originSourceHash: 'previous', targetSourceHash: archive.baselineId,
         translations: ['Preserved German', 'Deleted old block'] });
       W.dropTranslation(store.workspace, original, 'German', { id: 'local-german', ownership: 'local',

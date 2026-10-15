@@ -1122,6 +1122,7 @@ test('OfflineStore cold snapshot captures one scope and shares its baseline acro
     const f = recordFixture(), files = Array.from({ length: 128 }, (_, index) => f.source('file-' + index + '.txt', index));
     f.workspace(files, true);
     f.put(N.stores.migration, { key: f.n.key('invalid-statdescription-stage-v1', N.scopeKey(f.scope)), value: { state: 'ready' } });
+    f.put(N.stores.migration, { key: f.n.key('invalid-statdescription-dropped-v1', N.scopeKey(f.scope)), value: { state: 'ready' } });
     const root = { WorkspaceState: require('../public/workspaceState.js'), NormalizedStore: N };
     const context = require('node:vm').createContext({ window: root, console: { log() {} }, setTimeout, clearTimeout,
         indexedDB: { open() { const req = {}; queueMicrotask(() => { req.result = f.db; req.onsuccess(); }); return req; } } });
@@ -1282,6 +1283,67 @@ for (const legacy of [false, true]) test((legacy ? 'legacy' : 'normalized') + ' 
     assert.ok(f.transactions.some(tx => tx.aborted && tx.mode === 'readwrite'));
     assert.deepEqual(f.data.get('kv').get(pointer).value, previous, 'An uncommitted superseded put cannot replace the last successful selection');
     assert.equal(store.captureWorkspaceScope().sourceHash, previous.sourceHash, 'Failed and superseded requests cannot publish cached context');
+});
+
+test('settled normalized scopes archive invalid Dropped copies atomically and never restore them as drafts on reload', async () => {
+    const W = require('../public/workspaceState.js'), f = recordFixture(), files = ['blank.txt', 'partial.txt', 'count.txt', 'valid.txt'].map(path => f.source(path));
+    f.workspace(files);
+    const id = N.scopeKey(f.scope), candidates = files.map((file, index) => ({ id: 'candidate-' + index, filepath: file.filepath,
+        language: 'Thai', game: f.scope.game, ownership: index % 2 ? 'online' : 'local', revision: 3,
+        originSourceHash: index === 0 ? f.scope.sourceHash : 'unavailable-previous', targetSourceHash: f.scope.sourceHash,
+        targetSourceHashes: [f.scope.sourceHash], status: 'dropped', originSourceAvailable: false,
+        snapshot: { english: index === 1 || index === 2 ? ['Old one', 'Old two'] : ['Old source'],
+            translations: index === 0 ? [''] : index === 1 ? ['Useful old text', ''] : index === 2 ? ['Only one entry'] : ['Valid old text'] } }));
+    const put = (field, entry, data, language) => f.put(N.stores.records, f.n.row(id, language ? [field, language, entry] : [field, entry],
+        { field, entry, ...(language ? { language } : {}), data }, { pathKey: f.n.key(id, data.filepath || data.candidate?.filepath || entry), kindScope: f.n.key(id, field) }));
+    const commands = [];
+    for (const candidate of candidates) {
+        put('dropped', candidate.filepath, candidate, candidate.language); put('droppedArchive', candidate.id, candidate);
+        const command = { id: candidate.id, kind: 'put', revision: candidate.revision, candidate: structuredClone(candidate), preparedRequest: { raw: 'exact old bytes' } };
+        commands.push(command); put('droppedOutbox', f.n.key(command.id, command.kind), command);
+    }
+    put('staged', files[0].filepath, { sourceHash: f.scope.sourceHash, translations: ['Current saved text'], savedAt: 30, saveOrigin: 'save' }, 'Thai');
+    const history = { id: 7, filepath: files[0].filepath, lang: 'Thai', translations: ['Earlier authored text'] };
+    f.data.get('revisions_poe2').set(history.id, structuredClone(history));
+    f.put(N.stores.migration, { key: f.n.key('invalid-statdescription-stage-v1', id), value: { state: 'ready' } });
+    const workspace = (await f.n.activation(f.scope)).workspace;
+    assert.equal(Object.keys(workspace.invalidTranslationArchive).length, 3);
+    for (const candidate of candidates.slice(0, 3)) {
+        assert.equal(W.droppedForFile(workspace, candidate.filepath, 'Thai'), null);
+        assert.equal(workspace.droppedArchive[candidate.id].status, 'quarantined');
+        const archive = Object.values(workspace.invalidTranslationArchive).find(value => value.candidate?.id === candidate.id);
+        assert.deepEqual(archive.candidate, candidate, 'The original invalid copy remains exact recovery evidence');
+        assert.deepEqual(archive.operations, [commands.find(command => command.id === candidate.id)]);
+    }
+    assert.deepEqual(W.droppedForFile(workspace, 'valid.txt', 'Thai').snapshot.translations, ['Valid old text']);
+    assert.deepEqual(workspace.staged.Thai['blank.txt'].translations, ['Current saved text']);
+    assert.deepEqual(f.data.get('revisions_poe2').get(history.id), history);
+    assert.deepEqual(workspace.droppedOutbox.map(command => command.id), [candidates[3].id]);
+    assert.equal(f.data.get(N.stores.drafts).size, 0, 'Quarantined Dropped evidence must not become an active draft');
+    const writes = f.writes.length;
+    assert.deepEqual((await f.n.activation(f.scope)).workspace, workspace);
+    assert.equal(f.writes.length, writes, 'A settled reload cannot repeat quarantine writes');
+});
+
+test('invalid Dropped repair retains all active evidence when the archive transaction fails and succeeds on retry', async () => {
+    let fail = true;
+    const f = recordFixture({ onPut({ name, value }) {
+        if (fail && name === N.stores.records && value.value.field === 'invalidTranslationArchive') throw new Error('Archive quota failure');
+    } }), file = f.source('a.txt');
+    f.workspace([file]);
+    const id = N.scopeKey(f.scope), candidate = { id: 'legacy-invalid', filepath: file.filepath, language: 'Thai', game: f.scope.game,
+        status: 'dropped', ownership: 'local', originSourceHash: 'old', targetSourceHashes: [f.scope.sourceHash],
+        snapshot: { english: ['Old'], translations: [''] } };
+    for (const [field, identity] of [['dropped', ['dropped', 'Thai', file.filepath]], ['droppedArchive', ['droppedArchive', candidate.id]]])
+        f.put(N.stores.records, f.n.row(id, identity, { field, entry: field === 'dropped' ? file.filepath : candidate.id,
+            ...(field === 'dropped' ? { language: 'Thai' } : {}), data: candidate }, { pathKey: f.n.key(id, file.filepath), kindScope: f.n.key(id, field) }));
+    const original = structuredClone([...f.data.get(N.stores.records)]);
+    await assert.rejects(f.n.workspace(f.scope), /Archive quota failure/);
+    assert.deepEqual([...f.data.get(N.stores.records)], original, 'A failed durable archive cannot remove its source copy');
+    fail = false;
+    const repaired = await f.n.workspace(f.scope);
+    assert.equal(repaired.droppedArchive[candidate.id].status, 'quarantined');
+    assert.deepEqual(Object.values(repaired.invalidTranslationArchive)[0].candidate, candidate);
 });
 
 test('v19 quarantine archives every invalid stage origin and retains draft, receipt and pending-command evidence', async () => {

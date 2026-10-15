@@ -178,7 +178,8 @@
         return current;
       }, this.workspaceScope(identity), { revisions, filepaths: [candidate.filepath], includeDropped: true, command: 'register-dropped' });
       if (!this.current(epoch)) throw staleError();
-      await this.deliverDropped(workspace, [registered], epoch);
+      await this.deliverDropped(workspace, registered ? [registered] : [], epoch);
+      if (!registered) return { status: 'quarantined', candidate: null };
       this.lastDroppedSync = 0; await this.retry();
       return { status: this.lastError ? 'pending' : 'synced', candidate: copy(registered) };
     }
@@ -1002,7 +1003,8 @@
         && W.droppedOwnership(operation.candidate) === 'online' && (operation.kind === 'discard' || operation.id === operation.candidate?.recoveryId)
         && operation.candidate?.game === this.room().identity.game && operation.candidate?.language === this.room().identity.language);
       await this.onRemoteDropped(copy(records), copy({ dropped: workspace.dropped, droppedArchive: workspace.droppedArchive,
-        droppedOutbox: workspace.droppedOutbox, droppedAliases: workspace.droppedAliases, droppedConflicts: workspace.droppedConflicts }));
+        droppedOutbox: workspace.droppedOutbox, droppedAliases: workspace.droppedAliases, droppedConflicts: workspace.droppedConflicts,
+        invalidTranslationArchive: workspace.invalidTranslationArchive, droppedConflictArchive: workspace.droppedConflictArchive }));
       if (!this.current(epoch)) throw staleError();
       this.notify();
       return workspace;
@@ -1013,11 +1015,46 @@
       } else this.droppedWorkspace = workspace;
       return this.droppedWorkspace;
     }
+    resumeQuarantinedPromotion(workspace, room, pending, shared, original = pending) {
+      const identity = room.identity, promotion = pending?.wire?.promoteDropped || pending?.promoteDropped;
+      if (!pending || !['candidate_conflict', 'needs_candidate_review'].includes(pending.status)
+        || pending.droppedCopyDecision?.requiresFreshSave || !promotion || promotion.targetSourceHash !== identity.sourceHash
+        || !shared?.snapshot || !['dropped', 'quarantined'].includes(shared.status || 'dropped')
+        || W.droppedTranslationIssues(shared).valid || shared.game !== identity.game || shared.language !== identity.language
+        || (shared.branchId || 'default') !== (identity.branchId || 'default')
+        || (shared.groupId && shared.groupId !== identity.groupId)
+        || ![...(shared.targetSourceHashes || []), shared.targetSourceHash].includes(identity.sourceHash)
+        || workspace.sourceHash !== identity.sourceHash
+        || workspace.collaborationAccountId && String(workspace.collaborationAccountId) !== identity.accountId
+        || pending.files?.length !== 1 || pending.files[0].yours.filepath !== shared.filepath
+        || translationError(pending.files[0].yours, this.sourceFiles)) return false;
+      const staged = workspace.staged?.[identity.language]?.[shared.filepath];
+      if (staged?.sourceHash !== identity.sourceHash || !P.equal(staged.translations, pending.files[0].yours.translations)
+        || room.outbox.slice(room.outbox.indexOf(pending) + 1).some(operation => !inactiveOperation(operation)
+          && operation.files?.some(entry => entry.yours?.filepath === shared.filepath))) return false;
+      // The rejected request remains exact recovery evidence. A complete authored
+      // save can retry without resolving a quarantined recovery generation, while
+      // retaining its original mutation ID and shared-file revision guard.
+      room.recovery ||= [];
+      const id = 'quarantined-promotion:' + pending.id;
+      if (!room.recovery.some(entry => entry.id === id)) room.recovery.push({ id, at: Date.now(),
+        reason: 'Rejected promotion of an incomplete preserved translation', operation: copy(original), candidate: copy(shared),
+        files: pending.files.map(entry => copy(entry.yours)) });
+      W.acceptDropped(workspace, [shared], { game: identity.game, language: identity.language });
+      if (workspace.droppedConflicts?.[identity.language]?.[shared.filepath]?.operationId === pending.id)
+        delete workspace.droppedConflicts[identity.language][shared.filepath];
+      pending.reviewedDroppedPromotion = true;
+      delete pending.promoteDropped; delete pending.wire; delete pending.upload;
+      pending.status = 'pending';
+      return true;
+    }
     coalesceDroppedCopy(workspace, room, conflict, shared) {
       shared = W.droppedComparisonRecord(workspace, shared, conflict?.shared);
       if (!conflict || !shared || conflict.targetSourceHash !== room.identity.sourceHash
-        || shared.game !== room.identity.game || shared.language !== room.identity.language
-        || !W.sameDroppedContent(conflict.yours, shared)) return false;
+        || shared.game !== room.identity.game || shared.language !== room.identity.language) return false;
+      if (conflict.kind === 'promotion' && this.resumeQuarantinedPromotion(workspace, room,
+        room.outbox.find(operation => operation.id === conflict.operationId), shared)) return true;
+      if (!W.sameDroppedContent(conflict.yours, shared)) return false;
       let pending;
       if (conflict.kind === 'promotion') {
         pending = room.outbox.find(operation => operation.id === conflict.operationId);
@@ -1085,6 +1122,7 @@
           const filepath = operation.files[0].yours?.filepath;
           if (!filepath || current.droppedConflicts?.[identity.language]?.[filepath]) continue;
           const yours = current.droppedArchive?.[reviewed.id], shared = latest.get(filepath);
+          if (this.resumeQuarantinedPromotion(current, room, operation, shared)) { changed = true; continue; }
           if (!yours || yours.filepath !== filepath || !W.sameDroppedContent(yours, W.droppedComparisonRecord(current, shared))) continue;
           const conflict = { kind: 'promotion', operationId: operation.id, filepath, language: identity.language,
             targetSourceHash: identity.sourceHash, yours: copy(yours), shared: copy(shared) };
@@ -1118,7 +1156,8 @@
         updated = W.recordDroppedConflict(workspace, { kind, filepath: shared.filepath, language: identity.language,
           targetSourceHash: identity.sourceHash, yours: copy(yours), shared: copy(shared),
           ...(kind === 'promotion' ? { operationId: operation.id } : {}) });
-        this.coalesceDroppedCopy(updated, state.rooms[this.key], updated.droppedConflicts[identity.language][shared.filepath], shared);
+        if (!this.resumeQuarantinedPromotion(updated, state.rooms[this.key], pending, shared, operation))
+          this.coalesceDroppedCopy(updated, state.rooms[this.key], updated.droppedConflicts[identity.language][shared.filepath], shared);
         if (kind === 'promotion' && pending?.status === 'candidate_conflict') { delete pending.wire; delete pending.upload; }
         return updated;
       };
@@ -1188,6 +1227,7 @@
       if (!workspace || (workspace.sourceHash && workspace.sourceHash !== identity.sourceHash)) return;
       workspace = this.mergeDroppedWorkspace(workspace);
       W.separateDroppedCopies(workspace);
+      W.quarantineInvalidDroppedTranslations(workspace);
       this.droppedConflicts = copy(workspace.droppedConflicts?.[identity.language] || {});
       const pending = (workspace.droppedOutbox || []).filter(operation => !operation.conflict && operation.candidate?.game === identity.game
         && W.droppedOwnership(operation.candidate) === 'online' && (operation.kind === 'discard' || operation.id === operation.candidate?.recoveryId)
