@@ -117,6 +117,19 @@ test('ClientText live field diagnostics refresh independently of saved scan issu
     assert.equal(control.field.dataAttrs['aria-invalid'],undefined);assert.equal(h.host.ctDiagnostics.record.length,2,'draft presentation does not rewrite committed scan results');
 });
 
+test('ClientText styling differences show warning counts and highlights without marking the shared field invalid',()=>{
+    for(const [source,target] of [['Dialogue','<i>{Texte}'],['<u>{Dialogue}','Texte'],['<size:16>{Dialogue}','<size:20>{Texte}']]){
+        const h=harness(target,source),control=h.session.fieldController(h.host,h.field),presentation=control.diagnosticPresentation;
+        assert.equal(presentation.errorCount,0);assert.equal(presentation.warningCount,1);assert.match(presentation.warningTitle,/Text decoration tagName mismatch/);
+        assert.equal(control.field.dataAttrs['aria-invalid'],undefined);assert.equal(highlightedText(control.highlight),target);
+        const spans=highlightSpans(control.highlight).filter(span=>span.classes.includes('diagnosticRange'));
+        assert.equal(spans.length,target==='Texte'?0:1);assert.ok(spans.every(span=>span.classes.includes('diagWarning')&&!span.classes.includes('diagError')));
+        assert.equal(h.host.ctValues.text,target);assert.deepEqual(h.calls,[]);
+    }
+    const h=harness('<i>{Texte {1}}','Dialogue {0}'),control=h.session.fieldController(h.host,h.field);
+    assert.equal(control.diagnosticPresentation.errorCount,1);assert.equal(control.diagnosticPresentation.warningCount,1);assert.equal(control.field.dataAttrs['aria-invalid'],true);
+});
+
 test('named Turkish controls diagnose literal NONEXISTENT without changing older form exemptions',()=>{
     for(const form of ['Normal Translation','Possessive Translation']){
         const h=harness('NONEXISTENT','Item {0}');

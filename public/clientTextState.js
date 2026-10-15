@@ -477,7 +477,8 @@
                 // Missing keyword tags have no target range; keep valid tags neutral.
                 const missingTags=kind==='keyword' ? [...sourceIds.keys()].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}))
                     .map(tagName=>({tagName,count:sourceIds.get(tagName)-(targetIds.get(tagName)||0)})).filter(tag=>tag.count>0) : null;
-                result.push({level:'error',code:'clienttext-token-identity',kind,
+                // Translators may change styling to suit localized punctuation.
+                result.push({level:kind==='format'?'warning':'error',code:'clienttext-token-identity',kind,
                     message:settings[kind][1]+' mismatch: English has '+counts(sourceIds)+'; translation has '+counts(targetIds)+'.',
                     ...(missingTags ? {missingTags} : {}),
                     ...(range ? {start:range.start,end:range.end} : {})});

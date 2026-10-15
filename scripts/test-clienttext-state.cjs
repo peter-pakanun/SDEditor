@@ -227,7 +227,7 @@ test('ClientText variable, format, substitution and control mismatches only anno
     const field={...unit().fields[0],source:'{0}% {0}% <size:16> <<Icon>> <continue>'},target='prefix@literal\\n\r\n{0}% <size:20> <<Other>> <continue> <continue>';
     const issues=S.diagnose(field,target).filter(issue=>issue.code==='clienttext-token-identity');
     assert.deepEqual(issues.map(issue=>[issue.kind,issue.level,target.slice(issue.start,issue.end)]),[
-        ['variable','error','{0}%'],['substitution','error','<<Other>>'],['format','error','<size:20>'],['control','error','<continue>'],
+        ['variable','error','{0}%'],['substitution','error','<<Other>>'],['format','warning','<size:20>'],['control','error','<continue>'],
     ]);
     assert.equal(issues.find(issue=>issue.kind==='control').start,target.lastIndexOf('<continue>'));
     const absent=S.diagnose(field,'plain target').filter(issue=>issue.code==='clienttext-token-identity');
@@ -470,7 +470,27 @@ test('ClientText diagnostics compare inner formatting identities and recognize u
     const target='<i>{<b>{Texte {0}}}',issues=S.diagnose(field,target);
     assert.ok(!issues.some(issue=>issue.code==='clienttext-unknown-syntax'));
     const mismatch=issues.find(issue=>issue.code==='clienttext-token-identity' && issue.kind==='format');
-    assert.ok(mismatch);assert.equal(target.slice(mismatch.start,mismatch.end),'<b>');
+    assert.ok(mismatch);assert.equal(mismatch.level,'warning');assert.equal(target.slice(mismatch.start,mismatch.end),'<b>');
+});
+
+test('ClientText added, removed and changed styling warn while preserving nested runtime tokens and raw text',()=>{
+    for(const tag of ['i','italic','b','bold','u','underline','size:20',"font:'fontin'",'rgb(12,34,56)','color:rare','shadow','center']){
+        const plain='Dialogue [Skill|Name] {0}% <<Icon>> <continue>',styled='<'+tag+'>{'+plain+'}',
+            sourceStyled='<'+tag+'>{Source [Skill|Name] {0}% <<Icon>> <continue>}';
+        for(const [source,target] of [[plain,styled],[sourceStyled,plain],[sourceStyled,'<size:24>{'+plain+'}']]){
+            const field={...unit().fields[0],source},before=structuredClone(field),issues=S.diagnose(field,target);
+            assert.equal(issues.length,1,tag+' '+target);assert.equal(issues[0].kind,'format');assert.equal(issues[0].level,'warning');
+            if(target===plain)assert.equal(Object.hasOwn(issues[0],'start'),false);
+            else assert.equal(target.slice(issues[0].start,issues[0].end),target.slice(0,target.indexOf('>')+1));
+            assert.deepEqual(field,before);assert.equal(S.normalizeValues({...unit(),fields:[field]},{[fieldId]:target})[fieldId],target);
+            assert.deepEqual(S.diagnose(field,target,{decorations:false}),[]);
+        }
+    }
+    const field={...unit().fields[0],source:'Dialogue [Skill] {0}% <<Icon>> <continue>'},target='😀\r\n<i>{<u>{Texte [Wrong] {1}% <<Other>>}}';
+    const issues=S.diagnose(field,target);
+    assert.deepEqual(issues.map(issue=>[issue.kind,issue.level]),[
+        ['keyword','error'],['variable','error'],['substitution','error'],['format','warning'],['control','error']]);
+    const style=issues.find(issue=>issue.kind==='format');assert.equal(style.start,4);assert.equal(target.slice(style.start,style.end),'<i>');
 });
 
 test('ClientText nested wrappers report missing, extra and crossed closing delimiters at raw offsets',()=>{

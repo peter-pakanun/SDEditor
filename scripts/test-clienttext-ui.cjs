@@ -3019,13 +3019,26 @@ test('ClientText scan categories reuse SD whitespace and dash checks and select 
     for(const [key,kind] of [['variables','variable'],['keywords','keyword'],['decorations','format'],['substitutions','substitution'],['controls','control']]) {
         onlyScanChecks(app,key);assert.equal(await app.ctStartScan(),true);
         assert.deepEqual(Array.from(app.ctDiagnostics[row.id],issue=>issue.kind),[kind],key+' excludes every other token identity category');
-        assert.equal(app.ctDiagnostics[row.id][0].severity,'error');
+        assert.equal(app.ctDiagnostics[row.id][0].severity,kind==='format'?'warning':'error');
     }
     onlyScanChecks(app,'whitespace');await app.ctStartScan();assert.ok(app.ctDiagnostics[row.id].length);assert.ok(app.ctDiagnostics[row.id].every(issue=>!issue.kind && /space/.test(issue.code)));
     onlyScanChecks(app,'dash');await app.ctStartScan();assert.ok(app.ctDiagnostics[row.id].some(issue=>/dash/.test(issue.code)));assert.ok(app.ctDiagnostics[row.id].every(issue=>!issue.kind));
     row.fields[0].target='[Broken';onlyScanChecks(app,'tagSyntax');await app.ctStartScan();assert.ok(app.ctDiagnostics[row.id].some(issue=>issue.code==='missing-closing-tag'));
     onlyScanChecks(app);assert.equal(app.ctHasScanSelection,false);assert.equal(await app.ctStartScan(),undefined);
 });
+test('ClientText scans count styling differences as warnings and refresh them after a committed correction',async()=>{
+    const row=namedUnit('Styling','Dialogue','<b>{Texte}'),{app}=scanHarness([row]);
+    onlyScanChecks(app,'tagSyntax','variables','keywords','decorations','substitutions','controls');
+    assert.equal(await app.ctStartScan(),true);
+    assert.equal(app.ctScanErrorFileCount,0);assert.equal(app.ctScanWarningFileCount,1);
+    assert.equal(app.ctScanIssueCounts.errors,0);assert.equal(app.ctScanIssueCounts.warnings,1);
+    const result=app.ctScanResultFiles[0].result;
+    assert.equal(result.errorCount,0);assert.equal(result.warningCount,1);
+    const issue=app.ctDiagnostics[row.id][0];assert.equal(issue.kind,'format');assert.equal(issue.level,'warning');assert.equal(issue.severity,'warning');
+    row.fields[0].target='Texte';await app.ctRefreshDiagnostics([row.id]);
+    assert.equal(app.ctScanDone,true);assert.equal(app.ctScanErrorFileCount,0);assert.equal(app.ctScanWarningFileCount,0);
+});
+
 test('ClientText scans ignore optional audio metadata while checking real keywords, variables and Dictionary terms',async()=>{
     const markers=['[NOAUDIO]','[NO AUDIO]','[OLD AUDIO]','[AUDIOTEST]'];
     const rows=markers.flatMap((marker,index)=>[
