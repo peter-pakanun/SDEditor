@@ -69,7 +69,7 @@
   function reminder(instant, now = Date.now()) {
     const remaining = new Date(instant).getTime() - now;
     if (!Number.isFinite(remaining)) return '';
-    if (remaining <= 0) return 'Import deadline passed — awaiting collection';
+    if (remaining <= 0) return 'Import deadline passed';
     if (remaining >= 86400000) { const days = Math.ceil(remaining / 86400000); return `${days} ${days === 1 ? 'day' : 'days'} until import deadline`; }
     const hours = Math.ceil(remaining / 3600000);
     return `${hours} ${hours === 1 ? 'hour' : 'hours'} until import deadline`;
