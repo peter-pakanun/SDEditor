@@ -1248,7 +1248,7 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 /* A font by Jos Buivenga (exljbris) -> www.exljbris.com */
-/* Optional: add Fontin-*.woff2 under public/fonts/ to use the in-game face */
+/* Bundled preview faces; language mappings and optional faces: fonts/FONTS.md. */
 @font-face {
   font-family: "Fontin";
   font-style: normal;
@@ -1266,6 +1266,14 @@ button, label, th, td, input[type="checkbox"] {
 }
 
 @font-face {
+  font-family: "Fontin";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: local("Fontin Italic"), url("fonts/Fontin-Italic.woff2") format("woff2");
+}
+
+@font-face {
   font-family: "Fontin Smallcaps";
   font-style: normal;
   font-weight: 400;
@@ -1273,7 +1281,7 @@ button, label, th, td, input[type="checkbox"] {
   src: local("Fontin SmallCaps"), local("Fontin Smallcaps"), url("fonts/Fontin-SmallCaps.woff2") format("woff2");
 }
 
-/* Japanese UI (Metadata); add Koruri-Regular.woff2 under public/fonts/ — see fonts/FONTS.md */
+/* Japanese UI (Metadata). */
 @font-face {
   font-family: "Koruri Regular";
   font-style: normal;
@@ -1290,7 +1298,15 @@ button, label, th, td, input[type="checkbox"] {
   src: local("Koruri Regular"), url("fonts/Koruri-Regular.woff2") format("woff2");
 }
 
-/* Latin body (PoE); optional — see fonts/FONTS.md */
+/* UISettings uses FrizQuadrataITC as a fallback, not the primary Latin face. */
+@font-face {
+  font-family: "FrizQuadrataITC";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local("FrizQuadrataITC"), local("Friz Quadrata ITC"), url("fonts/FrizQuadrataITC.woff2") format("woff2");
+}
+
 @font-face {
   font-family: "Friz Quadrata ITC";
   font-style: normal;

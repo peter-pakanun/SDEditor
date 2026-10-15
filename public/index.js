@@ -44,20 +44,20 @@ const SETTINGS_LANG_TO_BCP47 = {
   Turkish: "tr",
 };
 
-/** CSS font-family stacks */
+/** Preview stacks from UISettings language overrides; see fonts/FONTS.md. */
 const GAME_PREVIEW_FONT_STACKS = {
   Thai: '"Kanit", sans-serif',
-  "Traditional Chinese": '"Noto Sans TC", sans-serif',
+  "Traditional Chinese": '"Noto Sans CJK TC", "Noto Sans TC", sans-serif',
   "Simplified Chinese": '"Noto Sans SC", sans-serif',
   Korean: '"Spoqa Han Sans Neo", "Noto Sans KR", sans-serif',
   Japanese: '"Koruri Regular", "Koruri", "Noto Sans JP", sans-serif',
-  Spanish: '"Fontin Smallcaps", "Fontin", "Noto Serif", serif',
-  French: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
-  Portuguese: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
-  German: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
-  Russian: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
-  Polish: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
-  Turkish: '"Friz Quadrata ITC", "Friz Quadrata", "Fontin Smallcaps", "Fontin", Georgia, serif',
+  Spanish: '"Fontin Smallcaps", "Fontin", "FrizQuadrataITC", "Noto Serif", serif',
+  French: '"Fontin", "FrizQuadrataITC", "Noto Serif", serif',
+  Portuguese: '"Fontin", "FrizQuadrataITC", "Noto Serif", serif',
+  German: '"Fontin", "FrizQuadrataITC", "Noto Serif", serif',
+  Russian: '"Fontin", "FrizQuadrataITC", "Noto Serif", serif',
+  Polish: '"Fontin", "FrizQuadrataITC", "Noto Serif", serif',
+  Turkish: '"Fontin-SmallCaps-tr-TR", "Fontin", "OptimusPrincepsSemiBold-tr-TR", "FrizQuadrataITC", "Noto Serif", serif',
 };
 
 // Preview palette only. Never apply these substitutions to stored translation text.

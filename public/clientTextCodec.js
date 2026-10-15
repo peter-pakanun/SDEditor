@@ -9,7 +9,7 @@
 })(typeof globalThis === 'object' ? globalThis : self, function (root, XMLParser, State, JSZip) {
     'use strict';
     const VERSION = 1, RED = 'FA8072', ORANGE = 'FF9966';
-    const PARSER_VERSION = 'clienttext-v3', PARSER_VERSIONS = Object.freeze(['clienttext-v1', 'clienttext-v2', PARSER_VERSION]);
+    const PARSER_VERSION = 'clienttext-v4', PARSER_VERSIONS = Object.freeze(['clienttext-v1', 'clienttext-v2', 'clienttext-v3', PARSER_VERSION]);
     const FILLS = { missing: 'FA8072', outdated: 'FF9966', filled: 'D9D9D9', reviewed: 'C6EFCE', revised: 'D9D2E9' };
     const FORMS = ['MS', 'FS', 'NS', 'MP', 'FP', 'NP'];
     const CLASS_FORMS = Object.freeze(['StrFour', 'IntFour', 'DexFour', 'StrDexFour', 'DexIntFour', 'StrIntFour',
@@ -17,6 +17,8 @@
     const NOTES = new Set(['Notes', 'Translation Note']);
     const METADATA = new Set(['Tags', 'ModType', 'StatMagnitude1 Stat', 'ModDomain', 'Generation Type', 'Character', 'Character Class']);
     const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
+    const enabled = value => !['0', 'false', 'off'].includes(String(value).toLowerCase());
+    const modernLayout = version => version === 'clienttext-v3' || version === 'clienttext-v4';
     const array = value => value === undefined || value === null ? [] : Array.isArray(value) ? value : [value];
     const error = (message, code = 'CLIENTTEXT_INVALID_WORKBOOK') => Object.assign(new Error(message), { code });
     function parserVersion(value) {
@@ -113,8 +115,22 @@
     }
     function styleData(document) {
         const sheet = local(document, 'styleSheet') || {}, fills = array(local(local(sheet, 'fills'), 'fill')),
-            styles = array(local(local(sheet, 'cellXfs'), 'xf'));
-        return { styles, fills, color(styleId) {
+            styles = array(local(local(sheet, 'cellXfs'), 'xf')), bases = array(local(local(sheet, 'cellStyleXfs'), 'xf')),
+            fonts = array(local(local(sheet, 'fonts'), 'font'));
+        return { styles, fills, italic(styleId, location) {
+            const invalid = () => error('Invalid header font or style in ' + location + '.');
+            if (!/^\d+$/.test(String(styleId))) throw invalid();
+            if (!styles.length && Number(styleId) === 0) return false;
+            const style = styles[Number(styleId)];
+            if (!style) throw invalid();
+            const baseId = attr(style, 'xfId'), base = baseId === undefined ? undefined : bases[Number(baseId)];
+            if (baseId !== undefined && (!/^\d+$/.test(baseId) || !base)) throw invalid();
+            const fontId = (attr(style, 'applyFont') !== undefined && !enabled(attr(style, 'applyFont')) ? undefined : attr(style, 'fontId'))
+                ?? attr(base, 'fontId') ?? '0';
+            if (!/^\d+$/.test(fontId) || !fonts[Number(fontId)]) throw invalid();
+            const italic = local(fonts[Number(fontId)], 'i');
+            return italic !== undefined && enabled(attr(italic, 'val'));
+        }, color(styleId) {
             const style = styles[Number(styleId || 0)], fill = fills[Number(attr(style, 'fillId') || 0)];
             const pattern = local(fill, 'patternFill');
             if (attr(pattern, 'patternType') !== 'solid') return null;
@@ -129,7 +145,7 @@
         if (type === 's') {
             // Current exports write styled blank shared-string cells without
             // a value element. Present references still require a valid index.
-            if (version === PARSER_VERSION && value === undefined) return '';
+            if (modernLayout(version) && value === undefined) return '';
             if (!/^\d+$/.test(raw) || Number(raw) >= shared.length) throw error('Invalid shared-string reference: ' + location + '.');
             return shared[Number(raw)];
         }
@@ -138,16 +154,34 @@
         if (type && !['n', 'str', 'b', 'e', 'd'].includes(type)) throw error('Unsupported worksheet cell type: ' + location + '.');
         return decodeExcel(raw);
     }
+    function headerItalic(cell, row, columns, styles, shared, location) {
+        const number = column(attr(cell, 'r'));
+        let styleId = '0';
+        for (const item of columns) if (number >= Number(attr(item, 'min')) && number <= Number(attr(item, 'max')))
+            styleId = attr(item, 'style') ?? '0';
+        if (attr(row, 's') !== undefined && attr(row, 'customFormat') !== undefined && enabled(attr(row, 'customFormat'))) styleId = attr(row, 's');
+        styleId = attr(cell, 's') ?? styleId;
+        const inherited = styles.italic(styleId, location), node = attr(cell, 't') === 's' ? shared[Number(scalar(local(cell, 'v')))] : local(cell, 'is');
+        const values = new Set(array(local(node, 'r')).filter(run => textRuns(run).trim()).map(run => {
+            const italic = local(local(run, 'rPr'), 'i');
+            return italic === undefined ? inherited : enabled(attr(italic, 'val'));
+        }));
+        if (values.size > 1) throw error('Mixed italic formatting in header ' + location + '.', 'CLIENTTEXT_LAYOUT_CHANGED');
+        return values.size ? values.values().next().value : inherited;
+    }
     function layout(headers, sheet, warnings, version) {
-        const id = headers.filter(item => item.name === 'ID');
+        // Older accepted originals replay their original name-based schema.
+        // New exports mark reference-only columns with italic header fonts.
+        const styleAware = version === 'clienttext-v4', reference = item => styleAware && item.italic,
+            editable = headers.filter(item => !reference(item)), id = editable.filter(item => item.name === 'ID');
         if (id.length !== 1) throw error('Sheet ' + sheet + ' must contain exactly one ID column.');
-        const used = new Set([id[0].column]), definitions = [], fieldIds = new Set(), gender = headers.filter(item => item.name === 'Gender');
+        const used = new Set([id[0].column]), definitions = [], fieldIds = new Set(), gender = editable.filter(item => item.name === 'Gender');
         if (gender.length > 1) throw error('Duplicate Gender columns in sheet ' + sheet + '.');
-        const at = new Map(headers.map(item => [item.column, item.name]));
+        const at = new Map(editable.map(item => [item.column, item.name]));
         const classForms = version !== 'clienttext-v1';
         function add(sourceColumn, targetColumn, kind, form = null) {
             const heading = kind === 'gender' ? 'Gender' : at.get(sourceColumn);
-            if (!heading || heading === 'ID' || heading === 'Translation' || heading === 'Gender' || FORMS.includes(heading) || (classForms && CLASS_FORMS.includes(heading)) || NOTES.has(heading) || METADATA.has(heading)) {
+            if (!heading || heading === 'ID' || heading === 'Translation' || heading === 'Gender' || FORMS.includes(heading) || (classForms && CLASS_FORMS.includes(heading)) || !styleAware && (NOTES.has(heading) || METADATA.has(heading))) {
                 throw error('Cannot identify the English source for ' + sheet + '!' + letters(targetColumn) + '1.');
             }
             const fieldId = JSON.stringify([heading, form]);
@@ -155,8 +189,8 @@
             fieldIds.add(fieldId); used.add(sourceColumn); used.add(targetColumn);
             definitions.push({ id: fieldId, name: heading, kind, sourceColumn, targetColumn, ...(form ? { form, group: heading } : {}) });
         }
-        if (version === PARSER_VERSION) {
-            const named = headers.filter(item => ['Normal Translation', 'Possessive Translation'].includes(item.name));
+        if (modernLayout(version)) {
+            const named = editable.filter(item => ['Normal Translation', 'Possessive Translation'].includes(item.name));
             if (named.length) {
                 const normal = named.filter(item => item.name === 'Normal Translation'), possessive = named.filter(item => item.name === 'Possessive Translation');
                 if (sheet !== 'BaseItemTypes' || normal.length !== 1 || possessive.length !== 1
@@ -167,8 +201,8 @@
                 add(normal[0].column - 1, possessive[0].column, 'form', 'Possessive Translation');
             }
         }
-        for (let index = 0; index < headers.length; index++) {
-            const header = headers[index];
+        for (let index = 0; index < editable.length; index++) {
+            const header = editable[index];
             if (header.name === 'Translation') add(header.column - 1, header.column, 'text');
             else if (FORMS.includes(header.name) && !used.has(header.column)) {
                 const cluster = [];
@@ -183,8 +217,8 @@
                 // retain no guessed mapping when the source cluster is unclear.
                 const sources = definitions.filter(field => field.sourceColumn < header.column);
                 const sourceColumn = Math.max(0, ...sources.map(field => field.sourceColumn));
-                const unknown = headers.filter(item => item.column > sourceColumn && item.column < header.column && !used.has(item.column)
-                    && !CLASS_FORMS.includes(item.name) && !NOTES.has(item.name) && !METADATA.has(item.name) && item.name !== 'Gender');
+                const unknown = editable.filter(item => item.column > sourceColumn && item.column < header.column && !used.has(item.column)
+                    && !CLASS_FORMS.includes(item.name) && !NOTES.has(item.name) && (styleAware || !METADATA.has(item.name)) && item.name !== 'Gender');
                 if (!sourceColumn || unknown.length) throw error('Cannot unambiguously identify the English source for class variant ' + sheet + '!' + letters(header.column) + '1.', 'CLIENTTEXT_LAYOUT_CHANGED');
                 add(sourceColumn, header.column, 'form', header.name);
             }
@@ -198,7 +232,7 @@
         if (new Set(metadata.map(item => item.name)).size !== metadata.length) throw error('Duplicate metadata column headings in sheet ' + sheet + '.', 'CLIENTTEXT_LAYOUT_CHANGED');
         // Context is known reference metadata. Keep its existing layout
         // interpretation so accepted v1/v2 sources and identities stay intact.
-        for (const item of metadata) if (!NOTES.has(item.name) && !METADATA.has(item.name) && item.name !== 'Context') warnings.push({ code: 'CLIENTTEXT_METADATA_COLUMN', sheet, cell: letters(item.column) + '1', message: 'Unrecognized metadata column retained: ' + item.name + '.' });
+        for (const item of metadata) if (!reference(item) && !NOTES.has(item.name) && !METADATA.has(item.name) && item.name !== 'Context') warnings.push({ code: 'CLIENTTEXT_METADATA_COLUMN', sheet, cell: letters(item.column) + '1', message: 'Unrecognized metadata column retained: ' + item.name + '.' });
         return { idColumn: id[0].column, definitions, metadata };
     }
     async function parseWorkbook(input, options = {}) {
@@ -221,7 +255,8 @@
             relationMap.set(id, relation);
         }
         const stringPart = await part(zip, 'xl/sharedStrings.xml', true);
-        const shared = stringPart === null ? [] : array(local(local(xml(stringPart, 'shared strings'), 'sst'), 'si')).map(item => decodeExcel(textRuns(item)));
+        const sharedNodes = stringPart === null ? [] : array(local(local(xml(stringPart, 'shared strings'), 'sst'), 'si')),
+            shared = sharedNodes.map(item => decodeExcel(textRuns(item)));
         const stylesPart = await part(zip, 'xl/styles.xml', true), styles = styleData(stylesPart ? xml(stylesPart, 'styles') : {});
         const sheetItems = array(local(local(local(document, 'workbook'), 'sheets'), 'sheet')), names = new Set(), partPaths = new Set();
         if (!sheetItems.length || sheetItems.length > 1024) throw error('The workbook has an unsupported sheet count.');
@@ -253,10 +288,11 @@
                 }
                 return cells;
             }
-            const headerCells = cellsFor(first), headers = [];
+            const headerCells = cellsFor(first), headers = [], columns = array(local(local(sheet, 'cols'), 'col'));
             for (const [number, cell] of headerCells) {
                 const value = cellValue(cell, shared, name + '!' + attr(cell, 'r'), true, version);
-                if (value) headers.push({ column: number, name: value });
+                if (value) headers.push({ column: number, name: value, ...(version === 'clienttext-v4'
+                    ? { italic: headerItalic(cell, first, columns, styles, sharedNodes, name + '!' + attr(cell, 'r')) } : {}) });
             }
             headers.sort((a, b) => a.column - b.column);
             const schema = layout(headers, name, warnings, version), start = units.length;

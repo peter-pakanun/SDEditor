@@ -9,7 +9,8 @@ const XMLParser = require('../public/vendor/fast-xml-parser-5.11.2.min.js').defa
 const Codec = require('../public/clientTextCodec.js');
 const State = require('../public/clientTextState.js');
 const allLanguages = process.argv.includes('--all-languages');
-const samples = process.argv.includes('--german') ? [
+const hints = process.argv.includes('--hints');
+const samples = hints ? [['Thai_with_hint.xlsx', 'normal', 'Thai', 43777, 4]] : process.argv.includes('--german') ? [
     ['German.xlsm', 'normal', 'German', 89902, 206],
     ['German_Gender.xlsm', 'gender', 'German', 68484, 10],
 ] : [
@@ -85,7 +86,8 @@ async function validateTargetedPatches(bytes, parsed) {
 (async () => {
     const argumentDirectory = process.argv.slice(2).find(value => !value.startsWith('--'));
     if (allLanguages && !argumentDirectory) throw new Error('--all-languages requires the supplied export directory as a positional argument.');
-    const directory = argumentDirectory || 'C:/Users/lpeac/Downloads/2026-10-05_POE2';
+    if (hints && (allLanguages || process.argv.includes('--german'))) throw new Error('--hints must be checked separately from the other sample sets.');
+    const directory = argumentDirectory || (hints ? 'C:/Users/lpeac/Downloads/2026-10-15_POE2' : 'C:/Users/lpeac/Downloads/2026-10-05_POE2');
     if (allLanguages) {
         const filenames = (await fs.readdir(directory)).filter(name => /\.xlsx$/i.test(name)).sort();
         assert.deepEqual(filenames, allLanguageSamples.map(sample => sample[0]).sort(), 'The supplied all-language export contains exactly the expected 17 workbooks; ZIP files are ignored');
@@ -96,6 +98,25 @@ async function validateTargetedPatches(bytes, parsed) {
         assert.equal(parsed.units.length, expectedUnits); assert.equal(parsed.sheets.length, expectedSheets);
         assert.equal(new Set(parsed.units.map(unit => unit.id)).size, expectedUnits);
         assert.deepEqual(await Codec.exportWorkbook(bytes, parsed, {}), bytes);
+        if (hints) {
+            assert.equal(parsed.parserVersion, 'clienttext-v4');
+            assert.equal(parsed.warnings.some(warning => warning.code === 'CLIENTTEXT_METADATA_COLUMN'), false, 'Italic hints are recognized reference columns');
+            const npcs = parsed.units.filter(unit => unit.sheet === 'NPCs'), dialogue = parsed.units.filter(unit => unit.sheet === 'NPCTalkDialogueTextAudio');
+            assert.equal(npcs.some(unit => unit.fields.some(field => field.kind === 'gender')), false, 'Italic NPC Gender is never an editable target');
+            assert.equal(npcs.filter(unit => unit.metadata.Gender.trim()).length, 665, 'Intrinsic NPC genders remain exact readonly hints');
+            assert.equal(dialogue.length, 11727);
+            let requiredClassForms = 0, optionalClassForms = 0;
+            for (const unit of dialogue) {
+                assert.equal(Object.hasOwn(unit.metadata, 'NPC'), true); assert.equal(Object.hasOwn(unit.metadata, 'Character'), true);
+                const classForms = unit.fields.filter(field => State.CLASS_FORMS.includes(field.form));
+                assert.equal(classForms.length, 12, 'Nonitalic class columns remain editable form targets');
+                assert.equal(classForms.every(field => field.target === ''), true, 'Class targets preserve the sample blanks');
+                requiredClassForms += classForms.filter(field => field.required).length;
+                optionalClassForms += classForms.filter(field => !field.required).length;
+            }
+            assert.equal(requiredClassForms, 4668, 'Direct red fills retain the marked class workload');
+            assert.equal(optionalClassForms, 136056, 'Other blank class forms and NOAUDIO rows remain optional');
+        }
         let manifestFacts;
         if (process.argv.includes('--manifest')) {
             const manifestStarted = performance.now();
@@ -125,8 +146,8 @@ async function validateTargetedPatches(bytes, parsed) {
                 baselineId: descriptor.baselineId, summary: preparation.summaries[role] };
         }
         let targetedEdits;
-        if (allLanguages) {
-            assert.equal(parsed.parserVersion, 'clienttext-v3');
+        if (allLanguages || hints) {
+            assert.equal(parsed.parserVersion, 'clienttext-v4');
             targetedEdits = await validateTargetedPatches(bytes, parsed);
             assert.equal(sha256(bytes), originalHash, 'Parsing/export preserves the retained input bytes');
             assert.equal(sha256(await fs.readFile(originalPath)), originalHash, 'The supplied workbook remains unchanged on disk');

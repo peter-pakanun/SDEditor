@@ -5,8 +5,8 @@
     else root.ClientTextState = api;
 })(typeof globalThis === 'object' ? globalThis : self, function () {
     'use strict';
-    const FORMAT = 'clienttext-v1', TRUSTED_FORMAT = 'clienttext-trusted-v1', STORAGE_PROTOCOL = TRUSTED_FORMAT, PARSER_VERSION = 'clienttext-v3';
-    const PARSER_VERSIONS = Object.freeze(['clienttext-v1', 'clienttext-v2', PARSER_VERSION]);
+    const FORMAT = 'clienttext-v1', TRUSTED_FORMAT = 'clienttext-trusted-v1', STORAGE_PROTOCOL = TRUSTED_FORMAT, PARSER_VERSION = 'clienttext-v4';
+    const PARSER_VERSIONS = Object.freeze(['clienttext-v1', 'clienttext-v2', 'clienttext-v3', PARSER_VERSION]);
     const CLASS_FORMS = Object.freeze(['StrFour', 'IntFour', 'DexFour', 'StrDexFour', 'DexIntFour', 'StrIntFour',
         'StrFourb', 'IntFourb', 'DexFourb', 'StrDexFourb', 'DexIntFourb', 'StrIntFourb']);
     const isClassForm = field => CLASS_FORMS.includes(typeof field === 'string' ? field : field?.kind === 'form' ? field.form : null);

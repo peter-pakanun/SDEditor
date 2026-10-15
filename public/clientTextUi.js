@@ -1459,8 +1459,11 @@
                 this.ctPolicy=policy;return policy;
             },
             ctCheckParserCapability(policy,parserVersions) {
-                const unsupported=[...new Set(parserVersions)].filter(version=>version==='clienttext-v3' && !policy?.clientTextParserVersions?.includes(version));
-                if(unsupported.length)throw new Error('This server needs the ClientText v3 API update before preparing or publishing these workbooks. Update the API first, then retry. Cached local work and existing v1/v2 publications remain available.');
+                const unsupported=[...new Set(parserVersions)].filter(version=>!['clienttext-v1','clienttext-v2'].includes(version) && !policy?.clientTextParserVersions?.includes(version));
+                if(unsupported.length){
+                    const required=unsupported.includes(root.ClientTextState.PARSER_VERSION)?root.ClientTextState.PARSER_VERSION:unsupported[0];
+                    throw new Error('This server needs the ClientText '+String(required).replace(/^clienttext-/,'')+' API update before preparing or publishing these workbooks. Update the API first, then retry. Cached local work and supported publications remain available.');
+                }
             },
             async ctOriginalHash(bytes) {
                 if(root.crypto?.subtle){const digest=await root.crypto.subtle.digest('SHA-256',bytes);return Array.from(new Uint8Array(digest),value=>value.toString(16).padStart(2,'0')).join('');}

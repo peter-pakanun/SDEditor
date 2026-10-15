@@ -307,17 +307,43 @@ test('Turkish named forms preserve raw values without grammatical-form sentinel 
     }
 });
 
-test('v3 originals retain distinct cache identities without changing legacy sparse field fingerprints',async()=>{
+test('v1 through v4 originals retain distinct cache identities without changing legacy sparse field fingerprints',async()=>{
     const original=unit(' [NOAUDIO] Exact {0}','Raw\r\n @value\\n '),facts=S.clientFacts(original),ids=new Set(),caches=new Set();
-    assert.deepEqual(S.PARSER_VERSIONS,['clienttext-v1','clienttext-v2','clienttext-v3']);
+    assert.equal(S.PARSER_VERSION,'clienttext-v4');
+    assert.deepEqual(S.PARSER_VERSIONS,['clienttext-v1','clienttext-v2','clienttext-v3','clienttext-v4']);
     for(const parserVersion of S.PARSER_VERSIONS){
         const prepared=await S.buildDescriptors([original],[{...asset,parserVersion}]);
         ids.add(prepared.descriptors[0].baselineId);caches.add(S.originalCacheKey(asset.hash,parserVersion,'normal'));
         assert.deepEqual(S.clientFacts(original),facts);assert.equal(prepared.descriptors[0].parserVersion,parserVersion);
     }
-    assert.equal(ids.size,3);assert.equal(caches.size,3);
+    assert.equal(ids.size,4);assert.equal(caches.size,4);
     assert.equal(facts.fields[0].sourceHash,S.hash('Exact {0}'));
     assert.equal(facts.fields[0].originalHash,S.hash('Raw\r\n @value\\n '));
+});
+
+test('v4 metadata classification excludes a previous editable Gender without changing its retained source or authored evidence',()=>{
+    const previous=unit('Renly','Original name'),genderId=JSON.stringify(['Gender',null]);
+    previous.sheet='NPCs';previous.recordId='Metadata/NPC/Four_Act1/Renly';previous.id=JSON.stringify([previous.role,previous.sheet,previous.recordId]);
+    previous.fields.push({id:genderId,name:'Gender',kind:'gender',source:'',target:'Male',required:true,
+        originalMissing:false,outdated:false,sourceCell:'',targetCell:'H2',originalFill:null,originalStyleId:'0'});
+    const saved={values:{[fieldId]:'Authored name',[genderId]:' Authored gender\r\n '},reviewed:{[fieldId]:S.sourceHash('Renly'),[genderId]:S.sourceHash('')},saved:true};
+    const next=structuredClone(previous);next.fields=next.fields.filter(field=>field.id!==genderId);next.metadata={Gender:'Male',Act:'1'};
+    const originals=structuredClone({previous,next,saved}),previousFacts=S.clientFacts(previous),previousCompact=S.compactUnit(previous);
+    const carried=S.carryForward(previous,next,saved);
+    assert.equal(next.id,previous.id,'A metadata change preserves workbook role, sheet and record identity');
+    assert.deepEqual(carried.values,{[fieldId]:'Authored name'});
+    assert.deepEqual(carried.reviewed,{[fieldId]:S.sourceHash('Renly')});
+    assert.deepEqual(carried.outdated,[]);assert.deepEqual(carried.conflicts,[]);
+    assert.deepEqual(carried.removed,[{field:previous.fields[1],value:saved.values[genderId]}],'Removed authored values remain separate evidence');
+    assert.deepEqual(S.valuesFor(previous,saved),saved.values,'The previous interpretation still exposes its exact saved targets');
+    assert.deepEqual(S.clientFacts(previous),previousFacts);assert.deepEqual(S.compactUnit(previous),previousCompact);
+    assert.deepEqual(S.clientFacts(next).fields.map(field=>field.id),[fieldId]);
+    assert.deepEqual(S.originalValues(next),{[fieldId]:'Original name'});
+    assert.deepEqual(S.normalizeValues(next,carried.values),carried.values);assert.deepEqual(S.normalizeReviewed(next,carried.reviewed),carried.reviewed);
+    assert.throws(()=>S.normalizeValues(next,saved.values),/Unknown or non-text/,'Old Gender targets cannot enter v4 saves');
+    assert.throws(()=>S.normalizeReviewed(next,saved.reviewed),/current field/,'Old Gender reviews cannot enter v4 saves');
+    assert.equal(S.addOriginalSummary(S.emptySummary(),previous).fields,2);assert.equal(S.addOriginalSummary(S.emptySummary(),next).fields,1);
+    assert.deepEqual({previous,next,saved},originals,'Advancement leaves both originals and the previous saved snapshot unchanged');
 });
 
 test('Turkish carry-forward keeps independent form conflicts and optional blanks without fallback',()=>{

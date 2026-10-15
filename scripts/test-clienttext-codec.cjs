@@ -48,6 +48,115 @@ const classDialogue = () => sheet([
         cell('I2', ' @literal\\n raw\r\nactual\n\t ', 1), empty('J2', 1), cell('K2', 'NONEXISTENT', 1), cell('L2', 'Original class translation', 1),
         ...['M', 'N', 'O', 'P', 'Q'].map(col => empty(col + '2', 1)), cell('R2', 'Actual developer note')]),
 ]);
+// Header styles deliberately use unrelated cellXf/font indexes. A style index
+// alone has no meaning, and inherited fonts must follow xfId rather than fill.
+const hintStyles = () => styles
+    .replace(/<fonts count="1">[\s\S]*?<\/fonts>/, '<fonts count="5"><font><name val="Calibri"/></font><font><i/></font><font><i val="0"/></font><font><i val="false"/></font><font><i val="true"/></font></fonts>')
+    .replace(/<cellStyleXfs count="1">[\s\S]*?<\/cellStyleXfs>/, '<cellStyleXfs count="2"><xf fontId="0" fillId="0"/><xf fontId="1" fillId="0"/></cellStyleXfs>')
+    .replace('<cellXfs count="4">', '<cellXfs count="9">')
+    .replace('</cellXfs>', '<xf fontId="4" fillId="0" xfId="0"/><xf fontId="2" fillId="0" xfId="1" applyFont="1"/><xf fillId="0" xfId="1"/><xf fontId="3" fillId="0" xfId="1" applyFont="1"/><xf fontId="1" fillId="0" xfId="0"/></cellXfs>');
+const withHintStyles = (normal, extra = {}) => workbook({ normal, ...extra, replace: { 'xl/styles.xml': hintStyles(), ...(extra.replace || {}) } });
+
+test('v4 italic header metadata overrides editable-name heuristics without consuming source or form columns', async () => {
+    const normal = sheet([
+        row(1, [cell('A1', 'ID'), cell('B1', 'Gender', 4), cell('C1', 'NPC', 6), cell('D1', 'Name'), cell('E1', 'Translation'),
+            cell('F1', 'MS', 8), cell('G1', 'FS', 6), cell('H1', 'StrFour', 4), cell('I1', 'Text', 6), cell('J1', 'Translation', 4),
+            cell('K1', 'Normal Translation', 8), cell('L1', 'Possessive Translation', 6), cell('M1', 'Description', 4), cell('N1', 'StrFourb')]),
+        row(2, [cell('A2', 'hints'), cell('B2', 'Intrinsic NPC gender'), cell('C2', 'Metadata/NPC/Example'), cell('D2', 'Immutable English'), cell('E2', 'Original target', 1),
+            cell('F2', 'MS reference'), cell('G2', 'FS reference'), cell('H2', 'Class reference'), cell('I2', 'Source-named reference'), cell('J2', 'Translation-named reference'),
+            cell('K2', 'Normal reference'), cell('L2', 'Possessive reference'), cell('M2', 'Description reference'), empty('N2', 1)]),
+    ]);
+    const bytes = await withHintStyles(normal, { macro: true }), parsed = await Codec.parseWorkbook(bytes, { filename: 'Thai.xlsm' }), unit = get(parsed, 'hints');
+    assert.equal(parsed.parserVersion, 'clienttext-v4');
+    assert.deepEqual(unit.fields.map(current => [current.name, current.form || null, current.targetCell]), [['Name', null, 'E2'], ['Name', 'StrFourb', 'N2']]);
+    assert.deepEqual(unit.metadata, { Gender: 'Intrinsic NPC gender', NPC: 'Metadata/NPC/Example', MS: 'MS reference', FS: 'FS reference', StrFour: 'Class reference',
+        Text: 'Source-named reference', Translation: 'Translation-named reference', 'Normal Translation': 'Normal reference', 'Possessive Translation': 'Possessive reference', Description: 'Description reference' });
+    assert.equal(field(unit, 'Name', 'StrFourb').required, false, 'A blank nonitalic class target remains an optional editable form');
+    assert.equal(parsed.warnings.some(warning => warning.code === 'CLIENTTEXT_METADATA_COLUMN'), false, 'Italic headers explicitly identify reference metadata');
+    assert.deepEqual(await Codec.exportWorkbook(bytes, parsed, {}), bytes);
+    await assert.rejects(Codec.exportWorkbook(bytes, parsed, { [unit.id]: { values: { '["Gender",null]': 'Not editable' } } }), /unknown field/);
+    const output = await Codec.exportWorkbook(bytes, parsed, { [unit.id]: { values: { [field(unit, 'Name').id]: 'Authored target' } } });
+    const reopened = get(await Codec.parseWorkbook(output, { filename: 'Thai.xlsm' }), 'hints');
+    assert.deepEqual(reopened.metadata, unit.metadata); assert.equal(field(reopened, 'Name').target, 'Authored target');
+    assert.deepEqual(field(reopened, 'Name', 'StrFourb'), field(unit, 'Name', 'StrFourb'));
+    const before = await JSZip.loadAsync(bytes), after = await JSZip.loadAsync(output);
+    for (const name of Object.keys(before.files)) if (!before.files[name].dir && !['xl/worksheets/sheet1.xml', 'xl/styles.xml'].includes(name))
+        assert.deepEqual(await after.file(name).async('uint8array'), await before.file(name).async('uint8array'), name);
+    const omitTarget = text => text.replace(/<c\b[^>]*\br="E2"[^>]*(?:\/>|>[\s\S]*?<\/c>)/, '<chosen-target/>');
+    assert.equal(omitTarget(await after.file('xl/worksheets/sheet1.xml').async('string')), omitTarget(await before.file('xl/worksheets/sheet1.xml').async('string')), 'All metadata cells and headers remain byte-exact');
+});
+test('v4 resolves header font italic booleans and keeps nonitalic Gender editable', async () => {
+    for (const styleId of [0, 5, 7]) {
+        const normal = sheet([
+            row(1, [cell('A1', 'ID'), cell('B1', 'Name', styleId), cell('C1', 'Translation', styleId), cell('D1', 'Gender', styleId)]),
+            row(2, [cell('A2', 'plain'), cell('B2', 'English'), cell('C2', 'Target', 1), cell('D2', 'F', 1)]),
+        ]);
+        const unit = get(await Codec.parseWorkbook(await withHintStyles(normal), { filename: 'French.xlsx' }), 'plain');
+        assert.equal(field(unit, 'Name').target, 'Target'); assert.equal(field(unit, 'Gender').target, 'F'); assert.deepEqual(unit.metadata, {});
+    }
+    for (const styleId of [4, 6, 8]) {
+        const normal = sheet([
+            row(1, [cell('A1', 'ID'), cell('B1', 'Name'), cell('C1', 'Translation'), cell('D1', 'Gender', styleId)]),
+            row(2, [cell('A2', 'italic'), cell('B2', 'English'), cell('C2', 'Target', 1), cell('D2', 'Reference only')]),
+        ]);
+        const unit = get(await Codec.parseWorkbook(await withHintStyles(normal), { filename: 'Thai.xlsx' }), 'italic');
+        assert.equal(field(unit, 'Gender'), undefined); assert.deepEqual(unit.metadata, { Gender: 'Reference only' });
+    }
+});
+test('v4 honors row, column and rich header fonts and rejects mixed hint formatting', async () => {
+    const noStyle = cell('D1', 'Gender').replace(' s="0"', ''), normal = sheet([
+        row(1, [cell('A1', 'ID'), cell('B1', 'Name'), cell('C1', 'Translation'), noStyle]),
+        row(2, [cell('A2', 'styled'), cell('B2', 'English'), cell('C2', 'Target', 1), cell('D2', 'Reference gender')]),
+    ]);
+    const rich = italic => '<c r="D1" s="0" t="inlineStr"><is><r><rPr><i' + italic + '/></rPr><t>Gender</t></r></is></c>';
+    const cases = [
+        [normal.replace('<sheetData>', '<cols><col min="4" max="4" style="4"/></cols><sheetData>'), {}, true],
+        [normal.replace('<row r="1">', '<row r="1" s="4" customFormat="1">'), {}, true],
+        [normal.replace('<sheetData>', '<cols><col min="4" max="4" style="4"/></cols><sheetData>').replace('<row r="1">', '<row r="1" s="5" customFormat="1">'), {}, false],
+        [normal.replace(noStyle, rich('')), {}, true],
+        [normal.replace(noStyle, rich(' val="0"').replace('s="0"', 's="4"')), {}, false],
+        [normal.replace(noStyle, '<c r="D1" t="s"><v>0</v></c>'), { 'xl/sharedStrings.xml': '<sst xmlns="' + NS + '"><si><r><rPr><i/></rPr><t>Gender</t></r></si></sst>' }, true],
+    ];
+    for (const [sheetXml, replace, italic] of cases) {
+        const unit = get(await Codec.parseWorkbook(await withHintStyles(sheetXml, { replace }), { filename: 'Thai.xlsx' }), 'styled');
+        assert.equal(field(unit, 'Gender') === undefined, italic); assert.deepEqual(unit.metadata, italic ? { Gender: 'Reference gender' } : {});
+    }
+    const mixed = '<c r="D1" t="inlineStr"><is><r><rPr><i/></rPr><t>Gen</t></r><r><t>der</t></r></is></c>';
+    await assert.rejects(Codec.parseWorkbook(await withHintStyles(normal.replace(noStyle, mixed)), { filename: 'Thai.xlsx' }), /Mixed italic formatting/);
+});
+test('v4 never borrows an italic source heading for an editable translation', async () => {
+    for (const normal of [
+        sheet([row(1, [cell('A1', 'ID'), cell('B1', 'Text', 4), cell('C1', 'Translation')]), row(2, [cell('A2', 'blocked'), cell('B2', 'Reference only'), cell('C2', 'Unsafe target')])]),
+        sheet([row(1, [cell('A1', 'ID'), cell('B1', 'Character', 4), cell('C1', 'Translation')]), row(2, [cell('A2', 'blocked'), cell('B2', 'Reference only'), cell('C2', 'Unsafe target')])]),
+        sheet([row(1, [cell('A1', 'ID'), cell('B1', 'Name'), cell('C1', 'Translation'), cell('D1', 'Text', 6), cell('E1', 'Translation')]), row(2, [cell('A2', 'blocked'), cell('B2', 'English'), cell('C2', 'Target'), cell('D2', 'Reference only'), cell('E2', 'Unsafe target')])]),
+    ]) await assert.rejects(Codec.parseWorkbook(await withHintStyles(normal), { filename: 'Thai.xlsx' }), /English source|recognized translation|source/i);
+});
+test('v4 nonitalic sources are not vetoed by legacy metadata heading names', async () => {
+    const normal = sheet([
+        row(1, [cell('A1', 'ID'), cell('B1', 'Character'), cell('C1', 'Translation')]),
+        row(2, [cell('A2', 'character-source'), cell('B2', 'English character name'), cell('C2', 'Translated character name', 1)]),
+    ]);
+    const bytes = await withHintStyles(normal), unit = get(await Codec.parseWorkbook(bytes, { filename: 'Thai.xlsx' }), 'character-source');
+    assert.equal(field(unit, 'Character').source, 'English character name'); assert.equal(field(unit, 'Character').target, 'Translated character name'); assert.deepEqual(unit.metadata, {});
+    await assert.rejects(Codec.parseWorkbook(bytes, { filename: 'Thai.xlsx', parserVersion: 'clienttext-v3' }), /identify the English source/);
+});
+test('explicit v1-v3 replay preserves accepted Gender fields while v4 changes only italic interpretation', async () => {
+    const normal = sheet([
+        row(1, [cell('A1', 'ID'), cell('B1', 'Gender', 4), cell('C1', 'Name'), cell('D1', 'Translation')]),
+        row(2, [cell('A2', 'replay'), cell('B2', 'Reference gender'), cell('C2', 'English'), cell('D2', 'Target', 1)]),
+    ]);
+    const bytes = await withHintStyles(normal); let legacyUnit;
+    for (const parserVersion of ['clienttext-v1', 'clienttext-v2', 'clienttext-v3']) {
+        const parsed = await Codec.parseWorkbook(bytes, { filename: 'Thai.xlsx', parserVersion }), unit = get(parsed, 'replay');
+        assert.equal(field(unit, 'Gender').target, 'Reference gender'); assert.deepEqual(unit.metadata, {});
+        if (legacyUnit) assert.deepEqual(unit, legacyUnit); else legacyUnit = unit;
+        assert.deepEqual(await Codec.exportWorkbook(bytes, parsed, {}, { parserVersion }), bytes);
+        await assert.rejects(Codec.exportWorkbook(bytes, parsed, {}, { parserVersion: 'clienttext-v4' }), /parser version does not match/);
+    }
+    const current = get(await Codec.parseWorkbook(bytes, { filename: 'Thai.xlsx' }), 'replay');
+    assert.equal(field(current, 'Gender'), undefined); assert.deepEqual(current.metadata, { Gender: 'Reference gender' });
+    assert.deepEqual(field(current, 'Name'), field(legacyUnit, 'Name')); assert.equal(current.id, legacyUnit.id);
+});
 
 test('v2 class dialogue variants are exact form identities with shared raw English and field-specific workload', async () => {
     const bytes = await workbook({ normal: classDialogue() });
@@ -73,11 +182,11 @@ test('v2 class dialogue variants are exact form identities with shared raw Engli
     assert.equal(field(unit, 'Text', 'StrFourb').required, true);
     assert.doesNotThrow(() => State.normalizeUnit(unit));
     const current = await Codec.parseWorkbook(bytes, { filename: 'German.xlsx', role: 'gender', language: 'German' });
-    assert.equal(current.parserVersion, 'clienttext-v3'); assert.deepEqual(current.units, parsed.units, 'v3 retains the complete v2 class interpretation');
+    assert.equal(current.parserVersion, 'clienttext-v4'); assert.deepEqual(current.units, parsed.units, 'v4 retains the complete v2 class interpretation for unstyled layouts');
     const asset = version => ({ role: 'gender', hash: parsed.artifactHash, parserVersion: version });
     const accepted = await State.buildDescriptors(parsed.units, [asset('clienttext-v2')]), replayed = await State.buildDescriptors(parsed.units, [asset('clienttext-v2')]);
     assert.deepEqual(replayed, accepted, 'Explicit v2 descriptors replay the same accepted baseline identity');
-    const upgraded = await State.buildDescriptors(current.units, [asset('clienttext-v3')]);
+    const upgraded = await State.buildDescriptors(current.units, [asset('clienttext-v4')]);
     assert.notEqual(upgraded.descriptors[0].baselineId, accepted.descriptors[0].baselineId, 'A new parser version establishes a separate baseline identity');
     await assert.rejects(Codec.exportWorkbook(bytes, parsed, {}, { parserVersion: 'clienttext-v3' }), /parser version does not match/);
 });
@@ -157,8 +266,8 @@ test('v1 snapshots replay their metadata authority and cannot silently export as
     assert.deepEqual(await after.file('xl/vbaProject.bin').async('uint8array'), await before.file('xl/vbaProject.bin').async('uint8array'));
     const current = await Codec.parseWorkbook(bytes, { filename: 'German.xlsm', role: 'gender' });
     await assert.rejects(Codec.exportWorkbook(bytes, current, {}, { parserVersion: 'clienttext-v1' }), /parser version does not match/);
-    await assert.rejects(Codec.parseWorkbook(bytes, { ...options, parserVersion: 'clienttext-v4' }), /Unsupported ClientText parser version/);
-    await assert.rejects(Codec.exportWorkbook(bytes, { ...legacy, parserVersion: 'clienttext-v4' }, {}), /Unsupported ClientText parser version/);
+    await assert.rejects(Codec.parseWorkbook(bytes, { ...options, parserVersion: 'clienttext-v5' }), /Unsupported ClientText parser version/);
+    await assert.rejects(Codec.exportWorkbook(bytes, { ...legacy, parserVersion: 'clienttext-v5' }, {}), /Unsupported ClientText parser version/);
 });
 test('v3 accepts absent shared-string value elements without weakening present indexes or formula guards', async () => {
     const normal = sheet([
@@ -167,7 +276,9 @@ test('v3 accepts absent shared-string value elements without weakening present i
         row(3, ['<c r="A3" t="s"/>', '<c r="B3" t="s"/>', '<c r="C3" t="s"/>']),
     ]);
     const bytes = await workbook({ normal }), parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsx' }), unit = get(parsed, 'blank');
-    assert.equal(parsed.parserVersion, 'clienttext-v3'); assert.equal(parsed.units.filter(item => item.sheet === 'Normal').length, 1);
+    assert.equal(parsed.parserVersion, 'clienttext-v4'); assert.equal(parsed.units.filter(item => item.sheet === 'Normal').length, 1);
+    const replay = await Codec.parseWorkbook(bytes, { filename: 'French.xlsx', parserVersion: 'clienttext-v3' });
+    assert.deepEqual(parsed.units, replay.units, 'v4 retains v3 shared-string blank handling and exact field interpretation');
     assert.equal(field(unit, 'Name').target, ''); assert.equal(field(unit, 'Name').originalFill, 'FA8072'); assert.equal(field(unit, 'Name').originalMissing, true);
     assert.equal(field(unit, 'Gender').target, ''); assert.equal(field(unit, 'Gender').outdated, true); assert.deepEqual(unit.metadata, { Context: '' });
     assert.deepEqual(await Codec.exportWorkbook(bytes, parsed, {}), bytes);
@@ -195,6 +306,8 @@ const namedForms = () => sheet([
 const namedWorkbook = normal => workbook({ normal, replace: { 'xl/workbook.xml': `<workbook xmlns="${NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="BaseItemTypes" sheetId="1" r:id="rId1"/><sheet name="Words_Gender" sheetId="2" r:id="rId2"/></sheets></workbook>` } });
 test('v3 BaseItemTypes named forms share exact English but keep identities and requiredness distinct', async () => {
     const bytes = await namedWorkbook(namedForms()), parsed = await Codec.parseWorkbook(bytes, { filename: 'Turkish.xlsx', language: 'Turkish' });
+    const replay = await Codec.parseWorkbook(bytes, { filename: 'Turkish.xlsx', language: 'Turkish', parserVersion: 'clienttext-v3' });
+    assert.deepEqual(parsed.units, replay.units, 'v4 retains all v3 named-form identities for nonitalic layouts');
     const unit = get(parsed, 'optional', 'BaseItemTypes'), normal = field(unit, 'Display Name', 'Normal Translation'), possessive = field(unit, 'Display Name', 'Possessive Translation');
     assert.equal(normal.id, '["Display Name","Normal Translation"]'); assert.equal(possessive.id, '["Display Name","Possessive Translation"]');
     for (const current of [normal, possessive]) {
@@ -214,7 +327,7 @@ test('v3 BaseItemTypes named forms share exact English but keep identities and r
     for (const parserVersion of ['clienttext-v1', 'clienttext-v2'])
         await assert.rejects(Codec.parseWorkbook(bytes, { filename: 'Turkish.xlsx', parserVersion }), /no recognized translation fields/);
     const descriptor = await State.buildDescriptors(parsed.units, [{ role: 'normal', hash: parsed.artifactHash, parserVersion: parsed.parserVersion }]);
-    assert.equal(descriptor.descriptors[0].parserVersion, 'clienttext-v3');
+    assert.equal(descriptor.descriptors[0].parserVersion, 'clienttext-v4');
     await assert.rejects(Codec.exportWorkbook(bytes, parsed, {}, { parserVersion: 'clienttext-v2' }), /parser version does not match/);
 });
 test('named forms require the exact supported source cluster and preserve literal NONEXISTENT without sentinel semantics', async () => {

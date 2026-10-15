@@ -2,6 +2,7 @@
 // Disposable normal-mode check. Fixture identity is injected locally; no API,
 // production account or downloaded browser is needed. --npc-real-workbooks
 // additionally verifies supplied Thai and French/French_Gender files.
+// --hint-real-workbook also checks the supplied Thai localisation-hint export.
 const assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
 const { resolve, join } = require('node:path');
@@ -21,7 +22,9 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
 if (!executablePath) throw new Error('No installed Edge/Chrome found; set FIXTURE_BROWSER_PATH.');
 const realNpcWorkbooks = process.argv.includes('--npc-real-workbooks') || process.argv.includes('--convo-real-workbooks');
 const realHistoryWorkbooks = process.argv.includes('--history-real-workbooks');
+const realHintWorkbook = process.argv.includes('--hint-real-workbook');
 const realWorkbookFolder = process.env.CLIENTTEXT_NPC_WORKBOOK_FOLDER || 'C:/Users/lpeac/Downloads/2026-10-13_POE2';
+const hintWorkbookPath = process.env.CLIENTTEXT_HINT_WORKBOOK || 'C:/Users/lpeac/Downloads/2026-10-15_POE2/Thai_with_hint.xlsx';
 const screenshotFolder = process.env.CLIENTTEXT_NPC_SCREENSHOT_FOLDER || 'C:/Users/lpeac/.codex/visualizations/2026/10/14/01a1388c-f446-7330-ab32-353def01f2d9';
 const disposableFolder = resolve(__dirname, '../temp/clienttext-npc-offline-fixture');
 const vueScriptPath=process.env.FIXTURE_VUE_PATH || resolve(__dirname,'../temp/clienttext-fixture-vue.min.js');
@@ -52,10 +55,10 @@ async function workbook(role = 'normal', sampleVersion = '') {
     zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/></Types>');
     const sheets = [{ name: role === 'normal' ? 'Normal' : 'Words_Gender', rows }];
     if (role === 'normal') sheets.push(
-        { name: 'NPCs', rows: [row(1, ['ID', 'Name', 'Translation', 'Short Name', 'Translation']),
-            row(2, ['Metadata/NPC/Renly', 'Renly', 'Renly traduit', 'Renly', 'Renly court']),
-            row(3, ['Metadata/NPC/Una', 'Una', 'Una traduite', 'Una', 'Una courte']),
-            row(4, ['Metadata/NPC/Doryani', 'Doryani', 'Doryani traduit', 'Doryani', 'Doryani court'])] },
+        { name: 'NPCs', rows: [row(1, ['ID', 'Name', 'Translation', 'Short Name', 'Translation', 'Gender', 'Quest Flags']).replace(/<c r="([FG]1)"/g, '<c s="2" r="$1"'),
+            row(2, ['Metadata/NPC/Renly', 'Renly', 'Renly traduit', 'Renly', 'Renly court', 'M', 'RenlyFirstMet']),
+            row(3, ['Metadata/NPC/Una', 'Una', 'Una traduite', 'Una', 'Una courte', 'F', 'UnaFirstMet']),
+            row(4, ['Metadata/NPC/Doryani', 'Doryani', 'Doryani traduit', 'Doryani', 'Doryani court', 'M', 'DoryaniFirstMet'])] },
         { name: 'NPCTalk', rows: [row(1, ['ID', 'Text', 'Translation']),
             row(2, ['Metadata/NPC/Renly::0', 'A conversation with Renly', 'Conversation avec Renly']),
             row(3, ['Metadata/NPC/Doryani::0', 'Introduction', 'Introduction'])] },
@@ -76,7 +79,7 @@ async function workbook(role = 'normal', sampleVersion = '') {
     zip.file('xl/workbook.xml', `<workbook xmlns="${NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheets.map((sheet, index) => `<sheet name="${sheet.name}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`).join('')}</sheets></workbook>`);
     zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((sheet, index) => `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`).join('')}</Relationships>`);
     for (const [index, sheet] of sheets.entries()) zip.file(`xl/worksheets/sheet${index + 1}.xml`, `<?xml version="1.0"?><worksheet xmlns="${NS}"><sheetData>${sheet.rows.join('')}</sheetData></worksheet>`);
-    zip.file('xl/styles.xml', `<styleSheet xmlns="${NS}"><fonts count="1"><font><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFF9966"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="0" fillId="1" borderId="0" xfId="0"/></cellXfs></styleSheet>`);
+    zip.file('xl/styles.xml', `<styleSheet xmlns="${NS}"><fonts count="2"><font><name val="Calibri"/></font><font><name val="Calibri"/><i/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFF9966"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="0" fillId="1" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs></styleSheet>`);
     zip.file('xl/vbaProject.bin', VBA);
     zip.file('xl/metadata', Buffer.from([0, 77, 255, 16]));
     return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
@@ -332,7 +335,7 @@ async function run() {
             await page.waitForFunction(() => {
                 const vm = window.__offlineTestApp;
                 return !vm.ctUploading && !vm.ctBusy && !vm.workspaceInitializationActive && (vm.ctActive || vm.ctUploadError);
-            }, null, { timeout: realNpcWorkbooks || realHistoryWorkbooks ? 180000 : 30000 });
+            }, null, { timeout: realNpcWorkbooks || realHistoryWorkbooks || realHintWorkbook ? 180000 : 30000 });
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctUploadError), '', 'One Open click prepares and validates the workbooks');
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctActive), true, 'Prepared test sheet opens successfully');
             await workspace.waitFor();
@@ -356,6 +359,8 @@ async function run() {
         });
         await workspace.getByRole('button', { name: 'offline-test-record', exact: true }).click();
         const translation = workspace.locator('.ctFullEditor textarea[data-ct-target]').first();
+        await translation.waitFor();
+        assert.equal(await workspace.locator('.ctFullEditor [data-ct-target][aria-label="Gender"]').count(), 1, 'Legacy non-italic Gender remains editable');
         await layout(page, workspace.locator('.ctFullEditor'), 'Offline ClientText full editor', true);
         layoutChecked = true;
         await translation.fill('Épée offline');
@@ -391,6 +396,11 @@ async function run() {
         const exported = await Codec.parseWorkbook(output, { filename: 'French.xlsm', role: 'normal' });
         assert.equal(exported.units.find(unit => unit.recordId === 'offline-test-record').fields.find(field => field.name === 'Name').target, 'Épée offline final');
         assert.equal(exported.units.find(unit => unit.recordId === 'offline-test-blank').fields.find(field => field.name === 'Name').target, '');
+        const exportedNpc = exported.units.find(unit => unit.recordId === 'Metadata/NPC/Renly');
+        assert.deepEqual(exportedNpc.metadata, { Gender: 'M', 'Quest Flags': 'RenlyFirstMet' }, 'Italic metadata survives the native workbook export');
+        assert.equal(exportedNpc.fields.some(field => field.kind === 'gender'), false, 'Italic Gender never becomes an editable export target');
+        const originalZip = await JSZip.loadAsync(normal);
+        assert.deepEqual(await exportedZip.file('xl/worksheets/sheet2.xml').async('nodebuffer'), await originalZip.file('xl/worksheets/sheet2.xml').async('nodebuffer'), 'Unedited NPC hint cells and their italic styles preserve exact worksheet bytes');
         await assertLocal(page, 'Prepare/open/edit/history/save/export');
         results.push('Manager Normal-only XLSM: in-memory edit, Save, Save & close, history, blank save and byte-preserving export');
         async function browseRenly(label) {
@@ -483,6 +493,18 @@ async function run() {
         }
         const syntheticRelated = await browseRenly('Synthetic offline NPCs');
         assert.equal(syntheticRelated.filter(unit => unit.recordId === 'RenlyIntro').length, 2, 'Identical audio IDs retain their two distinct sheets');
+        const hintedRow = workspace.locator('.ctTable tbody tr').filter({ has: page.getByRole('button', { name: 'Metadata/NPC/Renly', exact: true }) });
+        assert.match(await hintedRow.locator('.ctReferenceContext').textContent(), /GenderM/);
+        assert.match(await hintedRow.locator('.ctReferenceContext').textContent(), /Quest FlagsRenlyFirstMet/);
+        await hintedRow.getByRole('button', { name: 'Metadata/NPC/Renly', exact: true }).click();
+        const hintedEditor = workspace.locator('.ctFullEditor');
+        assert.match(await hintedEditor.locator('.ctReferenceContext').textContent(), /GenderM/);
+        assert.match(await hintedEditor.locator('.ctReferenceContext').textContent(), /Quest FlagsRenlyFirstMet/);
+        assert.equal(await hintedEditor.locator('[data-ct-target]').count(), 2, 'Only the two translation fields are editable beside the italic hints');
+        assert.equal(await hintedEditor.locator('[data-ct-target][aria-label="Gender"]').count(), 0, 'Italic Gender appears only as read-only context');
+        await workspace.getByRole('button', { name: 'Close', exact: true }).click();
+        await page.waitForFunction(() => !window.__offlineTestApp.ctEditor);
+        results.push('Italic Gender and arbitrary hints remain read-only context in list/full editor and native export; legacy non-italic Gender remains editable');
         const orderedNpcIds = await page.evaluate(() => window.__offlineTestApp.ctRows.map(unit => unit.id));
         await workspace.locator('.ctTable tbody tr').first().locator('.ctID').click();
         await workspace.locator('.ctFullEditor').waitFor();
@@ -711,6 +733,104 @@ async function run() {
         await monitor(page, false);
         results.push('Manager, Admin, Translator, and Guest access is local-only; Gender-only tests remain local');
         results.push('Different test language preserves account language; importer, list and full editor fit all four themes at 1440px and 1100px');
+        if (realHintWorkbook) {
+            console.log('Validating supplied Thai localisation hints through Test Sheet Offline…');
+            mkdirSync(disposableFolder, { recursive: true });
+            const originalHash = checksum(hintWorkbookPath), originalBytes = readFileSync(hintWorkbookPath),
+                originalParsed = await Codec.parseWorkbook(originalBytes, { filename: 'Thai_with_hint.xlsx', role: 'normal' });
+            await bootstrap('admin', 'Thai');
+            await page.evaluate(async () => { const vm = window.__offlineTestApp; vm.inlineEditor = true; await vm.saveSettings(); await vm.$nextTick(); });
+            await monitor(page, true);
+            const preparationStarted = Date.now();
+            await openTest([hintWorkbookPath]);
+            assert.equal(await page.evaluate(() => window.__offlineTestApp.ctUnits.length), 43777, 'Hint export imports every original record across all four worksheets');
+            assert.equal(await page.evaluate(() => window.__offlineTestApp.ctUnits.filter(unit => unit.sheet === 'NPCs').some(unit => unit.fields.some(field => field.kind === 'gender'))), false,
+                'Italic NPCs Gender is never an editable target in the real hint workbook');
+            await page.evaluate(() => window.__offlineTestApp.ctShowAllLoaded());
+            await workspace.locator('.ctSheetList').getByRole('button', { name: 'NPCs', exact: true }).click();
+            await page.waitForFunction(() => !window.__offlineTestApp.ctBrowseBusy && window.__offlineTestApp.ctRows.every(unit => unit.sheet === 'NPCs'));
+            const npc = await page.evaluate(async () => {
+                const vm = window.__offlineTestApp, unit = vm.ctRows.find(unit => unit.metadata.Gender?.trim());
+                vm.ctSetPage(Math.floor(vm.ctRows.indexOf(unit) / vm.ctEffectivePageSize) + 1); await vm.$nextTick();
+                return { id: unit.id, recordId: unit.recordId, gender: unit.metadata.Gender, row: vm.ctPageRows.indexOf(unit) };
+            });
+            const npcRow = workspace.locator('.ctTable tbody tr').nth(npc.row);
+            assert.ok((await npcRow.locator('.ctReferenceContext').textContent()).includes('Gender' + npc.gender), 'Real italic Gender appears in row context');
+            await npcRow.getByRole('button', { name: npc.recordId, exact: true }).click();
+            const full = workspace.locator('.ctFullEditor');
+            assert.ok((await full.locator('.ctReferenceContext').textContent()).includes('Gender' + npc.gender), 'Real italic Gender appears in full-editor context');
+            assert.equal(await full.locator('[data-ct-target][aria-label="Gender"]').count(), 0, 'Real italic Gender has no full-editor input');
+            await layout(page, full, 'Thai hint NPC editor');
+            await workspace.getByRole('button', { name: 'Close', exact: true }).click();
+            await page.waitForFunction(() => !window.__offlineTestApp.ctEditor);
+            assert.equal(await npcRow.locator('[data-ct-target][aria-label="Gender"]').count(), 0, 'Real italic Gender has no inline-editor input');
+            await workspace.locator('.ctSheetList').getByRole('button', { name: 'NPCTalkDialogueTextAudio', exact: true }).click();
+            const hintSearch = workspace.getByRole('searchbox', { name: 'Search ClientText', exact: true });
+            await hintSearch.fill('DoryaniA4_Intro_A_Sin'); await hintSearch.press('Enter');
+            await page.waitForFunction(() => !window.__offlineTestApp.ctBrowseBusy && window.__offlineTestApp.ctRows.length > 0 && window.__offlineTestApp.ctRows.every(unit => unit.recordId.includes('DoryaniA4_Intro_A_Sin')));
+            const turnRow = workspace.locator('.ctTable tbody tr').filter({ has: page.getByRole('button', { name: 'DoryaniA4_Intro_A_Sin', exact: true }) });
+            assert.match(await turnRow.locator('.ctReferenceContext').textContent(), /NPC/);
+            assert.match(await turnRow.locator('.ctReferenceContext').textContent(), /Audio File/);
+            await turnRow.locator('td').last().click();
+            const turnInput = turnRow.locator('textarea[data-ct-target]').first();
+            await turnInput.waitFor();
+            const fieldId = await turnInput.getAttribute('data-ct-target');
+            const entry = await page.evaluate(fieldId => {
+                const vm = window.__offlineTestApp, unit = vm.ctCurrentUnit, field = unit.fields.find(field => field.id === fieldId);
+                return { id: unit.id, field: field.id, source: field.source, target: field.target, sheet: unit.sheet, metadata: unit.metadata };
+            }, fieldId);
+            assert.equal(entry.metadata.NPC, 'Metadata/NPC/Four_Act4/HoodedMentorKingsmarchIntro', 'The original explicit NPC reference remains intact');
+            assert.equal(await page.evaluate(() => window.__offlineTestApp.ctCurrentUnit.fields.some(field => ['NPC', 'Character', 'Audio File'].includes(field.name))), false,
+                'NPC, Character and Audio File hints never become translation fields');
+            await layout(page, workspace, 'Thai hint inline conversation');
+            const target = entry.target + ' [offline hint fixture edit]';
+            await turnInput.fill(target); await turnInput.press('Control+s');
+            await saved(page, entry.id, entry.field, target);
+            await turnRow.getByRole('button', { name: 'DoryaniA4_Intro_A_Sin', exact: true }).click();
+            await full.locator('.ctTarget').first().getByRole('button', { name: 'Comparison options and revision history' }).click();
+            await page.waitForFunction(({ id, field, target }) => {
+                const vm = window.__offlineTestApp;
+                return !vm.ctHistoryLoading && vm.ctHistory.some(entry => entry.unitId === id && entry.after.values[field] === target);
+            }, { id: entry.id, field: entry.field, target });
+            await workspace.getByRole('button', { name: 'Close', exact: true }).click();
+            const downloading = page.waitForEvent('download', { timeout: 180000 });
+            await workspace.getByRole('button', { name: 'Download workbooks', exact: true }).click();
+            const download = await downloading, outputPath = join(disposableFolder, 'hint-' + download.suggestedFilename());
+            await download.saveAs(outputPath);
+            await page.waitForFunction(() => !window.__offlineTestApp.ctBusy, null, { timeout: 180000 });
+            assert.equal(await page.evaluate(() => window.__offlineTestApp.ctError), '');
+            const output = readFileSync(outputPath), parsed = await Codec.parseWorkbook(output, { filename: 'Thai_with_hint.xlsx', role: 'normal' }),
+                originalById = new Map(originalParsed.units.map(unit => [unit.id, unit]));
+            assert.equal(parsed.units.length, originalParsed.units.length, 'Export keeps all original record identities');
+            for (const unit of parsed.units) {
+                const originalUnit = originalById.get(unit.id); assert.ok(originalUnit, 'Export preserves original identity ' + unit.id);
+                assert.deepEqual(unit.metadata, originalUnit.metadata, 'Export preserves every hint for ' + unit.id);
+                for (const field of unit.fields) {
+                    const originalField = originalUnit.fields.find(original => original.id === field.id);
+                    assert.ok(originalField, 'Export preserves original field identity');
+                    assert.equal(field.source, originalField.source, 'Export preserves immutable English');
+                    assert.equal(field.target, unit.id === entry.id && field.id === entry.field ? target : originalField.target, 'Only the saved translation changes');
+                }
+            }
+            const originalZip = await JSZip.loadAsync(originalBytes), exportedZip = await JSZip.loadAsync(output), changedSheet = parsed.sheets.find(sheet => sheet.name === entry.sheet).path;
+            assert.deepEqual(Object.keys(exportedZip.files).sort(), Object.keys(originalZip.files).sort(), 'Hint workbook export preserves all native parts');
+            for (const [path, part] of Object.entries(originalZip.files)) if (!part.dir && path !== changedSheet && path !== 'xl/styles.xml')
+                assert.deepEqual(await exportedZip.file(path).async('nodebuffer'), await part.async('nodebuffer'), 'Hint export preserves native part ' + path);
+            await page.waitForTimeout(Math.max(0, 21000 - (Date.now() - preparationStarted)));
+            await assertLocal(page, 'Real Thai hint import/context/inline edit/save/history/export');
+            await workspace.getByRole('button', { name: 'Versions', exact: true }).click(); await offline.waitFor();
+            assert.deepEqual(await page.evaluate(() => ({ active: window.__offlineTestApp.ctActive, units: window.__offlineTestApp.ctUnits.length,
+                stores: window.__offlineTestApp._ctTestStores?.size || 0 })), { active: false, units: 0, stores: 0 }, 'Leaving the hint workbook clears all in-memory data');
+            await assertLocal(page, 'Real Thai hint session exit', true); await monitor(page, false);
+            await page.evaluate(() => OfflineStore.updateHybridState(state => { state.auth = null; state.activeProfile = 'guest'; return state; }));
+            await page.reload();
+            await page.waitForFunction(() => window.__offlineTestApp?.offlineStoreReady && !window.__offlineTestApp.workspaceInitializationActive);
+            assert.equal(await page.evaluate(() => window.__offlineTestApp.ctActive), false, 'Reload cannot restore the in-memory hint workbook');
+            assert.equal(checksum(hintWorkbookPath), originalHash, 'Supplied hint workbook checksum remains unchanged');
+            await bootstrap('admin');
+            results.push({ name: 'Real Thai localisation hints: read-only list/full/inline context, temporary save/history, exact metadata/native export, no durable/cloud activity and exit/reload cleanup',
+                originalWorkbookSha256: originalHash, preparationAndValidationMs: Date.now() - preparationStarted });
+        }
         if (realNpcWorkbooks) {
             mkdirSync(disposableFolder, { recursive: true });
             mkdirSync(screenshotFolder, { recursive: true });
@@ -909,6 +1029,8 @@ async function run() {
             return { active: vm?.ctActive, test: vm?.ctOfflineTest, workspace: vm?.ctWorkspace?.scope,
                 uploadVisible: vm?.ctUploadVisible, uploadError: vm?.ctUploadError, error: vm?.ctError,
                 busy: vm?.ctBusy, uploading: vm?.ctUploading, units: vm?.ctUnits?.length,
+                current: vm?.ctCurrentUnit && { recordId: vm.ctCurrentUnit.recordId, fields: vm.ctCurrentUnit.fields.map(field => ({ name: field.name, kind: field.kind })), metadata: vm.ctCurrentUnit.metadata },
+                editorInputs: [...document.querySelectorAll('.ctFullEditor [data-ct-target]')].map(input => ({ tag: input.tagName, role: input.getAttribute('role'), aria: input.getAttribute('aria-label'), id: input.getAttribute('data-ct-target') })),
                 comparisonBusy:vm?.ctComparisonBusy,comparisonError:vm?.ctComparisonError,historyError:vm?.ctHistoryError,comparisons:vm?.ctComparisonVersions?.length,
                 chooser: vm?.versionChooserVisible, stores: vm?._ctTestStores?.size,
                 writes: window.__offlineTestWrites, storageWrites: window.__offlineTestStorageWrites,

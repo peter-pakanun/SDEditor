@@ -338,10 +338,10 @@ async function run() {
             await page.evaluate(async()=>{const vm=window.__clientFixtureApp;vm.lang='Turkish';vm.autoOpenNextFile=false;await vm.saveSettings();});
             await page.getByRole('button',{name:'Upload next version',exact:true}).click();
             const upload=page.getByRole('region',{name:'Content upload'}),workspace=page.getByRole('region',{name:'ClientText workspace'});
-            await upload.locator('input[type=text]').fill('Turkish v3 browser fixture');await upload.locator('input[type=file]').first().setInputFiles(files);
+            await upload.getByRole('textbox',{name:'Version name',exact:true}).fill('Turkish v4 browser fixture');await upload.locator('input[type=file]').first().setInputFiles(files);
             await upload.getByRole('button',{name:'Prepare and validate',exact:true}).click();await page.waitForFunction(()=>!window.__clientFixtureApp.ctUploading);
             assert.equal(await page.evaluate(()=>window.__clientFixtureApp.ctUploadError),'');
-            assert.deepEqual(await page.evaluate(()=>window.__clientFixtureApp.ctPrepared[0].originals.descriptors.map(d=>d.parserVersion)),['clienttext-v3']);
+            assert.deepEqual(await page.evaluate(()=>window.__clientFixtureApp.ctPrepared[0].originals.descriptors.map(d=>d.parserVersion)),[Codec.PARSER_VERSION]);
             await upload.getByRole('button',{name:'Publish complete groups',exact:true}).click();await page.waitForFunction(()=>!window.__clientFixtureApp.ctUploading);
             assert.equal(await page.evaluate(()=>window.__clientFixtureApp.ctUploadError),'');
             const accepted=await page.evaluate(()=>({version:window.__clientFixtureApp.managedSelectedVersion,group:window.__clientFixtureApp.ctGroups.find(group=>group.language==='Turkish')}));
@@ -448,7 +448,7 @@ async function run() {
             await workspace.getByRole('button',{name:'Close',exact:true}).click();const downloaded=page.waitForEvent('download');await workspace.getByRole('button',{name:'Download workbooks',exact:true}).click();const download=await downloaded,output=readFileSync(await download.path());
             const parsed=await Codec.parseWorkbook(output,{filename:'Turkish.xlsx',role:'normal',language:'Turkish'}),edited=parsed.units.find(unit=>unit.recordId==='named');assert.deepEqual(Object.fromEntries(edited.fields.map(field=>[field.id,field.target])),values);
             const before=await JSZip.loadAsync(normal),after=await JSZip.loadAsync(output);for(const part of ['[Content_Types].xml','xl/workbook.xml','xl/_rels/workbook.xml.rels','xl/worksheets/sheet2.xml','xl/metadata'])assert.deepEqual(await after.file(part).async('uint8array'),await before.file(part).async('uint8array'));
-            assert.deepEqual(failures,[]);console.log(JSON.stringify({status:'PASS',turkishFormsOnly:true,normalMode:true,themeChecks,screenshots:['turkish-preview-full.png','turkish-preview-inline.png'].map(name=>join(directory,name)),results:['Three previews with editable defaults, number variables, both team examples, conditional and blank-possessive fallback','Preview parameters retain full/inline handoff and leave real drafts unchanged','v3 preparation/publication/API saves; real native IndexedDB reload and independent history comparison','Normal/Possessive grids, C/D traversal and focus handoff in both editors across all four themes and two desktop widths','No sentinel expansion; blank-save and orange optional form behavior; targeted native workbook export']},null,2));return;
+            assert.deepEqual(failures,[]);console.log(JSON.stringify({status:'PASS',turkishFormsOnly:true,normalMode:true,themeChecks,screenshots:['turkish-preview-full.png','turkish-preview-inline.png'].map(name=>join(directory,name)),results:['Three previews with editable defaults, number variables, both team examples, conditional and blank-possessive fallback','Preview parameters retain full/inline handoff and leave real drafts unchanged','v4 preparation/publication/API saves; real native IndexedDB reload and independent history comparison','Normal/Possessive grids, C/D traversal and focus handoff in both editors across all four themes and two desktop widths','No sentinel expansion; blank-save and orange optional form behavior; targeted native workbook export']},null,2));return;
         }
         const captureTrustedCache = async () => {
             const preparedUnits=[],preparedAssets=[],legacyAssets=[];
@@ -538,7 +538,7 @@ async function run() {
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctUploadError), '');
             const prepared = await page.evaluate(() => ({ warnings: window.__clientFixtureApp.ctPrepared[0].assets.flatMap(asset => asset.parsed.warnings),
                 versions: window.__clientFixtureApp.ctPrepared[0].originals.descriptors.map(descriptor => descriptor.parserVersion) }));
-            assert.deepEqual(prepared, { warnings: [], versions: ['clienttext-v3','clienttext-v3'] });
+            assert.deepEqual(prepared, { warnings: [], versions: [Codec.PARSER_VERSION,Codec.PARSER_VERSION] });
             await upload.getByRole('button', { name: 'Store local workspaces', exact: true }).click();
             await page.waitForFunction(() => !window.__clientFixtureApp.ctUploadVisible && window.__clientFixtureApp.ctLocalWorkspaces.length === 1);
             await page.evaluate(() => window.__clientFixtureApp.ctOpenCached(window.__clientFixtureApp.ctLocalWorkspaces.find(row => row.language === 'German')));

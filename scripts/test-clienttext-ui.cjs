@@ -3317,11 +3317,11 @@ function uploadPreparationHarness(names,game='poe2'){
     h.app.ctChooseFiles({target:{files}});return{...h,files,parseCalls,manifestCalls,requests,storeCalls};
 }
 
-test('new ClientText v3 preparation stops before parsing on an older trusted API with an actionable error',async()=>{
+test('new ClientText v4 preparation stops before parsing on an older trusted API with an actionable error',async()=>{
     for(const names of [['Thai.xlsx'],['Polish.xlsx','Polish_Gender.xlsx']]){
         const {app,parseCalls,manifestCalls,requests,storeCalls}=uploadPreparationHarness(names);
         app._cloud={async request(route){assert.equal(route,'/v1/content-policy');return{clientTextStorageProtocols:[S.STORAGE_PROTOCOL]};}};
-        await app.ctPrepareUpload();assert.match(app.ctUploadError,/ClientText v3 API update/);assert.match(app.ctUploadError,/Update the API first, then retry/);
+        await app.ctPrepareUpload();assert.match(app.ctUploadError,/ClientText v4 API update/);assert.match(app.ctUploadError,/Update the API first, then retry/);
         assert.equal(app.ctPrepared.length,0);assert.equal(app.ctUploading,false);assert.equal(parseCalls.length,0);assert.equal(manifestCalls.length,0);assert.equal(requests.length,0);assert.equal(storeCalls.length,0);
     }
 });
@@ -3333,12 +3333,22 @@ test('new ClientText v3 publication stops before journaling or requests on an ol
     await app.ctPublishPrepared();assert.match(app.ctUploadError,/ClientText v3 API update/);assert.deepEqual(calls,['/v1/content-policy']);assert.equal(app.ctUploading,false);
 });
 
-test('parser capability checks retain v1/v2 replay and only require the new contract for v3',async()=>{
+test('parser capability checks retain v1/v2 replay and require advertised v3/v4 support independently',async()=>{
     const {app}=harness();app._cloud={async request(){return{clientTextStorageProtocols:[S.STORAGE_PROTOCOL]};}};
     assert.ok(await app.ctRequireTrustedProtocol(undefined,['clienttext-v1','clienttext-v2']));
     await assert.rejects(app.ctRequireTrustedProtocol(undefined,['clienttext-v2','clienttext-v3']),/ClientText v3 API update/);
     app._cloud={async request(){return{clientTextStorageProtocols:[S.STORAGE_PROTOCOL],clientTextParserVersions:['clienttext-v1','clienttext-v2','clienttext-v3']};}};
     assert.ok(await app.ctRequireTrustedProtocol(undefined,['clienttext-v3']));
+    await assert.rejects(app.ctRequireTrustedProtocol(undefined,['clienttext-v3','clienttext-v4']),/ClientText v4 API update/);
+    app._cloud={async request(){return{clientTextStorageProtocols:[S.STORAGE_PROTOCOL],clientTextParserVersions:S.PARSER_VERSIONS};}};
+    assert.ok(await app.ctRequireTrustedProtocol(undefined,['clienttext-v1','clienttext-v2','clienttext-v3','clienttext-v4']));
+});
+
+test('new ClientText v4 publication does not journal or upload to a v3-only API',async()=>{
+    const {app}=harness(),calls=[];app.ctPrepared=[{contentMode:'clienttext',originals:{descriptors:[{parserVersion:'clienttext-v4'}]}}];
+    app._cloud={async request(route){calls.push(route);return{clientTextStorageProtocols:[S.STORAGE_PROTOCOL],clientTextParserVersions:['clienttext-v1','clienttext-v2','clienttext-v3']};}};
+    app.ctRememberPublication=()=>assert.fail('Unsupported v4 must not write a publication request');
+    await app.ctPublishPrepared();assert.match(app.ctUploadError,/ClientText v4 API update/);assert.deepEqual(calls,['/v1/content-policy']);assert.equal(app.ctUploading,false);
 });
 
 test('local ClientText defaults require normal and Gender roles for all six observed paired languages',async()=>{
