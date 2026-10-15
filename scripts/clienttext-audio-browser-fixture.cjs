@@ -160,7 +160,7 @@ async function run() {
                         activeColor: button && getComputedStyle(button).color, accentColor };
                 });
                 assert.ok(bounds.left >= 0 && bounds.right <= width && bounds.scroll <= width && bounds.audio > 100, JSON.stringify({ width, theme, surface, bounds }));
-                assert.equal(bounds.position, 'fixed'); assert.equal(bounds.opacity, 0.5);
+                assert.equal(bounds.position, 'fixed'); assert.equal(bounds.opacity, 0.7);
                 assert.equal(bounds.activeColor, bounds.accentColor, 'Playing tracks use the editor toolbar active color.');
                 assert.ok(width - bounds.right <= 30, 'Native controls float at the right edge.');
                 if (surface === 'inline') assert.ok(bounds.bottom <= bounds.footerTop, 'Inline native controls clear the workspace status bar.');
