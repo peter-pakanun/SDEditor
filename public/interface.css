@@ -351,6 +351,27 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .attentionNavigation .attentionArrow { color: var(--ui-warning); }
 .attentionNavigationTarget:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 2px; }
 .sideHeader { flex-wrap: wrap; }
+.editor {
+  --editor-preview-height: clamp(min(calc(160px * var(--density)), 50dvh), var(--editor-preview-requested-height, var(--editor-preview-default-height)), 50dvh);
+}
+.editorPreviewPane { position: sticky; top: var(--editor-notice-height, 0px); z-index: 40; display: flex; flex-direction: column; height: var(--editor-preview-height); margin: 0 calc(-0.35em * var(--density)) calc(0.75em * var(--density)); background: var(--color-bg2); border-bottom: 1px solid var(--ui-border); box-sizing: border-box; }
+.editorPreviewPane .gamePreviewStrip { position: static; flex: 1; min-height: 0; height: auto; margin: 0; border-bottom: 0; }
+.editorPreviewResizeHandle { display: flex; align-items: center; justify-content: center; flex: 0 0 14px; cursor: row-resize; touch-action: none; user-select: none; }
+.editorPreviewResizeThumb { width: 36px; height: 4px; border-radius: 3px; background: var(--ui-muted); opacity: .55; }
+.editorPreviewResizeHandle:hover .editorPreviewResizeThumb, .editorPreviewResizeHandle:focus-visible .editorPreviewResizeThumb, .editorPreviewResizing .editorPreviewResizeThumb { opacity: 1; background: var(--ui-accent); }
+.editorPreviewResizeHandle:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: -2px; }
+.editorPreviewResizing, .editorPreviewResizing * { cursor: row-resize !important; user-select: none !important; }
+.gamePreviewSourcePane, .gamePreviewTargetPane { display: contents; }
+.editor .gamePreviewFramesColumn { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: repeat(2, minmax(0, 1fr)); align-items: stretch; overflow: hidden; }
+.editor .gamePreviewStrip--split .gamePreviewFramesColumn { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); gap: 12px; }
+.editor .gamePreviewStrip--source-hidden .gamePreviewFramesColumn { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+.editor :is(.gamePreviewSourcePane, .gamePreviewTargetPane) { display: flex; flex-direction: column; gap: calc(0.35em * var(--density)); min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.editor :is(.gamePreviewSourcePane, .gamePreviewTargetPane):focus-visible { outline: 2px solid var(--ui-accent); outline-offset: -2px; }
+.editor .gamePreviewLine { flex: none; }
+.editor .gamePreviewStrip:not(.gamePreviewStrip--split) .gamePreviewLineLabel { position: sticky; top: calc(0.6em * var(--density)); align-self: flex-start; margin-top: calc(0.6em * var(--density)); }
+.editor .gamePreviewStrip--split .gamePreviewLine { flex-direction: column; justify-content: flex-start; }
+.editor .gamePreviewStrip--split .gamePreviewLineLabel { flex: none; align-self: flex-start; text-align: left; }
+.editor .gamePreviewStrip--split .gamePreviewWindow { flex: none; min-width: 0; }
 .editor .gamePreviewStrip { display: flex; flex-direction: column; }
 .gamePreviewAudioMarker { display: inline-flex; align-items: center; justify-content: center; width: 1.1em; height: 1.1em; margin-inline: .1em; vertical-align: -.12em; color: #e8bd76; cursor: help; border-radius: 2px; }
 .gamePreviewAudioMarker svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
@@ -368,7 +389,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .editorCopyFilePath.copied svg { animation: editorCopyConfirm .25s ease-out; }
 @keyframes editorCopyConfirm { 0% { transform: scale(.65); } 60% { transform: scale(1.2); } 100% { transform: scale(1); } }
 @media (prefers-reduced-motion: reduce) { .editorCopyFilePath.copied svg { animation: none; } }
-.editor .editorActions { position: sticky; top: calc(200px * var(--density) + var(--editor-notice-height, 0px)); z-index: 41; flex-wrap: wrap; padding: 8px 0; background: var(--color-bg); border-bottom: 1px solid var(--ui-border); }
+.editor .editorActions { position: sticky; top: calc(var(--editor-preview-height) + var(--editor-notice-height, 0px)); z-index: 41; flex-wrap: wrap; padding: 8px 0; background: var(--color-bg); border-bottom: 1px solid var(--ui-border); }
 .editor > .editorNotice { position: sticky; top: 0; z-index: 42; padding: 0; }
 .editor .editorActions button, .editor .applyRegexButton { flex-shrink: 0; white-space: nowrap; }
 @media (max-width: 1200px) {

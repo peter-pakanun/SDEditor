@@ -250,13 +250,73 @@
     name: 'EditorFullShell',
     props: { controller: { type: Object, required: true }, previewHostId: { type: String, required: true },
       sidebarHostId: { type: String, required: true } },
+    data() { return { previewDragHeight: null, previewMeasuredHeight: 0, previewMinHeight: 160, previewMaxHeight: 450 }; },
+    computed: {
+      previewStyle() {
+        const height = this.previewDragHeight ?? this.controller.fullEditorPreviewHeight;
+        return {
+          '--editor-preview-requested-height': Number.isFinite(height) ? height + 'px' : undefined,
+          '--editor-preview-default-height': this.controller.gamePreviewTargetRows?.length > 1
+            ? 'calc(340px * var(--density))' : 'calc(200px * var(--density))',
+        };
+      },
+    },
     mounted() {
       this._noticeObserver = new ResizeObserver(() => this.measureNotice());
+      this._previewObserver = new ResizeObserver(() => this.measurePreview());
+      this._previewObserver.observe(this.$refs.previewPane);
+      this._previewWindowResize = () => this.measurePreview();
+      window.addEventListener('resize', this._previewWindowResize);
       this.syncNotice();
+      this.measurePreview();
     },
     updated() { this.syncNotice(); },
-    beforeUnmount() { this._noticeObserver?.disconnect(); },
+    beforeUnmount() {
+      this._noticeObserver?.disconnect(); this._previewObserver?.disconnect();
+      window.removeEventListener('resize', this._previewWindowResize);
+      this.finishPreviewResize();
+    },
     methods: {
+      measurePreview() {
+        const pane = this.$refs.previewPane;
+        if (!pane) return;
+        const density = parseFloat(getComputedStyle(this.$el).getPropertyValue('--density')) || 1;
+        this.previewMaxHeight = window.innerHeight / 2;
+        this.previewMinHeight = Math.min(160 * density, this.previewMaxHeight);
+        this.previewMeasuredHeight = Math.round(pane.getBoundingClientRect().height);
+      },
+      clampPreviewHeight(height) { return Math.max(this.previewMinHeight, Math.min(this.previewMaxHeight, height)); },
+      rememberPreviewHeight(height) { this.controller.fullEditorPreviewHeight = Math.max(100, Math.min(2000, Math.round(height))); },
+      startPreviewResize(event) {
+        if (event.button !== 0 || this._previewDrag) return;
+        this.measurePreview();
+        this._previewDrag = { pointerId: event.pointerId, startY: event.clientY,
+          startHeight: this.$refs.previewPane.getBoundingClientRect().height, handle: event.currentTarget };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        event.currentTarget.focus({ preventScroll: true });
+      },
+      movePreviewResize(event) {
+        const drag = this._previewDrag;
+        if (!drag || event.pointerId !== drag.pointerId) return;
+        this.previewDragHeight = this.clampPreviewHeight(drag.startHeight + event.clientY - drag.startY);
+      },
+      finishPreviewResize(event) {
+        const drag = this._previewDrag;
+        if (!drag || event && event.pointerId !== drag.pointerId) return;
+        this._previewDrag = null;
+        if (this.previewDragHeight != null) this.rememberPreviewHeight(this.previewDragHeight);
+        this.previewDragHeight = null;
+        if (drag.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId);
+      },
+      previewResizeKeydown(event) {
+        const steps = { ArrowUp: -10, ArrowDown: 10, PageUp: -50, PageDown: 50 };
+        if (!(event.key in steps) && event.key !== 'Home' && event.key !== 'End') return;
+        event.preventDefault(); event.stopPropagation();
+        this.measurePreview();
+        const height = event.key === 'Home' ? this.previewMinHeight : event.key === 'End' ? this.previewMaxHeight
+          : this.$refs.previewPane.getBoundingClientRect().height + steps[event.key];
+        this.rememberPreviewHeight(this.clampPreviewHeight(height));
+      },
       syncNotice() {
         const notice = this.$refs.notice;
         if (notice !== this._observedNotice) {
@@ -272,9 +332,17 @@
           this.$el.style.setProperty('--editor-notice-height', height);
       },
     },
-    template: `<div class="editor" :class="{ clipboardHidden: controller.hideEditorClipboard }" aria-label="Translation editor">
+    template: `<div class="editor" :class="{ clipboardHidden: controller.hideEditorClipboard, editorPreviewResizing: previewDragHeight != null }" :style="previewStyle" aria-label="Translation editor">
       <div v-if="$slots.notice" ref="notice" class="editorNotice"><slot name="notice"></slot></div>
-      <div class="edit"><div :id="previewHostId"></div><slot></slot></div>
+      <div class="edit"><div ref="previewPane" class="editorPreviewPane">
+        <div :id="previewHostId"></div>
+        <div class="editorPreviewResizeHandle" role="separator" aria-orientation="horizontal" aria-label="Preview height" tabindex="0"
+          :aria-controls="previewHostId" :aria-valuemin="Math.round(previewMinHeight)" :aria-valuemax="Math.round(previewMaxHeight)" :aria-valuenow="previewMeasuredHeight"
+          :aria-valuetext="previewMeasuredHeight + ' pixels'" title="Drag to resize preview · Up/Down to adjust · Home/End for minimum/maximum"
+          @pointerdown.prevent="startPreviewResize" @pointermove="movePreviewResize" @pointerup="finishPreviewResize" @pointercancel="finishPreviewResize" @lostpointercapture="finishPreviewResize" @keydown="previewResizeKeydown">
+          <span class="editorPreviewResizeThumb" aria-hidden="true"></span>
+        </div>
+      </div><slot></slot></div>
       <div :id="sidebarHostId" class="side fixed editorSidebarHost"></div>
       <div class="fixed clipboard" v-show="!controller.hideEditorClipboard">
         <textarea placeholder="📋 Clipboard" aria-label="Editor clipboard" :value="controller.editorClipboard" @change="controller.editorClipboard = $event.target.value" :lang="controller.translationEditorBcp47"></textarea>
@@ -478,7 +546,7 @@
     },
     template: String.raw`<span class="gamePreviewAudioMarker" :data-audio-marker="segment.full" tabindex="0" role="img" :aria-label="segment.tooltip" v-tooltip="segment.tooltip"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 9h4l5-4v14l-5-4H3z"></path><path d="M19 6v7"></path><circle class="gamePreviewAudioDot" cx="19" cy="17" r="1"></circle></svg></span>`,
   };
-  const SharedPreview = sharedSurface('EditorPreview', String.raw`<div class="gamePreviewStrip" :class="{ 'gamePreviewStrip--variants': gamePreviewTargetRows.length > 1 }">
+  const SharedPreview = sharedSurface('EditorPreview', String.raw`<div class="gamePreviewStrip" :class="{ 'gamePreviewStrip--variants': gamePreviewTargetRows.length > 1, 'gamePreviewStrip--split': gamePreviewFullEditor && ctActive, 'gamePreviewStrip--source-hidden': hideSourceInPreviewPanel }">
           <div v-if="gamePreviewFullEditor" class="gamePreviewToolbar twoSided">
             <span class="gamePreviewLabel">Preview size</span>
             <div class="gamePreviewFrameBtns">
@@ -490,7 +558,8 @@
           <div class="gamePreviewMainRow">
             <div class="gamePreviewFrameWrap">
               <div class="gamePreviewFramesColumn">
-                <div v-if="!hideSourceInPreviewPanel" class="gamePreviewLine">
+                <div v-if="!hideSourceInPreviewPanel" class="gamePreviewSourcePane" :tabindex="gamePreviewFullEditor ? 0 : undefined" :role="gamePreviewFullEditor ? 'region' : undefined" :aria-label="gamePreviewFullEditor ? 'English preview' : undefined">
+                <div class="gamePreviewLine">
                   <div class="gamePreviewLineLabel">EN</div>
                   <div class="gamePreviewWindow" :class="'gamePreviewWindow--' + gamePreviewFrame" :style="{ fontFamily: gamePreviewSourceFontFamily }">
                     <template v-for="(seg, si) in gamePreviewDisplaySource" :key="'gps-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
@@ -508,7 +577,7 @@
                         <span class="gamePreviewVarValue" v-tooltip="seg.full">{{ seg.prefix + gamePreviewVarValues[seg.key] }}</span><span v-if="seg.trailingPercent" class="gamePreviewVarPct">%</span>
                       </span>
                       <editor-preview-audio v-else-if="seg.type === 'audio'" :segment="seg" :controller="$props.controller"></editor-preview-audio>
-                      <span v-else-if="seg.type === 'continue'" class="gamePreviewContinue">— Continue —</span>
+                      <span v-else-if="seg.type === 'continue'" class="gamePreviewContinue">Continue</span>
                       <span v-else-if="seg.type === 'rightAlign'" class="gamePreviewRightAlign"></span>
                       <span v-else-if="seg.type === 'break' && gamePreviewSourceIsTable" class="gamePreviewBreak"></span>
                       <br v-else-if="seg.type === 'break'" class="gamePreviewBreak">
@@ -516,6 +585,8 @@
                     <span v-if="gamePreviewDisplaySource.length === 0" class="gamePreviewEmpty">(empty)</span>
                   </div>
                 </div>
+                </div>
+                <div class="gamePreviewTargetPane" :tabindex="gamePreviewFullEditor ? 0 : undefined" :role="gamePreviewFullEditor ? 'region' : undefined" :aria-label="gamePreviewFullEditor ? 'Translation preview' : undefined">
                 <template v-for="row in gamePreviewTargetRows" :key="row.key">
                 <div v-if="row.label" class="gamePreviewVariantLabel">{{ row.label }}</div>
                 <div class="gamePreviewLine" :data-preview-variant="row.key">
@@ -536,7 +607,7 @@
                         <span class="gamePreviewVarValue" v-tooltip="seg.full">{{ seg.prefix + gamePreviewVarValues[seg.key] }}</span><span v-if="seg.trailingPercent" class="gamePreviewVarPct">%</span>
                       </span>
                       <editor-preview-audio v-else-if="seg.type === 'audio'" :segment="seg" :controller="$props.controller"></editor-preview-audio>
-                      <span v-else-if="seg.type === 'continue'" class="gamePreviewContinue">— Continue —</span>
+                      <span v-else-if="seg.type === 'continue'" class="gamePreviewContinue">Continue</span>
                       <span v-else-if="seg.type === 'rightAlign'" class="gamePreviewRightAlign"></span>
                       <span v-else-if="seg.type === 'break' && gamePreviewTargetIsTable" class="gamePreviewBreak"></span>
                       <br v-else-if="seg.type === 'break'" class="gamePreviewBreak">
@@ -545,6 +616,7 @@
                   </div>
                 </div>
                 </template>
+                </div>
               </div>
             </div>
             <div class="gamePreviewVarsColumn" :class="{ isEmpty: gamePreviewVarKeyList.length === 0 && !(ctActive && ctPossessivePreviewForms) }">

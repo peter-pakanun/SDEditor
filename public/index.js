@@ -389,6 +389,7 @@ const config = Vue.defineComponent({
 
       gamePreviewFrame: "m",
       gamePreviewFonts: null,
+      fullEditorPreviewHeight: null,
       previewGggVars: {},
       gamePreviewSourceSegments: [],
       gamePreviewSegments: [],
@@ -645,6 +646,7 @@ const config = Vue.defineComponent({
     uiDensity() { this.saveSettings(); },
     editorRegexes: { deep: true, handler() { this.saveSettings(); } },
     gamePreviewFonts: { deep: true, handler() { this.saveSettings(); } },
+    fullEditorPreviewHeight() { this.saveSettings(); },
   },
   computed: {
     editorSessionActive() { return this.editorVisible || !!this.inlineActive; },
@@ -7611,6 +7613,7 @@ const config = Vue.defineComponent({
         uiDensity: this.uiDensity,
         gamePreviewFrame: this.gamePreviewFrame,
         gamePreviewFonts: this.gamePreviewFonts,
+        fullEditorPreviewHeight: this.fullEditorPreviewHeight,
       };
     },
     scheduleSettingsSave() {
@@ -7707,6 +7710,7 @@ const config = Vue.defineComponent({
         uiDensity: this.uiDensity,
         gamePreviewFrame: this.gamePreviewFrame,
         gamePreviewFonts: this.gamePreviewFonts,
+        fullEditorPreviewHeight: this.fullEditorPreviewHeight,
       }
       let settingsStr = JSON.stringify(settings, null, 2);
       var settingsBlob = new Blob([settingsStr], {});
@@ -7768,6 +7772,9 @@ const config = Vue.defineComponent({
       if (settings.gamePreviewFonts && typeof settings.gamePreviewFonts === 'object' && !Array.isArray(settings.gamePreviewFonts)) {
         this.gamePreviewFonts = settings.gamePreviewFonts;
       } else this.gamePreviewFonts = null;
+      this.fullEditorPreviewHeight = typeof settings.fullEditorPreviewHeight === 'number'
+        && Number.isFinite(settings.fullEditorPreviewHeight) && settings.fullEditorPreviewHeight >= 100 && settings.fullEditorPreviewHeight <= 2000
+        ? settings.fullEditorPreviewHeight : null;
     },
     async saveLocalDescs() {
       if (this.testMode) return;

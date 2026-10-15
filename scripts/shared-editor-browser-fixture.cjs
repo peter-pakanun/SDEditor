@@ -17,6 +17,7 @@ const vueScriptPath = process.env.FIXTURE_VUE_PATH || join(__dirname, '../temp/c
 const { checkHighlightGeometry } = require('./highlight-geometry-browser-check.cjs');
 const { checkInlineDictionaryScroll } = require('./dictionary-scroll-browser-check.cjs');
 const { checkDiagnosticScanner } = require('./diagnostic-scanner-browser-check.cjs');
+const { checkFullPreviewResize, checkStatDescriptionPreviewScroll, checkClientTextPreviewSplit, checkInlinePreviewLayout } = require('./preview-layout-browser-check.cjs');
 const { thaiEnglish, germanEnglish, germanTarget, dictionary: shredDictionary } = require('./clienttext-highlight-fixture.cjs');
 
 async function checkPreviewDecorations(page, contentMode) {
@@ -178,7 +179,7 @@ async function checkAudioPreviewMarkers(page, surface = 'full') {
       surface + ': the highlight overlay retains exact raw tags and dialogue.');
     if (surface === 'full' && process.env.SDEDITOR_AUDIO_PREVIEW_SCREENSHOT) {
       await page.locator('.gamePreviewStrip').evaluate(element => {
-        for (const pane of element.querySelectorAll('.gamePreviewFrameWrap, .gamePreviewFramesColumn, .gamePreviewMainRow')) pane.scrollTop = 0;
+        for (const pane of element.querySelectorAll('.gamePreviewFrameWrap, .gamePreviewFramesColumn, .gamePreviewMainRow, .gamePreviewSourcePane, .gamePreviewTargetPane')) pane.scrollTop = 0;
       });
       const first = frames.first().locator('.gamePreviewAudioMarker').first(), box = await first.boundingBox();
       await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
@@ -330,6 +331,8 @@ async function run() {
     await checkPreviewDecorations(page, 'statdescription');
     await checkPreviewLineBreaks(page, 'statdescription');
     await checkPreviewLineBreaks(page, 'statdescription', 'table', true);
+    await checkFullPreviewResize(page, 'statdescription');
+    await checkStatDescriptionPreviewScroll(page);
     const sd = page.locator('.editor [data-editor-ref="translation_1"]');
     await sd.fill('SD retained draft');
     await page.locator('.sharedEditorSidebar').getByRole('button', { name: 'Lookup', exact: true }).click();
@@ -423,9 +426,27 @@ async function run() {
     });
     await page.waitForSelector('.ctFullEditor [data-ct-target="text-field"]');
     console.log('ClientText full editor and native fields mounted.');
+    await checkFullPreviewResize(page, 'clienttext');
+    await checkClientTextPreviewSplit(page);
     await checkPreviewDecorations(page, 'clienttext');
     await checkPreviewLineBreaks(page, 'clienttext');
     await checkAudioPreviewMarkers(page);
+    if (process.env.SDEDITOR_PREVIEW_LAYOUT_ONLY === '1') {
+      await page.evaluate(async () => {
+        const host = window.__sharedFixtureApp;
+        host.ctSave = async () => true; host.ctInlineFocusOut = () => {};
+        host.inlineEditor = true; host.inlineSidebarVisible = true; host.ctEditor = false; host.ctInlineClosed = false;
+        host.ctSelectedFilters = ['unchanged', 'missing', 'saved', 'outdated']; host.ctTool = 'preview';
+        await host.$nextTick();
+      });
+      await page.waitForSelector('.ctListWorkspace [data-ct-target="text-field"]');
+      await checkInlinePreviewLayout(page);
+      await checkPreviewLineBreaks(page, 'clienttext', 'inline');
+      await checkAudioPreviewMarkers(page, 'inline');
+      assert.deepEqual(failures, []);
+      console.log('PASS full/inline preview layout, scrolling and resize browser checks.');
+      return;
+    }
     const ct = page.locator('.ctFullEditor [data-ct-target="text-field"]');
     assert.equal(await ct.inputValue(), 'raw @ literal\\n\nactual');
     assert.ok(await page.locator('.ctFullEditor .HLter [data-ct-hl]').count() >= 3);
@@ -573,6 +594,7 @@ async function run() {
     assert.equal(await page.evaluate(() => document.querySelector('.gamePreviewStrip') === window.__fixturePreviewNode), true);
     await checkPreviewLineBreaks(page, 'clienttext', 'inline');
     await checkAudioPreviewMarkers(page, 'inline');
+    await checkInlinePreviewLayout(page);
     assert.equal(await page.locator('.ctListWorkspace [data-ct-target="text-field"]').inputValue(), 'kept raw @ literal\\n\ntranslation');
     if (process.env.SDEDITOR_AUDIO_PREVIEW_ONLY === '1') {
       assert.deepEqual(failures, []); return;

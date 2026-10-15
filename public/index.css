@@ -1566,8 +1566,18 @@ button, label, th, td, input[type="checkbox"] {
 .gamePreviewContinue {
   display: block;
   flex-basis: 100%;
-  margin-block: 1lh;
+  box-sizing: border-box;
+  width: 100%;
+  margin-block: 0.5em;
+  padding-block: 0.35em;
+  border-block: 1px solid currentColor;
+  color: #945b35;
   text-align: center;
+}
+
+[data-theme="dark"] .gamePreviewContinue,
+[data-theme="modern-dark"] .gamePreviewContinue {
+  color: #dca16b;
 }
 
 .gamePreviewKw {

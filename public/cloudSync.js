@@ -5,8 +5,8 @@
   else root.CloudSync = api;
 })(typeof window === 'object' ? window : this, function () {
   'use strict';
-  const SETTING_KEYS = ['editorRegexes', 'lang', 'theme', 'hideDNT', 'hideEditorClipboard', 'hideSourceInPreviewPanel', 'mapClientTextClassNames', 'highlightDict', 'shiftEnterSave', 'autoOpenNextFile', 'inlineEditor', 'filterShortcutCtrlD', 'autocompleteShortcut', 'dictionaryDefaultGameScope', 'uiDensity', 'gamePreviewFrame', 'gamePreviewFonts'];
-  const DEFAULT_SETTINGS = { editorRegexes: [], lang: '', theme: 'light', hideDNT: true, hideEditorClipboard: true, hideSourceInPreviewPanel: false, mapClientTextClassNames: true, highlightDict: true, shiftEnterSave: false, autoOpenNextFile: true, inlineEditor: true, filterShortcutCtrlD: false, autocompleteShortcut: 'ctrl-space', dictionaryDefaultGameScope: 'all', uiDensity: 'compact', gamePreviewFrame: 'm', gamePreviewFonts: null };
+  const SETTING_KEYS = ['editorRegexes', 'lang', 'theme', 'hideDNT', 'hideEditorClipboard', 'hideSourceInPreviewPanel', 'mapClientTextClassNames', 'highlightDict', 'shiftEnterSave', 'autoOpenNextFile', 'inlineEditor', 'filterShortcutCtrlD', 'autocompleteShortcut', 'dictionaryDefaultGameScope', 'uiDensity', 'gamePreviewFrame', 'gamePreviewFonts', 'fullEditorPreviewHeight'];
+  const DEFAULT_SETTINGS = { editorRegexes: [], lang: '', theme: 'light', hideDNT: true, hideEditorClipboard: true, hideSourceInPreviewPanel: false, mapClientTextClassNames: true, highlightDict: true, shiftEnterSave: false, autoOpenNextFile: true, inlineEditor: true, filterShortcutCtrlD: false, autocompleteShortcut: 'ctrl-space', dictionaryDefaultGameScope: 'all', uiDensity: 'compact', gamePreviewFrame: 'm', gamePreviewFonts: null, fullEditorPreviewHeight: null };
   const LANGUAGES = ['French', 'German', 'Japanese', 'Korean', 'Polish', 'Portuguese', 'Russian', 'Simplified Chinese', 'Spanish', 'Thai', 'Traditional Chinese', 'Turkish'];
   const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
   const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
@@ -28,6 +28,10 @@
     const enums = { theme: ['light', 'grey', 'dark', 'modern-dark'], autocompleteShortcut: ['ctrl-space', 'ctrl-i', 'disabled'], dictionaryDefaultGameScope: ['all', 'poe1', 'poe2'], uiDensity: ['compact', 'spacious'], gamePreviewFrame: ['s', 'm', 'l'] };
     for (const [key, allowed] of Object.entries(enums)) if (Object.hasOwn(value, key)) assert(allowed.includes(value[key]), key + ' is invalid.');
     if (value.gamePreviewFonts != null) assert(object(value.gamePreviewFonts) && Object.entries(value.gamePreviewFonts).every(([lang, font]) => LANGUAGES.includes(lang) && string(font)), 'preview fonts must map languages to strings.');
+    if (Object.hasOwn(value, 'fullEditorPreviewHeight')) assert(value.fullEditorPreviewHeight === null
+      || typeof value.fullEditorPreviewHeight === 'number' && Number.isFinite(value.fullEditorPreviewHeight)
+        && value.fullEditorPreviewHeight >= 100 && value.fullEditorPreviewHeight <= 2000,
+      'fullEditorPreviewHeight must be null or a number between 100 and 2000.');
     if (value.editorClipboard != null) assert(string(value.editorClipboard), 'clipboard must be text.');
     if (Object.hasOwn(value, 'editorRegexes')) assert(Array.isArray(value.editorRegexes) && value.editorRegexes.every(r => object(r) && string(r.find) && string(r.replace)), 'regex rules must be Find/Replace rows.');
     if (Object.hasOwn(value, 'dictionary')) {

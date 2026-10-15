@@ -41,6 +41,18 @@ test('ClientText class-name display defaults on and validates explicit preferenc
   }
 });
 
+test('full editor preview height defaults to automatic and validates finite pixel preferences', () => {
+  assert.equal(Cloud.completeSettings({}).fullEditorPreviewHeight, null);
+  for (const fullEditorPreviewHeight of [null, 100, 275.5, 2000]) {
+    assert.equal(Cloud.completeSettings({ fullEditorPreviewHeight }).fullEditorPreviewHeight, fullEditorPreviewHeight);
+    assert.deepEqual(Cloud.preferences({ fullEditorPreviewHeight }), { fullEditorPreviewHeight });
+    assert.doesNotThrow(() => Cloud.validateImport({ fullEditorPreviewHeight }));
+  }
+  for (const fullEditorPreviewHeight of ['275', undefined, true, false, 99, 2001, NaN, Infinity, -Infinity, {}, []]) {
+    assert.throws(() => Cloud.validateImport({ fullEditorPreviewHeight }), /fullEditorPreviewHeight must be null or a number between 100 and 2000/);
+  }
+});
+
 test('inline editing defaults on and preserves an explicit disabled preference', () => {
   assert.equal(Cloud.completeSettings({}).inlineEditor, true);
   assert.equal(Cloud.completeSettings({ inlineEditor: false }).inlineEditor, false);
@@ -369,6 +381,27 @@ test('ClientText class-name display persists through cloud backup and remains pe
   assert.equal(reloaded.store.state.profiles.alice.settings.mapClientTextClassNames, false);
   await reloaded.client.acceptLogin({ token: 'token-alice', user: user(), expiresAt: 1 });
   assert.equal(reloaded.client.snapshot().settings.mapClientTextClassNames, false);
+});
+
+test('full editor preview height persists through reload, cloud backup, and account changes', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  seedAPI(h.api);
+  await h.client.saveLocal(payload([word()], { fullEditorPreviewHeight: 275.5 }));
+  assert.equal(h.store.state.profiles.alice.settings.fullEditorPreviewHeight, 275.5);
+  await h.client.sync();
+  assert.equal(h.api.writes('/v1/settings').at(-1).body.settings.fullEditorPreviewHeight, 275.5);
+  assert.equal(h.api.settings.get('alice').settings.fullEditorPreviewHeight, 275.5);
+
+  const reloaded = await harness(t, { store: h.store, api: h.api });
+  assert.equal(reloaded.client.snapshot().settings.fullEditorPreviewHeight, 275.5);
+  await reloaded.client.acceptLogin({ token: 'token-bob', user: user('bob'), expiresAt: 1 });
+  assert.equal(Cloud.completeSettings(reloaded.client.snapshot().settings).fullEditorPreviewHeight, null);
+  assert.equal(reloaded.store.state.profiles.alice.settings.fullEditorPreviewHeight, 275.5);
+  await reloaded.client.acceptLogin({ token: 'token-alice', user: user(), expiresAt: 1 });
+  assert.equal(reloaded.client.snapshot().settings.fullEditorPreviewHeight, 275.5);
+  await reloaded.client.importLocal(payload([word()], { fullEditorPreviewHeight: null }));
+  assert.equal(reloaded.client.snapshot().settings.fullEditorPreviewHeight, null);
+  assert.equal(reloaded.client.recoveryExport().copies.at(-1).settings.fullEditorPreviewHeight, 275.5);
 });
 
 test('ClientText class-name display imports preserve false and legacy imports restore the default', async t => {
@@ -1275,7 +1308,9 @@ test('malformed imports reject before opening a transaction and leave all local 
     { dictionary: [word('id', { tlnote: [] })] },
     { dictionary: [word(7)] },
     { dictionary: [word('id', { alts: [{ find: 'Alias', replace: {} }] })] },
-    { gamePreviewFonts: { Thai: 3 } }
+    { gamePreviewFonts: { Thai: 3 } },
+    { fullEditorPreviewHeight: '275' },
+    { fullEditorPreviewHeight: 2001 }
   ];
   for (const value of invalid) await assert.rejects(h.client.importLocal(value), /Invalid settings file/);
   assert.equal(h.store.updates, updatesBefore);

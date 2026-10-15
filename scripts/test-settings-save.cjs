@@ -73,6 +73,30 @@ test('ClientText class-name display defaults on and survives local save, export,
   assert.equal(e.mapClientTextClassNames, true);
 });
 
+test('full editor preview height survives local save, export, and import with a legacy automatic default', async () => {
+  const { e, writes, downloads, config } = harness();
+  assert.equal(e.fullEditorPreviewHeight, null);
+  for (const fullEditorPreviewHeight of [100, 275.5, 2000, null]) {
+    e.fullEditorPreviewHeight = fullEditorPreviewHeight;
+    await config.watch.fullEditorPreviewHeight.call(e);
+    await e.flushScheduledSettingsSave();
+    assert.equal(writes.at(-1).fullEditorPreviewHeight, fullEditorPreviewHeight);
+    e.exportSettingsClicked();
+    const imported = JSON.parse(await downloads.at(-1).blob.text());
+    assert.equal(imported.fullEditorPreviewHeight, fullEditorPreviewHeight);
+    const restored = harness().e;
+    restored.importSettings(imported);
+    assert.equal(restored.fullEditorPreviewHeight, fullEditorPreviewHeight);
+  }
+  const legacy = e.settingsSavePayload();
+  delete legacy.fullEditorPreviewHeight;
+  for (const value of [undefined, '275', true, 99, 2001, NaN, Infinity, -Infinity]) {
+    e.fullEditorPreviewHeight = 275;
+    e.importSettings({ ...legacy, ...(value === undefined ? {} : { fullEditorPreviewHeight: value }) });
+    assert.equal(e.fullEditorPreviewHeight, null);
+  }
+});
+
 test('new Dictionary game scope defaults to All and survives local save, export, and import', async () => {
   const { e, writes, downloads } = harness();
   assert.equal(e.dictionaryDefaultGameScope, 'all');
