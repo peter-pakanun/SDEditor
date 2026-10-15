@@ -614,6 +614,7 @@
           <div class="ctEditorNavigation"><button @click="ctNavigate(-1)" :disabled="ctBusy">Previous</button><strong>{{ ctCurrentUnit?.recordId }}</strong><button @click="ctNavigate(1)" :disabled="ctBusy">Next</button><editor-attention-navigation :controller="sharedEditorController"></editor-attention-navigation></div>
           <ct-fields ref="ctEditorRegion" :host="$root"></ct-fields>
       </editor-full-shell>
+      <ct-audio-session v-if="ctCurrentUnit && (ctEditor || inlineEditor)" :host="$root" :surface="ctEditor ? 'both' : 'source'"></ct-audio-session>
 
     </section>
     <div v-if="managedManagerAccess && managedUploadVisible" class="importDialogOverlay versionModalBackdrop" @click.self="!managedVersionBusy && (managedUploadVisible = false)">

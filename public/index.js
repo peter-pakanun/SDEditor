@@ -1577,6 +1577,10 @@ const config = Vue.defineComponent({
       }
       this.previewGggVars = next;
     },
+    gamePreviewAudioSegments(segments) {
+      return this.ctActive && window.ClientTextAudio
+        ? window.ClientTextAudio.previewSegments(segments, window.ClientTextAudio.clipsFor(this.ctCurrentUnit)) : segments;
+    },
     buildGamePreviewSegments(decodedString, options = {}) {
       const s = String(decodedString ?? "");
       const clientText = options.contentMode === 'clienttext';
@@ -8161,6 +8165,10 @@ function renderUnifiedLineDiff(edits) {
 }
 
 const app = Vue.createApp(config);
+if (window.ClientTextAudio) {
+  app.component('ct-audio-session', window.ClientTextAudio.component);
+  app.component('ct-audio-controls', window.ClientTextAudio.controlsComponent);
+}
 if (window.ClientTextUI) {
   app.component('ct-context', window.ClientTextUI.contextComponent);
   app.component('ct-fields', window.ClientTextUI.fieldsComponent);

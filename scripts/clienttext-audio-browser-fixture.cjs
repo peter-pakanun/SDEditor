@@ -46,17 +46,28 @@ async function run() {
             </head><body><main id="fixture"><h1>Dialogue audio</h1><button id="toggle" @click="host.ctEditor=!host.ctEditor">Change editor view</button>
             <div v-if="!host.ctEditor" class="fixtureColumns"><section class="fixturePanel"><h2>English</h2><ct-fields :host="host" side="source"></ct-fields></section><section class="fixturePanel"><h2>Translation</h2><ct-fields :host="host" side="translation"></ct-fields></section></div>
             <section v-else class="fixturePanel ctFullEditor"><h2>English and translation</h2><ct-fields :host="host"></ct-fields></section>
+            <div id="fixturePreviewHost"></div><editor-preview :controller="host" target="#fixturePreviewHost"></editor-preview>
+            <ct-audio-session :host="host" :surface="host.ctEditor ? 'both' : 'source'"></ct-audio-session>
             <footer v-if="!host.ctEditor" class="workspaceFooter fixtureFooter">Fixture workspace status bar</footer></main>
-            <script src="/fixture/vue.js"></script><script src="/cloudUi.js"></script><script src="/clientTextState.js"></script><script src="/clientTextAudio.js"></script><script src="/clientTextUi.js"></script>
+            <script src="/fixture/vue.js"></script><script src="/cloudUi.js"></script><script src="/clientTextState.js"></script><script src="/editorComponents.js"></script><script src="/clientTextAudio.js"></script><script src="/clientTextUi.js"></script>
             <script>const field={id:'Text',name:'Text',kind:'text',source:'Welcome to the camp of the lost, stranger.',targetCell:'D2'};
-                const host=window.fixtureHost=Vue.reactive({ctActive:true,ctBusy:false,ctEditor:false,inlineEditor:true,ctInlineClosed:false,
+                const host=window.fixtureHost=Vue.reactive({ctActive:true,ctBusy:false,ctEditor:false,inlineEditor:true,ctInlineClosed:false,ctAudioController:null,
                 ctWorkspace:{scope:{accountId:'guest',game:'poe2',branchId:'default',versionId:'local:test:audio',groupId:'local:test:audio',language:'Thai'}},
                 cloudProfileId:'guest',cloudUser:null,managedCatalogScope:'guest:poe2',gameVersion:'poe2',branchId:'default',lang:'Thai',
                 ctCurrentUnit:{id:'audio-one',sheet:'NPCTextAudio',metadata:{'Audio File':'4.0/NPC/Fixture/First.wav, 4.0/NPC/Fixture/Second=StrDex4.wav, 4.0/NPC/Fixture/Missing.wav'}},
                 ctNotes:()=>[],ctChoices:[],ctFieldGroups:[{key:'Text',name:'Text',source:field.source,fields:[field],forms:false}],
                 ctGroupSources:group=>[{key:'Text',label:'Text',source:group.source,fieldIds:['Text']}],
-                ctSourceFieldController:(group,source)=>({value:source.source}),ctClassFields:()=>[],ctFieldsKeydown:()=>{},ctResizeFields:()=>{}});
+                ctSourceFieldController:(group,source)=>({value:source.source}),ctClassFields:()=>[],ctFieldsKeydown:()=>{},ctResizeFields:()=>{},
+                get gamePreviewFullEditor(){return this.ctEditor;},gamePreviewFrame:'s',gamePreviewIsDialogue:true,
+                gamePreviewDefaultTextColor:'#fffbd6',gamePreviewFontFamily:'Arial',gamePreviewSourceFontFamily:'Arial',
+                hideSourceInPreviewPanel:false,gamePreviewSourceIsTable:false,gamePreviewTargetIsTable:false,gamePreviewVarKeyList:[],
+                gamePreviewVarValues:{},ctPossessivePreviewForms:null,translationEditorBcp47:'th',
+                gamePreviewDisplaySource:[{type:'text',text:'First dialogue block.'},{type:'continue'},{type:'text',text:'Last dialogue block.'}],
+                get gamePreviewTargetRows(){return [{key:'target',label:'',segments:this.gamePreviewDisplaySource}];},
+                gamePreviewAudioSegments(segments){return ClientTextAudio.previewSegments(segments,ClientTextAudio.clipsFor(this.ctCurrentUnit));}});
                 const app=Vue.createApp({data:()=>({host})});app.component('ct-fields',ClientTextUI.fieldsComponent);
+                app.component('ct-audio-session',ClientTextAudio.component);app.component('ct-audio-controls',ClientTextAudio.controlsComponent);
+                app.component('editor-preview',EditorComponents.Preview);
                 app.directive('tooltip',{});
                 app.component('editor-native-field',{props:['controller','kind'],template:'<pre class="fixtureNativeField" :data-kind="kind">{{controller.value}}</pre>'});
                 app.component('ct-target',{template:'<textarea aria-label="Translation">A translation draft</textarea>'});
@@ -95,6 +106,12 @@ async function run() {
         const rememberAudio = () => page.evaluate(() => { window.previousAudio = document.querySelector('.ctAudioFloating audio'); });
         const oldStopped = () => page.evaluate(() => previousAudio.paused && !previousAudio.hasAttribute('src'));
         await toolbar.waitFor();
+        const sourcePreview=page.locator('.gamePreviewSourcePane .ctAudioTrack');
+        await sourcePreview.first().waitFor();
+        assert.equal(await page.locator('.gamePreviewTargetPane .ctAudioTrack').count(),0,'Only the English preview has dialogue playback buttons.');
+        assert.equal(await page.locator('.gamePreviewSourcePane .ctPreviewAudioControls').count(),2,'Each nonempty continue block receives playback controls.');
+        assert.equal(await page.locator('.gamePreviewSourcePane .ctPreviewAudioControls').nth(0).locator('.ctAudioTrack').count(),1);
+        assert.equal(await page.locator('.gamePreviewSourcePane .ctPreviewAudioControls').nth(1).locator('.ctAudioTrack').count(),2,'Extra tracks belong to the last text block.');
         assert.equal(await toolbar.count(), 1, 'Inline source has one audio bar; translation has none.');
         assert.equal(await tracks.count(), 3, 'Every available track has its own icon button.');
         assert.equal((await toolbar.textContent()).trim(), '', 'The toolbar is icon-only.');
@@ -109,8 +126,9 @@ async function run() {
         await page.waitForTimeout(100);
         assert.equal(requests.length, 0, 'Opening a record does not request media.');
         assert.equal(await page.locator('audio').count(), 0);
-        await first().click();
+        await sourcePreview.first().click();
         await page.waitForFunction(() => document.querySelector('.ctAudioTrack.loading'));
+        assert.equal(await page.locator('.ctAudioTrack.loading').count(),2,'Field and English preview share loading.');
         assert.equal(await first().isDisabled(), true, 'Loading tracks cannot be clicked.');
         assert.match(await first().getAttribute('aria-label'), /Loading.*First\.wav/);
         assert.equal(await first().locator('.spinner').count(), 1);
@@ -118,6 +136,8 @@ async function run() {
         assert.equal(await floating.isVisible(), false, 'Native controls stay hidden during initial loading.');
         releaseFirst();
         await playing();
+        assert.equal(await page.locator('.ctAudioTrack.active').count(),2,'Field and English preview share the playing state.');
+        assert.equal(await page.locator('audio').count(),1,'All playback buttons use one media element.');
         assert.equal(calls.length, 1); assert.ok(requests.some(request => request.range.startsWith('bytes=')), 'Native playback uses range requests.');
         assert.equal(await first().getAttribute('aria-label'), 'Stop First.wav');
         assert.equal(await first().locator('.ctAudioSpeakIcon').count(), 1);
@@ -134,6 +154,9 @@ async function run() {
         await second().focus(); await second().press('Enter'); await playing();
         assert.equal(calls.length, 2); assert.ok(calls[1].endsWith('/second=strdex4.wav'));
         assert.equal(await second().getAttribute('aria-label'), 'Stop Second=StrDex4.wav');
+        await sourcePreview.nth(1).click(); await stopped();
+        assert.equal(await second().getAttribute('aria-label'),'Play Second=StrDex4.wav','The preview can stop a track started in the field.');
+        await second().click(); await playing();
         await rememberAudio(); await first().click(); await playing();
         assert.equal(await oldStopped(), true, 'Playing another icon releases the previous native player.');
         assert.equal(await first().getAttribute('aria-label'), 'Stop First.wav');
@@ -197,6 +220,8 @@ async function run() {
         await missing().click();
         await page.waitForFunction(() => document.querySelector('.ctAudioTrack.error')?.getAttribute('aria-label').includes('404'));
         assert.match(await missing().getAttribute('aria-label'), /404/);
+        assert.equal(await page.locator('.ctAudioTrack.error').count(),2,'An HTTP failure is shared by the field and English preview buttons.');
+        assert.match(await sourcePreview.nth(2).getAttribute('aria-label'),/404/);
         assert.match(await missing().getAttribute('aria-label'), /retry/i);
         assert.equal(await missing().isDisabled(), false, 'Failed tracks remain clickable for retry.');
         assert.equal(await missing().locator('.ctAudioSpeakIcon').count(), 1, 'An error retains the speak icon.');
@@ -211,7 +236,8 @@ async function run() {
         }
         assert.equal(await floating.isVisible(), false, 'An error does not leave the native player visible.');
         const callsBeforeRetry = calls.length; missingAvailable = true;
-        await missing().click(); await playing();
+        await sourcePreview.nth(2).click(); await playing();
+        assert.equal(await missing().getAttribute('aria-label'),'Stop Missing.wav','Retrying in the preview updates the field button.');
         assert.ok(calls.length > callsBeforeRetry, 'Retry requests the previously unavailable clip again.');
         await page.evaluate(() => { fixtureHost.ctCurrentUnit = { id: 'audio-two', sheet: 'NPCTextAudio', metadata: { 'Audio File': '4.0/NPC/Fixture/First.wav' } }; });
         await stopped();

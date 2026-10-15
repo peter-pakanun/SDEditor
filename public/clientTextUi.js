@@ -99,7 +99,7 @@
             ctBrowseMode: 'sheets', ctNpcSelection: 'all', ctNpcKind: '', ctNpcFilter: '', ctBrowseBusy: false,
             ctConvoSelection: 'all', ctConvoFilter: '', ctConvoExpanded: [], ctConvoFocusKey: '',
             ctSort: 'row', ctSortDir: 'asc', ctSelectedFilters: defaultFilters(), ctFiltersVisible: false,
-            ctSelection: '', ctEditor: false, ctInlineClosed: false, ctValues: {}, ctReviewed: {}, ctDraftDirty: false, ctDraftStageFailure: null, ctCompletion: null,
+            ctSelection: '', ctEditor: false, ctInlineClosed: false, ctAudioController:null, ctValues: {}, ctReviewed: {}, ctDraftDirty: false, ctDraftStageFailure: null, ctCompletion: null,
             ctVariantSelections: {},
             ctBusy: false, ctNavigationBusy: false, ctInitializing:false, ctProgress: null, ctError: '', ctNotice: '', ctDiagnostics: raw({}), ctScanDone: false,
             ctScanTypes:scanTypes,ctScanChecks:defaultScanChecks(),ctScanAppliedChecks:null,ctScanRunning:false,ctScanStopped:false,
@@ -3111,7 +3111,7 @@
             <dl><div v-for="item in items" :key="item.name" class="ctContextEntry"><dt>{{ item.name }}</dt><dd class="ctContextValue"><span v-for="(part,index) in item.parts" :key="index" class="ctContextPart" :tabindex="part.tooltip ? 0 : undefined" :aria-label="part.tooltip || undefined" v-tooltip="part.tooltip">{{ part.text }}</span></dd></div></dl>
         </section>` };
     const fieldsComponent = { props: {host:Object,side:{type:String,default:'both'}},
-        components: root.ClientTextAudio ? {'ct-dialogue-audio':root.ClientTextAudio.component} : {},
+        components: root.ClientTextAudio ? {'ct-dialogue-audio':root.ClientTextAudio.controlsComponent} : {},
         methods: {
             showTooltip(event,text) { this.host.showTooltip?.(event,text); },
             hideTooltip() { this.host.hideTooltip?.(); },

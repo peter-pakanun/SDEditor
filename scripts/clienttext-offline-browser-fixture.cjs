@@ -577,15 +577,29 @@ async function run() {
         };
         await dialogueRow.locator('.inlineSourceCell').click();
         await track().waitFor();
+        const previousDialogueTool = await page.evaluate(() => {
+            const vm = window.__offlineTestApp, previous = vm.ctTool; vm.ctTool = 'preview'; return previous;
+        });
+        const previewTrack = () => workspace.locator('.gamePreviewSourcePane .ctAudioTrack');
+        await previewTrack().waitFor();
+        assert.equal(await workspace.locator('.gamePreviewTargetPane .ctAudioTrack').count(), 0, 'The translation preview has no English audio buttons');
         const dialogueTarget = dialogueRow.locator('textarea[data-ct-target]').first();
         await dialogueTarget.fill('Dialogue audio draft from controls');
         await track().click();
         await page.waitForFunction(() => document.querySelector('.ctAudioTrack.loading'));
         assert.equal(await track().isDisabled(), true);
+        assert.equal(await previewTrack().isDisabled(), true, 'The actual shared preview follows field-button loading');
+        assert.equal(await previewTrack().getAttribute('aria-label'), await track().getAttribute('aria-label'));
         assert.equal(await page.evaluate(() => !!document.activeElement.closest('.ctAudioTrackTarget')), true,
             'Disabling the loading icon keeps focus on its wrapper inside the inline row');
         await assertDialogueOpen('Loading audio preserves the unsaved inline draft', dialogue.saved);
         releaseAudio(); await dialoguePlaying();
+        assert.equal(await previewTrack().getAttribute('aria-label'), 'Stop Inline.wav', 'The actual shared preview follows playback');
+        await previewTrack().click();
+        await page.waitForFunction(() => !document.querySelector('.ctAudioFloating audio'));
+        assert.equal(await track().getAttribute('aria-label'), 'Play Inline.wav', 'Stopping from the preview updates the field button');
+        await previewTrack().click(); await dialoguePlaying();
+        assert.equal(await track().getAttribute('aria-label'), 'Stop Inline.wav', 'Starting from the preview updates the field button');
         await nativeAudio().focus();
         assert.equal(await nativeAudio().evaluate(player => player === document.activeElement), true);
         await nativeAudio().click({ position: { x: 160, y: 18 } });
@@ -609,6 +623,7 @@ async function run() {
         await track().click(); await dialoguePlaying();
         await track().focus(); await track().press('Escape');
         await page.waitForFunction(() => window.__offlineTestApp.ctInlineClosed && !document.querySelector('.ctAudioFloating audio'));
+        await page.evaluate(previous => { window.__offlineTestApp.ctTool = previous; }, previousDialogueTool);
         const pointerDestination = await page.evaluate(id => {
             const rows = window.__offlineTestApp.ctPageRows, index = rows.findIndex(unit => unit.id === id), unit = rows[index + 1];
             return unit && { id: unit.id, selector: '[data-unit-id="' + CSS.escape(unit.id) + '"]' };
@@ -690,7 +705,7 @@ async function run() {
         await page.waitForFunction(() => !window.__offlineTestApp.ctEditor);
         await assertLocal(page, 'Actual inline audio focus, shortcuts and native controls');
         assert.ok(audioRequests.length >= 2, 'Explicit play and replay use only the locally generated fixture clip');
-        results.push('Dialogue audio: loading/native-control focus retains inline drafts, Ctrl+S saves from icon/player, Escape closes, native pause/resume works, and explicit media stays fixture-local');
+        results.push('Dialogue audio: English-only preview shares field loading/play/stop, loading/native-control focus retains inline drafts, Ctrl+S saves from icon/player, Escape closes, native pause/resume works, and explicit media stays fixture-local');
         results.push('Row pointer handoff keeps layout stable through a held mouse press from native audio or changed text, saves before switching, survives slow storage, and retains double-click full editing');
         await monitor(page, false);
         await page.evaluate(async () => { const vm = window.__offlineTestApp; vm.inlineEditor = false; await vm.$nextTick(); await vm.saveSettings(); });

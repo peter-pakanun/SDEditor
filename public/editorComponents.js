@@ -605,7 +605,7 @@
                 <div class="gamePreviewLine">
                   <div class="gamePreviewLineLabel">EN</div>
                   <div class="gamePreviewWindow" :class="['gamePreviewWindow--' + gamePreviewFrame, { 'gamePreviewWindow--dialogue': gamePreviewIsDialogue }]" :style="{ fontFamily: gamePreviewSourceFontFamily, color: gamePreviewDefaultTextColor }">
-                    <template v-for="(seg, si) in gamePreviewDisplaySource" :key="'gps-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
+                    <template v-for="(seg, si) in gamePreviewAudioSegments(gamePreviewDisplaySource)" :key="'gps-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
                       <span v-if="seg.type === 'text'" class="gamePreviewText" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle">{{ seg.text }}</span>
                       <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle" v-tooltip="seg.full">
                         <template v-if="seg.parts"><template v-for="(part, pi) in seg.parts" :key="'gps-part-' + si + '-' + pi">
@@ -620,6 +620,7 @@
                         <span class="gamePreviewVarValue" v-tooltip="seg.full">{{ seg.prefix + gamePreviewVarValues[seg.key] }}</span><span v-if="seg.trailingPercent" class="gamePreviewVarPct">%</span>
                       </span>
                       <editor-preview-audio v-else-if="seg.type === 'audio'" :segment="seg" :controller="$props.controller"></editor-preview-audio>
+                      <ct-audio-controls v-else-if="seg.type === 'playback'" :host="$props.controller" :indices="seg.tracks" preview></ct-audio-controls>
                       <span v-else-if="seg.type === 'continue'" class="gamePreviewContinue">Continue</span>
                       <span v-else-if="seg.type === 'rightAlign'" class="gamePreviewRightAlign"></span>
                       <span v-else-if="seg.type === 'break' && gamePreviewSourceIsTable" class="gamePreviewBreak"></span>

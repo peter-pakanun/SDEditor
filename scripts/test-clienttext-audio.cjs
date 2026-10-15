@@ -32,6 +32,48 @@ test('untrusted workbook audio cannot create arbitrary URLs or traversal request
     assert.deepEqual(Audio.clipsFor(unit('https://evil.test/a.ogg, '+first)).map(clip=>clip.path),[first.toLowerCase()]);
 });
 
+test('preview tracks follow continue blocks, with every surplus track on the last text block',()=>{
+    const clips=Array.from({length:4},(_,index)=>({path:index+'.ogg'}));
+    const text=value=>({type:'text',text:value}),separator={type:'continue'};
+    const source=[text('First'),separator,text('Second')],snapshot=structuredClone(source);
+    const parts=Audio.previewSegments(source,clips);
+    assert.deepEqual(parts.filter(part=>part.type==='playback').map(part=>part.tracks),[[0],[1,2,3]]);
+    assert.deepEqual(source,snapshot,'playback presentation never mutates source text or segments');
+    assert.equal(parts[0],source[0]);assert.equal(parts[2],separator);
+    assert.deepEqual(Audio.previewSegments([text('One block')],clips).at(-1).tracks,[0,1,2,3]);
+    assert.deepEqual(Audio.previewSegments([text('A'),separator,text('B'),separator,text('C')],clips.slice(0,1))
+        .filter(part=>part.type==='playback').map(part=>part.tracks),[[0]]);
+    assert.equal(Audio.previewSegments(source,[]),source);
+});
+
+test('empty continue blocks and trailing newlines do not move controls away from the spoken text',()=>{
+    const styled={type:'text',text:'Spoken',decorStyle:{color:'red'}},separator={type:'continue'},newline={type:'break'};
+    const parts=Audio.previewSegments([separator,styled,newline,separator,{type:'text',text:' '}],[{},{}]);
+    assert.deepEqual(parts.filter(part=>part.type==='playback').map(part=>part.tracks),[[0,1]]);
+    assert.equal(parts[1],styled);assert.equal(parts[2].type,'playback');assert.equal(parts[3],newline);
+    assert.deepEqual(Audio.previewSegments([],[{}]),[{type:'playback',tracks:[0]}]);
+});
+
+test('field and preview controls use the same session and unmounting one view keeps playback alive',async()=>{
+    const h=harness();h.app.host.ctAudioController=h.app;
+    const controls=h.window.ClientTextAudio.controlsComponent;
+    const view=indices=>{
+        const value={host:h.app.host,indices};
+        for(const[name,get]of Object.entries(controls.computed))Object.defineProperty(value,name,{get:()=>get.call(value)});
+        controls.watch.session.handler.call(value,h.app);
+        return value;
+    };
+    const field=view(null),preview=view([0]);
+    assert.equal(field.session,preview.session);assert.equal(preview.tracks[0].clip.path,first.toLowerCase());
+    await preview.session.play(0);const request=h.app.request;
+    assert.equal(field.session.trackState(0),'loading');
+    await h.app.playing({currentTarget:h.player},request);assert.equal(preview.session.trackState(0),'playing');
+    controls.beforeUnmount.call(preview);assert.equal(field.session.trackState(0),'playing');assert.equal(h.calls.play,1);
+    await field.session.play(0);assert.equal(h.app.request,null);assert.equal(preview.session.trackState(0),'idle');
+    h.app.host.ctInlineClosed=true;
+    await h.app.play(0);assert.ok(h.app.request,'preview-only playback works after the inline fields close');
+});
+
 test('opening and selecting records stays network silent; explicit play uses the shared API resolver without credentials',async()=>{
     let fetched=0;const h=harness({}, {fetch:async()=>{fetched++;return {ok:true};}});
     assert.equal(h.app.request,null);assert.equal(h.calls.play,0);assert.equal(h.app.clips.length,1);
