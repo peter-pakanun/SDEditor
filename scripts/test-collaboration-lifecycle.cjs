@@ -223,6 +223,99 @@ test('an activated managed group synchronizes Japanese when its legacy catalog l
   });
 });
 
+function managedJapaneseLocalRecoveryFixture() {
+  const { editor: e, window } = harness(), W = window.WorkspaceState;
+  const source = description('japanese-recovery'); source.hasChanges = false;
+  e.testMode = false; e.offlineStoreReady = true; e.editorVisible = false;
+  e.gameVersion = 'poe2'; e.lang = 'Japanese';
+  e.cloudSignedIn = true; e.cloudCanAccessAllLanguages = true;
+  e.cloudUser = { id: 'manager', role: 'admin', language: 'Thai', assignmentVersion: 3 };
+  e._cloud = { apiBase: 'http://api.test', context: () => ({}), request() {} };
+  e.activeContentGroup = { id: 'current-group', versionId: 'current-version', contentMode: 'statdescription' };
+  e.descs = [plain(source)]; e._workspaceSourceBaseline = [source];
+  e.localDescs = W.initializeWorkspace({ accountId: 'manager', workspaceOrigin: 'online', descs: [], status: {},
+    workspaceGroupId: 'current-group', workspaceVersionId: 'current-version', catalogVersionId: 'current-version' },
+    { source: [source], sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang });
+  const standalone = W.initializeWorkspace({ accountId: 'manager', descs: [], status: {} },
+    { source: [source], sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang });
+  W.dropTranslation(standalone, source, e.lang, { id: 'standalone-japanese-recovery', ownership: 'local', game: e.gameVersion,
+    translations: ['保持する復旧訳 {0}', '復旧の二行目'], targetSourceHash: e.sourceIdentity, originSourceHash: 'previous-source' });
+  const candidate = plain(W.droppedForFile(standalone, source.filepath, e.lang, 'local'));
+  let stored = plain(e.localDescs), attachments = 0;
+  window.OfflineStore.getLocalDroppedCandidates = async () => [plain(candidate)];
+  window.OfflineStore.updateWorkspace = async (mutate, game, options) => {
+    attachments++;
+    stored = mutate(plain(stored));
+    return { ...plain(stored), _storageSelection: { filepaths: options.filepaths } };
+  };
+  window.OfflineStore.mergeWorkspaceRecords = require('../public/normalizedStore.js').create({}).mergeWorkspaceRecords;
+  const joins = [], background = new Map(), translations = ['同期された共有訳 {0}', '共有の二行目'];
+  e.queueWorkspaceBackground = (key, callback) => { background.set(key, callback); return true; };
+  window.CollaborationSync = { Client: class {
+    constructor(options) { this.options = options; }
+    async connect(input) { joins.push(plain(input)); }
+    async startRemote() {
+      const file = { filepath: source.filepath, translations, trackedForExport: true, revision: 2 };
+      // The real client commits its workspace projection before updating the UI.
+      W.stageTranslation(stored, file, e.lang, { source, sourceHash: e.sourceIdentity, game: e.gameVersion });
+      await this.options.onRemote([file]);
+    }
+    select() {} setAway() {} disconnect() {}
+  } };
+  e.applyWorkspaceOverlay(); e.filterDesc();
+  return { e, window, W, source, candidate, joins, background, translations, attachments: () => attachments };
+}
+
+test('online initialization attaches local recovery and receives Japanese shared saves without invalidating its workspace', async () => {
+  const { e, W, source, candidate, joins, background, translations, attachments } = managedJapaneseLocalRecoveryFixture();
+  assert.equal(e.collaborationWorkspaceReady(), true);
+  assert.equal(e.statistic.hasChanges, 0); assert.equal(e.statistic.isMissing, 1);
+  await e.initializeCollaboration();
+  assert.equal(joins.length, 1, 'Attaching a local recovery must not abort initialization before the shared room is opened.');
+  assert.equal(joins[0].groupId, 'current-group'); assert.equal(joins[0].language, 'Japanese');
+  await background.get('shared-translations')();
+  assert.deepEqual(plain(e.descs[0].translations.Japanese), translations);
+  assert.equal(e.statistic.hasChanges, 1); assert.equal(e.statistic.isMissing, 0);
+  assert.equal(e.statistic.isDropped, 0, 'A standalone recovery remains separate from the shared assignment.');
+  const recovered = W.droppedForFile(e.localDescs, source.filepath, 'Japanese', 'local');
+  assert.equal(recovered.id, candidate.id); assert.deepEqual(plain(recovered.snapshot), candidate.snapshot);
+  const client = e._collaboration;
+  await e.loadLocalDroppedRecovery();
+  await e.initializeCollaboration();
+  assert.ok(attachments() >= 2, 'A later hydration reattaches the same durable recovery.');
+  assert.equal(joins.length, 1); assert.equal(e._collaboration, client);
+  assert.equal(W.droppedForFile(e.localDescs, source.filepath, 'Japanese', 'local').id, candidate.id);
+  assert.deepEqual(plain(e.descs[0].translations.Japanese), translations);
+});
+
+test('local recovery hydration cannot start collaboration after an account, language, group, source or workspace switch', async t => {
+  const changes = {
+    account: e => { e.cloudUser = { ...e.cloudUser, id: 'replacement-account' }; },
+    language: e => { e.lang = 'German'; },
+    group: e => { e.activeContentGroup = { ...e.activeContentGroup, id: 'replacement-group' }; },
+    source: e => { e.sourceIdentity = 'replacement-source'; },
+    workspace: e => { e.localDescs = plain(e.localDescs); },
+  };
+  for (const phase of ['read', 'commit']) for (const [field, change] of Object.entries(changes)) await t.test(`${phase}: ${field}`, async () => {
+    const { e, window, joins, background } = managedJapaneseLocalRecoveryFixture(), held = deferred(), reached = deferred();
+    const method = phase === 'read' ? 'getLocalDroppedCandidates' : 'updateWorkspace';
+    const original = window.OfflineStore[method];
+    window.OfflineStore[method] = async (...args) => {
+      const result = await original(...args);
+      reached.resolve(); await held.promise; return result;
+    };
+    const initializing = e.initializeCollaboration();
+    await reached.promise;
+    change(e);
+    const selected = e.localDescs;
+    held.resolve(); await initializing;
+    assert.equal(joins.length, 0, 'The outgoing recovery hydration cannot initialize a client in the replacement scope.');
+    assert.equal(e.localDescs, selected);
+    assert.equal(Object.keys(e.localDescs.droppedArchive || {}).length, 0, 'An obsolete read or commit cannot publish its recovered candidate.');
+    assert.equal(background.size, 0);
+  });
+});
+
 test('a transition begun during queued-save recovery fences a pending room initialization', async () => {
   const { editor: e, window } = harness(), held = deferred(), reached = deferred();
   e.testMode = false; e.offlineStoreReady = true; e.cloudSignedIn = true; e.cloudCanAccessAllLanguages = true;

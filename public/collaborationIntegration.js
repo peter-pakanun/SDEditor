@@ -122,7 +122,10 @@
         if (!this.testMode && store.updateWorkspace) {
           const committed = await store.updateWorkspace(attach, context.game, { scope, filepaths: paths, includeDropped: true });
           if (this.localDescs !== workspace || !this.collaborationContextCurrent(context)) return false;
-          this.localDescs = store.mergeWorkspaceRecords?.(workspace, committed) || committed;
+          // Recovery hydration updates this accepted workspace. Keep its
+          // identity so an initializer awaiting this step is not cancelled as
+          // though another workspace had been selected.
+          Object.assign(workspace, store.mergeWorkspaceRecords?.(workspace, committed) || committed);
         } else state.attachLocalDroppedCandidates(workspace, records);
         this.applyWorkspaceOverlay({ filepaths: paths }); this.filterDesc({ changedFilepaths: paths });
         return true;

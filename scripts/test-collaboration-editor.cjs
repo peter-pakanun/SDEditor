@@ -1897,7 +1897,9 @@ test('local recovery attachment persists separately and never revives its resolv
   window.OfflineStore.updateWorkspace = async (mutate, game, options) => {
     calls.push({ game, options }); return mutate(structuredClone(e.localDescs));
   };
+  const workspace = e.localDescs;
   assert.equal(await e.loadLocalDroppedRecovery(), true);
+  assert.equal(e.localDescs, workspace, 'Recovery hydration preserves the accepted workspace identity.');
   assert.equal(calls[0].read.accountId, 'guest'); assert.equal(calls[0].read.sourceHash, e.sourceIdentity);
   assert.equal(calls[1].options.includeDropped, true);
   assert.deepEqual(Array.from(calls[1].options.filepaths), [desc.filepath]);
