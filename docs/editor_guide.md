@@ -65,6 +65,8 @@ Select a ClientText group and language from Versions, or import its workbooks lo
 
 Every ClientText field can be saved and exported blank or whitespace-only, including ordinary translations, Normal, class variants and Gender. Missing and Outdated indicate workload or review; they do not block blank saves.
 
+Dialogue rows with an **Audio File** reference offer **Play audio** in the inline and full editors. Select a clip when several are listed. Audio loads only when requested and stops when you leave the record or change editor views. Playback uses the companion API and browser HTTP caching; unavailable audio does not affect your translation. See [Dialogue audio](dialogue_audio.md) for cache limits and deployment details.
+
 Opening a workbook uses the same workspace initialization screen as StatDescription. First opening reports original download, workbook/sheet parsing, local caching and editor preparation. Later openings reuse the cached parsed workbook and load that version's independent saved work. Initialization timings remain available in Settings. Saving translations does not invalidate the original cache.
 
 ClientText uses the same default filters as StatDescription: Missing, Saved, Revised, Outdated and diagnostic errors/warnings start selected; **Unchanged** starts off. Unsaved work retains its committed status and has no separate badge, counter or filter. Use the shared Filters control to narrow the list.

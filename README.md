@@ -43,6 +43,7 @@ Then open the printed URL (defaults to `http://127.0.0.1:3333/`), choose PoE1 or
   - After the table loads, click 📦 to import a ZIP file
   - You can import a previously exported `StatDescriptions_Translated.zip` to restore your edits
 - Translator workflow guide: see [docs/editor_guide.md](docs/editor_guide.md).
+- ClientText dialogue playback and bounded audio-cache configuration: see [docs/dialogue_audio.md](docs/dialogue_audio.md).
 - PoE1/PoE2 storage and migration details: see [docs/multi_version.md](docs/multi_version.md).
 - Workspace labels, counts and export scope: see [docs/workspace_statuses.md](docs/workspace_statuses.md).
 - Storage architecture, database-size investigation, implemented reductions and rollout work: see [Local-first baselines and incremental server storage](docs/local_first_server_storage.md).

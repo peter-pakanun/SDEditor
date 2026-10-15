@@ -250,6 +250,10 @@ The ClientText field controller maps native textarea offsets back to raw strings
 
 [editorReferenceCatalog.js](../public/editorReferenceCatalog.js) prepares read-only reference groups for cross-mode Lookup within the selected release and authorized language. Cached originals are reused; explicit preparation may fetch missing originals. Preparation never activates a workspace, joins a room, stages translations or replaces the active draft. StatDescription references prepared without an activated workspace use a bounded session cache; ClientText reuses its verified original cache. Mode/group filters retain opaque ClientText unit/field identities, and the shared Comments panel keeps its existing audience, unread, polling and access guards under a group-scoped ClientText identity.
 
+## Disposable dialogue audio cache
+
+ClientText dialogue playback uses a separate, bounded media cache in the companion API and the browser's ordinary HTTP cache. Audio is fetched only after a playback action. This cache has no authored-data or baseline-retention role, adds no IndexedDB stores or SQLite rows, and may evict clips by age or least-recent use. See [Dialogue audio](dialogue_audio.md) for the endpoint, configuration and validation boundary.
+
 ## Extending to another content mode
 
 Keep the storage/lifecycle design common and place format-specific behavior behind an adapter. Start with explicit unit and field identities; do not make an array position or display name the durable ID if it can change.

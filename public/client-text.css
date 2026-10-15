@@ -2,6 +2,12 @@
 .ctWorkspaceBody.ctToolsOpen { grid-template-columns:190px minmax(0,1fr) clamp(360px,29vw,460px); }
 .ctListWorkspace { padding-bottom:var(--workspace-footer-height,110px); }
 .ctHistoryActions {display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.ctHistoryError:not(.appNotice) {color:var(--ui-error)}
+.ctDialogueAudio {box-sizing:border-box;min-width:0;margin-bottom:10px;padding:9px;border:1px solid var(--ui-border);border-radius:5px;background:var(--color-element-alt);color:var(--color-font);font-size:calc(12px * var(--density));}
+.ctAudioHeading {display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;}.ctAudioCount {color:var(--ui-muted);font-variant-numeric:tabular-nums;}
+.ctAudioClipPicker {display:block;min-width:0;}.ctAudioClipPicker select {box-sizing:border-box;min-width:0;width:100%;padding:4px;font:inherit;color:var(--color-font);background:var(--color-element);border:1px solid var(--ui-border);border-radius:4px;}
+.ctAudioFilename {display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--ui-muted);}
+.ctAudioPlayback {display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:7px;min-width:0;}.ctAudioPlayback button {flex:none;padding:5px 9px;font:inherit;}.ctAudioPlayback audio {flex:1;width:260px;max-width:100%;min-width:0;height:36px;}
+.ctAudioError {display:block;margin-top:6px;color:var(--ui-warning);}.ctDialogueAudio :is(button,select,audio):focus-visible {outline:2px solid var(--ui-accent);outline-offset:2px;}
 .editorFieldTools {min-width:0;max-width:100%;font-size:calc(12px * var(--density));}
 .editorFieldFrame {overflow:hidden;border:1px solid var(--ui-border);border-radius:5px;background:var(--color-element-alt);}
 .editorFieldFrame.outdated {border-color:var(--ui-dropped);}.editorFieldFrame.missing {border-color:var(--ui-missing);}.editorFieldFrame:focus-within {box-shadow:0 0 0 1px var(--ui-accent);}

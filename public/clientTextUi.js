@@ -33,7 +33,7 @@
         {key:'controls',label:'ClientText controls',description:'Control identities and counts compared with English.'}
     ];
     const defaultScanChecks = () => Object.fromEntries(scanTypes.map(type=>[type.key,type.key!=='terminology']));
-    const rowControl = event => !!event?.target?.closest?.('textarea,input,select,button,label,a,[contenteditable="true"],.HLter,.ctReferenceContext');
+    const rowControl = event => !!event?.target?.closest?.('textarea,input,select,button,label,a,audio,[contenteditable="true"],.HLter,.ctReferenceContext,.ctDialogueAudio');
     const genderSuggestions = ['M', 'F', 'N', 'MP', 'FP', 'NP'];
     const russianGenderSuggestions = ['MS', 'FS', 'NS', 'MP', 'FP', 'NP', 'M'];
     const pairedLanguages = ['French', 'German', 'Polish', 'Portuguese', 'Russian', 'Spanish'];
@@ -3104,6 +3104,7 @@
             <dl><div v-for="item in items" :key="item.name" class="ctContextEntry"><dt>{{ item.name }}</dt><dd class="ctContextValue"><span v-for="(part,index) in item.parts" :key="index" class="ctContextPart" :tabindex="part.tooltip ? 0 : undefined" :aria-label="part.tooltip || undefined" v-tooltip="part.tooltip">{{ part.text }}</span></dd></div></dl>
         </section>` };
     const fieldsComponent = { props: {host:Object,side:{type:String,default:'both'}},
+        components: root.ClientTextAudio ? {'ct-dialogue-audio':root.ClientTextAudio.component} : {},
         methods: {
             showTooltip(event,text) { this.host.showTooltip?.(event,text); },
             hideTooltip() { this.host.hideTooltip?.(); },
@@ -3123,6 +3124,7 @@
         <div class="ctFields" :data-side="side === 'both' ? undefined : side" :inert="host.ctBusy" @keydown="host.ctFieldsKeydown($event)">
             <div :class="{inlineFileBlock:side !== 'both',inlineBlockPrelude:side !== 'both'}" :data-inline-block="side !== 'both' ? 'prelude' : undefined" :data-inline-side="side === 'source' ? 'english' : side === 'translation' ? 'translation' : undefined"><div :class="{inlineBlockNatural:side !== 'both'}">
             <template v-if="side !== 'translation'">
+                <ct-dialogue-audio v-if="host.ctCurrentUnit && $options.components['ct-dialogue-audio']" :host="host" :surface="side"></ct-dialogue-audio>
                 <section v-if="host.ctNotes().length" class="ctDeveloperNotes editBlock"><strong>Developer notes</strong><pre v-for="(note,index) in host.ctNotes()" :key="index">{{ note }}</pre></section>
             </template>
             <template v-if="side !== 'source'"><section v-for="(choice,index) in host.ctChoices" :key="index" class="ctDeveloperNotes editBlock"><strong>Translation choice · {{ host.ctHistoryFieldLabel(host.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId) || {name:choice.fieldId}) }}</strong><p>Incoming translation remains active. Choose the text to keep.</p><pre>{{ choice.upstream ?? choice.remote }}</pre><button @click="host.ctChooseAlternative(choice,'remote')">Keep incoming</button><pre>{{ choice.local }}</pre><button @click="host.ctChooseAlternative(choice,'local')">Use previous saved text</button></section></template>
