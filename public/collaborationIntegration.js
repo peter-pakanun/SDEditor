@@ -79,6 +79,7 @@
         return this._workspaceBaselineIndex.files.get(filepath);
       },
       droppedCandidateMatches(candidate, current) {
+        if (!candidate || !current || window.WorkspaceState.droppedOwnership(candidate) !== window.WorkspaceState.droppedOwnership(current)) return false;
         if (window.WorkspaceState.sameDroppedContent(candidate, current)) return true;
         // A ZIP-only read can omit historical English. The frozen generation
         // and exact target text still identify an explicit review safely.
@@ -94,14 +95,43 @@
       },
       capturedDroppedPromotion(filepath, candidate = this.editorDroppedCandidate) {
         if (!candidate) return null;
-        if (this.localDescs.droppedConflicts?.[this.lang]?.[filepath]) throw new Error('Resolve the competing dropped copies before saving this file.');
-        const current = window.WorkspaceState.droppedForFile(this.localDescs, filepath, this.lang);
+        const current = window.WorkspaceState.droppedForFile(this.localDescs, filepath, this.lang,
+          { id: candidate.id, ownership: window.WorkspaceState.droppedOwnership(candidate) });
         if (!this.droppedCandidateMatches(candidate, current)) throw new Error('The dropped translation changed. Reopen this file to review the current copy.');
-        return { id: current.id, revision: current.revision || 0, targetSourceHash: this.sourceIdentity };
+        return { id: current.id, revision: current.revision || 0, targetSourceHash: this.sourceIdentity,
+          ownership: window.WorkspaceState.droppedOwnership(current) };
+      },
+      async loadLocalDroppedRecovery({ context = this.captureCollaborationContext() } = {}) {
+        const store = window.OfflineStore, state = window.WorkspaceState;
+        if (this.ctActive || !this.sourceIdentity || !store?.getLocalDroppedCandidates || !state.attachLocalDroppedCandidates) return false;
+        const workspace = this.localDescs;
+        if (!workspace || !this.collaborationContextCurrent(context)) return false;
+        const scope = { accountId: context.account || 'guest', game: context.game, branchId: context.branchId || 'default',
+          sourceHash: context.source, language: context.language,
+          ...(context.groupId ? { groupId: context.groupId, versionId: context.versionId } : {}) };
+        const records = await store.getLocalDroppedCandidates(scope);
+        if (this.localDescs !== workspace || !this.collaborationContextCurrent(context) || !records?.length) return false;
+        const paths = [...new Set(records.map(record => record.filepath).filter(Boolean))];
+        if (!paths.length) return false;
+        const attach = current => {
+          if (!this.collaborationContextCurrent(context) || current.sourceHash !== context.source)
+            throw Object.assign(new Error('The workspace changed before local recovery could be attached.'), { stale: true });
+          state.attachLocalDroppedCandidates(current, records);
+          return current;
+        };
+        if (!this.testMode && store.updateWorkspace) {
+          const committed = await store.updateWorkspace(attach, context.game, { scope, filepaths: paths, includeDropped: true });
+          if (this.localDescs !== workspace || !this.collaborationContextCurrent(context)) return false;
+          this.localDescs = store.mergeWorkspaceRecords?.(workspace, committed) || committed;
+        } else state.attachLocalDroppedCandidates(workspace, records);
+        this.applyWorkspaceOverlay({ filepaths: paths }); this.filterDesc({ changedFilepaths: paths });
+        return true;
       },
       async applyRemoteDropped(records, lang = this.lang, snapshot) {
         if (lang !== this.lang) return;
         const context = this.captureCollaborationContext(), workspace = this.localDescs;
+        const retainedLocal = Object.values(workspace.droppedArchive || {}).filter(record =>
+          (window.WorkspaceState.droppedOwnership?.(record) || record.ownership || 'local') === 'local');
         const affected = new Set([...(records || []).map(record => record.filepath),
           ...Object.keys(workspace.dropped?.[lang] || {}), ...Object.keys(snapshot?.dropped?.[lang] || {})].filter(Boolean));
         if (snapshot) for (const field of ['dropped', 'droppedArchive', 'droppedOutbox', 'droppedAliases', 'droppedConflicts']) {
@@ -110,6 +140,7 @@
           if (snapshot[field] !== undefined) this.localDescs[field] = snapshot[field];
         }
         else window.WorkspaceState.acceptDropped(this.localDescs, records, { game: this.gameVersion, language: lang, acknowledge: true });
+        window.WorkspaceState.attachLocalDroppedCandidates?.(this.localDescs, retainedLocal);
         const descriptions = this.collaborationFileIndexes().descriptions;
         const paths = [...affected].filter(path => descriptions.has(path));
         let sliceStart = Date.now();
@@ -694,6 +725,9 @@
         if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
         if (!current()) return;
         if (this._importingSource || this._reconcilingImport || this.pendingDuplicateLangImport?.mode === 'update') return;
+        if (window.OfflineStore.getLocalDroppedCandidates && window.WorkspaceState.workspaceDroppedOwnership(this.localDescs) === 'online')
+          await this.loadLocalDroppedRecovery();
+        if (!current()) return;
         const key = this.collaborationInitializationKey();
         if (this._collabKey === key && this._collaboration) return;
         this._collaboration?.disconnect();
@@ -892,7 +926,7 @@
               && repair.language === lang && repair.sourceHash === this.sourceIdentity) repair.protectedRevision = file.revision;
           }
           const promotion = options.acknowledgedPromotions?.[file.filepath];
-          const candidate = promotion && window.WorkspaceState.droppedForFile(this.localDescs, file.filepath, lang);
+          const candidate = promotion && window.WorkspaceState.droppedForFile(this.localDescs, file.filepath, lang, promotion);
           if (candidate && options.acknowledgedSourceHash === this.sourceIdentity
             && (!promotion.targetSourceHash || promotion.targetSourceHash === this.sourceIdentity)
             && candidate.id === promotion.id && Number(candidate.revision || 0) === Number(promotion.revision || 0)) {
@@ -927,7 +961,8 @@
           const translationChanged = !arrayEquals(desc.translations[lang] || [], state.translations);
           const needsReview = state.needsReview, hasChanges = state.hasChanges, isMissing = state.isMissing;
           const metadataChanged = desc.needsReview !== needsReview || desc.hasChanges !== hasChanges
-            || desc.isMissing !== isMissing || desc.isRevised !== state.isRevised || desc.isDropped !== state.isDropped;
+            || desc.isMissing !== isMissing || desc.isRevised !== state.isRevised || desc.isDropped !== state.isDropped
+            || !!desc.hasLocalRecovery !== !!state.hasLocalRecovery || !!desc.hasSharedRecovery !== !!state.hasSharedRecovery;
           const local = locals.get(file.filepath);
           const localChanged = !local || !arrayEquals(local.translations?.[lang] || [], state.translations)
             || !arrayEquals(local.translations?.English || [], original.translations.English)
@@ -941,7 +976,7 @@
             else changedFilepaths.push(file.filepath);
           }
           if (translationChanged) desc.translations[lang] = [...state.translations];
-          if (metadataChanged) { desc.needsReview = needsReview; desc.hasChanges = hasChanges; desc.isMissing = isMissing; desc.isRevised = state.isRevised; desc.isDropped = state.isDropped; }
+          if (metadataChanged) { desc.needsReview = needsReview; desc.hasChanges = hasChanges; desc.isMissing = isMissing; desc.isRevised = state.isRevised; desc.isDropped = state.isDropped; desc.hasLocalRecovery = !!state.hasLocalRecovery; desc.hasSharedRecovery = !!state.hasSharedRecovery; }
           if (local && localChanged) updateLocalDesc(local, original, lang, state.translations, { derivedStatus: true });
           else if (!local) {
             const added = makeLocalDesc(original, lang, state.translations, { derivedStatus: true });
@@ -1092,11 +1127,15 @@
           }
           const promotions = { ...(options.promoteDroppedByPath || {}) };
           for (const { desc } of updates) {
-            const candidate = window.WorkspaceState.droppedForFile(this.localDescs, desc.filepath, ctx.language);
-            if (options.inline && (candidate || this.localDescs.droppedConflicts?.[ctx.language]?.[desc.filepath])) {
+            const choices = window.WorkspaceState.droppedCandidatesForFile?.(this.localDescs, desc.filepath, ctx.language)
+              || [window.WorkspaceState.droppedForFile(this.localDescs, desc.filepath, ctx.language)].filter(Boolean);
+            const selected = this.editorCurrentEditingDesc?.filepath === desc.filepath ? this.editorDroppedCandidate : null;
+            const candidate = selected || (choices.length === 1 ? choices[0] : null);
+            if (options.inline && (choices.length || this.localDescs.droppedConflicts?.[ctx.language]?.[desc.filepath])) {
               throw new Error('Open the full editor to review the dropped translation before saving this file.');
             }
-            if (candidate) promotions[desc.filepath] ||= this.capturedDroppedPromotion(desc.filepath, candidate);
+            if (candidate && !promotions[desc.filepath]
+              && !(options.promoteDropped && updates.length === 1)) promotions[desc.filepath] = this.capturedDroppedPromotion(desc.filepath, candidate);
           }
           if (options.promoteDropped && updates.length === 1) promotions[updates[0].desc.filepath] = options.promoteDropped;
           const promotion = updates.length === 1 ? promotions[updates[0].desc.filepath] : null;
@@ -1334,33 +1373,29 @@
           const now = Date.now();
           const source = copy(this.workspaceSourceFile(desc.filepath) || desc);
           const id = crypto.randomUUID();
-          const candidate = { id, recoveryId: id, game: context.game, language: context.language, filepath: desc.filepath,
+          const candidate = { id, recoveryId: id, ownership: 'local', game: context.game, language: context.language, filepath: desc.filepath,
             originSourceHash: context.source, targetSourceHash: context.source, originSourceAvailable: true,
             reason: 'Recovered translation', snapshot: { name: source.name || '', english: [...source.translations.English],
               variables: copy(source.variables || []), remarks: copy(source.remarks || []), stats: copy(source.stats || []), translations: [...lines] } };
           const revisions = [{ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir, lang: context.language,
             savedAt: now, note: 'Recovered dropped translation', needsReview: true, translations: [...lines], sourceHash: context.source,
             sourceRef: { kind: 'sd-baseline', game: context.game, baselineId: context.source, filepath: desc.filepath } }];
-          let result;
-          if (context.client?.registerDroppedCandidate) result = await context.client.registerDroppedCandidate(candidate, { revisions });
-          else {
-            const recover = workspace => {
-              if (!this.collaborationContextCurrent(context) || workspace.sourceHash !== context.source) throw new Error('The workspace changed before recovery.');
-              if (Number(workspace.stagedVersion || 0) < 1) window.WorkspaceState.initializeWorkspace(workspace, { source: [source], sourceHash: context.source,
-                game: context.game, language: context.language });
-              window.WorkspaceState.dropTranslation(workspace, source, context.language, { ...candidate, snapshot: candidate.snapshot });
-              return workspace;
-            };
-            const workspace = this.testMode ? recover(copy(this.localDescs))
-              : await window.OfflineStore.updateWorkspace(recover, context.game, { revisions, filepaths: [desc.filepath] });
-            result = { status: 'local' };
-            if (!this.collaborationContextCurrent(context)) return { stale: true };
-            this.localDescs = window.OfflineStore.mergeWorkspaceRecords?.(this.localDescs, workspace) || workspace;
-          }
+          const recover = workspace => {
+            if (!this.collaborationContextCurrent(context) || workspace.sourceHash !== context.source) throw new Error('The workspace changed before recovery.');
+            if (Number(workspace.stagedVersion || 0) < 1) window.WorkspaceState.initializeWorkspace(workspace, { source: [source], sourceHash: context.source,
+              game: context.game, language: context.language });
+            window.WorkspaceState.dropTranslation(workspace, source, context.language, { ...candidate, snapshot: candidate.snapshot });
+            return workspace;
+          };
+          const scope = { accountId: context.account || 'guest', game: context.game, branchId: context.branchId || 'default', sourceHash: context.source,
+            ...(context.groupId ? { groupId: context.groupId, versionId: context.versionId } : {}) };
+          const workspace = this.testMode ? recover(copy(this.localDescs))
+            : await window.OfflineStore.updateWorkspace(recover, context.game, { scope, revisions, filepaths: [desc.filepath], includeDropped: true });
           if (!this.collaborationContextCurrent(context)) return { stale: true };
+          this.localDescs = window.OfflineStore.mergeWorkspaceRecords?.(this.localDescs, workspace) || workspace;
           this.applyWorkspaceOverlay(); this.filterDesc();
           this._editorCollabBase = this._collaboration?.fileBase(desc.filepath);
-          return result;
+          return { status: 'local' };
         } finally { this._translationWrites--; }
       },
       collabLoadHistoryEntry(id) { return this._collaboration.historyEntry(id); },

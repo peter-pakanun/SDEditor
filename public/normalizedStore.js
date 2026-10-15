@@ -633,7 +633,7 @@
         }
       });
     }
-    const fieldMaps = ['status', 'staged', 'dropped', 'droppedArchive', 'droppedOutbox', 'droppedAliases', 'droppedConflicts', 'droppedAssignments', 'placeholderRepairArchive', 'sourceCarryRepairArchive', 'invalidTranslationArchive'];
+    const fieldMaps = ['status', 'staged', 'dropped', 'droppedArchive', 'droppedOutbox', 'droppedAliases', 'droppedConflicts', 'droppedConflictArchive', 'droppedAssignments', 'placeholderRepairArchive', 'sourceCarryRepairArchive', 'invalidTranslationArchive'];
     const languageMaps = new Set(['staged', 'dropped', 'droppedConflicts', 'droppedAssignments']);
     function verificationMap(field, value) {
       const map = value || {};
@@ -656,7 +656,7 @@
       if (Array.isArray(workspace?.importRecovery) || workspace?._storageArchiveKinds?.includes('importRecovery')) meta._storageArchiveKinds = ['importRecovery'];
       for (const desc of workspace?.descs || []) {
         const original = originals.get(desc.filepath), overrides = {};
-        for (const [field, value] of Object.entries(desc)) if (field !== 'translations' && !['hasChanges', 'isMissing', 'needsReview', 'isDropped', 'isRevised', 'languageStatus', 'statusLanguage'].includes(field)
+        for (const [field, value] of Object.entries(desc)) if (field !== 'translations' && !['hasChanges', 'isMissing', 'needsReview', 'isDropped', 'hasLocalRecovery', 'hasSharedRecovery', 'isRevised', 'languageStatus', 'statusLanguage'].includes(field)
           && (!original || !same(value, original[field]))) overrides[field] = value;
         const value = { filepath: desc.filepath, overrides, languages: Object.keys(desc.translations || {}) };
         if (!original) value.fallback = desc;
@@ -739,6 +739,9 @@
         : await originalFiles(tx, scope, files.map(item => item.value.filepath));
       const originals = new Map(originalValues.filter(Boolean).map(desc => [desc.filepath, desc]));
       const workspace = assembleWorkspace(meta, files, [...new Map(records.map(r => [r.key, r])).values()].sort((a,b) => (a.value.order || 0) - (b.value.order || 0)), originals, filepaths == null);
+      workspace.accountId ||= scope.accountId;
+      workspace.game ||= scope.game;
+      workspace.branchId ||= scope.branchId;
       if (filepaths == null && workspace.importArchive) {
         const retained = await get(tx, stores.assets, baselineKey(scope));
         if (!retained?.archive) throw new Error('The accepted archive descriptor is unavailable. Reimport its matching original ZIP.');
@@ -753,7 +756,7 @@
       for (const [id, item] of after) if (!same(before.get(id), item)) store.put(item);
       for (const id of before.keys()) if (!after.has(id)) store.delete(id);
     }
-    async function writeWorkspace(tx, scope, workspace, filepaths) {
+    async function writeWorkspace(tx, scope, workspace, filepaths, resolveLinked = true) {
       if (!workspace) return;
       W.pruneWorkspaceStatus(workspace);
       const id = scopeKey(scope), paths = filepaths || workspace.descs.map(file => file.filepath);
@@ -781,6 +784,33 @@
       if (!same(beforeMeta, parts.meta)) tx.objectStore(stores.meta).put({ key: id, scope: id, value: copy(parts.meta) });
       await writeDifference(tx, stores.files, oldFiles, parts.files);
       await writeDifference(tx, stores.records, [...new Map(oldRecords.map(r => [r.key, r])).values()], parts.records);
+      if (resolveLinked) for (const candidate of Object.values(workspace.droppedArchive || {})) {
+        const origin = candidate.localRecoveryScope;
+        if (W.droppedOwnership(candidate) !== 'local' || !origin || !['promoted', 'discarded'].includes(candidate.status)
+          || filepaths && !filepaths.includes(candidate.filepath) || scopeKey(origin) === id) continue;
+        if (String(origin.accountId) !== String(scope.accountId) || origin.game !== scope.game
+          || (origin.branchId || 'default') !== (scope.branchId || 'default') || origin.sourceHash !== scope.sourceHash
+          || origin.groupId || origin.workspaceGroupId || origin.versionId || origin.workspaceVersionId)
+          throw new Error('The local recovery belongs to another workspace.');
+        // The local disposition and this workspace's save/receipt share the
+        // same transaction. Returning to the standalone workspace cannot revive
+        // a copy already resolved from its managed recovery chooser.
+        const original = await readWorkspace(tx, origin, [candidate.filepath]);
+        if (!original) continue;
+        const current = W.droppedForFile(original, candidate.filepath, candidate.language, { id: candidate.id, ownership: 'local' });
+        if (!current) {
+          const resolved = Object.values(original.droppedArchive || {}).find(record => record.id === candidate.id && W.droppedOwnership(record) === 'local');
+          if (resolved && resolved.status !== candidate.status) throw Object.assign(
+            new Error('The local recovery was resolved in another view. Reload its current state before continuing.'), { code: 'DROPPED_PROMOTION_CHANGED', stale: true });
+          continue;
+        }
+        if (Number(current.revision || 0) !== Number(candidate.revision || 0) || !same(current.snapshot, candidate.snapshot))
+          throw Object.assign(new Error('The local recovery changed. Review its current copy before continuing.'), { code: 'DROPPED_PROMOTION_CHANGED', stale: true });
+        const expected = { id: current.id, ownership: 'local', revision: current.revision || 0, targetSourceHash: origin.sourceHash };
+        if (candidate.status === 'discarded') W.discardDropped(original, candidate.filepath, candidate.language, expected);
+        else W.resolveDroppedPromotion(original, candidate.filepath, candidate.language, expected, { sourceHash: origin.sourceHash });
+        await writeWorkspace(tx, origin, original, [candidate.filepath], false);
+      }
     }
     async function migrate(scope, legacyWorkspace, legacySource, baseline, language) {
       const id = scopeKey(scope);
@@ -1236,8 +1266,32 @@
       invalidRepairs.set(id, work);
       try { return await work; } finally { invalidRepairs.delete(id); }
     }
+    async function removeDeletedRecoveries(scope) {
+      if (!W?.removeDeletedRecoveryCopies || !scope?.sourceHash) return { removed: [] };
+      const captured = { ...scope }, id = scopeKey(captured), baseId = baselineKey(captured);
+      return transaction([stores.meta, stores.records, stores.baseline, stores.assets, stores.migration], 'readwrite', async tx => {
+        const meta = await get(tx, stores.meta, id), asset = await get(tx, stores.assets, baseId), archive = asset?.archive;
+        const migration = await get(tx, stores.migration, id);
+        if (!meta || migration?.state !== 'ready' || archive?.baselineId !== captured.sourceHash || !Number.isSafeInteger(archive.descriptionCount)) return { removed: [] };
+        const fields = fieldMaps.filter(field => field.startsWith('dropped'));
+        const records = (await Promise.all(fields.map(field => request(tx.objectStore(stores.records).index('by_kind').getAll(key(id, field)))))).flat();
+        if (!records.length) return { removed: [] };
+        const baselineIndex = tx.objectStore(stores.baseline).index('by_scope');
+        const count = baselineIndex.count ? await request(baselineIndex.count(baseId)) : (await request(baselineIndex.getAll(baseId))).length;
+        // An incomplete or unavailable immutable cache cannot prove removal.
+        if (count !== archive.descriptionCount) return { removed: [] };
+        const workspace = assembleWorkspace(meta, [], records, new Map(), false), paths = W.droppedRecoveryPaths(workspace);
+        const originals = await Promise.all(paths.map(filepath => get(tx, stores.baseline, key(baseId, filepath))));
+        const removed = paths.filter((filepath, index) => !originals[index]);
+        if (!W.removeDeletedRecoveryCopies(workspace, removed)) return { removed: [] };
+        const next = splitWorkspace(captured, workspace).records.filter(record => fields.includes(record.value.field));
+        await writeDifference(tx, stores.records, records, next);
+        return { removed };
+      });
+    }
     async function workspace(scope, options = {}) {
       await ensure(scope);
+      if (options.filepaths == null || options.allDropped) await removeDeletedRecoveries(scope);
       await repairInvalidStages(scope);
       if (options.filepaths == null) await repairCarriedStages(scope);
       return transaction([stores.meta, stores.files, stores.records, stores.baseline, stores.assets], 'readonly', tx => readWorkspace(tx, scope, options.filepaths, options.includeDropped, options.allDropped));
@@ -1342,6 +1396,7 @@
       }
       // Three callers own independently mutable views of original file data.
       const baseline = raw.retained && { ...raw.retained, source: yield* activationCopy(source) };
+      if (workspace) { workspace.accountId ||= scope.accountId; workspace.game ||= scope.game; workspace.branchId ||= scope.branchId; }
       return { workspace, source, baseline,
         ...(workspace?.importArchive && raw.retained?.archive?.baselineId === scope.sourceHash ? { sourceBaselineId: scope.sourceHash } : {}) };
     }
@@ -1361,6 +1416,7 @@
     async function activation(scope) {
       const captured = { ...scope };
       await ensure(captured);
+      await removeDeletedRecoveries(captured);
       await repairInvalidStages(captured);
       await repairCarriedStages(captured);
       const id = scopeKey(captured), baseId = baselineKey(captured);
@@ -1408,6 +1464,7 @@
         if (conversion && conversion.state !== 'ready') throw new Error('The destination workspace is still being recovered. Open it to finish recovery before importing this source again.');
         const existing = await readWorkspace(tx, scope);
         committed = W.mergeSourceImportWorkspace ? W.mergeSourceImportWorkspace(existing, workspace, { source, game: scope.game }) : workspace;
+        W.removeDeletedRecoveryCopies?.(committed, W.droppedRecoveryPaths(committed).filter(filepath => !originals.has(filepath)));
         const parts = splitWorkspace(scope, committed, originals);
         await writeDifference(tx, stores.files, await all(tx, stores.files, id), parts.files);
         await writeDifference(tx, stores.records, await all(tx, stores.records, id), parts.records);
@@ -1739,7 +1796,7 @@
       });
     }
     return { stores, dependencies, available, ensure, migrate, workspace, source, activation, saveWorkspace, transaction, get, all, originalFiles, selectedRows, row, key, scopeKey, baselineKey, readWorkspace, writeWorkspace,
-      importScope, assets, hasScope, scopeAvailable, clearScope, mergeWorkspaceRecords, beginBatch, fingerprint, normalizeHistory, trackMigration, repairCarriedStages, repairInvalidStages,
+      importScope, assets, hasScope, scopeAvailable, clearScope, mergeWorkspaceRecords, beginBatch, fingerprint, normalizeHistory, trackMigration, repairCarriedStages, repairInvalidStages, removeDeletedRecoveries,
       draftGet, draftUpdate, draftList, draftRow, hydrateDraft, putSubmission, listSubmissions, updateSubmission, copy, same,
       tmStores, tmCapture, getTranslationMemory, getTranslationMemoryState, putTranslationMemoryUnits, deleteTranslationMemoryUnit, getTranslationMemoryPending,
       applyTranslationMemoryRemote, acknowledgeTranslationMemoryWrite, rejectTranslationMemoryWrite, resolveTranslationMemoryConflict,

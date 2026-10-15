@@ -135,7 +135,8 @@ test('dropped review paths include saved-only blockers and remain scoped to acco
   const sourceHash = 'a'.repeat(64);
   const { app } = editor({ sourceIdentity: sourceHash, localDescs: { sourceHash, game: 'poe1', collaborationAccountId: 'alice',
     droppedConflicts: { Thai: { 'local.txt': { targetSourceHash: sourceHash }, 'old.txt': { targetSourceHash: 'b'.repeat(64) } },
-      German: { 'german.txt': { targetSourceHash: sourceHash } } } } });
+      German: { 'german.txt': { targetSourceHash: sourceHash } } } },
+    descs: ['local.txt','saved.txt','shared.txt','german.txt'].map(filepath => ({ filepath })) });
   app.collaborationState.droppedReviewPaths = ['saved.txt', 'local.txt'];
   app.collaborationState.droppedConflicts = { 'shared.txt': { targetSourceHash: sourceHash } };
   assert.deepEqual(Array.from(app.collaborationDroppedReviewPaths), ['local.txt', 'saved.txt', 'shared.txt']);
@@ -173,7 +174,7 @@ test('dropped warning opens its hidden filter, cancels pending search, and prese
   assert.equal(app.currentPage, 1); assert.equal(filtered, 1); assert.equal(focused, 1);
 });
 
-test('hidden dropped review displays preserved conflicts for files absent from the current source', () => {
+test('authoritatively removed files are outside the current dropped review workload', () => {
   const sourceHash = 'a'.repeat(64), preserved = { targetSourceHash: sourceHash,
     yours: { snapshot: { english: ['Removed English'], translations: ['local preserved text'] } },
     shared: { snapshot: { english: ['Removed English'], translations: ['shared preserved text'] } } };
@@ -182,9 +183,11 @@ test('hidden dropped review displays preserved conflicts for files absent from t
       droppedConflicts: { Thai: { 'stat.txt': copy(preserved), 'removed.txt': copy(preserved) } } } });
   assert.equal(app.collaborationUnloadedDroppedConflicts.length, 0);
   app.selectedFileFilters = ['droppedConflict'];
-  assert.deepEqual(Array.from(app.collaborationUnloadedDroppedConflicts, item => item.filepath), ['removed.txt']);
+  assert.deepEqual(Array.from(app.collaborationDroppedReviewPaths), ['stat.txt']);
+  assert.equal(app.collaborationUnloadedDroppedConflicts.length, 0);
   app.searchText = 'SHARED preserved';
-  assert.equal(app.collaborationUnloadedDroppedConflicts.length, 1);
+  assert.equal(app.collaborationUnloadedDroppedConflicts.length, 0);
+  assert.ok(app.localDescs.droppedConflicts.Thai['removed.txt'], 'Historical evidence stays retained.');
   app.searchText = 'unrelated';
   assert.equal(app.collaborationUnloadedDroppedConflicts.length, 0);
   app.searchText = ''; app.cloudUser = { id: 'bob' };

@@ -84,7 +84,7 @@
       managedVersionsUnavailable: false, managedShowWithdrawn: false, localVersions: [], offlineVersionName: '',
       managedCatalogLoading: false, managedCatalogLoaded: false, managedLocalVersionsLoading: false, managedLocalVersionsLoaded: false,
       managedDetailsLoading: false, managedDetailsLoaded: false,
-      activeManagedVersionId: '', managedActiveDetails: null, managedWorkspaceMode: 'offline', managedNow: Date.now(), managedUploadVisible: false, managedUpload: null,
+      activeManagedVersionId: '', managedActiveDetails: null, managedWorkspaceMode: 'offline', managedWorkspaceIdentity: null, managedNow: Date.now(), managedUploadVisible: false, managedUpload: null,
       managedUploadName: '', managedUploadDeadline: '', managedUploadFile: null, managedUploadBytes: 0,
       managedUploadError: '', managedDuplicateChoices: {}, managedDuplicateVersion: null, managedMetadataVisible: false, managedMetadataVersion: null, managedMetadataName: '', managedMetadataDeadline: '',
       managedRecoveryVisible: false, managedRecoveryTeam: null }; },
@@ -155,6 +155,13 @@
       },
       managedImportZipDisabled() {
         return this.managedCatalogAccess && this.managedWorkspaceMode === 'online';
+      },
+      managedWorkspaceOrigin() {
+        // Entry mode and network availability do not own a workspace's recovery
+        // chain. A retained managed group remains online when opened offline.
+        const identity = this.managedWorkspaceIdentity, scope = this.managedWorkspaceScope();
+        return identity && ['accountId', 'game', 'branchId', 'sourceHash', 'groupId'].every(field => (identity[field] || '') === (scope[field] || ''))
+          ? 'online' : 'local';
       },
       managedStatusName() {
         const currentLocalName = this.localDescs?.sourceHash === this.sourceIdentity ? this.localDescs.versionName : '';
@@ -316,6 +323,12 @@
       },
       managedWorkspaceScope(sourceHash = this.sourceIdentity, group = this.activeContentGroup) { return { accountId: this.cloudProfileId || this.cloudUser?.id || 'guest', game: this.gameVersion, branchId: this.branchId || DEFAULT_BRANCH, sourceHash: sourceHash || '',
         ...(group?.contentMode === 'statdescription' && !group.legacyVersionId ? { versionId: group.versionId, groupId: group.id, contentMode: 'statdescription' } : {}) }; },
+      managedRestoreWorkspaceIdentity(scope, metadata, workspace) {
+        const online = !!scope?.groupId || metadata?.workspaceOrigin === 'online' || workspace?.workspaceOrigin === 'online';
+        this.managedWorkspaceIdentity = online && scope?.sourceHash ? { ...scope,
+          catalogVersionId: metadata?.catalogVersionId || workspace?.catalogVersionId || scope.versionId || '' } : null;
+        return this.managedWorkspaceIdentity ? 'online' : 'local';
+      },
       syncManagedWorkspaceScope() { if (this.gameVersion) root.OfflineStore?.setWorkspaceContext?.(this.managedWorkspaceScope()); },
       managedScopeChanged({ deferWorkspace = this.versionChooserVisible } = {}) {
         if (this.testMode || !this.gameVersionSelected || !this.offlineStoreReady) return Promise.resolve();
@@ -332,7 +345,7 @@
         const key = this.managedCatalogScope, run = this._managedScopeRun = (this._managedScopeRun || 0) + 1;
         const owner = JSON.stringify([this.cloudProfileId || 'guest', this.gameVersion, this.branchId]);
         const previousOwner = this._managedWorkspaceOwner;
-        if (previousOwner !== owner) this.managedWorkspaceMode = 'offline';
+        if (previousOwner !== owner) { this.managedWorkspaceMode = 'offline'; this.managedWorkspaceIdentity = null; }
         const previousCatalogOwner = this._managedCatalogOwner || previousOwner;
         if (previousCatalogOwner && JSON.parse(previousCatalogOwner)[0] === 'guest' && this.cloudSignedIn
           && JSON.parse(previousCatalogOwner)[1] === this.gameVersion && JSON.parse(previousCatalogOwner)[2] === this.branchId) this._managedGuestAdoptionScope = owner;
@@ -668,6 +681,12 @@
           if (!current()) return false;
           this._managedWorkspaceOwner = JSON.stringify([scope.accountId, scope.game, scope.branchId]);
           if (!this.sourceLoaded || this.sourceIdentity !== scope.sourceHash) return false;
+          const origin = this.managedRestoreWorkspaceIdentity(scope, activated?.metadata, activated?.workspace);
+          if (origin === 'online' && this.localDescs) this.localDescs.workspaceOrigin = 'online';
+          if (origin === 'online' && root.OfflineStore?.getLocalDroppedCandidates) {
+            await this.loadLocalDroppedRecovery?.();
+            if (!current()) return false;
+          }
           await task('Updating the active source version', () => this.managedAssociateActive());
           if (!current()) return false;
           if (this.managedOnlineAvailable && this.managedActiveVersion) this.queueManagedActiveRefresh();
@@ -784,7 +803,7 @@
             if (!current()) return;
             if (root.SDBaselineFiles) await task('Caching the verified original ZIP', () => root.SDBaselineFiles.cacheOriginalZip(blob, baseline.archive, { current }));
             if (!current()) return;
-            const workspace = { descs: [], status: {}, branchId: scope.branchId, sourceHash: version.sourceHash, importArchive: baseline.archive, catalogVersionId: version.id };
+            const workspace = { descs: [], status: {}, branchId: scope.branchId, sourceHash: version.sourceHash, importArchive: baseline.archive, catalogVersionId: version.id, workspaceOrigin: 'online' };
             root.WorkspaceState.initializeWorkspace(workspace, { game: version.game, branchId: scope.branchId, sourceHash: version.sourceHash, source: baseline.source, language: targetLanguage });
             await task('Storing the verified source version locally', () => root.OfflineStore.saveSourceWorkspaceWithRevisions(copy(baseline.source), workspace, [], scope, baseline));
           }
@@ -793,14 +812,16 @@
             const baseline=await task('Reading the retained immutable baseline',()=>root.OfflineStore.getImportedBaseline(version.sourceHash,scope));if(!current())return;
             if(!baseline || baseline.archive?.baselineId!==version.sourceHash)throw new Error('The cached original baseline is unavailable. Open this group while connected to verify its original ZIP.');
             root.CollaborationProtocol.validateBaselineSource(baseline.source, version.archive);
-            const workspace={descs:[],status:{},branchId:scope.branchId,sourceHash:version.sourceHash,importArchive:baseline.archive,catalogVersionId:version.id};
+            const workspace={descs:[],status:{},branchId:scope.branchId,sourceHash:version.sourceHash,importArchive:baseline.archive,catalogVersionId:version.id,workspaceOrigin:'online'};
             root.WorkspaceState.initializeWorkspace(workspace,{game:version.game,branchId:scope.branchId,sourceHash:version.sourceHash,source:baseline.source,language:targetLanguage});
             await task('Creating this content group workspace',()=>root.OfflineStore.saveSourceWorkspaceWithRevisions(copy(baseline.source),workspace,[],scope,baseline));if(!current())return;
           }
-          await task('Storing selected version and team details', () => root.OfflineStore.setVersionMetadata(scope, { catalogVersionId: version.id, officialName: version.name, ...(details ? { details: copy(details) } : {}) }));
+          await task('Storing selected version and team details', () => root.OfflineStore.setVersionMetadata(scope, { catalogVersionId: version.id, officialName: version.name, workspaceOrigin: 'online', ...(details ? { details: copy(details) } : {}) }));
           if (!current()) return;
           const opened = await task('Opening the prepared workspace', () => this.managedActivateWorkspace(version.sourceHash, targetLanguage, initialization));
           if (opened && current()) {
+            this.managedRestoreWorkspaceIdentity(scope, { workspaceOrigin: 'online', catalogVersionId: version.id });
+            if (this.localDescs) this.localDescs.workspaceOrigin = 'online';
             this.managedWorkspaceMode = 'online';
             this.managedSetOperationError('open', '');
             if (acknowledgedWindow && this.managedActiveVersion?.id === version.id

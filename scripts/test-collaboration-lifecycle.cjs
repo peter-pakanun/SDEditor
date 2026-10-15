@@ -1594,28 +1594,33 @@ test('duplicate import continuation shares one ZIP digest and excludes archive d
   assert.equal(a.zipHash, 'd'.repeat(64)); assert.equal(a.zipSize, file.size);
 });
 
-test('connected recovery registers a separate dropped candidate without publishing a translation edit', async () => {
+test('connected history recovery stays local and preserves the independent shared Dropped copy', async () => {
   const { editor: e, window } = harness({ realImport: true }); const desc = e.descs[0], commit = deferred();
-  const original = plain(desc.translations.Thai), lines = ['recovered {0}', 'second recovered']; let candidate;
-  window.OfflineStore.updateWorkspace = () => assert.fail('The connected client registers candidate and workspace atomically');
+  const original = plain(desc.translations.Thai), lines = ['recovered {0}', 'second recovered']; let candidate, captured;
+  e.localDescs.workspaceOrigin = 'online';
+  const shared = window.WorkspaceState.dropTranslation(e.localDescs, desc, 'Thai', { id: 'dropped_connected-shared', ownership: 'online',
+    game: e.gameVersion, translations: ['shared {0}', 'shared second'] });
+  window.OfflineStore.updateWorkspace = async (recover, game, options) => {
+    const workspace = recover(plain(e.localDescs)); captured = plain({ game, options });
+    candidate = plain(workspace.dropped.Thai[desc.filepath]);
+    await commit.promise; return workspace;
+  };
   e._collaboration = {
-    registerDroppedCandidate: async (file, options) => {
-      candidate = plain({ file, options }); await commit.promise;
-      window.WorkspaceState.dropTranslation(e.localDescs, desc, 'Thai', { ...file, snapshot: file.snapshot });
-      return { status: 'local' };
-    },
+    registerDroppedCandidate: () => assert.fail('Local history recovery cannot change the shared Dropped chain'),
     fileBase: () => ({ filepath: desc.filepath, translations: original, revision: 5 }),
     save: () => assert.fail('A review candidate cannot publish an edit'),
     retry: () => assert.fail('Candidate registration must not upload changes'),
   };
   const recovering = e.restoreReviewCandidate(desc, lines); await tick();
-  assert.deepEqual(plain(desc.translations.Thai), original); assert.deepEqual(candidate.file.snapshot.translations, lines);
-  assert.equal(candidate.file.originSourceHash, e.sourceIdentity);
-  assert.equal(candidate.file.targetSourceHash, e.sourceIdentity);
-  assert.deepEqual(candidate.options.revisions[0].translations, lines);
+  assert.deepEqual(plain(desc.translations.Thai), original); assert.deepEqual(candidate.snapshot.translations, lines);
+  assert.equal(candidate.ownership, 'local'); assert.equal(candidate.originSourceHash, e.sourceIdentity);
+  assert.equal(candidate.targetSourceHash, e.sourceIdentity);
+  assert.deepEqual(captured.options.revisions[0].translations, lines);
+  assert.equal(captured.options.scope.sourceHash, e.sourceIdentity); assert.equal(captured.options.includeDropped, true);
   commit.resolve(); assert.equal((await recovering).status, 'local');
   assert.deepEqual(plain(desc.translations.Thai), original);
-  assert.deepEqual(plain(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai').snapshot.translations), lines);
+  assert.deepEqual(plain(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai', 'local').snapshot.translations), lines);
+  assert.equal(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai', 'online').id, shared.id);
   assert.equal(e._editorCollabBase.revision, 5);
 });
 

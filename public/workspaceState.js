@@ -76,7 +76,7 @@
     }
     return status;
   }
-  const statusFlags = new Set(['hasChanges', 'isMissing', 'isEdited', 'isRevised', 'isDropped', 'isMetadataCorrection', 'isInvalidTranslation', 'languageBlockPresent', 'translationIssues', 'needsReview', 'trackedForExport']);
+  const statusFlags = new Set(['hasChanges', 'isMissing', 'isEdited', 'isRevised', 'isDropped', 'hasLocalRecovery', 'hasSharedRecovery', 'isMetadataCorrection', 'isInvalidTranslation', 'languageBlockPresent', 'translationIssues', 'needsReview', 'trackedForExport']);
   const cleanMetadata = value => Object.fromEntries(Object.entries(value || {})
     .filter(([field]) => !statusFlags.has(field) && !excluded.has(field)));
   function setFileMetadata(status, language, patch = {}, local) {
@@ -199,7 +199,7 @@
   const sourceMetadata = desc => ({ variables: copy(desc?.variables || []), remarks: copy(desc?.remarks || []),
     stats: copy(desc?.stats || []), name: String(desc?.name || '') });
   function classifySourceCarry(previous, current, language, translations) {
-    if (!current) return { action: 'drop', reason: 'File removed from source' };
+    if (!current) return { action: 'remove', reason: 'File removed from source' };
     if (!previous || !equal(lines(previous.translations?.English), lines(current.translations?.English)))
       return { action: 'drop', reason: 'English source changed' };
     const carried = lines(translations), baseline = lines(current.translations?.[language]);
@@ -220,8 +220,8 @@
     return validHash(correction?.beforeHash) && validHash(correction?.afterHash) && correction.beforeHash !== correction.afterHash
       && (!validHash(acceptedHash) || acceptedHash === correction.afterHash);
   }
-  const droppedScopeCache = new WeakMap();
-  function invalidateDroppedScopes(workspace) { droppedScopeCache.delete(workspace); }
+  const droppedScopeCache = new WeakMap(), droppedCandidateCache = new WeakMap();
+  function invalidateDroppedScopes(workspace) { droppedScopeCache.delete(workspace); droppedCandidateCache.delete(workspace); }
   function sourceHashes(...values) {
     return [...new Set(values.flat().filter(value => typeof value === 'string' && !!value))];
   }
@@ -239,17 +239,104 @@
     if ((record.branchId || 'default') !== (workspace?.branchId || 'default')) return false;
     if (record.groupId && record.groupId !== (workspace?.workspaceGroupId || workspace?.groupId || '')) return false;
     if (record.collaborationAccountId && String(record.collaborationAccountId) !== String(workspace?.collaborationAccountId || '')) return false;
+    if (record.localRecoveryScope && (String(record.localRecoveryScope.accountId) !== String(workspace?.accountId || workspace?.collaborationAccountId || 'guest')
+      || record.localRecoveryScope.game !== game || (record.localRecoveryScope.branchId || 'default') !== (workspace?.branchId || 'default'))) return false;
     return true;
+  }
+  function droppedOwnership(record) {
+    if (record?.ownership === 'local' || record?.ownership === 'online') return record.ownership;
+    // Existing server generations retain their identity. Unacknowledged local
+    // snapshots remain local; a ZIP hash or catalog association proves no ancestry.
+    return record?.groupId || /^dropped_/.test(record?.id || '') ? 'online' : 'local';
+  }
+  function workspaceDroppedOwnership(workspace) {
+    return workspace?.workspaceOrigin === 'online' || workspace?.workspaceGroupId || workspace?.groupId ? 'online' : 'local';
+  }
+  function droppedCandidatesForFile(workspace, filepath, language) {
+    if (!object(workspace)) return [];
+    const context = [workspace.droppedArchive, workspace.dropped, workspace.sourceHash, workspace.workspaceOrigin,
+      workspace.workspaceGroupId || workspace.groupId, workspace.game, workspace.branchId, workspace.collaborationAccountId];
+    let cached = droppedCandidateCache.get(workspace);
+    if (!cached || context.some((value, index) => value !== cached.context[index])) {
+      const records = Object.values(workspace.droppedArchive || {});
+      const paths = new Map();
+      for (const record of records) {
+        if (!record?.id || !inWorkspaceScope(workspace, record)
+          || workspace.sourceHash && !candidateScopes(record).includes(workspace.sourceHash)) continue;
+        const key = serialized([record.language, record.filepath]);
+        if (!paths.has(key)) paths.set(key, []);
+        paths.get(key).push(record);
+      }
+      cached = { context, paths }; droppedCandidateCache.set(workspace, cached);
+    }
+    const preferred = workspaceDroppedOwnership(workspace);
+    const selected = new Map(), active = workspace.dropped?.[language]?.[filepath];
+    for (const record of [...(cached.paths.get(serialized([language, filepath])) || []), active]) {
+      if (!record?.id || !inWorkspaceScope(workspace, record)
+        || workspace.sourceHash && !candidateScopes(record).includes(workspace.sourceHash)) continue;
+      record.ownership = droppedOwnership(record);
+      const key = record.ownership + ':' + record.id, previous = selected.get(key);
+      if (!previous || Number(record.revision || 0) > Number(previous.revision || 0)
+        || Number(record.revision || 0) === Number(previous.revision || 0) && (!previous.status || previous.status === 'dropped')) selected.set(key, record);
+    }
+    const activeOnline = active && droppedOwnership(active) === 'online' && (!active.status || active.status === 'dropped') ? active.id : null;
+    return [...selected.values()].filter(record => (!record.status || record.status === 'dropped')
+      && (record.ownership !== 'online' || !activeOnline || record.id === activeOnline)).sort((a, b) => Number(b.ownership === preferred) - Number(a.ownership === preferred)
+      || Number(b === active) - Number(a === active)
+      || timestamp(b.createdAt) - timestamp(a.createdAt));
+  }
+  function retainDropped(workspace, record) {
+    const ownership = droppedOwnership(record), current = workspace.droppedArchive[record.id];
+    if (current && droppedOwnership(current) !== ownership) workspace.droppedArchive[droppedOwnership(current) + ':' + current.id] = copy(current);
+    const key = current && droppedOwnership(current) !== ownership && ownership === 'local' ? 'local:' + record.id : record.id;
+    workspace.droppedArchive[key] = copy({ ...record, ownership });
+    return record;
+  }
+  function attachLocalDroppedCandidates(workspace, records) {
+    maps(workspace);
+    for (const incoming of records || []) {
+      if (!incoming?.id || !inWorkspaceScope(workspace, incoming) || !candidateScopes(incoming).includes(workspace.sourceHash)) continue;
+      const retained = Object.values(workspace.droppedArchive).find(record => record.id === incoming.id && droppedOwnership(record) === 'local');
+      if (retained) {
+        // A disposition in either view wins over a stale unresolved attachment.
+        if ((!retained.status || retained.status === 'dropped') && ['promoted', 'discarded'].includes(incoming.status)
+          && Number(incoming.revision || 0) >= Number(retained.revision || 0) && equal(incoming.snapshot, retained.snapshot)) {
+          retainDropped(workspace, { ...retained, status: incoming.status, resolvedAt: incoming.resolvedAt });
+          if (workspace.dropped[retained.language]?.[retained.filepath]?.id === retained.id
+            && droppedOwnership(workspace.dropped[retained.language][retained.filepath]) === 'local') delete workspace.dropped[retained.language][retained.filepath];
+        }
+        continue;
+      }
+      retainDropped(workspace, { ...copy(incoming), ownership: 'local' });
+    }
+    invalidateDroppedScopes(workspace);
+    return workspace;
+  }
+  function separateDroppedCopies(workspace) {
+    if (!object(workspace)) return workspace;
+    maps(workspace);
+    for (const [language, conflicts] of Object.entries(workspace.droppedConflicts)) for (const [filepath, conflict] of Object.entries(conflicts)) {
+      if (!conflict.yours || droppedOwnership(conflict.yours) !== 'local' || !conflict.shared) continue;
+      // Keep the full old decision evidence, but two independent owners are no
+      // longer competing for a shared slot and must not block an ordinary save.
+      (workspace.droppedConflictArchive ||= {})[serialized([language, filepath, conflict.yours.id, conflict.shared.id])] = copy(conflict);
+      retainDropped(workspace, { ...conflict.yours, ownership: 'local' });
+      retainDropped(workspace, { ...conflict.shared, ownership: 'online' });
+      delete conflicts[filepath];
+    }
+    workspace.droppedOwnershipVersion = 1;
+    invalidateDroppedScopes(workspace);
+    return workspace;
   }
   function wasDroppedInSource(workspace, filepath, language) {
     if (!object(workspace) || !workspace.sourceHash) return false;
     const context = [workspace.droppedArchive, workspace.sourceHash, workspace.game || workspace.sourceBaseline?.game,
-      workspace.collaborationAccountId, workspace.branchId || 'default', workspace.workspaceGroupId || workspace.groupId || ''];
+      workspace.collaborationAccountId, workspace.branchId || 'default', workspace.workspaceGroupId || workspace.groupId || '', workspace.workspaceOrigin, workspace.accountId];
     let cached = droppedScopeCache.get(workspace);
     if (!cached || context.some((value, index) => value !== cached.context[index])) {
       const byLanguage = new Map();
       for (const record of Object.values(workspace.droppedArchive || {})) {
-        if (!inWorkspaceScope(workspace, record) || !candidateScopes(record).includes(workspace.sourceHash)
+        if (!inWorkspaceScope(workspace, record) || droppedOwnership(record) !== workspaceDroppedOwnership(workspace) || !candidateScopes(record).includes(workspace.sourceHash)
           || !record.filepath || !languageName(record.language)) continue;
         if (!byLanguage.has(record.language)) byLanguage.set(record.language, new Set());
         byLanguage.get(record.language).add(record.filepath);
@@ -262,11 +349,50 @@
     workspace.staged ||= {}; workspace.dropped ||= {}; workspace.droppedArchive ||= {}; workspace.droppedOutbox ||= []; workspace.droppedConflicts ||= {};
     return workspace;
   }
-  function droppedForFile(workspace, filepath, language) {
-    const candidate = workspace?.dropped?.[language]?.[filepath];
-    return candidate && inWorkspaceScope(workspace, candidate)
-      && (!workspace?.sourceHash || candidateScopes(candidate).includes(workspace.sourceHash))
-      && (!candidate.status || candidate.status === 'dropped') ? candidate : null;
+  function droppedRecoveryPaths(workspace) {
+    const paths = new Set();
+    const add = (record, fallback) => {
+      const filepath = record?.filepath || record?.candidate?.filepath || record?.yours?.filepath || record?.shared?.filepath || fallback;
+      if (filepath) paths.add(filepath);
+    };
+    for (const field of ['dropped', 'droppedConflicts', 'droppedAssignments'])
+      for (const entries of Object.values(workspace?.[field] || {})) for (const [filepath, value] of Object.entries(entries || {})) add(value, filepath);
+    for (const field of ['droppedArchive', 'droppedConflictArchive', 'droppedOutbox']) for (const value of Object.values(workspace?.[field] || {})) add(value);
+    return [...paths];
+  }
+  function removeDeletedRecoveryCopies(workspace, filepaths) {
+    if (!object(workspace)) return false;
+    const removed = new Set(filepaths), ids = new Set();
+    let changed = false;
+    const deleted = (record, fallback) => removed.has(record?.filepath || record?.candidate?.filepath
+      || record?.yours?.filepath || record?.shared?.filepath || fallback);
+    const remember = record => {
+      for (const value of [record, record?.candidate, record?.yours, record?.shared]) if (value?.id) ids.add(value.id);
+      changed = true;
+    };
+    for (const field of ['dropped', 'droppedConflicts', 'droppedAssignments'])
+      for (const entries of Object.values(workspace[field] || {})) for (const [filepath, value] of Object.entries(entries || {}))
+        if (deleted(value, filepath)) { remember(value); delete entries[filepath]; }
+    for (const field of ['droppedArchive', 'droppedConflictArchive']) for (const [id, value] of Object.entries(workspace[field] || {}))
+      if (deleted(value)) { remember(value); ids.add(id); delete workspace[field][id]; }
+    if (workspace.droppedOutbox) workspace.droppedOutbox = workspace.droppedOutbox.filter(value => {
+      if (!deleted(value)) return true;
+      remember(value); return false;
+    });
+    let aliasesChanged;
+    do {
+      aliasesChanged = false;
+      for (const [id, target] of Object.entries(workspace.droppedAliases || {})) if (ids.has(id) || ids.has(target)) {
+        ids.add(id); delete workspace.droppedAliases[id]; aliasesChanged = changed = true;
+      }
+    } while (aliasesChanged);
+    if (changed) invalidateDroppedScopes(workspace);
+    return changed;
+  }
+  function droppedForFile(workspace, filepath, language, expected) {
+    return droppedCandidatesForFile(workspace, filepath, language).find(candidate => !expected
+      || (typeof expected === 'string' ? candidate.ownership === expected
+        : (!expected.id || candidate.id === expected.id) && (!expected.ownership || candidate.ownership === expected.ownership))) || null;
   }
   function queueDropped(workspace, candidate, kind = 'put') {
     const previous = workspace.droppedOutbox.find(operation => operation.id === candidate.id && operation.kind === kind);
@@ -282,11 +408,12 @@
     const originSourceHash = own(options, 'originSourceHash') ? options.originSourceHash || '' : workspace.sourceHash || '';
     const targetSourceHash = options.targetSourceHash || workspace.sourceHash || '';
     const signature = serialized([game, language, desc.filepath, originSourceHash, content, ...(branchId === 'default' ? [] : [branchId])]);
-    const active = droppedForFile(workspace, desc.filepath, language);
+    const ownership = options.ownership || 'local';
+    const active = droppedForFile(workspace, desc.filepath, language, ownership);
     const sameContent = record => record && record.game === game && (record.branchId || 'default') === branchId
       && inWorkspaceScope(workspace, record)
       && record.language === language && record.filepath === desc.filepath
-      && record.originSourceHash === originSourceHash && equal(record.snapshot, content);
+      && droppedOwnership(record) === ownership && record.originSourceHash === originSourceHash && equal(record.snapshot, content);
     const recoveryId = options.recoveryId || '';
     // A deliberate recovery is a new generation. Its stable action ID makes
     // retries idempotent, including after that generation has been resolved.
@@ -313,14 +440,15 @@
       if (candidate && (alias?.fromRevision === Number(candidate.revision || 0) || originalAlias) && shared
         && inWorkspaceScope(workspace, shared) && sameDroppedContent(candidate, shared)) candidate = shared;
     } else candidate = sameContent(active) ? active : Object.values(workspace.droppedArchive).find(sameContent);
-    if (candidate && candidate.status !== 'dropped') return candidate;
+    if (candidate && (candidate.status !== 'dropped' || recoveryId && candidate.id !== recoveryId
+      && workspace.droppedAliases?.[options.id || recoveryId]?.id === candidate.id)) return candidate;
     if (candidate) {
       candidate.targetSourceHashes = candidateScopes(candidate, options);
       rememberDroppedScope(candidate, targetSourceHash);
       candidate.targetSourceHash = targetSourceHash;
     } else {
       const id = options.id || recoveryId || globalThis.crypto?.randomUUID?.() || ('local-' + Date.now() + '-' + Math.random().toString(36).slice(2));
-      candidate = { id, game, language, ...(branchId === 'default' ? {} : { branchId }), filepath: desc.filepath, originSourceHash, targetSourceHash,
+      candidate = { id, ownership, game, language, ...(branchId === 'default' ? {} : { branchId }), filepath: desc.filepath, originSourceHash, targetSourceHash,
         targetSourceHashes: candidateScopes(options),
         snapshot: copy(content), reason: options.reason || 'Source changed', signature, status: 'dropped',
         ...(recoveryId ? { recoveryId } : {}),
@@ -335,7 +463,7 @@
     (workspace.dropped[language] ||= {})[desc.filepath] = candidate;
     workspace.droppedArchive[candidate.id] = copy(candidate);
     invalidateDroppedScopes(workspace);
-    queueDropped(workspace, candidate);
+    if (ownership === 'online') queueDropped(workspace, candidate);
     return candidate;
   }
   function workspaceFile(workspace, desc, language) {
@@ -348,26 +476,29 @@
       : codec().baselineTranslationIssues(desc, language);
     const translations = staged ? lines(staged.translations) : lines(desc?.translations?.[language]);
     while (translations.length < count) translations.push('');
-    const candidate = droppedForFile(workspace, desc?.filepath, language);
+    const candidate = droppedForFile(workspace, desc?.filepath, language, workspaceDroppedOwnership(workspace));
     const baseline = desc?.translations?.[language];
     return { translations, hasChanges: !!staged, isRevised: !!staged && complete(baseline, count)
       && !equal(lines(baseline), translations) && !candidate && !wasDroppedInSource(workspace, desc?.filepath, language),
       isMetadataCorrection: !!staged && metadataCorrectionForSource(staged, desc, workspace?.sourceHash),
       isMissing: !issues.valid, isInvalidTranslation: statDescription(workspace) && issues.languageBlockPresent && !issues.valid,
       languageBlockPresent: issues.languageBlockPresent, translationIssues: issues, isDropped: !!candidate,
+      hasLocalRecovery: workspaceDroppedOwnership(workspace) === 'online' && !!droppedForFile(workspace, desc?.filepath, language, 'local'),
+      hasSharedRecovery: workspaceDroppedOwnership(workspace) === 'local' && !!droppedForFile(workspace, desc?.filepath, language, 'online'),
       needsReview: !!candidate && !staged && !complete(translations, count), candidate, staged };
   }
   function resolveDroppedPromotion(workspace, filepath, language, promotion, options = {}) {
     if (!object(workspace) || !languageName(language) || !filepath || !promotion) throw new Error('Invalid dropped promotion.');
     maps(workspace);
-    const candidate = droppedForFile(workspace, filepath, language);
+    const candidate = droppedForFile(workspace, filepath, language, promotion);
     if (!candidate || candidate.id !== promotion.id || Number(candidate.revision || 0) !== Number(promotion.revision || 0)
       || (promotion.targetSourceHash && promotion.targetSourceHash !== (options.sourceHash || workspace.sourceHash))) {
       throw Object.assign(new Error('The dropped translation changed before it could be promoted. Review its current preserved copy before saving again.'), { stale: true, code: 'DROPPED_PROMOTION_CHANGED' });
     }
     rememberDroppedScope(candidate, options.sourceHash || workspace.sourceHash);
-    workspace.droppedArchive[candidate.id] = { ...copy(candidate), status: 'promoted', resolvedAt: options.savedAt || Date.now() };
-    delete workspace.dropped[language][filepath];
+    retainDropped(workspace, { ...copy(candidate), status: 'promoted', resolvedAt: options.savedAt || Date.now() });
+    if (workspace.dropped[language]?.[filepath]?.id === candidate.id
+      && droppedOwnership(workspace.dropped[language][filepath]) === candidate.ownership) delete workspace.dropped[language][filepath];
     invalidateDroppedScopes(workspace);
     return candidate;
   }
@@ -396,7 +527,9 @@
   function initializeWorkspace(workspace, options = {}) {
     if (!object(workspace)) return workspace;
     if (!workspace.game && options.game) workspace.game = options.game;
+    if (!workspace.accountId && options.accountId) workspace.accountId = String(options.accountId);
     if (!workspace.branchId && options.branchId) workspace.branchId = options.branchId;
+    separateDroppedCopies(workspace);
     if (Number(workspace.stagedVersion) >= 1) {
       if (!workspace.sourceBaseline?.sourceHash && options.sourceHash) {
         workspace.sourceHash ||= options.sourceHash;
@@ -405,7 +538,8 @@
         for (const candidates of Object.values(workspace.dropped || {})) for (const candidate of Object.values(candidates)) {
           candidate.targetSourceHash ||= options.sourceHash;
           rememberDroppedScope(candidate, options.sourceHash);
-          workspace.droppedArchive[candidate.id] = copy(candidate); queueDropped(workspace, candidate);
+          workspace.droppedArchive[candidate.id] = copy(candidate);
+          if (droppedOwnership(candidate) === 'online' && candidate.recoveryId) queueDropped(workspace, candidate);
         }
         invalidateDroppedScopes(workspace);
       }
@@ -570,6 +704,7 @@
     const previouslyStaged = new Set(Object.entries(workspace.staged || {}).flatMap(([language, entries]) =>
       Object.keys(entries).map(filepath => serialized([language, filepath]))));
     for (const [language, entries] of Object.entries(workspace.staged || {})) for (const [filepath, entry] of Object.entries(entries)) {
+      if (!next.has(filepath)) { delete entries[filepath]; continue; }
       const desc = old.get(filepath) || (workspace.descs || []).find(desc => desc.filepath === filepath);
       if (archiveInvalidTranslation(workspace, entry, language, { filepath, source: desc })) { delete entries[filepath]; continue; }
       const decision = classifySourceCarry(desc, next.get(filepath), language, entry.translations);
@@ -585,10 +720,11 @@
         delete entries[filepath];
       }
     }
-    // A translation supplied by the old ZIP can disappear in the next release
-    // even though nobody edited it locally. Keep that original context too.
+    // Preserve a missing language block only while its filepath still exists.
+    // Removed files belong to the predecessor version, outside this workload.
     for (const previous of options.previousSource || []) {
       const current = next.get(previous.filepath);
+      if (!current) continue;
       for (const language of Object.keys(previous.translations || {}).filter(languageName)) {
         const translations = lines(previous.translations[language]);
         const preserved = workspace.dropped?.[language]?.[previous.filepath];
@@ -601,18 +737,32 @@
         if (current && sameSource(previous, current) && equal(translations, lines(current.translations?.[language]))) continue;
         dropTranslation(workspace, previous, language, { game: options.game, translations,
           originSourceHash: options.previousSourceHash, targetSourceHash: options.sourceHash,
-          reason: current ? 'Translation missing from new source' : 'File removed from source' });
+          reason: 'Translation missing from new source' });
       }
     }
-    for (const candidates of Object.values(workspace.dropped || {})) for (const candidate of Object.values(candidates)) {
-      if (!inWorkspaceScope(workspace, candidate) || !candidateScopes(candidate).some(hash =>
-        hash === (options.previousSourceHash || workspace.sourceHash) || hash === options.sourceHash)) continue;
+    const carriedCandidates = new Map([...Object.values(workspace.droppedArchive || {}), ...Object.values(workspace.dropped || {}).flatMap(Object.values)]
+      .filter(candidate => candidate?.id).map(candidate => [droppedOwnership(candidate) + ':' + candidate.id, candidate]));
+    for (let candidate of carriedCandidates.values()) {
+      if (!next.has(candidate.filepath) || !inWorkspaceScope(workspace, candidate) || !candidateScopes(candidate).some(hash =>
+        hash === (options.previousSourceHash || workspace.sourceHash) || hash === options.sourceHash) || candidate.status !== 'dropped') continue;
+      if (droppedOwnership(candidate) === 'online') {
+        candidate = { ...copy(candidate), id: 'local-carry:' + options.sourceHash + ':' + candidate.id, ownership: 'local', revision: 0,
+          targetSourceHash: options.sourceHash, targetSourceHashes: [options.sourceHash] };
+        delete candidate.groupId; delete candidate.versionId;
+      }
+      if (candidate.localRecoveryScope && candidate.localRecoveryScope.sourceHash !== options.sourceHash) {
+        // An attachment resolves the matching standalone baseline only. A new
+        // local import owns its carried copy; keep the old link as provenance,
+        // never as permission to dispose work in a different source workspace.
+        candidate.localRecoveryOriginScope = copy(candidate.localRecoveryScope);
+        delete candidate.localRecoveryScope;
+      }
       rememberDroppedScope(candidate, options.sourceHash);
       candidate.targetSourceHash = options.sourceHash; workspace.droppedArchive[candidate.id] = copy(candidate);
-      queueDropped(workspace, candidate);
+      (workspace.dropped[candidate.language] ||= {})[candidate.filepath] = candidate;
     }
-    for (const conflicts of Object.values(workspace.droppedConflicts || {})) for (const conflict of Object.values(conflicts)) {
-      if (!inWorkspaceScope(workspace, conflict) || (conflict.targetSourceHash
+    for (const conflicts of Object.values(workspace.droppedConflicts || {})) for (const [filepath, conflict] of Object.entries(conflicts)) {
+      if (!next.has(filepath) || !inWorkspaceScope(workspace, conflict) || (conflict.targetSourceHash
         && conflict.targetSourceHash !== (options.previousSourceHash || workspace.sourceHash))) continue;
       conflict.targetSourceHash = options.sourceHash;
       if (conflict.yours) {
@@ -622,6 +772,7 @@
     }
     workspace.sourceHash = options.sourceHash;
     workspace.sourceBaseline = { sourceHash: options.sourceHash };
+    removeDeletedRecoveryCopies(workspace, droppedRecoveryPaths(workspace).filter(filepath => !next.has(filepath)));
     invalidateDroppedScopes(workspace);
     return workspace;
   }
@@ -780,12 +931,15 @@
     return merged;
   }
   function discardDropped(workspace, filepath, language, expected) {
-    const candidate = droppedForFile(workspace, filepath, language);
-    if (!candidate || (expected && (candidate.id !== expected.id || Number(candidate.revision) !== Number(expected.revision))))
+    const candidate = droppedForFile(workspace, filepath, language, expected);
+    if (!candidate || (expected && (candidate.id !== expected.id || Number(candidate.revision) !== Number(expected.revision)
+      || expected.targetSourceHash && expected.targetSourceHash !== workspace.sourceHash)))
       throw Object.assign(new Error('The dropped translation changed before it could be discarded.'), { stale: true });
     maps(workspace); rememberDroppedScope(candidate, workspace.sourceHash);
-    workspace.droppedArchive[candidate.id] = { ...copy(candidate), status: 'discarded', resolvedAt: Date.now() };
-    delete workspace.dropped[language][filepath]; queueDropped(workspace, candidate, 'discard');
+    retainDropped(workspace, { ...copy(candidate), status: 'discarded', resolvedAt: Date.now() });
+    if (workspace.dropped[language]?.[filepath]?.id === candidate.id
+      && droppedOwnership(workspace.dropped[language][filepath]) === candidate.ownership) delete workspace.dropped[language][filepath];
+    if (candidate.ownership === 'online') queueDropped(workspace, candidate, 'discard');
     invalidateDroppedScopes(workspace);
     return candidate;
   }
@@ -795,22 +949,24 @@
     const fingerprint = record => serialized([record.game || workspace.game, record.language, record.filepath, record.originSourceHash || '', record.snapshot, record.recoveryId || '']);
     const matchingLocal = remote => {
       const known = workspace.droppedArchive[remote.id];
+      if (known && droppedOwnership(known) !== 'online') return null;
       if (known && inWorkspaceScope(workspace, known)) return known;
       // Resolved provenance tombstones have no snapshot with which to prove
       // an alias. A trusted upload receipt can still match its local ID below.
       if (remote.snapshot == null) return null;
       if (!byFingerprint) {
         byFingerprint = new Map(Object.values(workspace.droppedArchive)
-          .filter(record => record.snapshot != null && inWorkspaceScope(workspace, record))
+          .filter(record => droppedOwnership(record) === 'online' && record.snapshot != null && inWorkspaceScope(workspace, record))
           .map(record => [fingerprint(record), record]));
       }
       return byFingerprint.get(fingerprint(remote)) || null;
     };
-    for (const remote of records || []) {
+    for (const incoming of records || []) {
+      const remote = { ...incoming, ownership: 'online' };
       if (!remote?.id || !inWorkspaceScope(workspace, remote) || (options.game && remote.game !== options.game) || (options.language && remote.language !== options.language)) continue;
-      const active = droppedForFile(workspace, remote.filepath, remote.language);
+      const active = droppedForFile(workspace, remote.filepath, remote.language, 'online');
       const acknowledged = options.acknowledge && options.acknowledgeId ? workspace.droppedArchive[options.acknowledgeId] : null;
-      const local = acknowledged?.language === remote.language && acknowledged?.filepath === remote.filepath && inWorkspaceScope(workspace, acknowledged)
+      const local = droppedOwnership(acknowledged) === 'online' && acknowledged?.language === remote.language && acknowledged?.filepath === remote.filepath && inWorkspaceScope(workspace, acknowledged)
         ? acknowledged : matchingLocal(remote);
       const retainedSnapshot = remote.snapshot && !remote.snapshot.english?.length && local?.id === remote.id
         && local.game === remote.game && local.language === remote.language && local.filepath === remote.filepath
@@ -828,7 +984,7 @@
       const locallyResolved = local && ['promoted', 'discarded'].includes(local.status);
       const record = { ...copy(preserveOriginal ? {} : local || {}), ...copy(remote),
         targetSourceHash: remote.targetSourceHash || local?.targetSourceHash || '',
-        targetSourceHashes: candidateScopes(local, remote),
+        targetSourceHashes: candidateScopes(remote),
         ...(retainedSnapshot ? { snapshot: copy(retainedSnapshot) } : {}),
         ...(remote.snapshot == null && local?.snapshot ? { snapshot: copy(local.snapshot) } : {}),
         ...(locallyResolved && remote.status === 'dropped' ? { status: local.status } : {}) };
@@ -837,8 +993,8 @@
       }
       // A read/join only projects assignments established by an import/review.
       // Browsing another named version must not create new Dropped workload.
-      workspace.droppedArchive[remote.id] = record;
-      if (preserveOriginal && local.id === remote.id) workspace.droppedArchive[local.id + ':revision:' + Number(local.revision || 0)] = { ...copy(local), status: 'replaced' };
+      retainDropped(workspace, record);
+      if (preserveOriginal && local?.id === remote.id) workspace.droppedArchive[local.id + ':revision:' + Number(local.revision || 0)] = { ...copy(local), status: 'replaced' };
       if (byFingerprint && record.snapshot != null) byFingerprint.set(fingerprint(record), record);
       if (local?.id && local.id !== remote.id) {
         if (preserveOriginal || (local.recoveryId && local.id === local.recoveryId)) {
@@ -856,9 +1012,6 @@
           && (!active || active.id === local?.id || active.id === remote.id || timestamp(record.createdAt) >= timestamp(active.createdAt)))
           (workspace.dropped[remote.language] ||= {})[remote.filepath] = record;
       } else if (active && (active.id === remote.id || active.id === local?.id)) delete workspace.dropped[remote.language][remote.filepath];
-      if ((remote.snapshot == null || remote.snapshot.english?.length) && record.snapshot
-        && record.targetSourceHashes.some(hash => !candidateScopes(remote).includes(hash))
-        && !workspace.droppedConflicts?.[remote.language]?.[remote.filepath]) queueDropped(workspace, record);
     }
     invalidateDroppedScopes(workspace);
     return workspace;
@@ -902,7 +1055,7 @@
   function coalesceDroppedConflict(workspace, filepath, language, shared) {
     const conflict = workspace?.droppedConflicts?.[language]?.[filepath];
     shared = droppedComparisonRecord(workspace, shared, conflict?.shared);
-    if (!conflict || !['upload', 'promotion', 'discard'].includes(conflict.kind) || conflict.targetSourceHash !== workspace.sourceHash
+    if (!conflict || droppedOwnership(conflict.yours) !== droppedOwnership(shared) || !['upload', 'promotion', 'discard'].includes(conflict.kind) || conflict.targetSourceHash !== workspace.sourceHash
       || !['dropped', 'promoted', 'discarded'].includes(shared?.status) || !shared.id || !sameDroppedContent(conflict.yours, shared)
       || !inWorkspaceScope(workspace, conflict.yours) || !inWorkspaceScope(workspace, shared)) return null;
     const preserveOriginal = !sameDroppedCopy(conflict.yours, shared) || !equal(conflict.yours.snapshot, shared.snapshot);
@@ -972,7 +1125,9 @@
       if (shared.status === 'dropped') (workspace.dropped[language] ||= {})[filepath] = copy(selected);
       else if (workspace.dropped[language]) delete workspace.dropped[language][filepath];
     } else {
-      const kept = { ...copy(local), status: 'dropped', revision: Number(shared.revision) || 0 };
+      const actionId = globalThis.crypto?.randomUUID?.() || ('recovery-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+      retainDropped(workspace, { ...local, status: 'replaced' });
+      const kept = { ...copy(local), id: actionId, recoveryId: actionId, ownership: 'online', status: 'dropped', revision: Number(shared.revision) || 0 };
       rememberDroppedScope(kept, workspace.sourceHash);
       if (workspace.droppedAliases) delete workspace.droppedAliases[kept.id];
       (workspace.dropped[language] ||= {})[filepath] = kept; workspace.droppedArchive[kept.id] = copy(kept);
@@ -988,6 +1143,7 @@
     initializeWorkspace, workspaceFile, stageTranslation, repairLegacyPlaceholders, classifySourceCarry, repairRedundantCarriedStages,
     sourceMetadata, metadataCorrectionForSource, carriedBaselineReplay, mergeSourceImportWorkspace,
     translationIssues, assertCompleteTranslation, archiveInvalidTranslation, quarantineInvalidTranslations, resolveDroppedPromotion,
-    dropTranslation, droppedForFile, upgradeSource, discardDropped, acceptDropped,
+    dropTranslation, droppedForFile, droppedCandidatesForFile, droppedOwnership, workspaceDroppedOwnership,
+    attachLocalDroppedCandidates, separateDroppedCopies, droppedRecoveryPaths, removeDeletedRecoveryCopies, upgradeSource, discardDropped, acceptDropped,
     recordDroppedConflict, resolveDroppedConflict, sameDroppedContent, sameDroppedCopy, droppedComparisonRecord, coalesceDroppedConflict };
 });

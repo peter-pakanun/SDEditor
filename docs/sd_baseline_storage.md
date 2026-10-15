@@ -1,6 +1,6 @@
 # ZIP-only StatDescription source storage
 
-The frontend uses IndexedDB v21 and the companion API uses schema v24. Deploy
+The frontend uses IndexedDB v22 and the companion API uses schema v24. Deploy
 the API first. This replaces the undeployed per-file-fragment design; production
 has not been migrated by agent work.
 
@@ -59,8 +59,20 @@ baseline with Saved work overlaid. A complete merged baseline is not persisted i
 SQLite. Offline **Import Next Version** performs the equivalent comparison in the
 browser. Selecting an existing version performs no carry-forward.
 
-Changed English, a removed file, or missing/incomplete incoming translation can
-preserve predecessor text as Dropped. Existing unresolved copies also propagate.
+Changed English or missing/incomplete incoming translation at a retained filepath
+can preserve predecessor text as Dropped. Existing unresolved copies propagate only
+while that filepath remains in the incoming source. Entire filepath removal is
+authoritative and creates no new Dropped or recovery copy. Earlier-version work
+and history remain in their original scope. Opening an existing source version
+physically deletes its removed-file recovery records after verification against
+the matching ZIP or a complete accepted browser baseline. Missing/incomplete
+source caches never prove deletion. A legacy candidate still assigned to a
+predecessor containing that filepath keeps only its valid predecessor assignment.
+Text-free recovery dispositions retain original retry hashes; saved translations,
+edit history and frozen collections remain intact. This cleanup touches scoped
+recovery records only. Reclaiming unreachable immutable payload bytes still uses
+the explicit stopped maintenance command; it never runs a full payload sweep on
+startup or during version loading.
 When an old ZIP is unavailable, retained source fingerprints can still classify
 staged work; unknown old English preserves that work as Dropped conservatively.
 Untouched translations existing only in a missing old ZIP cannot be recovered.
@@ -75,6 +87,36 @@ cache only when needed for comparison. Losing that source does not lose the
 frozen target or prevent explicit recovery against the verified current baseline.
 Explicit history recovery can also create a Dropped candidate with a stable
 recovery ID; advancement is the main automatic trigger, not its only origin.
+
+Ownership also identifies the version chain. Browser-created automatic copies
+belong to the standalone local import chain and remain local recovery records.
+Managed automatic copies come from the API's accepted predecessor chain and
+remain online records. Matching destination ZIPs or matching preserved text do
+not merge these lifecycles or their assignment lists. Cached online work retains
+its online identity while disconnected; a local import of its next source creates
+local recovery without extending or resolving the original online record.
+
+The client can use both owners at runtime. It labels them **Local recovery** and
+**Shared Dropped**, retains each frozen target, and resolves only the selected
+copy. A local recovery can be reviewed and saved against the current managed
+baseline through the normal completeness, candidate and file-revision guards.
+That authored save can synchronize without resolving the online candidate. Only
+the current workspace's ownership contributes to Dropped assignment status and
+Revised eligibility. SQLite retains online recovery and authored collaboration
+history; browser storage retains local recovery, including resolved dispositions.
+An attached Local recovery retains its originating standalone scope. Promotion
+or discard resolves that local candidate in the same transaction as the managed
+workspace action, with exact-snapshot and revision guards. The standalone staged
+translation and its history remain unchanged; stale linked recovery rejects the
+destination transaction instead of consuming a changed copy.
+
+The schema-v24 API advertises the `separate-v1` ownership capability and accepts
+new client-created online candidates only for explicit recovery with a stable
+`recoveryId`. It retains existing server candidates and replay evidence. Browser
+v22 fences older pages/workers that can merge owners, preserves all existing
+stores, and retains obsolete cross-owner conflicts in a recovery archive. Room
+identities, edit attribution, history and saved-translation receipts stay intact.
+Deploy this API capability before the frontend.
 
 ## Source loading and recovery
 

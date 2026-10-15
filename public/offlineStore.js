@@ -17,7 +17,8 @@
   // v19 excludes writers that could stage incomplete StatDescription text.
   // v20 fences proof-producing pages/workers and retires baseline tree caches.
   // v21 fences pages/workers unaware of immutable on-demand SD source caches.
-  const DB_VERSION = 21;
+  // Fence older writers that can coalesce local and online Dropped lifecycles.
+  const DB_VERSION = 22;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
   const tmListeners = new Set();
@@ -313,6 +314,27 @@
       return normalized.workspace(scope);
     }
     return getLegacyWorkspaceView(version, language);
+  }
+  async function getLocalDroppedCandidates(value) {
+    const scope = normalizeWorkspaceScope({ accountId: value.accountId, game: value.game,
+      branchId: value.branchId || DEFAULT_BRANCH, sourceHash: value.sourceHash });
+    // Read only the matching standalone recovery namespace. A shared baseline
+    // is reusable; another version/group/account's recovery is not.
+    let workspace = normalized && await normalized.available()
+      ? await normalized.workspace(scope, { filepaths: [], allDropped: true }) : await getWorkspace(scope, value.language);
+    if (!workspace) workspace = await getWorkspace(scope, value.language);
+    if (!workspace) return [];
+    const records = new Map();
+    for (const record of [...Object.values(workspace.droppedArchive || {}), ...Object.values(workspace.dropped || {}).flatMap(Object.values)]
+      .filter(record => record?.id && WorkspaceState.droppedOwnership(record) === 'local'
+        && (!value.language || record.language === value.language)
+        && [...(record.targetSourceHashes || []), record.targetSourceHash].includes(scope.sourceHash))) {
+      const previous = records.get(record.id);
+      if (!previous || Number(record.revision || 0) > Number(previous.revision || 0)
+        || Number(record.revision || 0) === Number(previous.revision || 0) && (!previous.status || previous.status === 'dropped'))
+        records.set(record.id, { ...record, ownership: 'local', localRecoveryScope: scope });
+    }
+    return [...records.values()];
   }
   async function prepareNormalizedWorkspace(scope, language) {
     const marker = await normalized.transaction([normalized.stores.migration], 'readonly', tx => normalized.get(tx, normalized.stores.migration, normalized.scopeKey(scope)));
@@ -742,7 +764,7 @@
   function versionIndexKey(scope) { return 'version_index_v1:' + JSON.stringify([scope.accountId, scope.game, scope.branchId, scope.sourceHash, ...contentParts(scope)]); }
   function versionIndexRecord(metadata, scope) {
     const record = { ...normalizeWorkspaceScope(scope || metadata) };
-    for (const field of ['name', 'officialName', 'catalogVersionId', 'createdAt', 'updatedAt', 'migrated', 'adoptedFrom']) {
+    for (const field of ['name', 'officialName', 'catalogVersionId', 'workspaceOrigin', 'createdAt', 'updatedAt', 'migrated', 'adoptedFrom']) {
       if (metadata?.[field] !== undefined) record[field] = metadata[field];
     }
     const version = metadata?.details?.version || metadata?.catalogVersion;
@@ -1489,11 +1511,14 @@
             && op.files.every(entry => replaced.has(entry.yours.filepath)))) room.recovery.push({ at: Date.now(), reason: 'Saved result before a fresh dropped-copy review', files: op.files.map(entry => clone(entry.yours)) });
           room.outbox = room.outbox.filter(op => !['candidate_conflict', 'needs_candidate_review'].includes(op.status)
             || !op.files.every(entry => replaced.has(entry.yours.filepath)));
+          const onlinePromotions = Object.fromEntries(Object.entries(promotions).filter(([, promotion]) => promotion.ownership !== 'local')
+            .map(([path, promotion]) => [path, { id: promotion.id, revision: promotion.revision, targetSourceHash: promotion.targetSourceHash }]));
           const promoted = files.filter(file => promotions[file.filepath]), ordinary = files.filter(file => !promotions[file.filepath]);
           const groups = [...promoted.map(file => [file]), ...(ordinary.length ? [ordinary] : [])];
           operations = groups.map((group, index) => ({ id: index ? batch.jobId + ':' + index : batch.jobId, origin: collaboration.origin || 'save', status: 'pending',
             ...(resetStaging ? { resetStaging: true } : {}),
-            ...(promotions[group[0].filepath] ? { promoteDropped: clone(promotions[group[0].filepath]) } : {}),
+            ...(onlinePromotions[group[0].filepath] ? { promoteDropped: clone(onlinePromotions[group[0].filepath]) } : {}),
+            ...(promotions[group[0].filepath]?.ownership === 'local' ? { reviewedDroppedPromotion: true } : {}),
             ...(collaboration.restore ? { restore: { ...collaboration.restore, translations: [...files[0].translations] } } : {}),
             files: group.map(yours => ({ base: clone(replaced.has(yours.filepath) ? room.shared?.[yours.filepath] || null : Object.hasOwn(collaboration.bases || {}, yours.filepath)
               ? collaboration.bases[yours.filepath] : room.local[yours.filepath] || null), yours: clone(yours) })) }));
@@ -1850,6 +1875,7 @@
     getHybridState: () => kvGet('hybrid_v1'),
     updateHybridState,
     getWorkspace,
+    getLocalDroppedCandidates,
     getWorkspaceSnapshot,
     updateWorkspace,
     setWorkspace,

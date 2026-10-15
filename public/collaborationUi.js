@@ -35,6 +35,13 @@
       collaborationHistoryRestoreVersion: '', collaborationHistoryRestoring: false,
     }; },
     computed: {
+      editorDroppedChoices() {
+        const filepath = this.editorCurrentEditingDesc?.filepath;
+        if (!filepath || this.ctActive) return [];
+        return window.WorkspaceState.droppedCandidatesForFile?.(this.localDescs, filepath, this.lang)
+          || [window.WorkspaceState.droppedForFile(this.localDescs, filepath, this.lang)].filter(Boolean);
+      },
+      editorDroppedChoiceKey() { return this.droppedChoiceKey(this.editorDroppedCandidate); },
       collaborationConflicts() { return this.collaborationState.conflicts || []; },
       collaborationDroppedReviewPaths() {
         const state = this.collaborationState, workspace = this.localDescs || {};
@@ -55,7 +62,8 @@
             if (conflict.targetSourceHash === source) paths.add(filepath);
           }
         }
-        return [...paths].sort();
+        const currentPaths = new Set((this.descs || []).map(desc => desc.filepath));
+        return [...paths].filter(filepath => currentPaths.has(filepath)).sort();
       },
       collaborationDroppedReviewWarning() {
         return !!this.collaborationDroppedReviewPaths.length && (!this.collaborationState.error
@@ -130,6 +138,48 @@
       },
     },
     methods: {
+      droppedChoiceKey(candidate) { return candidate ? `${window.WorkspaceState.droppedOwnership(candidate)}:${candidate.id}` : ''; },
+      droppedOwnershipLabel(candidate) { return window.WorkspaceState.droppedOwnership(candidate) === 'online' ? 'Shared Dropped' : 'Local recovery'; },
+      selectEditorDroppedCandidate(choice) {
+        if (!this.editorReady || this.editorSaving || this.editorCompareActive || this.entryAlignment) return false;
+        const key = typeof choice === 'string' ? choice : this.droppedChoiceKey(choice);
+        const candidate = this.editorDroppedChoices.find(item => this.droppedChoiceKey(item) === key);
+        if (!candidate) return false;
+        this.editorDroppedCandidate = this.toPlainForStorage(candidate);
+        this.editorShowEnglishDiff = false;
+        return true;
+      },
+      async useEditorDroppedCandidate() {
+        const desc = this.editorCurrentEditingDesc, candidate = this.editorDroppedCandidate;
+        if (!desc || !candidate || !this.editorReady || this.editorSaving || this.editorCompareActive || this.entryAlignment) return false;
+        const context = this.captureCollaborationContext(), blocks = this.editorBlocks;
+        const key = this.droppedChoiceKey(candidate);
+        const current = () => this.collaborationContextCurrent(context) && this.editorCurrentEditingDesc === desc
+          && this.editorBlocks === blocks && this.droppedChoiceKey(this.editorDroppedCandidate) === key;
+        try {
+          this.capturedDroppedPromotion(desc.filepath, candidate);
+          if (this.editorHaveChanges() && !await this.appConfirm('Replace the text in this editor with the selected recovery copy? Your committed translation stays unchanged until Save.', {
+            title: 'Use recovery copy?', confirmLabel: 'Use for editing',
+          })) return false;
+          if (!current()) return false;
+          this.capturedDroppedPromotion(desc.filepath, candidate);
+          const translations = candidate.snapshot?.translations;
+          if (!Array.isArray(translations)) throw new Error('The selected recovery copy has no preserved translation.');
+          const english = desc.translations?.English || [];
+          const prepared = Array.from({ length: Math.max(english.length, translations.length) }, (_, index) =>
+            this.makeEditorBlock(english[index] || '', translations[index] || '', true));
+          this.applyPreparedEditorBlocks(prepared);
+          this.editorShowEnglishDiff = true;
+          this.refreshEditorDiagnostics(); this.refreshGamePreview();
+          this.offerEntryAlignment?.();
+          if (this.flushEditorDraft && !await this.flushEditorDraft({ force: true })) return false;
+          if (current()) this.prepareEditorEnglishDiff?.();
+          return true;
+        } catch (error) {
+          if (current()) this.collaborationNotice = 'Could not use the recovery copy: ' + error.message;
+          return false;
+        }
+      },
       async collaborationOpenDroppedConflicts() {
         if (this.editorSaving || this.navigationBusy || !this.collaborationDroppedReviewPaths.length) return;
         const scope = () => [this.collaborationContext, this.cloudUser?.id || '', this.gameVersion, this.lang, this.sourceIdentity || ''].join('|');

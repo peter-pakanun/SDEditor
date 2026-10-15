@@ -168,7 +168,7 @@
       if (candidate.game !== identity.game || candidate.language !== identity.language
         || candidate.targetSourceHash !== identity.sourceHash) throw staleError();
       const id = candidate.id || this.uuid();
-      candidate = { ...copy(candidate), id, recoveryId: candidate.recoveryId || id };
+      candidate = { ...copy(candidate), ownership: 'online', id, recoveryId: candidate.recoveryId || id };
       let registered;
       const workspace = await this.store.updateWorkspace(current => {
         if (!this.current(epoch) || !current || current.sourceHash !== identity.sourceHash
@@ -860,6 +860,8 @@
       if (restore && (normalized.length !== 1 || !restore.eventId || !['before', 'after'].includes(restore.version))) throw new Error('Invalid shared history restore.');
       if (promoteDropped && normalized.length !== 1) throw new Error('A dropped translation promotion must name one file.');
       const promotions = { ...copy(promoteDroppedByPath), ...(promoteDropped ? { [normalized[0].filepath]: copy(promoteDropped) } : {}) };
+      const onlinePromotions = Object.fromEntries(Object.entries(promotions).filter(([, value]) => value.ownership !== 'local')
+        .map(([path, value]) => [path, { id: value.id, revision: value.revision, targetSourceHash: value.targetSourceHash }]));
       const promoted = normalized.filter(file => promotions[file.filepath]);
       const ordinary = normalized.filter(file => !promotions[file.filepath]);
       const groups = [...promoted.map(file => [file]), ...(ordinary.length ? [ordinary] : [])];
@@ -879,7 +881,8 @@
           if (current.carryRevisions) delete current.carryRevisions[file.filepath];
         }
         groups.forEach((group, index) => current.outbox.push({ id: mutationIds[index], origin,
-          ...(promotions[group[0].filepath] ? { promoteDropped: copy(promotions[group[0].filepath]) } : {}),
+          ...(onlinePromotions[group[0].filepath] ? { promoteDropped: copy(onlinePromotions[group[0].filepath]) } : {}),
+          ...(promotions[group[0].filepath]?.ownership === 'local' ? { reviewedDroppedPromotion: true } : {}),
           ...(restore ? { restore: { ...copy(restore), translations: copy(normalized[0].translations) } } : {}), status: 'pending', files: group.map(yours => ({
           base: copy(replaced.has(yours.filepath) ? current.shared[yours.filepath] || this.baselineStates?.[yours.filepath]
             : Object.hasOwn(bases, yours.filepath) ? bases[yours.filepath] : current.local[yours.filepath]
@@ -996,6 +999,7 @@
       workspace = this.mergeDroppedWorkspace(workspace);
       this.droppedConflicts = copy(workspace.droppedConflicts?.[this.room().identity.language] || {});
       this.pendingDropped = (workspace.droppedOutbox || []).some(operation => !operation.conflict
+        && W.droppedOwnership(operation.candidate) === 'online' && (operation.kind === 'discard' || operation.id === operation.candidate?.recoveryId)
         && operation.candidate?.game === this.room().identity.game && operation.candidate?.language === this.room().identity.language);
       await this.onRemoteDropped(copy(records), copy({ dropped: workspace.dropped, droppedArchive: workspace.droppedArchive,
         droppedOutbox: workspace.droppedOutbox, droppedAliases: workspace.droppedAliases, droppedConflicts: workspace.droppedConflicts }));
@@ -1183,8 +1187,10 @@
       if (!this.current(epoch)) throw staleError();
       if (!workspace || (workspace.sourceHash && workspace.sourceHash !== identity.sourceHash)) return;
       workspace = this.mergeDroppedWorkspace(workspace);
+      W.separateDroppedCopies(workspace);
       this.droppedConflicts = copy(workspace.droppedConflicts?.[identity.language] || {});
       const pending = (workspace.droppedOutbox || []).filter(operation => !operation.conflict && operation.candidate?.game === identity.game
+        && W.droppedOwnership(operation.candidate) === 'online' && (operation.kind === 'discard' || operation.id === operation.candidate?.recoveryId)
         && (operation.candidate?.branchId || 'default') === (identity.branchId || 'default')
         && operation.candidate?.language === identity.language
         && [...(operation.candidate?.targetSourceHashes || []), operation.candidate?.targetSourceHash].includes(identity.sourceHash));

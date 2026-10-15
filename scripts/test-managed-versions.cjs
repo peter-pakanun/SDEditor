@@ -1079,6 +1079,70 @@ test('an associated cached baseline remains available for local Continue without
   assert.equal(app.managedImportZipDisabled, false, 'Offline Continue enables Import ZIP even when the same baseline is published.');
 });
 
+test('an explicit online opening retains its recovery identity through offline entry and a cached reload', async () => {
+  const metadata = new Map(), key = scope => JSON.stringify(scope), source = [{ filepath: 'source/test.txt' }];
+  const storage = {
+    async setVersionMetadata(scope, patch) { metadata.set(key(scope), { ...metadata.get(key(scope)), ...copy(patch) }); },
+    async activateVersion(scope) { return { scope: copy(scope), source: copy(source), workspace: { sourceHash: scope.sourceHash }, metadata: copy(metadata.get(key(scope))) }; },
+  };
+  const first = harness({ storage });
+  assert.equal(await first.app.continueManagedVersion(version(), 'Thai'), true);
+  assert.equal(metadata.get(key(storageScope())).workspaceOrigin, 'online');
+  assert.equal(first.app.localDescs.workspaceOrigin, 'online');
+  assert.equal(first.app.managedWorkspaceOrigin, 'online');
+  first.app._cloud = null;
+  first.app.managedVersions = [];
+  first.app.managedActiveDetails = null;
+  assert.equal(first.app.managedWorkspaceOrigin, 'online', 'Network and catalog loss cannot reclassify managed recovery.');
+  const row = { ...storageScope(), hasSource: true, catalogVersionId: 'weekly-1' };
+  assert.equal(await first.app.managedContinueLocalVersion(row), true);
+  assert.equal(first.app.managedWorkspaceMode, 'offline', 'The chooser entry mode remains independent of recovery ownership.');
+  assert.equal(first.app.managedWorkspaceOrigin, 'online');
+  const reloaded = harness({ storage });
+  reloaded.app._cloud = null;
+  assert.equal(await reloaded.app.managedContinueLocalVersion(row), true);
+  assert.equal(reloaded.app.managedWorkspaceOrigin, 'online', 'The durable marker restores online ownership without a catalog request.');
+  assert.equal(reloaded.requests.length, 0);
+  assert.equal(reloaded.app.localDescs.workspaceOrigin, 'online');
+});
+
+test('automatic published-baseline association leaves standalone recovery local', async () => {
+  const { app } = harness();
+  await app.managedAssociateActive();
+  assert.equal(app.activeManagedVersionId, 'weekly-1');
+  assert.equal(app.managedWorkspaceOrigin, 'local');
+  app.managedRestoreWorkspaceIdentity(storageScope(), { catalogVersionId: 'weekly-1' }, { sourceHash: hash('a') });
+  assert.equal(app.managedWorkspaceOrigin, 'local', 'A catalog alias does not prove a managed version chain.');
+});
+
+test('restored online recovery identity is fenced by account, game, branch and source', () => {
+  for (const change of [app => { app.cloudProfileId = 'bob'; }, app => { app.gameVersion = 'poe1'; },
+    app => { app.branchId = 'release'; }, app => { app.sourceIdentity = hash('c'); }]) {
+    const { app } = harness();
+    app.managedRestoreWorkspaceIdentity(storageScope(), { workspaceOrigin: 'online', catalogVersionId: 'weekly-1' });
+    assert.equal(app.managedWorkspaceOrigin, 'online');
+    change(app);
+    assert.equal(app.managedWorkspaceOrigin, 'local');
+  }
+});
+
+test('cached managed content groups keep online recovery identity without retained catalog details', async () => {
+  const group = { id: 'cached-managed-group', versionId: 'weekly-1', contentMode: 'statdescription' };
+  const { app, events } = harness({ storage: {
+    async activateVersion(scope) { return { scope: copy(scope), workspace: { sourceHash: scope.sourceHash } }; },
+  } });
+  app._cloud = null;
+  app.managedVersions = [];
+  app.managedActiveDetails = null;
+  assert.equal(await app.managedContinueLocalVersion({ ...storageScope(), groupId: group.id, versionId: group.versionId }), true);
+  assert.equal(app.managedWorkspaceOrigin, 'online');
+  assert.equal(app.managedWorkspaceIdentity.groupId, group.id);
+  assert.deepEqual(events.find(event => event.type === 'context').scope, storageScope({ versionId: group.versionId,
+    groupId: group.id, contentMode: 'statdescription' }));
+  app.cloudProfileId = 'bob';
+  assert.equal(app.managedWorkspaceOrigin, 'local', 'An old active group cannot carry online ownership into another account.');
+});
+
 test('the same published baseline switches Import ZIP policy only through Offline and Online entry', async () => {
   const { app } = harness();
   const local = { ...storageScope(), hasSource: true, current: true, catalogVersionId: 'weekly-1' };

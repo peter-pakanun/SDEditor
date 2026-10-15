@@ -1,4 +1,4 @@
-// Native IndexedDB v21 and a real ZIP worker on a disposable local origin.
+// Native IndexedDB v22 and a real ZIP worker on a disposable local origin.
 const assert = require('node:assert/strict');
 const { createServer } = require('node:http');
 const { readFileSync, existsSync, mkdtempSync } = require('node:fs');
@@ -97,7 +97,7 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
       return { fenced, version: db.version, warm, second, retained: retained.slice(0, 2), cachedHash: await CollaborationProtocol.zipHash(retained[2].blob), archive, probe: window.__sourceWorkerProbe,
         sourceLoss: { error: viewer.sdDroppedSourceError, candidate: workspace.droppedArchive[candidate.id], stage: workspace.staged.Thai[warm.filepath] } };
     });
-    assert.equal(result.version, 21); assert.equal(result.fenced, true);
+    assert.equal(result.version, 22); assert.equal(result.fenced, true);
     assert.equal(result.warm.translations.English[0], 'English'); assert.equal(result.second.filepath, 'source/8.txt');
     assert.equal(result.cachedHash, result.archive.zipHash);
     assert.deepEqual(result.probe.filter(value => value.operation === 'inflate').map(value => value.filepath), ['source/7.txt', 'source/8.txt']);
@@ -119,6 +119,6 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
     assert.equal(offline.file.filepath, 'source/9.txt'); assert.equal(offline.file.translations.English[0], 'English');
     assert.deepEqual(offline.promotion.staged.Thai['source/7.txt'].translations, ['Retained authored target']);
     assert.equal(offline.promotion.droppedArchive['target-only'].snapshot.english, undefined);
-    console.log('PASS: native v20→v21 fence, durable ZIP reload, selective worker extraction, coalesced/warm detached reads, preserved recovery/receipt and target-only promotion despite missing historical ZIP.');
+    console.log('PASS: native v20→v22 fence, durable ZIP reload, selective worker extraction, coalesced/warm detached reads, preserved recovery/receipt and target-only promotion despite missing historical ZIP.');
   } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -396,8 +396,8 @@ test('bulk promotion maps stage and resolve each candidate atomically with separ
   const promotions = {};
   for (const filepath of ['stat.txt', 'other.txt']) {
     const desc = workspace.descs.find(item => item.filepath === filepath);
-    const candidate = W.dropTranslation(workspace, desc, 'Thai', { id: 'drop-' + filepath, game: 'poe1', originSourceHash: 'old', targetSourceHash: 'source' });
-    promotions[filepath] = { id: candidate.id, revision: 0, targetSourceHash: 'source' };
+    const candidate = W.dropTranslation(workspace, desc, 'Thai', { id: 'drop-' + filepath, ownership: 'online', game: 'poe1', originSourceHash: 'old', targetSourceHash: 'source' });
+    promotions[filepath] = { id: candidate.id, ownership: 'online', revision: 0, targetSourceHash: 'source' };
     if (filepath !== 'stat.txt') { room.manifest.files.push({ filepath, english: ['other'] }); room.local[filepath] = { ...file('untouched'), filepath }; room.shared[filepath] = copy(room.local[filepath]); }
   }
   const command = batch({ files: ['stat.txt', 'other.txt'].map(filepath => ({ ...file('accepted ' + filepath), filepath })),
@@ -408,12 +408,33 @@ test('bulk promotion maps stage and resolve each candidate atomically with separ
   assert.equal(ack.operations.length, 2); assert.equal(ack.mutationIds.length, 2);
   assert.ok(ack.operations.every(op => op.files.length === 1 && op.promoteDropped));
   for (const filepath of ['stat.txt', 'other.txt']) {
-    assert.equal(W.droppedForFile(f.kv.get('workspace_poe1'), filepath, 'Thai'), null);
+    assert.equal(W.droppedForFile(f.kv.get('workspace_poe1'), filepath, 'Thai', 'online'), null);
     assert.deepEqual(f.kv.get('workspace_poe1').staged.Thai[filepath].translations, ['accepted ' + filepath]);
   }
   const replay = await commit(f, f.store.saveTranslationBatch(command));
   assert.equal(replay.duplicate, true); assert.equal(replay.operations.length, 2);
   assert.equal(f.kv.get('collaboration_v1').rooms[key].outbox.length, 2);
+});
+
+test('a bulk save keeps a local recovery review guard when an ordinary file precedes it', async () => {
+  const W = require('../public/workspaceState.js'), f = fixture({ collaboration: true });
+  const workspace = f.kv.get('workspace_poe1'), room = f.kv.get('collaboration_v1').rooms[key];
+  W.initializeWorkspace(workspace, { source: workspace.descs, sourceHash: 'source', game: 'poe1', language: 'Thai' });
+  const desc = workspace.descs.find(item => item.filepath === 'other.txt');
+  const local = W.dropTranslation(workspace, desc, 'Thai', { id: 'local-other', originSourceHash: 'old', targetSourceHash: 'source' });
+  room.manifest.files.push({ filepath: desc.filepath, english: ['other'] });
+  room.local[desc.filepath] = { ...file('untouched'), filepath: desc.filepath }; room.shared[desc.filepath] = copy(room.local[desc.filepath]);
+  const command = batch({ files: ['stat.txt', 'other.txt'].map(filepath => ({ ...file('accepted ' + filepath), filepath })),
+    descriptions: copy(workspace.descs), promoteDroppedByPath: { [desc.filepath]: { id: local.id, ownership: 'local', revision: 0, targetSourceHash: 'source' } },
+    collaboration: { key, identity } });
+  const ack = await commit(f, f.store.saveTranslationBatch(command));
+  const reviewed = ack.operations.find(op => op.files.some(entry => entry.yours.filepath === desc.filepath));
+  const ordinary = ack.operations.find(op => op.files.some(entry => entry.yours.filepath === 'stat.txt'));
+  assert.equal(reviewed.reviewedDroppedPromotion, true);
+  assert.equal(reviewed.files.length, 1);
+  assert.equal(reviewed.promoteDropped, undefined, 'A local review never disposes the server candidate.');
+  assert.equal(ordinary.reviewedDroppedPromotion, undefined);
+  assert.equal(f.kv.get('workspace_poe1').droppedArchive[local.id].status, 'promoted');
 });
 
 test('same-ID recovery acknowledges the durable receipt without duplicate revision or outbox', async () => {

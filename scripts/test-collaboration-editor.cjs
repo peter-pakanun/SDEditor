@@ -100,6 +100,11 @@ function droppedReviewFixture() {
 function droppedConflictFixture() {
   const h = droppedReviewFixture(), e = h.editor;
   const candidate = JSON.parse(JSON.stringify(h.window.WorkspaceState.droppedForFile(e.localDescs, h.desc.filepath, 'Thai')));
+  // A genuine same-chain revision conflict still needs an explicit decision.
+  // Independent local/online recovery choices are covered separately below.
+  candidate.ownership = 'online'; e.localDescs.workspaceOrigin = 'online';
+  e.localDescs.dropped.Thai[h.desc.filepath] = JSON.parse(JSON.stringify(candidate));
+  e.localDescs.droppedArchive[candidate.id] = JSON.parse(JSON.stringify(candidate));
   const conflict = { game: e.gameVersion, language: e.lang, filepath: h.desc.filepath, targetSourceHash: e.sourceIdentity, kind: 'put', yours: candidate,
     shared: { ...candidate, id: 'shared-copy', revision: 2,
       snapshot: { ...candidate.snapshot, translations: ['Shared preserved translation', 'Second shared translation'] } } };
@@ -1427,7 +1432,7 @@ function modernGroupDroppedImportFixture(options) {
   const preserved = copy(original);
   preserved.translations.English[0] = 'Earlier preserved English';
   const candidate = window.WorkspaceState.dropTranslation(e.localDescs, preserved, 'Thai', {
-    id: 'server-id', revision: 7, recoveryId: 'explicit-original-recovery', game: scope.game,
+    id: 'server-id', ownership: 'online', revision: 7, recoveryId: 'explicit-original-recovery', game: scope.game,
     originSourceHash: 'd'.repeat(64), targetSourceHash: scope.sourceHash, createdAt: 123,
     translations: ['Acknowledged preserved group text', 'Second preserved line'],
     baseline: { filepath: original.filepath, sourceHash: 'd'.repeat(64) }, proof: { index: 1, siblings: ['proof-sibling'] },
@@ -1452,13 +1457,14 @@ function modernGroupDroppedImportFixture(options) {
   return { ...h, candidate: copy(candidate), conflict: copy(conflict), before: copy(e.localDescs) };
 }
 
-test('leaving a modern group rebinds acknowledged Dropped text without replaying its group mutations', async () => {
+test('leaving a modern group carries independent local recovery and retains old shared commands without replaying them', async () => {
   const h = modernGroupDroppedImportFixture(), { editor: e, window, workspace, scope, candidate, conflict, before, next, newHash, imports, copy } = h;
   await e.importUpdateZipFile({ name: 'StatDescriptions.zip', size: 123, lastModified: 1 }, [next]);
   assert.equal(imports.length, 1); assert.equal(imports[0].scope.groupId, undefined);
   const committed = imports[0].workspace, carried = window.WorkspaceState.droppedForFile(e.localDescs, next.filepath, 'Thai');
   assert.ok(carried); assert.notEqual(carried.id, candidate.id); assert.notEqual(carried.id, candidate.recoveryId);
   assert.equal(carried.revision, 0); assert.equal(carried.groupId, undefined); assert.equal(carried.versionId, undefined);
+  assert.equal(carried.ownership, 'local');
   assert.equal(carried.originSourceHash, candidate.originSourceHash); assert.equal(carried.targetSourceHash, newHash);
   assert.deepEqual(Array.from(carried.targetSourceHashes), [newHash]);
   for (const field of ['snapshot', 'recoveryId', 'baseline', 'proof', 'originArchive', 'createdAt']) {
@@ -1466,16 +1472,19 @@ test('leaving a modern group rebinds acknowledged Dropped text without replaying
   }
   assert.deepEqual(committed.droppedArchive[candidate.id], candidate,
     'The old server ID, revision, group, provenance and target assignments remain recovery evidence.');
+  const archivedConflict = Object.values(committed.droppedConflictArchive).find(record => record.yours.id === conflict.yours.id);
+  assert.ok(archivedConflict, 'The prior same-chain decision remains complete recovery evidence.');
   for (const copyName of ['yours', 'shared']) {
-    const archived = committed.droppedArchive[conflict[copyName].id];
+    const archived = archivedConflict[copyName];
     assert.ok(archived, 'Both sides of the old comparison remain recoverable.');
     assert.deepEqual(archived.snapshot, conflict[copyName].snapshot);
     assert.equal(archived.revision, conflict[copyName].revision);
   }
-  assert.deepEqual(committed.droppedAliases, {}); assert.deepEqual(committed.droppedConflicts, {});
-  assert.equal(committed.droppedOutbox.length, 1);
-  assert.deepEqual(committed.droppedOutbox[0], { id: carried.id, kind: 'put', revision: 0, candidate: copy(carried) },
-    'Only a plain local destination upload is queued; no old discard, replace, conflict or revision is replayed.');
+  assert.deepEqual(committed.droppedAliases, before.droppedAliases);
+  assert.ok(Object.values(committed.droppedConflicts).every(records => !Object.keys(records).length));
+  assert.deepEqual(committed.droppedOutbox, before.droppedOutbox,
+    'Old commands remain scoped recovery evidence; local carry never creates a shared upload.');
+  assert.ok(committed.droppedOutbox.every(operation => operation.candidate.groupId === scope.groupId && operation.id !== carried.id));
   assert.deepEqual(copy(workspace), before, 'Leaving the group never mutates its own saved recovery evidence or commands.');
   assert.equal(workspace.sourceHash, scope.sourceHash); assert.equal(e.activeContentGroup, null);
   assert.equal(e.collaborationWorkspaceReady(), true);
@@ -1776,14 +1785,101 @@ test('Save unchanged stages a complete current ZIP translation as Saved without 
   assert.deepEqual(Array.from(e.localDescs.staged.Thai[desc.filepath].translations), ['เดิม', 'สอง']);
 });
 
-test('a competing dropped copy blocks Save and Confirm until the comparison is resolved', async () => {
-  const { editor: e, writes, calls } = droppedConflictFixture();
-  assert.ok(e.editorDroppedConflict);
-  assert.equal(e.editorDroppedCanPromote, false);
-  assert.equal(await e.editorSave(), false);
-  await e.confirmTranslationUnchanged();
-  assert.equal(writes.length, 0); assert.equal(calls.length, 0);
-  assert.match(e.collaborationNotice, /competing dropped copies/);
+test('local recovery and shared Dropped choices coexist and using local text resolves only its selected generation', async () => {
+  const { editor: e, window, writes, desc } = droppedReviewFixture(), W = window.WorkspaceState;
+  const local = structuredClone(W.droppedForFile(e.localDescs, desc.filepath, e.lang, 'local'));
+  e.localDescs.workspaceOrigin = 'online';
+  const shared = W.dropTranslation(e.localDescs, desc, e.lang, { id: 'dropped_shared-choice', ownership: 'online',
+    game: e.gameVersion, originSourceHash: 'managed-predecessor', translations: ['Managed preserved translation', 'Managed second'] });
+  e.editorDroppedCandidate = structuredClone(shared);
+  e.flushEditorDraft = async () => true; e.prepareEditorEnglishDiff = () => {};
+  const committed = Array.from(desc.translations.Thai), blocks = e.editorBlocks;
+  assert.equal(e.editorDroppedChoices.length, 2);
+  assert.equal(e.droppedOwnershipLabel(shared), 'Shared Dropped');
+  assert.equal(e.droppedOwnershipLabel(local), 'Local recovery');
+  assert.equal(e.selectEditorDroppedCandidate(e.droppedChoiceKey(local)), true);
+  assert.equal(e.editorBlocks, blocks, 'Choosing a comparison preserves the editor draft.');
+  assert.deepEqual(Array.from(desc.translations.Thai), committed);
+  assert.equal(await e.useEditorDroppedCandidate(), true, e.collaborationNotice);
+  assert.deepEqual(Array.from(e.editorBlocks, block => block.translation), Array.from(local.snapshot.translations));
+  assert.deepEqual(Array.from(desc.translations.Thai), committed, 'Using a recovery copy changes only the draft.');
+  assert.equal(W.droppedForFile(e.localDescs, desc.filepath, e.lang, 'online').id, shared.id);
+  const promotion = e.capturedDroppedPromotion(desc.filepath);
+  assert.equal(promotion.ownership, 'local');
+  await e.persistTranslationBatch([{ desc, lines: local.snapshot.translations }], 'save', { promoteDropped: promotion });
+  assert.equal(writes.length, 1);
+  assert.equal(W.droppedForFile(e.localDescs, desc.filepath, e.lang, 'local'), null);
+  assert.equal(W.droppedForFile(e.localDescs, desc.filepath, e.lang, 'online').id, shared.id);
+  assert.deepEqual(Array.from(e.localDescs.staged.Thai[desc.filepath].translations), Array.from(local.snapshot.translations));
+});
+
+test('a selected recovery cannot silently switch to equal text owned by the other chain', () => {
+  const { editor: e, window, desc } = droppedReviewFixture(), W = window.WorkspaceState;
+  const local = structuredClone(W.droppedForFile(e.localDescs, desc.filepath, e.lang, 'local'));
+  W.dropTranslation(e.localDescs, desc, e.lang, { id: 'dropped_equal-shared', ownership: 'online', game: e.gameVersion,
+    snapshot: structuredClone(local.snapshot) });
+  e.editorDroppedCandidate = local;
+  W.discardDropped(e.localDescs, desc.filepath, e.lang, { id: local.id, ownership: 'local', revision: local.revision });
+  assert.throws(() => e.capturedDroppedPromotion(desc.filepath), /dropped translation changed/);
+  assert.ok(W.droppedForFile(e.localDescs, desc.filepath, e.lang, 'online'));
+});
+
+test('a local workspace exposes shared-only legacy recovery through the Dropped filter without changing its workload', () => {
+  const { editor: e, window } = harness(), W = window.WorkspaceState, desc = description(1);
+  desc.hasChanges = false;
+  e.descs = [desc]; e._workspaceSourceBaseline = [structuredClone(desc)];
+  e.localDescs = { sourceHash: e.sourceIdentity, workspaceOrigin: 'local', descs: [], status: {} };
+  W.initializeWorkspace(e.localDescs, { source: e._workspaceSourceBaseline, sourceHash: e.sourceIdentity, game: e.gameVersion, language: e.lang });
+  const shared = W.dropTranslation(e.localDescs, desc, e.lang, { id: 'dropped_standalone-legacy', ownership: 'online', game: e.gameVersion,
+    originSourceHash: 'managed-predecessor', translations: ['Legacy shared preserved target', 'Legacy shared second'] });
+  e.selectedFileFilters = ['dropped']; e.applyWorkspaceOverlay(); e.filterDesc();
+  assert.equal(desc.hasSharedRecovery, true); assert.equal(desc.hasLocalRecovery, false);
+  assert.equal(desc.isDropped, false); assert.equal(desc.hasChanges, false); assert.equal(desc.isMissing, false);
+  assert.equal(e.statistic.isDropped, 0);
+  assert.deepEqual(Array.from(e.filteredDescs, item => item.filepath), [desc.filepath]);
+  assert.equal(e.filteredDescs[0].hasSharedRecovery, true);
+  e.editorCurrentEditingDesc = desc; e.editorVisible = true; e.seedEditorOpenSource({ desc });
+  assert.equal(e.editorDroppedCandidate.ownership, 'online'); assert.equal(e.editorDroppedCandidate.id, shared.id);
+  W.discardDropped(e.localDescs, desc.filepath, e.lang, shared);
+  e.applyCollaborationFiles([{ filepath: desc.filepath, translations: desc.translations.Thai, needsReview: false, trackedForExport: false }]);
+  assert.equal(desc.hasSharedRecovery, false); assert.equal(e.filteredDescs.length, 0); assert.equal(e.statistic.isDropped, 0);
+});
+
+test('an unchanged save receipt refreshes local recovery discovery while shared Dropped remains unresolved', () => {
+  const { editor: e, window, desc } = droppedReviewFixture(), W = window.WorkspaceState;
+  const local = structuredClone(W.droppedForFile(e.localDescs, desc.filepath, e.lang, 'local'));
+  e.localDescs.workspaceOrigin = 'online';
+  W.dropTranslation(e.localDescs, desc, e.lang, { id: 'dropped_unchanged-shared', ownership: 'online', game: e.gameVersion,
+    translations: ['Shared preserved translation', 'Shared second'] });
+  const file = { filepath: desc.filepath, translations: local.snapshot.translations, trackedForExport: true, needsReview: false };
+  W.stageTranslation(e.localDescs, file, e.lang, { source: e.workspaceSourceFile(desc.filepath), sourceHash: e.sourceIdentity });
+  e.applyWorkspaceOverlay(); e.filterDesc();
+  assert.equal(desc.hasLocalRecovery, true); assert.equal(desc.isDropped, true);
+  const filtered = [], filter = e.filterDesc;
+  e.filterDesc = options => { filtered.push(...options.changedFilepaths); return filter.call(e, options); };
+  e.applyCollaborationFiles([file], e.lang, null, { acknowledgedPromotions: { [desc.filepath]: {
+    id: local.id, revision: local.revision, targetSourceHash: e.sourceIdentity, ownership: 'local',
+  } }, acknowledgedSourceHash: e.sourceIdentity });
+  assert.equal(desc.hasLocalRecovery, false); assert.equal(desc.isDropped, true);
+  assert.deepEqual(filtered, [desc.filepath]);
+});
+
+test('local recovery attachment persists separately and never revives its resolved overlay', async () => {
+  const { editor: e, window, desc } = droppedReviewFixture(), W = window.WorkspaceState;
+  const local = structuredClone(W.droppedForFile(e.localDescs, desc.filepath, e.lang, 'local'));
+  e.localDescs.workspaceOrigin = 'online';
+  W.discardDropped(e.localDescs, desc.filepath, e.lang, { id: local.id, ownership: 'local', revision: local.revision });
+  const calls = [];
+  window.OfflineStore.getLocalDroppedCandidates = async scope => { calls.push({ read: scope }); return [local]; };
+  window.OfflineStore.updateWorkspace = async (mutate, game, options) => {
+    calls.push({ game, options }); return mutate(structuredClone(e.localDescs));
+  };
+  assert.equal(await e.loadLocalDroppedRecovery(), true);
+  assert.equal(calls[0].read.accountId, 'guest'); assert.equal(calls[0].read.sourceHash, e.sourceIdentity);
+  assert.equal(calls[1].options.includeDropped, true);
+  assert.deepEqual(Array.from(calls[1].options.filepaths), [desc.filepath]);
+  assert.equal(W.droppedForFile(e.localDescs, desc.filepath, e.lang, 'local'), null);
+  assert.equal(e.localDescs.droppedArchive[local.id].status, 'discarded');
 });
 
 test('matching dropped text needs no metadata choice and keeps the captured recovery evidence', () => {
@@ -1835,7 +1931,7 @@ test('captured dropped review follows the latest equal text revision but rejects
   current.snapshot.stats = ['different_stat'];
   current.snapshot.name = 'Different preserved name';
   assert.deepEqual(JSON.parse(JSON.stringify(e.capturedDroppedPromotion(desc.filepath))), {
-    id: current.id, revision: 8, targetSourceHash: e.sourceIdentity,
+    id: current.id, revision: 8, targetSourceHash: e.sourceIdentity, ownership: 'local',
   });
   assert.equal(JSON.stringify(e.editorDroppedCandidate), JSON.stringify(captured));
   current.snapshot.translations[0] += ' ';
@@ -1985,8 +2081,13 @@ test('a removed source file can resolve its preserved dropped copies without ope
     assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ filepath: desc.filepath, choice,
       expected: { id: conflict.shared.id, revision: conflict.shared.revision } }]);
     assert.equal(e.localDescs.droppedConflicts.Thai[desc.filepath], undefined);
-    assert.equal(window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai').id,
-      choice === 'local' ? conflict.yours.id : conflict.shared.id);
+    const selected = window.WorkspaceState.droppedForFile(e.localDescs, desc.filepath, 'Thai', 'online');
+    assert.equal(selected.ownership, 'online');
+    assert.deepEqual(JSON.parse(JSON.stringify(selected.snapshot)), conflict[choice === 'local' ? 'yours' : 'shared'].snapshot);
+    if (choice === 'local') {
+      assert.notEqual(selected.id, conflict.yours.id);
+      assert.equal(selected.id, selected.recoveryId, 'An explicit replacement has its own stable recovery action.');
+    } else assert.equal(selected.id, conflict.shared.id);
     assert.equal(e.editorVisible, false); assert.equal(e.editorCurrentEditingDesc, null);
     assert.equal(e.editorDroppedCandidate, null); assert.deepEqual(e.editorBlocks, []);
     assert.equal(opened.length, 0); assert.equal(writes.length, 0);

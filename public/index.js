@@ -1403,8 +1403,13 @@ const config = Vue.defineComponent({
         }
         const { workspace, source: storedSource } = snapshot;
         if (!current()) return;
-        if(snapshot.scope?.groupId){const metadata=await window.OfflineStore.getVersionMetadata(snapshot.scope);if(!current())return;this.managedActiveDetails=this.managedScopedDetails(metadata?.details);this.activeContentGroup=metadata?.details?.contentGroups?.find(group=>group.id===snapshot.scope.groupId) || {id:snapshot.scope.groupId,versionId:snapshot.scope.versionId,contentMode:'statdescription'};}
+        const identityMetadata = snapshot.metadata || (snapshot.scope && window.OfflineStore.getVersionMetadata
+          ? await window.OfflineStore.getVersionMetadata(snapshot.scope) : null);
+        if (!current()) return;
+        if(snapshot.scope?.groupId){this.managedActiveDetails=this.managedScopedDetails(identityMetadata?.details);this.activeContentGroup=identityMetadata?.details?.contentGroups?.find(group=>group.id===snapshot.scope.groupId) || {id:snapshot.scope.groupId,versionId:snapshot.scope.versionId,contentMode:'statdescription'};}
         else this.activeContentGroup=null;
+        const workspaceOrigin = this.managedRestoreWorkspaceIdentity?.(snapshot.scope, identityMetadata, workspace);
+        if (workspace && workspaceOrigin) workspace.workspaceOrigin = workspaceOrigin;
         if (initialization?.ownsPlan) this.setWorkspaceInitializationPlan(initialization, [
           ...(reusable ? ['Reusing the activated local source and saved translations']
             : window.OfflineStore.getWorkspaceSnapshot ? ['Loading saved translations and the original source baseline']
@@ -1527,6 +1532,8 @@ const config = Vue.defineComponent({
         desc.isMissing = state.isMissing;
         desc.isDropped = state.isDropped;
         desc.needsReview = state.needsReview;
+        desc.hasLocalRecovery = !!state.hasLocalRecovery;
+        desc.hasSharedRecovery = !!state.hasSharedRecovery;
         prepared.push(desc);
         if (Date.now() - started >= 6) {
           reportProgress({ completed: prepared.length, total: source.length, unit: 'files' });
@@ -1937,7 +1944,7 @@ const config = Vue.defineComponent({
         });
         if (result.stale || result.status === 'conflict') return;
         this.editorShowEnglishDiff = false;
-        this.editorDroppedCandidate = null;
+        this.editorDroppedCandidate = window.WorkspaceState.droppedForFile(this.localDescs, desc.filepath, context.language);
         this._editorCollabBase = this._collaboration?.fileBase(desc.filepath);
         this.rebaseEditorAfterCommit(this._collaboration?.fileBase(desc.filepath) || this.collaborationFile(desc), {
           draftBefore: blocks.map(block => block.translation), submittedTranslations: lines,
@@ -2064,7 +2071,7 @@ const config = Vue.defineComponent({
           title: 'Discard dropped translation?', confirmLabel: 'Discard', danger: true,
         }) || !this.collaborationContextCurrent(context)) return;
         this.capturedDroppedPromotion(desc.filepath, candidate);
-        if (context.client?.discardDropped) await context.client.discardDropped(desc.filepath, expected);
+        if (expected.ownership !== 'local' && context.client?.discardDropped) await context.client.discardDropped(desc.filepath, expected);
         else {
           const discard = workspace => {
             window.WorkspaceState.discardDropped(workspace, desc.filepath, context.language, expected);
@@ -2078,7 +2085,8 @@ const config = Vue.defineComponent({
           this.localDescs = window.OfflineStore.mergeWorkspaceRecords?.(this.localDescs, workspace) || workspace;
         }
         if (!this.collaborationContextCurrent(context)) return;
-        this.editorDroppedCandidate = null; this.editorShowEnglishDiff = false;
+        this.editorDroppedCandidate = window.WorkspaceState.droppedForFile(this.localDescs, desc.filepath, context.language);
+        this.editorShowEnglishDiff = false;
         this.applyWorkspaceOverlay(); this.filterDesc();
       } catch (error) { this.collaborationNotice = 'Could not discard the translation: ' + error.message; }
       finally { this.editorSaving = false; }
@@ -5824,36 +5832,18 @@ const config = Vue.defineComponent({
       nextWorkspace.descs ||= []; nextWorkspace.status ||= {};
       const baselineSource = importedBaseline?.source || this.toPlainForStorage(nextSource);
       const prevSource = this.workspaceSource();
-      const leavingGroup = advancesSource && importContext?.groupId;
-      const previousDroppedArchive = leavingGroup ? this.toPlainForStorage(nextWorkspace.droppedArchive || {}) : null;
       if (advancesSource) window.WorkspaceState.upgradeSource(nextWorkspace, { previousSource: prevSource, source: baselineSource,
         previousSourceHash: this.sourceIdentity, sourceHash, game });
-      if (leavingGroup) {
-        // Shared candidate IDs and revisions belong to the previous group.
-        // Carry snapshots locally; retain the old group's recovery evidence.
-        Object.assign(nextWorkspace.droppedArchive, previousDroppedArchive);
-        for (const conflicts of Object.values(nextWorkspace.droppedConflicts || {})) for (const conflict of Object.values(conflicts)) {
-          for (const candidate of [conflict.yours, conflict.shared]) if (candidate?.id && !nextWorkspace.droppedArchive[candidate.id]) {
-            nextWorkspace.droppedArchive[candidate.id] = this.toPlainForStorage(candidate);
-          }
-        }
-        for (const record of Object.values(nextWorkspace.droppedArchive)) record.groupId ||= importContext.groupId;
-        nextWorkspace.droppedAliases = {};
-        nextWorkspace.droppedConflicts = {};
-        nextWorkspace.droppedOutbox = [];
-        for (const [lang, candidates] of Object.entries(nextWorkspace.dropped || {})) for (const filepath of Object.keys(candidates)) {
-          const candidate = window.WorkspaceState.droppedForFile(nextWorkspace, filepath, lang);
-          if (!candidate) continue;
-          const carried = { ...this.toPlainForStorage(candidate), id: `carry-${sourceHash}-${candidate.id}`,
-            revision: 0, targetSourceHash: sourceHash, targetSourceHashes: [sourceHash] };
-          delete carried.groupId;
-          delete carried.versionId;
-          candidates[filepath] = carried;
-          nextWorkspace.droppedArchive[carried.id] = this.toPlainForStorage(carried);
-          nextWorkspace.droppedOutbox.push({ id: carried.id, kind: 'put', revision: 0, candidate: this.toPlainForStorage(carried) });
-        }
-      }
       if (advancesSource) {
+        nextWorkspace.workspaceOrigin = 'local';
+        // Old groups retain their own generations and retry evidence. New local
+        // carry records have independent IDs and never reuse shared revisions.
+        if (importContext?.groupId) for (const record of Object.values(nextWorkspace.droppedArchive || {}))
+          if (window.WorkspaceState.droppedOwnership(record) === 'online') record.groupId ||= importContext.groupId;
+        for (const [language, conflicts] of Object.entries(nextWorkspace.droppedConflicts || {})) for (const [filepath, conflict] of Object.entries(conflicts)) {
+          (nextWorkspace.droppedConflictArchive ||= {})[JSON.stringify([language, filepath, conflict.yours?.id, conflict.shared?.id])] = conflict;
+          delete conflicts[filepath];
+        }
         delete nextWorkspace.catalogVersionId;
         delete nextWorkspace.workspaceGroupId;
         delete nextWorkspace.workspaceVersionId;
@@ -5902,6 +5892,8 @@ const config = Vue.defineComponent({
         nextDesc.isMissing = state.isMissing;
         nextDesc.needsReview = state.needsReview;
         nextDesc.isDropped = state.isDropped;
+        nextDesc.hasLocalRecovery = !!state.hasLocalRecovery;
+        nextDesc.hasSharedRecovery = !!state.hasSharedRecovery;
         nextDesc.isRevised = state.isRevised;
         const hasChanges = state.hasChanges;
         nextDesc.hasChanges = hasChanges;
@@ -5943,7 +5935,7 @@ const config = Vue.defineComponent({
         return;
       }
       if (!workspaceCurrent()) return;
-      if (advancesSource) this.activeContentGroup = null;
+      if (advancesSource) { this.activeContentGroup = null; this.managedWorkspaceIdentity = null; }
       this.localDescs = nextWorkspace;
       this.importBaseline = importedBaseline;
       this._workspaceSourceBaseline = baselineSource;
@@ -6168,6 +6160,8 @@ const config = Vue.defineComponent({
         desc.isRevised = state.isRevised;
         desc.isMissing = state.isMissing;
         desc.isDropped = state.isDropped;
+        desc.hasLocalRecovery = !!state.hasLocalRecovery;
+        desc.hasSharedRecovery = !!state.hasSharedRecovery;
         desc.needsReview = state.needsReview;
       }
       // A full workspace replacement can change saved reference languages
@@ -6447,7 +6441,7 @@ const config = Vue.defineComponent({
             missing: !!state.isMissing,
             saved: !!state.hasChanges,
             revised: !!state.isRevised,
-            dropped: !!state.isDropped,
+            dropped: !!state.isDropped || !!state.hasLocalRecovery || !!state.hasSharedRecovery,
             droppedConflict: droppedReviewPaths.has(desc.filepath),
             unchanged: !state.isMissing && !state.hasChanges && !state.isDropped,
             diagnosticError: invalidTranslation || !!diagnosticResult?.hasDiagnosticError,
@@ -6472,6 +6466,8 @@ const config = Vue.defineComponent({
               hasChanges: !!state.hasChanges,
               isRevised: !!state.isRevised,
               isDropped: !!state.isDropped,
+              hasLocalRecovery: !!state.hasLocalRecovery,
+              hasSharedRecovery: !!state.hasSharedRecovery,
               hasDiagnosticWarning: !!diagnosticResult?.hasDiagnosticWarning,
               hasDiagnosticError: invalidTranslation || !!diagnosticResult?.hasDiagnosticError,
               diagnosticWarningCount: Number(diagnosticResult?.warningCount || 0),

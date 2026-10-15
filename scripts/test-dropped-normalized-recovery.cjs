@@ -43,6 +43,46 @@ function database() {
     return { db, data };
 }
 
+test('deleted-path cleanup physically deletes scoped normalized recovery records and preserves previous Saved work and history', async () => {
+    const { db, data } = database(), scope = { accountId: 'alice', game: 'poe2', branchId: 'default', sourceHash: 'c'.repeat(64) };
+    const normalized = N.create({ W, openDb: async () => db, legacyGet: async () => undefined, normalizeScope: value => value });
+    const id = N.scopeKey(scope), baseId = N.baselineKey(scope), kept = 'current.txt', removed = 'removed.txt';
+    const put = (store, row) => data.get(store).set(row.key, copy(row));
+    put(N.stores.meta, { key: id, scope: id, value: { ...scope, stagedVersion: 1 } });
+    put(N.stores.migration, { key: id, scope: id, value: { state: 'ready' } });
+    put(N.stores.assets, { key: baseId, scope: baseId, value: { archive: { baselineId: scope.sourceHash, descriptionCount: 1 } } });
+    put(N.stores.baseline, normalized.row(baseId, kept, { filepath: kept, translations: { English: ['Current'], Thai: ['Current target'] } }));
+    const records = [
+        ['dropped', 'Thai', removed, { id: 'deleted', filepath: removed }],
+        ['droppedArchive', 'deleted', null, { id: 'deleted', filepath: removed, snapshot: { translations: ['Deleted recovery target'] } }],
+        ['droppedConflicts', 'Thai', removed, { yours: { id: 'deleted', filepath: removed, snapshot: { translations: ['Another target'] } } }],
+        ['droppedConflictArchive', 'old-conflict', null, { yours: { id: 'deleted', filepath: removed } }],
+        ['droppedOutbox', 'queued', null, { id: 'deleted', kind: 'put', candidate: { filepath: removed } }],
+        ['droppedAliases', 'alias', null, 'deleted'],
+        ['droppedArchive', 'keep', null, { id: 'keep', filepath: kept, snapshot: { translations: ['Current alternative'] } }],
+    ];
+    for (const [field, entry, filepath, value] of records) {
+        const identity = filepath ? [field, entry, filepath] : [field, entry];
+        put(N.stores.records, normalized.row(id, identity, { field, entry: filepath || entry, ...(filepath ? { language: entry } : {}), data: value },
+            { pathKey: normalized.key(id, filepath || value?.filepath || removed), kindScope: normalized.key(id, field) }));
+    }
+    const previousScope = { ...scope, sourceHash: 'a'.repeat(64) }, previousId = N.scopeKey(previousScope);
+    put(N.stores.records, normalized.row(previousId, ['staged', 'Thai', removed], { field: 'staged', language: 'Thai', entry: removed, data: { translations: ['Previous saved work'] } }, { kindScope: normalized.key(previousId, 'staged') }));
+    put(N.stores.receipts, normalized.row(previousId, 'receipt', { originalHash: 'unchanged' }));
+    const protectedRows = [...data.get(N.stores.records).values()].filter(row => row.scope !== id), receipts = copy([...data.get(N.stores.receipts)]);
+    // An incomplete source cache proves nothing, even when its descriptor exists.
+    data.get(N.stores.baseline).clear();
+    assert.deepEqual(await normalized.removeDeletedRecoveries(scope), { removed: [] });
+    assert.equal(data.get(N.stores.records).size, 8);
+    put(N.stores.baseline, normalized.row(baseId, kept, { filepath: kept, translations: { English: ['Current'] } }));
+    assert.deepEqual(await normalized.removeDeletedRecoveries(scope), { removed: [removed] });
+    const currentRows = [...data.get(N.stores.records).values()].filter(row => row.scope === id);
+    assert.equal(currentRows.length, 1); assert.equal(currentRows[0].value.data.id, 'keep');
+    assert.deepEqual([...data.get(N.stores.records).values()].filter(row => row.scope !== id), protectedRows);
+    assert.deepEqual([...data.get(N.stores.receipts)], receipts);
+    assert.deepEqual(await normalized.removeDeletedRecoveries(scope), { removed: [] });
+});
+
 async function fixture({ status = 'needs_candidate_review', different = false, wire = false, stagedDifferent = false } = {}) {
     const { db, data } = database();
     const scope = { accountId: 'julia', game: 'poe2', branchId: 'default', language: 'German', sourceHash: 'a'.repeat(64) };
@@ -65,7 +105,9 @@ async function fixture({ status = 'needs_candidate_review', different = false, w
         { pathKey: normalized.key(id, original.filepath) }));
     const workspace = await normalized.workspace(scope);
     W.initializeWorkspace(workspace, { source: [original], sourceHash: scope.sourceHash, game: scope.game, language: scope.language });
-    const local = W.dropTranslation(workspace, original, scope.language, { id: 'legacy-local-copy', game: scope.game,
+    // This is an existing online generation with a historical temporary ID.
+    // Its reviewed mutation and uncertain wire must retain their old guards.
+    const local = W.dropTranslation(workspace, original, scope.language, { id: 'legacy-local-copy', ownership: 'online', game: scope.game,
         originSourceHash: 'b'.repeat(64), targetSourceHash: scope.sourceHash, reason: 'Older preserved source' });
     const promotion = { id: local.id, revision: Number(local.revision) || 0, targetSourceHash: scope.sourceHash };
     const saved = ['Confirmed local translation@{0}s'];
