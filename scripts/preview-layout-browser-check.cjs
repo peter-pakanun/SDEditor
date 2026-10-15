@@ -40,9 +40,23 @@ async function checkFullPreviewResize(page, mode) {
     assert.equal(await handle.getAttribute('role'), 'separator', mode);
     assert.equal(await handle.getAttribute('aria-orientation'), 'horizontal', mode);
     assert.equal(await handle.getAttribute('tabindex'), '0', mode);
+    await settle(page);
     const initial = await previewSize(page);
+    assert.equal(await page.locator('.gamePreviewToolbar').count(), ct ? 0 : 1,
+      mode + ': only the stacked SD full preview offers frame-size controls');
+    if (ct) {
+      const fills = await page.locator('.gamePreviewWindow').evaluateAll(frames => frames.map(frame => {
+        const bounds = frame.getBoundingClientRect(), pane = frame.closest('.gamePreviewSourcePane, .gamePreviewTargetPane');
+        return { width: bounds.width, availableWidth: pane.clientWidth, bottom: bounds.bottom,
+          paneBottom: pane.getBoundingClientRect().bottom };
+      }));
+      for (const frame of fills) {
+        assert.ok(Math.abs(frame.width - frame.availableWidth) <= 2, 'Short ClientText preview fills its pane width');
+        assert.ok(Math.abs(frame.bottom - frame.paneBottom) <= 2, 'Short ClientText preview fills its pane height below the label');
+      }
+    }
     assert.match(initial.cursor, /^(row|ns)-resize$/, mode + ': pointer communicates vertical resizing');
-    assert.ok(initial.min > 0 && initial.min < initial.height, mode + ': preview can shrink below its default height');
+    assert.ok(initial.min > 0 && initial.min < initial.height, mode + ': preview can shrink below its default height: ' + JSON.stringify(initial));
     assert.ok(Math.abs(initial.max - 450) <= 2, mode + ': maximum preview height is half the viewport');
     const originalBox = await handle.boundingBox();
     await dragPreview(page, originalBox.y + originalBox.height / 2 + 70);
@@ -195,7 +209,7 @@ async function checkClientTextPreviewSplit(page) {
     assert.equal(await page.locator('.gamePreviewTargetPane .gamePreviewWindow').count(), 3, 'all three Turkish target variants share the translation pane');
     assert.deepEqual(await page.locator('.gamePreviewWindow').evaluateAll(nodes => nodes.map(node => node.closest('.gamePreviewSourcePane') ? 'EN' : 'TL')),
       ['EN', 'TL', 'TL', 'TL'], 'preview DOM order remains English followed by all target variants');
-    for (const theme of ['light', 'grey', 'dark', 'modern-dark']) for (const width of [1440, 1000]) {
+    for (const theme of ['light', 'grey', 'dark', 'modern-dark']) for (const width of [1920, 1440, 1000]) {
       await page.setViewportSize({ width, height: 900 });
       await page.evaluate(theme => {
         document.documentElement.setAttribute('data-theme', theme);
@@ -206,6 +220,9 @@ async function checkClientTextPreviewSplit(page) {
       assert.ok(Math.abs(before.source.top - before.target.top) <= 2 && Math.abs(before.source.height - before.target.height) <= 2,
         message + ': English and translation occupy parallel columns');
       assert.ok(before.target.left >= before.source.right - 2, message + ': English is left of translation');
+      assert.ok(await page.locator('.gamePreviewWindow').evaluateAll(frames => frames.every(frame =>
+        Math.abs(frame.getBoundingClientRect().width - frame.closest('.gamePreviewLine').clientWidth) <= 2)),
+      message + ': preview frames fill the pane width regardless of saved frame size');
       for (const pane of Object.values(before)) {
         assert.equal(pane.overflowY, 'auto', message + ': each pane owns a vertical scrollbar');
         assert.ok(pane.scrollHeight > pane.clientHeight * 2, message + ': fixture has substantial overflowing preview content');
@@ -242,7 +259,7 @@ async function checkClientTextPreviewSplit(page) {
     });
     if (viewport) await page.setViewportSize(viewport);
   }
-  console.log('ClientText full preview left/right geometry and independent real wheel scrolling, including all three target variants, passed in four themes and two desktop widths.');
+  console.log('ClientText full preview left/right geometry, full pane sizing and independent real wheel scrolling, including all three target variants, passed in four themes and three desktop widths.');
 }
 
 async function checkInlinePreviewLayout(page) {

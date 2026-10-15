@@ -1714,12 +1714,12 @@ async function run() {
         assert.deepEqual(await fullPreview.locator('.gamePreviewVarValue').allTextContents(), ['37', '10'], 'Distinct complete variable identities keep independent values in the English and translation frames');
         await fullPreview.getByRole('textbox', { name: 'Variable {0}', exact: true }).fill('41');
         assert.deepEqual(await fullPreview.locator('.gamePreviewVarValue').allTextContents(), ['37', '41'], 'The translation variable resolves its own exact identity');
-        await fullPreview.getByRole('button', { name: 'Small', exact: true }).click();
-        assert.equal(await fullPreview.locator('.gamePreviewWindow--s').count(), 2);
+        assert.equal(await fullPreview.locator('.gamePreviewToolbar').count(), 0, 'Left/right full preview fills its panes without frame-size controls');
+        assert.ok(await fullPreview.locator('.gamePreviewWindow').evaluateAll(frames => frames.every(frame =>
+            Math.abs(frame.getBoundingClientRect().width - frame.closest('.gamePreviewLine').clientWidth) < 2)), 'Both full preview frames fill the pane width');
         await page.evaluate(async () => { const vm = window.__clientFixtureApp; vm.hideSourceInPreviewPanel = true; await vm.$nextTick(); });
         assert.equal(await fullPreview.locator('.gamePreviewWindow').count(), 1, 'Hide-source setting also controls ClientText preview');
         await page.evaluate(async () => { const vm = window.__clientFixtureApp; vm.hideSourceInPreviewPanel = false; await vm.$nextTick(); });
-        await fullPreview.getByRole('button', { name: 'Medium', exact: true }).click();
         await workspace.getByRole('button', { name: 'Close', exact: true }).click();
         await page.evaluate(async () => { const vm = window.__clientFixtureApp; vm.inlineEditor = true; vm.inlineSidebarVisible = true; await vm.$nextTick(); });
         await workspace.locator('.ctTable > tbody > tr').filter({ has: page.getByRole('button', { name: 'complete', exact: true }) }).click();

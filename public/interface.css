@@ -369,9 +369,9 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .editor :is(.gamePreviewSourcePane, .gamePreviewTargetPane):focus-visible { outline: 2px solid var(--ui-accent); outline-offset: -2px; }
 .editor .gamePreviewLine { flex: none; }
 .editor .gamePreviewStrip:not(.gamePreviewStrip--split) .gamePreviewLineLabel { position: sticky; top: calc(0.6em * var(--density)); align-self: flex-start; margin-top: calc(0.6em * var(--density)); }
-.editor .gamePreviewStrip--split .gamePreviewLine { flex-direction: column; justify-content: flex-start; }
+.editor .gamePreviewStrip--split .gamePreviewLine { flex: 1 0 auto; flex-direction: column; align-items: stretch; justify-content: flex-start; }
 .editor .gamePreviewStrip--split .gamePreviewLineLabel { flex: none; align-self: flex-start; text-align: left; }
-.editor .gamePreviewStrip--split .gamePreviewWindow { flex: none; min-width: 0; }
+.editor .gamePreviewStrip--split .gamePreviewWindow { flex: 1 0 auto; min-width: 0; width: 100%; max-width: none; }
 .editor .gamePreviewStrip { display: flex; flex-direction: column; }
 .gamePreviewAudioMarker { display: inline-flex; align-items: center; justify-content: center; width: 1.1em; height: 1.1em; margin-inline: .1em; vertical-align: -.12em; color: #e8bd76; cursor: help; border-radius: 2px; }
 .gamePreviewAudioMarker svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }

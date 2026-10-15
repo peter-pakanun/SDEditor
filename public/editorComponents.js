@@ -255,7 +255,7 @@
       previewStyle() {
         const height = this.previewDragHeight ?? this.controller.fullEditorPreviewHeight;
         return {
-          '--editor-preview-requested-height': Number.isFinite(height) ? height + 'px' : undefined,
+          '--editor-preview-requested-height': Number.isFinite(height) ? height + 'px' : '',
           '--editor-preview-default-height': this.controller.gamePreviewTargetRows?.length > 1
             ? 'calc(340px * var(--density))' : 'calc(200px * var(--density))',
         };
@@ -547,7 +547,7 @@
     template: String.raw`<span class="gamePreviewAudioMarker" :data-audio-marker="segment.full" tabindex="0" role="img" :aria-label="segment.tooltip" v-tooltip="segment.tooltip"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 9h4l5-4v14l-5-4H3z"></path><path d="M19 6v7"></path><circle class="gamePreviewAudioDot" cx="19" cy="17" r="1"></circle></svg></span>`,
   };
   const SharedPreview = sharedSurface('EditorPreview', String.raw`<div class="gamePreviewStrip" :class="{ 'gamePreviewStrip--variants': gamePreviewTargetRows.length > 1, 'gamePreviewStrip--split': gamePreviewFullEditor && ctActive, 'gamePreviewStrip--source-hidden': hideSourceInPreviewPanel }">
-          <div v-if="gamePreviewFullEditor" class="gamePreviewToolbar twoSided">
+          <div v-if="gamePreviewFullEditor && !ctActive" class="gamePreviewToolbar twoSided">
             <span class="gamePreviewLabel">Preview size</span>
             <div class="gamePreviewFrameBtns">
               <button type="button" class="gamePreviewFrameBtn" :class="{ active: gamePreviewFrame === 's' }" :aria-pressed="gamePreviewFrame === 's'" title="Use a small preview frame" @click="setGamePreviewFrame('s')">Small</button>
