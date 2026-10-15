@@ -35,6 +35,15 @@ const VBA = Buffer.from([0, 255, 8, 99, 14, 0]);
 const escape = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const cell = (ref, value) => `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${escape(value)}</t></is></c>`;
 const row = (number, values) => `<row r="${number}">${values.map((value, index) => cell(String.fromCharCode(65 + index) + number, value)).join('')}</row>`;
+const audioReference = '4.0/NPC/Fixture/Inline.wav';
+function dialogueWave() {
+    const sampleRate = 8000, dataSize = sampleRate * 2 * 45, bytes = Buffer.alloc(44 + dataSize);
+    bytes.write('RIFF'); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8);
+    bytes.writeUInt32LE(16, 16); bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(1, 22);
+    bytes.writeUInt32LE(sampleRate, 24); bytes.writeUInt32LE(sampleRate * 2, 28);
+    bytes.writeUInt16LE(2, 32); bytes.writeUInt16LE(16, 34); bytes.write('data', 36); bytes.writeUInt32LE(dataSize, 40);
+    return bytes;
+}
 async function workbook(role = 'normal', sampleVersion = '') {
     const zip = new JSZip();
     const rows = role === 'normal' ? [
@@ -62,10 +71,10 @@ async function workbook(role = 'normal', sampleVersion = '') {
         { name: 'NPCTalk', rows: [row(1, ['ID', 'Text', 'Translation']),
             row(2, ['Metadata/NPC/Renly::0', 'A conversation with Renly', 'Conversation avec Renly']),
             row(3, ['Metadata/NPC/Doryani::0', 'Introduction', 'Introduction'])] },
-        { name: 'NPCTextAudio', rows: [row(1, ['ID', 'Text', 'Translation']),
-            row(2, ['RenlyIntro', 'Welcome, friend.', 'Bienvenue, ami.']),
-            row(3, ['UnaRenly', 'Have you spoken with Renly?', 'Avez-vous parlé à Renly ?']),
-            row(4, ['UnarmedStart', 'Unarmed dialogue unrelated to Una.', 'Sans armes.'])] },
+        { name: 'NPCTextAudio', rows: [row(1, ['ID', 'Text', 'Translation', 'Audio File']).replace('<c r="D1"', '<c s="2" r="D1"'),
+            row(2, ['RenlyIntro', 'Welcome, friend.', 'Bienvenue, ami.', audioReference]),
+            row(3, ['UnaRenly', 'Have you spoken with Renly?', 'Avez-vous parlé à Renly ?', '']),
+            row(4, ['UnarmedStart', 'Unarmed dialogue unrelated to Una.', 'Sans armes.', ''])] },
         { name: 'NPCTalkDialogueTextAudio', rows: [row(1, ['ID', 'Text', 'Translation', 'Character']),
             row(2, ['RenlyIntro', 'Player reply addressing Renly.', 'Réponse du joueur.', 'Metadata/Characters/Str/StrFourb']),
             row(3, ['HuntressRenlyReply', 'Renly, can you help?', 'Renly, pouvez-vous aider ?', 'Metadata/Characters/Dex/DexFourb']),
@@ -180,7 +189,8 @@ async function run() {
     await new Promise(done => server.listen(0, '127.0.0.1', done));
     const origin = 'http://127.0.0.1:' + server.address().port;
     const normal = await workbook(), gender = await workbook('gender'), failures = [], results = [];
-    let browser, page;
+    let browser, page, releaseAudio;
+    const firstAudioResponse = new Promise(resolve => { releaseAudio = resolve; }), audioRequests = [];
     try {
         browser = await playwright.chromium.launch({ executablePath, headless: true, args: ['--disable-gpu'] });
         const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, acceptDownloads: true, ignoreHTTPSErrors: true });
@@ -214,6 +224,13 @@ async function run() {
         page.on('pageerror', error => failures.push(error.message));
         await context.route('**/*', async route => {
             const url = new URL(route.request().url());
+            if (url.pathname === '/audio/poe2db') {
+                assert.equal(url.searchParams.get('path'), audioReference.toLowerCase(), 'Only the explicit fixture clip is requested');
+                audioRequests.push(route.request().method());
+                if (audioRequests.length === 1) await firstAudioResponse;
+                return route.fulfill({ status: 200, headers: { 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store',
+                    'Access-Control-Allow-Origin': origin }, body: dialogueWave() });
+            }
             if (url.origin === origin || !/\/auth\/|\/v1\//.test(url.pathname)) return route.continue();
             throw new Error('Fixture unexpectedly attempted an actual API request: ' + url.pathname);
         });
@@ -536,6 +553,65 @@ async function run() {
         await page.waitForFunction(id => window.__offlineTestApp.ctSelection === id && !window.__offlineTestApp.ctBusy, orderedNpcIds[0]);
         assert.equal(await inlineTargets.last().evaluate(element => element === document.activeElement), true, 'Shift+Tab returns to the exact preceding worksheet target');
         await assertLocal(page, 'NPC inline cross-sheet Tab/Shift+Tab');
+        assert.equal(audioRequests.length, 0, 'Opening and browsing audio references does not request media automatically');
+        const dialogue = await page.evaluate(() => {
+            const vm = window.__offlineTestApp, unit = vm.ctRows.find(unit => unit.sheet === 'NPCTextAudio' && unit.recordId === 'RenlyIntro');
+            return { id: unit.id, field: unit.fields[0].id, saved: JSON.stringify(vm.ctSaved[unit.id] || null) };
+        });
+        const dialogueSelector = await page.evaluate(id => '[data-unit-id="' + CSS.escape(id) + '"]', dialogue.id),
+            dialogueRow = workspace.locator(dialogueSelector), track = () => dialogueRow.locator('.ctAudioTrack'),
+            nativeAudio = () => page.locator('.ctAudioFloating audio');
+        const dialoguePlaying = () => page.waitForFunction(() => {
+            const player = document.querySelector('.ctAudioFloating audio');
+            return player && !player.paused && player.currentTime > 0.05 && getComputedStyle(player.parentElement).display !== 'none';
+        });
+        const assertDialogueOpen = async (label, savedValue) => {
+            // Allow the real focusout timer to run before asserting it kept the
+            // in-memory draft open instead of silently saving and closing it.
+            await page.waitForTimeout(50);
+            const state = await page.evaluate(id => {
+                const vm = window.__offlineTestApp;
+                return { id: vm.ctSelection, closed: vm.ctInlineClosed, saved: JSON.stringify(vm.ctSaved[id] || null) };
+            }, dialogue.id);
+            assert.deepEqual(state, { id: dialogue.id, closed: false, saved: savedValue }, label);
+        };
+        await dialogueRow.locator('.inlineSourceCell').click();
+        await track().waitFor();
+        const dialogueTarget = dialogueRow.locator('textarea[data-ct-target]').first();
+        await dialogueTarget.fill('Dialogue audio draft from controls');
+        await track().click();
+        await page.waitForFunction(() => document.querySelector('.ctAudioTrack.loading'));
+        assert.equal(await track().isDisabled(), true);
+        assert.equal(await page.evaluate(() => !!document.activeElement.closest('.ctAudioTrackTarget')), true,
+            'Disabling the loading icon keeps focus on its wrapper inside the inline row');
+        await assertDialogueOpen('Loading audio preserves the unsaved inline draft', dialogue.saved);
+        releaseAudio(); await dialoguePlaying();
+        await nativeAudio().focus();
+        assert.equal(await nativeAudio().evaluate(player => player === document.activeElement), true);
+        await nativeAudio().click({ position: { x: 160, y: 18 } });
+        await assertDialogueOpen('Focusing and seeking native audio controls does not auto-save or close the inline editor', dialogue.saved);
+        await nativeAudio().press('Control+s');
+        await saved(page, dialogue.id, dialogue.field, 'Dialogue audio draft from controls');
+        assert.equal(await page.evaluate(() => window.__offlineTestApp.ctInlineClosed), false, 'Ctrl+S from the native player uses the inline Save action');
+        await dialogueTarget.fill('Dialogue audio draft from icon');
+        await track().focus(); await track().press('Control+s');
+        await saved(page, dialogue.id, dialogue.field, 'Dialogue audio draft from icon');
+        assert.equal(await page.evaluate(() => window.__offlineTestApp.ctInlineClosed), false, 'Ctrl+S from the icon uses the inline Save action');
+        await nativeAudio().focus(); await nativeAudio().press('Escape');
+        await page.waitForFunction(() => window.__offlineTestApp.ctInlineClosed && !document.querySelector('.ctAudioFloating audio'));
+        await dialogueRow.locator('.inlineSourceCell').click();
+        await track().click(); await dialoguePlaying();
+        await nativeAudio().focus();
+        await nativeAudio().evaluate(player => player.pause());
+        await page.waitForFunction(() => getComputedStyle(document.querySelector('.ctAudioFloating')).display === 'none');
+        assert.equal(await page.evaluate(() => window.__offlineTestApp.ctInlineClosed), false, 'Pausing focused native controls preserves the inline editor');
+        assert.equal(await track().getAttribute('aria-label'), 'Play Inline.wav');
+        await track().click(); await dialoguePlaying();
+        await track().focus(); await track().press('Escape');
+        await page.waitForFunction(() => window.__offlineTestApp.ctInlineClosed && !document.querySelector('.ctAudioFloating audio'));
+        await assertLocal(page, 'Actual inline audio focus, shortcuts and native controls');
+        assert.ok(audioRequests.length >= 2, 'Explicit play and replay use only the locally generated fixture clip');
+        results.push('Dialogue audio: loading/native-control focus retains inline drafts, Ctrl+S saves from icon/player, Escape closes, native pause/resume works, and explicit media stays fixture-local');
         await monitor(page, false);
         await page.evaluate(async () => { const vm = window.__offlineTestApp; vm.inlineEditor = false; await vm.$nextTick(); await vm.saveSettings(); });
         await monitor(page, true);
@@ -1150,6 +1226,7 @@ async function run() {
         console.error('Browser errors:', failures);
         throw error;
     } finally {
+        releaseAudio();
         if (browser) await browser.close();
         await new Promise(done => server.close(done));
     }

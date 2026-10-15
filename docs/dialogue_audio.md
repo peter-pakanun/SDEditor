@@ -1,10 +1,12 @@
 # ClientText dialogue audio
 
-ClientText records with an `Audio File` reference offer dialogue playback in the inline and full editors. Choose a clip when the workbook lists several, then press **Play audio**. Opening a record does not download audio. Playback stops when the record, workspace or editor surface changes. Audio is reference material and does not change translations, review state or workbook exports.
+ClientText records with an `Audio File` reference offer an icon bar immediately below the English field in the inline and full editors. Each speaking icon plays one track; hover or focus it for the filename. A disabled spinner indicates loading. The active icon uses the field toolbar's accent color and stops that track when clicked. A red icon indicates an error; its tooltip gives the available failure details, and clicking retries the track. Opening a record does not download audio.
+
+Native browser audio controls float at the bottom right only while a track is playing. In the file list they sit above the status bar; in the full editor they sit nearer the bottom edge. The controls are half transparent and become opaque on hover or keyboard focus. Pausing, stopping or finishing a track hides the controls. Playback also stops when the record, workspace or editor surface changes. Audio is reference material and does not change translations, review state or workbook exports.
 
 The editor requests `GET /audio/poe2db?path=<reference>` from its configured companion API. The endpoint accepts individual relative `.ogg` and `.wav` references, normalizes their case and resolves them under the fixed `https://cdn.poe2db.tw/audio/dialogue/` host/path. Comma-separated workbook references become separate clip choices. Absolute URLs, traversal, query strings and redirects are rejected. The API sends a fixed PoE2DB referrer upstream and never forwards editor credentials or arbitrary client headers.
 
-This is a public media endpoint, including for guests using **Test Sheet Offline**. It uses the API's allowed-origin checks and a separate request limit. No account token is placed in an audio URL. Upstream missing files and failures appear only in the audio player, without affecting translation saves or synchronization.
+This is a public media endpoint, including for guests using **Test Sheet Offline**. It uses the API's allowed-origin checks and a separate request limit. No account token is placed in an audio URL. Upstream missing files and failures appear in the track's tooltip, without affecting translation saves or synchronization. If native playback fails, a bounded HEAD request retrieves an HTTP status when possible; stale or cancelled requests cannot change another track's tooltip.
 
 ## Cache policy
 

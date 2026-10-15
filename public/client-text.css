@@ -2,12 +2,23 @@
 .ctWorkspaceBody.ctToolsOpen { grid-template-columns:190px minmax(0,1fr) clamp(360px,29vw,460px); }
 .ctListWorkspace { padding-bottom:var(--workspace-footer-height,110px); }
 .ctHistoryActions {display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.ctHistoryError:not(.appNotice) {color:var(--ui-error)}
-.ctDialogueAudio {box-sizing:border-box;min-width:0;margin-bottom:10px;padding:9px;border:1px solid var(--ui-border);border-radius:5px;background:var(--color-element-alt);color:var(--color-font);font-size:calc(12px * var(--density));}
-.ctAudioHeading {display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;}.ctAudioCount {color:var(--ui-muted);font-variant-numeric:tabular-nums;}
-.ctAudioClipPicker {display:block;min-width:0;}.ctAudioClipPicker select {box-sizing:border-box;min-width:0;width:100%;padding:4px;font:inherit;color:var(--color-font);background:var(--color-element);border:1px solid var(--ui-border);border-radius:4px;}
-.ctAudioFilename {display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--ui-muted);}
-.ctAudioPlayback {display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:7px;min-width:0;}.ctAudioPlayback button {flex:none;padding:5px 9px;font:inherit;}.ctAudioPlayback audio {flex:1;width:260px;max-width:100%;min-width:0;height:36px;}
-.ctAudioError {display:block;margin-top:6px;color:var(--ui-warning);}.ctDialogueAudio :is(button,select,audio):focus-visible {outline:2px solid var(--ui-accent);outline-offset:2px;}
+.ctDialogueAudio {box-sizing:border-box;display:flex;align-items:center;flex-wrap:wrap;gap:4px;min-width:0;min-height:29px;margin-top:-1px;padding:2px 5px;border:1px solid var(--ui-border);border-radius:0 0 5px 5px;background:var(--color-element-alt);color:var(--ui-muted);font-size:calc(12px * var(--density));}
+.ctSourceBlock:has(.ctDialogueAudio) > .editorFieldTools > .editorFieldFrame {border-bottom-left-radius:0;border-bottom-right-radius:0;}
+.ctAudioTrackTarget {display:inline-flex;align-items:center;justify-content:center;border-radius:4px;}
+.ctDialogueAudio .ctAudioTrack {box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;flex:none;width:30px;min-width:30px;height:25px;padding:2px 5px;margin:0;font:inherit;border:1px solid transparent;border-radius:4px;background:transparent;color:var(--color-font);cursor:pointer;}
+.ctDialogueAudio .ctAudioTrack:hover:not(:disabled) {border-color:transparent;background:var(--ui-accent-soft);}
+.ctDialogueAudio .ctAudioTrack.active {color:var(--ui-accent);}
+.ctDialogueAudio .ctAudioTrack.error {color:var(--ui-error);}
+.ctDialogueAudio .ctAudioTrack:disabled {cursor:wait;opacity:1;}
+.ctDialogueAudio .ctAudioTrack:focus:not(:focus-visible) {outline:none;}
+.ctDialogueAudio :is(.ctAudioTrack,.ctAudioTrackTarget):focus-visible {outline:2px solid var(--ui-accent);outline-offset:-2px;}
+.ctAudioSpeakIcon {width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;}
+.ctAudioSpinner {box-sizing:border-box;width:15px;height:15px;border:2px solid var(--ui-border);border-top-color:var(--ui-accent);border-radius:50%;animation:browserWorkSpin .8s linear infinite;}
+.ctAudioFloating {position:fixed;right:16px;bottom:calc(var(--ct-audio-footer-height,110px) + 12px);z-index:43;box-sizing:border-box;max-width:calc(100vw - 32px);padding:3px;border:1px solid var(--ui-border);border-radius:24px;background:var(--color-element);box-shadow:var(--ui-shadow);opacity:.5;transition:opacity .15s ease;}
+.ctAudioFloating.ctAudioFloatingFull {bottom:14px;}
+.ctAudioFloating:hover,.ctAudioFloating:focus-within {opacity:1;}
+.ctAudioFloating audio {display:block;width:320px;max-width:calc(100vw - 40px);height:36px;}
+.ctAudioFloating audio:focus-visible {outline:2px solid var(--ui-accent);outline-offset:2px;border-radius:20px;}
 .editorFieldTools {min-width:0;max-width:100%;font-size:calc(12px * var(--density));}
 .editorFieldFrame {overflow:hidden;border:1px solid var(--ui-border);border-radius:5px;background:var(--color-element-alt);}
 .editorFieldFrame.outdated {border-color:var(--ui-dropped);}.editorFieldFrame.missing {border-color:var(--ui-missing);}.editorFieldFrame:focus-within {box-shadow:0 0 0 1px var(--ui-accent);}

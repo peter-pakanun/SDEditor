@@ -3108,6 +3108,10 @@
         methods: {
             showTooltip(event,text) { this.host.showTooltip?.(event,text); },
             hideTooltip() { this.host.hideTooltip?.(); },
+            audioSource(group,source) {
+                const first=this.host.ctFieldGroups.find(candidate=>this.host.ctGroupSources(candidate).length);
+                return group.key===first?.key && source.key===this.host.ctGroupSources(group)[0]?.key;
+            },
         },
         mounted() {
             this.$nextTick(()=>this.host.ctResizeFields(this.$el));
@@ -3124,7 +3128,6 @@
         <div class="ctFields" :data-side="side === 'both' ? undefined : side" :inert="host.ctBusy" @keydown="host.ctFieldsKeydown($event)">
             <div :class="{inlineFileBlock:side !== 'both',inlineBlockPrelude:side !== 'both'}" :data-inline-block="side !== 'both' ? 'prelude' : undefined" :data-inline-side="side === 'source' ? 'english' : side === 'translation' ? 'translation' : undefined"><div :class="{inlineBlockNatural:side !== 'both'}">
             <template v-if="side !== 'translation'">
-                <ct-dialogue-audio v-if="host.ctCurrentUnit && $options.components['ct-dialogue-audio']" :host="host" :surface="side"></ct-dialogue-audio>
                 <section v-if="host.ctNotes().length" class="ctDeveloperNotes editBlock"><strong>Developer notes</strong><pre v-for="(note,index) in host.ctNotes()" :key="index">{{ note }}</pre></section>
             </template>
             <template v-if="side !== 'source'"><section v-for="(choice,index) in host.ctChoices" :key="index" class="ctDeveloperNotes editBlock"><strong>Translation choice · {{ host.ctHistoryFieldLabel(host.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId) || {name:choice.fieldId}) }}</strong><p>Incoming translation remains active. Choose the text to keep.</p><pre>{{ choice.upstream ?? choice.remote }}</pre><button @click="host.ctChooseAlternative(choice,'remote')">Keep incoming</button><pre>{{ choice.local }}</pre><button @click="host.ctChooseAlternative(choice,'local')">Use previous saved text</button></section></template>
@@ -3140,6 +3143,7 @@
                         <pre v-if="host.ctFieldToolbar && host.ctComparisonState(host.ctSourceComparisonField(source),'source').open && host.ctComparisonParts(host.ctSourceComparisonField(source),'source')" class="ctInlineDiff ctSourceDiff" aria-label="English source differences"><span v-for="(part,index) in host.ctComparisonParts(host.ctSourceComparisonField(source),'source')" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ host.ctHistoryDisplay(part.value) }}</span></pre>
                         <editor-native-field v-else :controller="host.ctSourceFieldController(group,source)" kind="english" :compact="side !== 'both'"></editor-native-field>
                         </component>
+                        <ct-dialogue-audio v-if="$options.components['ct-dialogue-audio'] && audioSource(group,source)" :host="host" :surface="side"></ct-dialogue-audio>
                     </div>
                     </template>
                 </div>
