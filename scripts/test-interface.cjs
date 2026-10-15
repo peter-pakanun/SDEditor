@@ -128,14 +128,17 @@ test('one-file save and draft refreshes preserve unrelated rows and match a full
   const workspaceFile = state.workspaceFile;
   let reads = 0;
   state.workspaceFile = (...args) => { reads++; return workspaceFile(...args); };
-  save(0, 'Completed translation'); save(500, '');
+  save(0, 'Completed translation'); save(500, 'Complete correction');
+  assert.throws(() => save(500, ''), { code: 'SD_TRANSLATION_INVALID' });
+  editor.inlineDraftRows[baseline[500].filepath] = { translations: [''] };
   editor.inlineDraftRows[baseline[20].filepath] = { translations: ['Private draft'] };
   editor.filterDesc({ changedFilepaths: [baseline[0].filepath, baseline[500].filepath, baseline[20].filepath] });
   assert.equal(reads, 3, 'Status derivation is limited to the changed files.');
   assert.equal(editor.filteredDescs.find(row => row.filepath === baseline[999].filepath), untouchedRow);
   assert.deepEqual(Array.from(editor.filteredDescs, row => row.filepath), [0, 500, 999].map(index => baseline[index].filepath),
     'Unsaved typing retains the committed status instead of adding a private status-filter match.');
-  assert.equal(editor.statistic.hasChanges, 3); assert.equal(editor.statistic.isMissing, 1); assert.equal(editor.statistic.isRevised, 2);
+  assert.equal(editor.statistic.hasChanges, 3); assert.equal(editor.statistic.isMissing, 0); assert.equal(editor.statistic.isRevised, 2);
+  assert.equal(editor.statistic.hasDiagnosticError, 0, 'An unsaved blank draft does not change committed error counts.');
   const incremental = JSON.stringify({ rows: editor.filteredDescs, counts: editor.statistic });
   editor.filterDesc();
   assert.equal(JSON.stringify({ rows: editor.filteredDescs, counts: editor.statistic }), incremental);
@@ -236,12 +239,12 @@ test('Dropped counts unresolved copies beside complete ZIP translations and igno
   editor.descs = [{ ...JSON.parse(JSON.stringify(baseline)), hasChanges: true, isRevised: true, isMissing: true, isDropped: false }];
   editor.selectedFileFilters = ['dropped']; editor.filterDesc();
   assert.deepEqual(names(editor.filteredDescs), ['complete-with-copy']);
-  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 1 });
+  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 1, hasDiagnosticError: 0 });
   assert.equal(editor.filteredDescs[0].isDropped, true);
   assert.equal(editor.filteredDescs[0].hasChanges, false); assert.equal(editor.filteredDescs[0].isRevised, false); assert.equal(editor.filteredDescs[0].isMissing, false);
   editor.lang = 'German'; editor.filterDesc();
   assert.equal(editor.filteredDescs.length, 0);
-  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0 });
+  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0, hasDiagnosticError: 0 });
   editor.lang = 'Thai'; editor.filterDesc();
   assert.deepEqual(names(editor.filteredDescs), ['complete-with-copy']);
   assert.equal(editor.statistic.isDropped, 1);
@@ -278,12 +281,12 @@ test('Revised filtering derives original Missing and resolved Dropped exclusions
     isRevised: file !== correction, isMissing: true, isDropped: true }));
   editor.selectedFileFilters = ['revised']; editor.filterDesc();
   assert.deepEqual(names(editor.filteredDescs), ['original-complete']);
-  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 3, isRevised: 1, isMissing: 0, isDropped: 0 });
+  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 3, isRevised: 1, isMissing: 0, isDropped: 0, hasDiagnosticError: 0 });
   editor.selectedFileFilters = ['saved']; editor.filterDesc();
   assert.deepEqual(names(editor.filteredDescs), ['original-missing', 'original-complete', 'resolved-dropped']);
   editor.lang = 'German'; editor.filterDesc();
   assert.equal(editor.filteredDescs.length, 0);
-  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0 });
+  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 0, isRevised: 0, isMissing: 0, isDropped: 0, hasDiagnosticError: 0 });
   editor.lang = 'Thai'; editor.selectedFileFilters = ['revised']; editor.filterDesc();
   assert.deepEqual(names(editor.filteredDescs), ['original-complete']);
 });
@@ -920,10 +923,10 @@ test('status totals respect Hide DNT and remain independent of search and status
   editor.selectedFileFilters = ['unchanged'];
   editor.filterDesc();
   assert.equal(editor.filteredDescs.length, 0);
-  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 2, isRevised: 0, isMissing: 2, isDropped: 2 });
+  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 2, isRevised: 0, isMissing: 2, isDropped: 2, hasDiagnosticError: 0 });
   editor.hideDNT = false;
   editor.filterDesc();
-  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 3, isRevised: 0, isMissing: 3, isDropped: 3 });
+  assert.deepEqual(JSON.parse(JSON.stringify(editor.statistic)), { hasChanges: 3, isRevised: 0, isMissing: 3, isDropped: 3, hasDiagnosticError: 0 });
 });
 
 test('45 files render correctly sorted pages, ranges, and a shorter final page', () => {
