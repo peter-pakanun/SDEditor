@@ -28,7 +28,7 @@ function loadEditor() {
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
-  for (const name of ['statDescCodec.js', 'workspaceState.js', 'dictionaryScope.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'editorSession.js', 'editorComponents.js', 'clientTextUi.js', 'index.js']) {
+  for (const name of ['statDescCodec.js', 'workspaceState.js', 'dictionaryScope.js', 'dictionaryMatching.js', 'dictionaryWorkerClient.js', 'dictionaryWorkerUi.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'collaborationIntegration.js', 'editorSession.js', 'editorComponents.js', 'keywordPopups.js', 'clientTextUi.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign({}, ...config.mixins.map(mixin => mixin.data?.() || {}), config.data(),
@@ -1223,4 +1223,82 @@ test('ClientText shares preview hosts and settings while isolating field values 
   assert.ok(context.window.EditorComponents.Tools.template.includes('id="inlineEditorPreviewHost"'));
   assert.ok(context.window.EditorComponents.Preview.template.includes('v-model="gamePreviewVarValues[k]"'));
   assert.ok(!html.includes('aria-label="Content group"'),'group selection belongs in the Versions Assignment table');
+});
+
+
+test('keyword windows freeze translated or English workbook fields, nested identities and preview variables', async () => {
+  const { editor } = loadEditor();
+  const field = (name, source, target) => ({ id: name, name, source, target });
+  const unit = (id, title, content) => ({ id, role: 'normal', sheet: 'KeywordPopups', recordId: id,
+    fields: [field('Info Title', 'English ' + title, 'Thai ' + title), field('Info Content', 'English ' + content, 'Thai ' + content)] });
+  editor.ctActive = true; editor.ctWorkspace = { scope: { game: 'poe2', language: 'Thai', versionId: 'old' } };
+  editor.ctUnits = [unit('Physical', 'title', '[Armour|armour] {0}'), unit('Armour', 'armour title', 'armour body')];
+  editor.ctSaved = { Armour: { values: { 'Info Content': 'Saved Thai armour' } } }; editor.ctPreviewGggVars = { '0': '42' };
+  const anchor = () => ({ isConnected: true });
+  const translated = await editor.previewKeywordEnter({ currentTarget: anchor() }, { tagName: 'Physical' }, true);
+  const english = await editor.previewKeywordEnter({ currentTarget: anchor() }, { tagName: 'Physical' }, false);
+  assert.equal(translated.title[0].text, 'Thai title'); assert.equal(english.title[0].text, 'English title');
+  assert.equal(translated.context.variables['0'], '42');
+  assert.equal(translated.content.find(segment => segment.type === 'kw').tagName, 'Armour');
+  editor.pinKeywordWindow(translated); editor.ctUnits = []; editor.ctSaved = {}; editor.ctWorkspace.scope.versionId = 'new';
+  editor.ctEditor = false; editor.ctSelection = 'other-file'; editor.ctPreviewGggVars = { '0': '99' };
+  const nested = await editor.previewKeywordEnter({ currentTarget: anchor() }, { tagName: 'Armour' }, true, translated);
+  assert.equal(nested.content[0].text, 'Saved Thai armour'); assert.equal(nested.context, translated.context);
+  assert.equal(nested.context.scope.versionId, 'old'); assert.equal(nested.context.variables['0'], '42');
+  assert.ok(editor.keywordWindows.some(item => item.id === translated.id && item.pinned));
+  clearTimeout(editor._keywordDismissTimer);
+});
+
+test('missing keyword translations stay empty and untrusted workbook markup stays text', async () => {
+  const { editor } = loadEditor(); editor.ctActive = true; editor.ctSaved = {};
+  editor.ctUnits = [{ id: 'Unsafe', role: 'normal', sheet: 'KeywordPopups', recordId: 'Unsafe', fields: [
+    { id: 'title', name: 'Info Title', source: 'English secret', target: '' },
+    { id: 'body', name: 'Info Content', source: 'English body', target: '<img src=x onerror=alert(1)>' },
+  ] }];
+  const item = await editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'Unsafe' }, true);
+  assert.equal(item.title[0].text, '(empty)'); assert.match(item.notice, /Missing Thai translation/);
+  assert.equal(item.content[0].text, '<img src=x onerror=alert(1)>');
+  editor.ctUnits = [];
+  const absent = await editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'Missing' }, false);
+  assert.match(absent.notice, /data unavailable/); assert.equal(absent.title[0].text, 'Missing');
+});
+
+test('keyword popup focus raising and explicit close preserve independently pinned children', async () => {
+  const { editor } = loadEditor(); editor.ctActive = true; editor.ctUnits = []; editor.ctSaved = {};
+  const open = (parent = null) => editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'Tag' }, true, parent);
+  const first = await open(), second = await open(first), third = await open(first);
+  editor.pinKeywordWindow(second); editor.raiseKeywordWindow(first);
+  assert.equal(editor.keywordWindows.at(-1).id, first.id);
+  editor.closeKeywordWindow(first.id);
+  assert.deepEqual(Array.from(editor.keywordWindows, item => item.id), [second.id]);
+  assert.ok(!editor.keywordWindows.includes(third));
+});
+
+test('a reused preview anchor opens a new window for a new file without retargeting its pinned predecessor', async () => {
+  const { editor } = loadEditor(); editor.ctActive = true; editor.ctUnits = []; editor.ctSaved = {};
+  const anchor = { isConnected: true }; editor.ctSelection = 'first';
+  const first = await editor.previewKeywordEnter({ currentTarget: anchor }, { tagName: 'Tag' }, true);
+  editor.pinKeywordWindow(first); editor.ctSelection = 'second';
+  const second = await editor.previewKeywordEnter({ currentTarget: anchor }, { tagName: 'Tag' }, true);
+  assert.notEqual(first.id, second.id); assert.notEqual(first.origin, second.origin); assert.ok(first.pinned);
+});
+
+test('late reference lookup cannot publish a popup after the selected file changes', async () => {
+  const { editor, context } = loadEditor(); let resolve;
+  context.window.EditorReferenceCatalog = { sessionFor: () => ({}), create: () => ({ load: () => new Promise(done => { resolve = done; }) }) };
+  editor.editorCurrentEditingDesc = { filepath: 'first.txt' };
+  const pending = editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'Tag' }, false);
+  editor.editorCurrentEditingDesc = { filepath: 'second.txt' }; resolve({ sources: [] });
+  assert.equal(await pending, undefined); assert.equal(editor.keywordWindows.length, 0);
+});
+
+test('hover dismissal retains nested ancestors and pinned windows, then removes the transient branch on departure', async () => {
+  const { editor } = loadEditor(); editor.ctActive = true; editor.ctUnits = []; editor.ctSaved = {};
+  const parent = await editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'Parent' }, false);
+  const child = await editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'Child' }, false, parent);
+  editor._keywordAnchor = null; editor.keepKeywordWindow(child); editor.scheduleKeywordDismiss();
+  await new Promise(done => setTimeout(done, 480)); assert.equal(editor.keywordWindows.length, 2);
+  editor.pinKeywordWindow(child); editor.leaveKeywordWindow(child);
+  await new Promise(done => setTimeout(done, 480));
+  assert.deepEqual(Array.from(editor.keywordWindows, item => item.id), [child.id]);
 });

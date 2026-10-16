@@ -607,7 +607,10 @@
                   <div class="gamePreviewWindow" :class="['gamePreviewWindow--' + gamePreviewFrame, { 'gamePreviewWindow--dialogue': gamePreviewIsDialogue }]" :style="{ fontFamily: gamePreviewSourceFontFamily, color: gamePreviewDefaultTextColor }">
                     <template v-for="(seg, si) in gamePreviewAudioSegments(gamePreviewDisplaySource)" :key="'gps-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
                       <span v-if="seg.type === 'text'" class="gamePreviewText" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle">{{ seg.text }}</span>
-                      <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle" v-tooltip="seg.full">
+                      <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle" tabindex="0" role="button" aria-haspopup="dialog"
+                        @mouseenter="previewKeywordEnter?.($event,seg,false)" @mouseleave="previewKeywordLeave?.($event)"
+                        @focus="previewKeywordEnter?.($event,seg,false)" @blur="previewKeywordLeave?.($event)"
+                        @click.stop="previewKeywordActivate?.($event,seg,false)" @keydown.enter.prevent.stop="previewKeywordActivate?.($event,seg,false)" @keydown.space.prevent.stop="previewKeywordActivate?.($event,seg,false)">
                         <template v-if="seg.parts"><template v-for="(part, pi) in seg.parts" :key="'gps-part-' + si + '-' + pi">
                           <span v-if="part.type === 'text'" class="gamePreviewText" :class="part.decorTag ? 'gamePreviewDecor--' + part.decorTag : ''" :style="part.decorStyle">{{ part.text }}</span>
                           <span v-else-if="part.type === 'var'" class="gamePreviewVarDisplay" :class="part.decorTag ? 'gamePreviewDecor--' + part.decorTag : ''" :style="part.decorStyle">
@@ -638,7 +641,10 @@
                   <div class="gamePreviewWindow" :class="['gamePreviewWindow--' + gamePreviewFrame, { 'gamePreviewWindow--dialogue': gamePreviewIsDialogue }]" :style="{ fontFamily: gamePreviewFontFamily, color: gamePreviewDefaultTextColor }">
                     <template v-for="(seg, si) in row.segments" :key="'gp-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
                       <span v-if="seg.type === 'text'" class="gamePreviewText" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle">{{ seg.text }}</span>
-                      <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle" v-tooltip="seg.full">
+                      <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle" tabindex="0" role="button" aria-haspopup="dialog"
+                        @mouseenter="previewKeywordEnter?.($event,seg,true)" @mouseleave="previewKeywordLeave?.($event)"
+                        @focus="previewKeywordEnter?.($event,seg,true)" @blur="previewKeywordLeave?.($event)"
+                        @click.stop="previewKeywordActivate?.($event,seg,true)" @keydown.enter.prevent.stop="previewKeywordActivate?.($event,seg,true)" @keydown.space.prevent.stop="previewKeywordActivate?.($event,seg,true)">
                         <template v-if="seg.parts"><template v-for="(part, pi) in seg.parts" :key="'gp-part-' + si + '-' + pi">
                           <span v-if="part.type === 'text'" class="gamePreviewText" :class="part.decorTag ? 'gamePreviewDecor--' + part.decorTag : ''" :style="part.decorStyle">{{ part.text }}</span>
                           <span v-else-if="part.type === 'var'" class="gamePreviewVarDisplay" :class="part.decorTag ? 'gamePreviewDecor--' + part.decorTag : ''" :style="part.decorStyle">

@@ -167,7 +167,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
 const config = Vue.defineComponent({
-  mixins: [window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}],
+  mixins: [window.KeywordPopups?.mixin || {}, window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -1715,7 +1715,7 @@ const config = Vue.defineComponent({
             flushText();
             const tagName = String(km[2] ?? '').trim();
             const dynamicContent = String(km[3] ?? '').trim();
-            const segment = decorate({ type: 'kw', text: dynamicContent || tagName, full: km[0] });
+            const segment = decorate({ type: 'kw', tagName, text: dynamicContent || tagName, full: km[0] });
             if (dynamicContent) segment.parts = scanInline(dynamicContent, decorTag, decorStyle, true, depth + 1);
             output.push(segment);
             i += km[0].length;
@@ -8176,6 +8176,7 @@ if (window.ClientTextUI) {
   app.component('ct-tools', window.ClientTextUI.toolsComponent);
 }
 if (window.EditorComponents?.TextField) app.component('editor-text-field', window.EditorComponents.TextField);
+if (window.KeywordPopups) app.component('keyword-popup-overlay', window.KeywordPopups.Overlay);
 if (window.EditorComponents?.Preview) app.component('editor-preview', window.EditorComponents.Preview);
 if (window.EditorComponents?.Assistance) app.component('editor-assistance', window.EditorComponents.Assistance);
 if (window.EditorComponents?.DictionaryEntries) app.component('editor-dictionary-entries', window.EditorComponents.DictionaryEntries);

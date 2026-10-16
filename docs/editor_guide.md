@@ -323,6 +323,10 @@ Thai:      สร้างความเสียหาย เพิ่มข�
 
 ### KeywordPopups Tags: `[TagName]` or `[TagName|Display]`
 
+Hover a keyword in either preview to open its `KeywordPopups` title and content. English uses source fields; Translation uses translated fields, including saved corrections and the current record's draft. Missing translations show `(empty)` and a warning; they do not fall back to English. If this workbook has no popup data, prepare the matching ClientText references in Lookup when available.
+
+Move into a popup or hover its keywords to explore nested popups. Click a popup to pin it; click its top-right × to close it. Keyboard users can Tab to a keyword and press Enter or Space to pin and focus its popup. Escape closes only the focused popup. Pinned popups remain open when leaving the full editor or changing files, games, or languages, retaining their original workbook and language context until closed. Reloading the page closes them; they are not saved with translations.
+
 These create interactive tooltips in the game. They have two parts:
 
 - **TagName**: The reference to a game KeywordPopups (must stay exactly the same)

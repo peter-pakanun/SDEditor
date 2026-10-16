@@ -1594,6 +1594,23 @@ button, label, th, td, input[type="checkbox"] {
   text-underline-offset: 2px;
 }
 
+.gamePreviewKw[role="button"] { cursor: pointer; }
+.gamePreviewKw[role="button"]:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.keywordPreviewOverlay { position: fixed; inset: 0; z-index: 12000; pointer-events: none; }
+.keywordPreviewWindow {
+  position: absolute; pointer-events: auto; box-sizing: border-box;
+  width: 380px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px);
+  overflow: auto; overscroll-behavior: contain; padding: 16px 20px;
+  background: rgb(18 17 16 / 70%); color: #fffbd6;
+  border: 1px solid #887452; border-radius: 2px; box-shadow: 0 4px 18px #0005;
+  font-size: calc(14px * var(--density, 1)); line-height: 1.45; overflow-wrap: anywhere;
+}
+.keywordPreviewWindow:focus-visible { outline: 2px solid #dca16b; outline-offset: 2px; }
+.keywordPreviewTitle { text-align: center; padding-inline: 12px; color: #e7b478; }
+.keywordPreviewSeparator.gamePreviewContinue { border-top: 0; padding: 0; margin-block: 10px; color: #dca16b; }
+.keywordPreviewClose { position: absolute; right: 3px; top: 2px; padding: 0 5px; border: 0; background: transparent; color: #fffbd6; font: 18px/1.2 sans-serif; cursor: pointer; }
+.keywordPreviewNotice { margin-bottom: 0; font: 12px/1.4 sans-serif; color: #f0c58a; }
+
 .gamePreviewVarDisplay {
   display: inline;
   line-height: inherit;
