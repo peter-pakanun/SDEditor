@@ -42,7 +42,7 @@ async function run() {
         frontend.get('/fixture/vue.js', (req, res) => res.type('js').send(readFileSync(vuePath)));
         frontend.get('/', (req, res) => res.type('html').send(`<!doctype html><html data-theme="modern-dark"><head>
             <link rel="stylesheet" href="/index.css"><link rel="stylesheet" href="/interface.css"><link rel="stylesheet" href="/client-text.css">
-            <style>:root{--workspace-footer-height:76px}body{padding:24px;box-sizing:border-box}#fixture{max-width:1100px;margin:auto}.fixtureColumns{display:grid;grid-template-columns:1fr 1fr;gap:24px}section.fixturePanel{min-width:0;padding:16px;background:var(--color-element);border:1px solid var(--ui-border)}textarea{width:100%;box-sizing:border-box}.fixtureNativeField{box-sizing:border-box;min-height:110px;margin:0;padding:12px;white-space:pre-wrap;border:1px solid var(--ui-border);border-radius:5px;background:var(--color-element-alt);color:var(--color-font)}.fixtureFooter{height:76px;box-sizing:border-box}</style>
+            <style>:root{--density:1;--workspace-footer-height:76px}body{padding:24px;box-sizing:border-box}#fixture{max-width:1100px;margin:auto}.fixtureColumns{display:grid;grid-template-columns:1fr 1fr;gap:24px}section.fixturePanel{min-width:0;padding:16px;background:var(--color-element);border:1px solid var(--ui-border)}textarea{width:100%;box-sizing:border-box}.fixtureNativeField{box-sizing:border-box;min-height:110px;margin:0;padding:12px;white-space:pre-wrap;border:1px solid var(--ui-border);border-radius:5px;background:var(--color-element-alt);color:var(--color-font)}.fixtureFooter{height:76px;box-sizing:border-box}</style>
             </head><body><main id="fixture"><h1>Dialogue audio</h1><button id="toggle" @click="host.ctEditor=!host.ctEditor">Change editor view</button>
             <div v-if="!host.ctEditor" class="fixtureColumns"><section class="fixturePanel"><h2>English</h2><ct-fields :host="host" side="source"></ct-fields></section><section class="fixturePanel"><h2>Translation</h2><ct-fields :host="host" side="translation"></ct-fields></section></div>
             <section v-else class="fixturePanel ctFullEditor"><h2>English and translation</h2><ct-fields :host="host"></ct-fields></section>
@@ -59,7 +59,7 @@ async function run() {
                 ctGroupSources:group=>[{key:'Text',label:'Text',source:group.source,fieldIds:['Text']}],
                 ctSourceFieldController:(group,source)=>({value:source.source}),ctClassFields:()=>[],ctFieldsKeydown:()=>{},ctResizeFields:()=>{},
                 get gamePreviewFullEditor(){return this.ctEditor;},gamePreviewFrame:'s',gamePreviewIsDialogue:true,
-                gamePreviewDefaultTextColor:'#fffbd6',gamePreviewFontFamily:'Arial',gamePreviewSourceFontFamily:'Arial',
+                gamePreviewDefaultTextColor:'#fffbd6',gamePreviewFontFamily:'Arial',gamePreviewSourceFontFamily:'Fontin, serif',
                 hideSourceInPreviewPanel:false,gamePreviewSourceIsTable:false,gamePreviewTargetIsTable:false,gamePreviewVarKeyList:[],
                 gamePreviewVarValues:{},ctPossessivePreviewForms:null,translationEditorBcp47:'th',
                 gamePreviewDisplaySource:[{type:'text',text:'First dialogue block.'},{type:'continue'},{type:'text',text:'Last dialogue block.'}],
