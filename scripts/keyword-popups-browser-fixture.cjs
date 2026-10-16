@@ -44,81 +44,147 @@ async function dragCard(page, card, x, y) {
 }
 async function checkPointerBehavior(page, target, source, windows) {
   await target.hover(); await page.waitForSelector('.keywordPreviewWindow');
-  await page.mouse.move(5, 5);
-  assert.equal(await windows.count(), 0, 'unpinned popup disappears on the leave event, without waiting');
-  await target.hover(); const parent = windows.first(), parentId = await parent.getAttribute('id');
-  await enterAdjacentCard(page, target, parent);
+  const transient = windows.first(), box = await transient.boundingBox();
+  await page.evaluate(() => document.querySelector('.keywordPreviewWindow').click());
+  assert.equal(await page.evaluate(() => fixtureApp.keywordWindows[0].pinned), false, 'card click raises/focuses but never pins');
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  assert.equal(await windows.count(), 0, 'entering an unpinned card dismisses it immediately');
+  await target.click(); await settle(page); const parent = windows.first();
+  assert.equal(await parent.locator('.keywordPreviewClose').count(), 1, 'keyword click pins');
+  const beforeHeaderClick=await parent.boundingBox();await parent.locator('.keywordPreviewTitle').click();
+  assert.deepEqual(await parent.boundingBox(),beforeHeaderClick,'plain header click never starts movement');
   const keyword = parent.locator('.keywordPreviewContent .gamePreviewKw').first();
-  await keyword.hover(); const child = windows.last(), childId = await child.getAttribute('id');
-  assert.equal(await windows.count(), 2); await enterAdjacentCard(page, keyword, child);
-  // Dragging a previously unpinned child pins it. Leaving the whole branch
-  // immediately removes its unpinned parent, while the child remains independent.
-  await dragCard(page, child, 350, 350); await page.mouse.move(5, 5);
-  assert.equal(await page.locator('#' + parentId).count(), 0);
-  assert.equal(await page.locator('#' + childId).count(), 1);
-  assert.equal(await child.locator('.keywordPreviewClose').count(), 1);
-  assert.equal(await child.evaluate(node => document.activeElement === node), true);
-  assert.equal(await page.evaluate(() => String(getSelection())), '', 'header dragging never selects workbook text');
-  await dragCard(page, child, -1000, -1000);
-  let box = await child.boundingBox(); assert.equal(box.x, 8); assert.equal(box.y, 8);
-  await dragCard(page, child, 3000, 3000);
-  box = await child.boundingBox(); assert.ok(box.x + box.width <= 1432 && box.y + box.height <= 892);
-  await page.keyboard.press('Escape'); assert.equal(await windows.count(), 0);
-  assert.equal(await page.evaluate(() => fixtureApp.ctEditor), true);
-
-  await target.hover(); await windows.first().locator('.keywordPreviewTitle').click();
-  const pinnedParent = windows.first(), pinnedParentId = await pinnedParent.getAttribute('id');
-  const coveredKeyword = pinnedParent.locator('.keywordPreviewContent .gamePreviewKw').first();
-  await coveredKeyword.hover(); const covering = windows.last(), coveringId = await covering.getAttribute('id');
-  // The top card must block both a lower card's keyword and a preview keyword.
-  for (const trigger of [coveredKeyword, source]) {
-    const a = await trigger.boundingBox(), point = { x: a.x + a.width / 2, y: a.y + a.height / 2 };
-    await dragCard(page, covering, point.x - 80, point.y - 40);
-    await page.mouse.move(point.x, point.y);
-    assert.equal(await page.evaluate(point => document.elementFromPoint(point.x, point.y)?.closest('[data-keyword-window]')?.id, point), coveringId);
-    assert.equal(await windows.count(), 2, 'covered keyword cannot open a popup through the top card');
-  }
+  await keyword.hover(); const child = windows.last(), c = await child.boundingBox();
+  await page.mouse.move(c.x + c.width / 2, c.y + c.height / 2);
+  assert.equal(await windows.count(), 1, 'nested hover ends at its trigger, too');
+  await keyword.click(); const pinnedChild = windows.last(), childId = await pinnedChild.getAttribute('id');
+  await enterAdjacentCard(page, keyword, pinnedChild);
+  await dragCard(page, pinnedChild, 350, 350); await page.mouse.move(5, 5);
+  assert.equal(await windows.count(), 2); assert.equal(await pinnedChild.locator('.keywordPreviewClose').count(), 1);
+  assert.equal(await page.evaluate(() => String(getSelection())), '');
+  await dragCard(page, pinnedChild, -1000, -1000);
+  let b = await pinnedChild.boundingBox(); assert.equal(b.x, 8); assert.equal(b.y, 8);
+  await dragCard(page, pinnedChild, 3000, 3000);
+  b = await pinnedChild.boundingBox(); assert.ok(b.x + b.width <= 1432 && b.y + b.height <= 892);
   await page.keyboard.press('Escape'); assert.equal(await windows.count(), 1);
-  assert.equal(await windows.first().getAttribute('id'), pinnedParentId);
-  await windows.first().locator('.keywordPreviewClose').click(); assert.equal(await windows.count(), 0);
-
-  // Removing a keyboard-focused child can expose background under the pointer.
-  // Focus returns to its parent's keyword; the next real mouse departure still
-  // dismisses the unpinned branch immediately.
-  await page.setViewportSize({ width: 700, height: 650 }); await settle(page); await target.hover();
-  const keyboardParent = windows.first(), keyboardParentId = await keyboardParent.getAttribute('id');
-  const keyboardTrigger = keyboardParent.locator('.keywordPreviewContent .gamePreviewKw').first();
-  await keyboardTrigger.hover(); const keyboardChild = windows.last();
-  await keyboardChild.hover(); await keyboardChild.focus(); await page.keyboard.press('Escape'); await settle(page);
-  assert.equal(await windows.count(), 1); assert.equal(await windows.first().getAttribute('id'), keyboardParentId);
-  await page.mouse.move(5, 5); assert.equal(await windows.count(), 0);
-  await page.setViewportSize({ width: 1440, height: 900 });
-
-  // Pin and move the parent to each viewport edge, then verify that every child
-  // is placed against its own keyword, including the left fallback at the right edge.
-  for (const x of [8, 1052]) {
-    await target.hover(); await windows.first().locator('.keywordPreviewTitle').click();
-    const parent = windows.first(); await dragCard(page, parent, x, 250);
-    const trigger = parent.locator('.keywordPreviewContent .gamePreviewKw').first();
-    await trigger.hover(); const child = windows.last(); await enterAdjacentCard(page, trigger, child);
-    const b = await child.boundingBox(); assert.ok(b.x >= 8 && b.x + b.width <= 1432 && b.y >= 8 && b.y + b.height <= 892);
-    await page.mouse.move(5, 5); assert.equal(await windows.count(), 1, 'only the pinned parent remains after leaving');
-    await windows.first().locator('.keywordPreviewClose').click();
+  assert.equal(await page.evaluate(() => fixtureApp.ctEditor), true);
+  await keyword.click(); const covering = windows.last(), coveringId = await covering.getAttribute('id');
+  for (const trigger of [keyword, source]) {
+    const a = await trigger.boundingBox(), point = { x: a.x + a.width / 2, y: a.y + a.height / 2 };
+    await dragCard(page, covering, point.x - 80, point.y - 40); await page.mouse.move(point.x, point.y);
+    assert.equal(await page.evaluate(p => document.elementFromPoint(p.x,p.y)?.closest('[data-keyword-window]')?.id,point), coveringId);
+    assert.equal(await windows.count(), 2);
   }
-  for (const [y, side] of [[80, 'bottom'], [500, 'top']]) {
-    await target.hover(); await windows.first().locator('.keywordPreviewTitle').click();
-    const parent = windows.first(); await page.setViewportSize({ width: 700, height: 650 }); await settle(page);
-    const trigger = parent.locator('.keywordPreviewContent .gamePreviewKw').first();
-    const a = await trigger.boundingBox(), p = await parent.boundingBox();
-    await dragCard(page, parent, 350 - (a.x + a.width / 2 - p.x), y);
-    await trigger.hover(); const child = windows.last(); await enterAdjacentCard(page, trigger, child);
-    const b = await child.boundingBox(), k = await trigger.boundingBox();
-    assert.ok(Math.abs(side === 'bottom' ? b.y - k.y - k.height : b.y + b.height - k.y) < 1, 'nested ' + side + ' fallback touches keyword');
-    await page.screenshot({ path: join(folder, 'nested-' + side + '.png') });
-    await page.mouse.move(5, 5); assert.equal(await windows.count(), 1);
-    await windows.first().locator('.keywordPreviewClose').click(); await page.setViewportSize({ width: 1440, height: 900 });
+  // Card click may raise and focus, while pin states stay unchanged.
+  await dragCard(page, covering, 800, 400);
+  const parentId = await parent.getAttribute('id');
+  await page.locator('#'+parentId+' .keywordPreviewContent').click({position:{x:5,y:5}});
+  assert.equal(await windows.last().getAttribute('id'), parentId);
+  assert.ok(await page.evaluate(() => fixtureApp.keywordWindows.every(item=>item.pinned)));
+  await windows.last().locator('.keywordPreviewClose').click();
+  assert.equal(await windows.count(), 1, 'pinned child survives parent closure');
+  await windows.first().locator('.keywordPreviewClose').click();
+  for (const [x,y,width,height] of [[8,250,1440,900],[1052,250,1440,900],[200,80,700,650],[200,500,700,650]]) {
+    await target.click(); const parent = windows.first();
+    await page.setViewportSize({width,height}); await settle(page); await dragCard(page,parent,x,y);
+    const trigger=parent.locator('.keywordPreviewContent .gamePreviewKw').first();
+    await trigger.click(); const child=windows.last(); await enterAdjacentCard(page,trigger,child);
+    await page.screenshot({path:join(folder,'edge-'+x+'-'+y+'.png')});
+    await child.locator('.keywordPreviewClose').click(); await parent.locator('.keywordPreviewClose').click();
+    await page.setViewportSize({width:1440,height:900});
   }
 }
+async function checkAutocomplete(page, ct, label) {
+  const card = page.locator('.keywordAutocompleteCard'), windows = page.locator('.keywordPreviewWindow[data-keyword-window]');
+  const prepare = async () => {
+    await page.evaluate(async ct => {
+      const host=fixtureApp;
+      document.querySelectorAll('[data-autocomplete-fixture-input]').forEach(node=>node.removeAttribute('data-autocomplete-fixture-input'));
+      const input=ct ? [...document.querySelectorAll('[data-ct-target="Text"]')].find(node=>node.getClientRects().length)
+        : host.getEditorRef('translation',0);
+      if(!input)throw new Error('No visible translation field for autocomplete fixture');
+      input.setAttribute('data-autocomplete-fixture-input','');input.focus();input.setSelectionRange(0,input.value.length);
+      const items=[{value:'[Physical]',label:'Physical',kwTagName:'Physical',tlnote:'Translator note for Physical'},
+        {value:'[Armour]',label:'Armour',kwTagName:'Armour'},{value:'{0}',label:'Variable'},
+        {value:'[Blank]',label:'Blank',kwTagName:'Blank'}];
+      if(ct){
+        const field=host.ctCurrentUnit.fields.find(field=>field.id==='Text');
+        if(!host.ctSuggest(field,{target:input},{manual:true}))throw new Error('Could not open actual ClientText completion');
+        host.ctCompletion.items=items;host.ctCompletion.allItems=items;host.ctCompletion.selectedIndex=0;
+      }else{
+        if(!host._fixtureAssistance)host._fixtureAssistance=host.getDictionaryAssistanceEntry;
+        host.getDictionaryAssistanceEntry=(id,...args)=>id==='fixture-note'?{_id:id,tlnote:items[0].tlnote}:host._fixtureAssistance(id,...args);
+        items[0].dictEntryId='fixture-note';
+        host.openHlPopup(0,{focusFilter:false});host.hlPopup.items=items;host.hlPopup.filtered=items;host.hlPopup.selectedIndex=0;
+      }
+      await host.$nextTick();
+    },ct);
+    await page.waitForSelector('.keywordAutocompleteCard');
+    return page.locator('[data-autocomplete-fixture-input]');
+  };
+  let input=await prepare(); const original=await input.inputValue();
+  assert.equal(await card.locator('.keywordPreviewTitle').innerText(),'Thai Physical',label);
+  const note=page.locator('.hlPopupTlnote'), n=await note.boundingBox(), b=await card.boundingBox();
+  assert.ok(b.y>=n.y+n.height,'keyword information appears beneath TL note');
+  await page.screenshot({path:join(folder,'autocomplete-'+label+'-with-note.png')});
+  assert.equal(await input.evaluate(node=>document.activeElement===node),true,'showing details never steals caret focus');
+  await input.press('ArrowDown'); await settle(page);
+  assert.equal(await card.locator('.keywordPreviewTitle').innerText(),'Thai Armour Title');assert.equal(await note.count(),0);
+  await input.press('ArrowDown');await settle(page);assert.equal(await card.count(),0,'ordinary variable suggestion clears keyword details');
+  await page.locator('.hlPopupItem').first().hover();await settle(page);
+  assert.equal(await card.locator('.keywordPreviewTitle').innerText(),'Thai Physical');assert.equal(await input.inputValue(),original);
+  await card.locator('.keywordPreviewContent').click({position:{x:5,y:5}});
+  assert.equal(await windows.count(),0,'detail text click never pins');
+  assert.equal(await input.evaluate(node=>document.activeElement===node),true,'detail text does not blur the translation field');
+  assert.deepEqual(await input.evaluate(node=>[node.selectionStart,node.selectionEnd]),[0,original.length],'caret selection stays intact');
+  await card.locator('.keywordPreviewTitle .gamePreviewKw').click();await settle(page);
+  assert.equal(await windows.count(),1);assert.equal(await windows.locator('.keywordPreviewClose').count(),1);
+  await dragCard(page,windows.first(),8,8);
+  await windows.first().locator('.keywordPreviewContent .gamePreviewKw').first().click();await settle(page);
+  assert.equal(await windows.last().locator('.keywordPreviewTitle').innerText(),'Thai Armour Title','nested details inherit translation context');
+  await windows.last().locator('.keywordPreviewClose').click();
+  await page.locator('.hlPopupItem').nth(1).hover();await settle(page);
+  assert.equal(await card.locator('.keywordPreviewTitle').innerText(),'Thai Armour Title');assert.equal(await windows.count(),1);
+  await input.focus();await input.press('Escape');await settle(page);
+  assert.equal(await card.count(),0);assert.equal(await page.locator('.hlPopup').count(),0);assert.equal(await windows.count(),1,'autocomplete close preserves independent pin');
+  assert.equal(await page.evaluate(ct=>ct?fixtureApp.ctActive:fixtureApp.editorSessionActive,ct),true,'Escape does not leave editor');
+  await windows.locator('.keywordPreviewClose').click();
+  input=await prepare();await input.press('Enter');await settle(page);
+  assert.equal(await input.inputValue(),'[Physical]','Enter still accepts highlighted suggestion');assert.equal(await card.count(),0);
+  if(ct){input=await prepare();await input.press('Tab');await settle(page);assert.equal(await input.inputValue(),'[Physical]','ClientText Tab still accepts');}
+  input=await prepare();const beforeTyping=await input.inputValue();await input.press('x');await settle(page);
+  if(ct){assert.equal(await input.inputValue(),'x','ClientText keeps native field input');assert.equal(await input.evaluate(node=>node.selectionStart),1);}
+  else {assert.equal(await input.inputValue(),beforeTyping,'SD keeps its existing autocomplete text-filter behavior');assert.equal(await page.evaluate(()=>fixtureApp.hlPopup.filter),'x');}
+  if(await page.locator('.hlPopup').count())await input.press('Escape');
+  input=await prepare();await page.locator('.hlPopupItem').nth(3).hover();await settle(page);
+  assert.match(await card.innerText(),/Missing Thai translation/);assert.doesNotMatch(await card.innerText(),/English must not leak/);
+  for(const theme of ['light','grey','dark','modern-dark']){
+    await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);await settle(page);
+    const geometry=await page.locator('.hlPopupDetails').evaluate(node=>{const r=node.getBoundingClientRect();return{x:r.x,y:r.y,right:r.right,bottom:r.bottom};});
+    assert.ok(geometry.x>=7&&geometry.y>=7&&geometry.right<=1440&&geometry.bottom<=900,JSON.stringify(geometry));
+    const bg=await card.evaluate(node=>({background:getComputedStyle(node).backgroundColor,opacity:getComputedStyle(node).opacity}));
+    assert.match(bg.background,/0\.7\)/);assert.equal(bg.opacity,'1');
+    if(theme==='modern-dark')await page.screenshot({path:join(folder,'autocomplete-'+label+'.png')});
+  }
+  await page.setViewportSize({width:700,height:450});await settle(page);
+  const small=await page.locator('.hlPopupDetails').evaluate(node=>{const r=node.getBoundingClientRect();return{x:r.x,y:r.y,right:r.right,bottom:r.bottom};});
+  assert.ok(small.x>=7&&small.y>=7&&small.right<=701&&small.bottom<=451,'detail area fits resized desktop viewport');
+  await page.setViewportSize({width:1440,height:900});await settle(page);
+  if(ct){
+    await page.locator('.hlPopupItem').first().hover();
+    await page.evaluate(async()=>{const host=fixtureApp;host._fixtureUnits=host.ctUnits;host.ctUnits=Vue.markRaw(host.ctUnits.filter(unit=>unit.sheet!=='KeywordPopups'));host.ctRevision++;await host.$nextTick();});
+    await settle(page);assert.equal(await card.count(),0,'partial workbook with no popup sheet hides keyword details');assert.equal(await note.count(),1);
+    await page.evaluate(async()=>{fixtureApp.ctUnits=fixtureApp._fixtureUnits;fixtureApp.ctRevision++;await fixtureApp.$nextTick();});await settle(page);
+    assert.equal(await card.locator('.keywordPreviewTitle').innerText(),'Thai Physical');
+  }
+  await input.focus();await input.press('Escape');
+  await page.evaluate(async ({ct,original})=>{
+    const host=fixtureApp;if(ct){host.ctValues.Text=original;host.ctDraftDirty=false;host.ctCloseCompletion();}
+    else {host.editorBlocks[0].translation=original;host.closeHlPopup();if(host._fixtureAssistance)host.getDictionaryAssistanceEntry=host._fixtureAssistance;}
+    await host.$nextTick();
+  },{ct,original});
+}
+
 (async () => {
   let browser;
   try {
@@ -144,9 +210,13 @@ async function checkPointerBehavior(page, target, source, windows) {
         popup('Blank', 'English must not leak', '', 'English must not leak either', ''),
         { id: 'dialogue', role: 'normal', sheet: 'NPCTextAudio', recordId: 'Dialogue', metadata: {}, fields: [field('Text', '[Physical] [Blank]', '[Physical|Thai Physical] [Blank|Thai Blank]')] }];
       host.ctWorkspace = { metadata: {}, scope: { accountId: 'guest', game: 'poe1', language: 'Thai', branchId: 'default', groupId: 'local:test:keyword', versionId: 'local:test:keyword' } };
+      for(const unit of units)unit.id=JSON.stringify([unit.role,unit.sheet,unit.recordId]);
+      const store=ClientTextMemoryStore.create();
+      await store.import(host.ctWorkspace.scope,{units,assets:[{role:'normal',name:'Thai.xlsx',hash:'a'.repeat(64),blob:new Blob(['fixture original'])}]});
+      host._ctTestStores=new Map([[host.ctWorkspace.scope.groupId,store]]);
       host.ctUnits = Vue.markRaw(units); host._ctUnitIndex = Vue.markRaw(new Map(units.map(unit => [unit.id, unit])));
       window.fixtureKeywordSources = [{ mode: 'clienttext', units, saved: {}, scope: { ...host.ctWorkspace.scope } }];
-      host.ctSelection = 'dialogue'; host.ctFocusedField = 'Text'; host.ctValues = { Text: units[3].fields[0].target };
+      host.ctSelection = units[3].id; host.ctFocusedField = 'Text'; host.ctValues = { Text: units[3].fields[0].target };
       host.ctSheet = JSON.stringify(['normal', 'NPCTextAudio']); host.ctTool = 'preview'; host.ctActive = true; host.inlineEditor = true; host.ctEditor = true;
       host.versionChooserVisible = false; host.showSetting = false; host.ctRevision++;
       await host.$nextTick();
@@ -156,18 +226,23 @@ async function checkPointerBehavior(page, target, source, windows) {
     const target = page.locator('.gamePreviewTargetPane .gamePreviewKw').first();
     const windows = page.locator('.keywordPreviewWindow');
     await checkPointerBehavior(page, target, source, windows);
+    await checkAutocomplete(page,true,'clienttext-full');
+    await page.evaluate(async()=>{fixtureApp.ctSelectedFilters=['missing','outdated','revised','saved','unchanged'];fixtureApp.ctEditor=false;await fixtureApp.$nextTick();});
+    await checkAutocomplete(page,true,'clienttext-inline');
+    await page.evaluate(async()=>{fixtureApp.ctEditor=true;await fixtureApp.$nextTick();});
     await target.hover(); await page.waitForSelector('.keywordPreviewWindow');
     assert.equal(await windows.locator('.keywordPreviewTitle').innerText(), 'Thai Physical');
     assert.match(await windows.locator('.keywordPreviewContent').innerText(), /^Thai body/);
-    const parentId = await windows.getAttribute('id');
+    const parentId = await windows.getAttribute('id'); await target.click();
     await windows.locator('.keywordPreviewContent .gamePreviewKw').hover();
     await page.waitForFunction(() => document.querySelectorAll('.keywordPreviewWindow').length === 2);
     const nested = windows.last();
     assert.equal(await nested.locator('.keywordPreviewTitle').innerText(), 'Thai Armour Title');
-    await nested.hover(); await page.waitForTimeout(600);
-    assert.equal(await windows.count(), 2, 'nested hover retains its unpinned ancestor');
+    await page.locator('#'+parentId+' .keywordPreviewContent .gamePreviewKw').click();
+    await nested.hover();
+    assert.equal(await windows.count(), 2, 'keyword-pinned nested cards persist');
     await nested.locator('.keywordPreviewTitle').click();
-    assert.equal(await nested.locator('.keywordPreviewClose').count(), 1, 'clicking content pins its popup');
+    assert.equal(await nested.locator('.keywordPreviewClose').count(), 1, 'keyword click pinned its popup');
     await page.keyboard.press('Escape');
     assert.equal(await windows.count(), 1, 'Escape closes only the focused child');
     assert.equal(await page.evaluate(() => fixtureApp.ctEditor), true, 'Escape never reaches the full editor');
@@ -175,7 +250,7 @@ async function checkPointerBehavior(page, target, source, windows) {
     await page.waitForTimeout(80); assert.equal(await windows.count(), 1);
     await page.locator('#' + parentId + ' .keywordPreviewTitle').click();
     await source.hover(); await page.waitForFunction(() => document.querySelectorAll('.keywordPreviewWindow').length === 2);
-    const englishId = await windows.last().getAttribute('id');
+    const englishId = await windows.last().getAttribute('id'); await source.click();
     assert.equal(await page.locator('#' + englishId + ' .keywordPreviewTitle').innerText(), 'Physical Damage');
     assert.match(await page.locator('#' + englishId + ' .keywordPreviewContent').innerText(), /^English body/);
     assert.equal(await windows.locator('img,script').count(), 0, 'workbook HTML never becomes DOM');
@@ -192,15 +267,15 @@ async function checkPointerBehavior(page, target, source, windows) {
     // Exiting full editor and selecting another record retains pinned windows.
     await page.evaluate(async () => {
       fixtureApp.ctEditor = false; await fixtureApp.$nextTick();
-      fixtureApp.ctSelection = 'Armour'; fixtureApp.ctValues = { 'Info Title': 'New file title', 'Info Content': 'New file body' }; await fixtureApp.$nextTick();
+      fixtureApp.ctSelection = fixtureApp.ctUnits.find(unit=>unit.recordId==='Armour').id; fixtureApp.ctValues = { 'Info Title': 'New file title', 'Info Content': 'New file body' }; await fixtureApp.$nextTick();
     });
     assert.equal(await windows.count(), 1); assert.match(await windows.innerText(), /English body/);
-    await windows.locator('.keywordPreviewContent .gamePreviewKw').first().hover();
+    await windows.locator('.keywordPreviewContent .gamePreviewKw').first().click();
     assert.equal(await windows.last().locator('.keywordPreviewTitle').innerText(), 'English Armour', 'nested lookup retains the original English context');
     await windows.last().locator('.keywordPreviewTitle').click();
     // Inline preview opens translated records as well.
     await page.evaluate(async () => {
-      fixtureApp.ctSelection = 'dialogue'; fixtureApp.ctValues = { Text: '[Physical|Thai inline]' }; await fixtureApp.$nextTick();
+      fixtureApp.ctSelection = fixtureApp.ctUnits.find(unit=>unit.recordId==='Dialogue').id; fixtureApp.ctValues = { Text: '[Physical|Thai inline]' }; await fixtureApp.$nextTick();
     });
     const inlineTarget = page.locator('#inlineEditorPreviewHost .gamePreviewTargetPane .gamePreviewKw').first();
     await inlineTarget.focus(); await page.keyboard.press('Space'); await settle(page);
@@ -223,12 +298,13 @@ async function checkPointerBehavior(page, target, source, windows) {
     await page.evaluate(async () => {
       const host = fixtureApp; host.ctActive = false; host.ctWorkspace = null;
       host._keywordCatalog = { load: async () => ({ sources: window.fixtureKeywordSources }), dispose() {} };
-      const desc = host.descs.find(desc => desc.translations.English?.length && !desc.isDNT);
+      const desc = host.descs.find(desc => desc.translations.English?.length && !desc.isDNT && desc.translations.English.every(text=>!text.includes('@')));
       await host.openEditorFile(desc.filepath);
       host.editorBlocks[0].english = '[Physical]'; host.editorBlocks[0].translation = '[Physical|Thai SD]';
       host.refreshGamePreview();
       host.sideTab = 'preview'; await host.$nextTick();
     });
+    await checkAutocomplete(page,false,'sd-full');
     await page.locator('.gamePreviewTargetPane .gamePreviewKw').first().focus(); await page.keyboard.press('Enter'); await settle(page);
     assert.equal(await windows.last().locator('.keywordPreviewTitle').innerText(), 'Thai Physical');
     await page.keyboard.press('Escape'); assert.equal(await page.evaluate(() => fixtureApp.editorVisible), true);
@@ -236,10 +312,12 @@ async function checkPointerBehavior(page, target, source, windows) {
     assert.equal(await windows.last().locator('.keywordPreviewTitle').innerText(), 'Physical Damage');
     await page.evaluate(async () => { fixtureApp.editorVisible = false; fixtureApp.inlineActive = true; await fixtureApp.$nextTick(); });
     assert.equal(await windows.count(), 1, 'SD pinned popup survives full-to-inline transition');
+    await windows.locator('.keywordPreviewClose').click(); await checkAutocomplete(page,false,'sd-inline');
+    await page.locator('#inlineEditorPreviewHost .gamePreviewSourcePane .gamePreviewKw').first().click(); await settle(page);
     await page.locator('#inlineEditorPreviewHost .gamePreviewTargetPane .gamePreviewKw').first().focus(); await page.keyboard.press('Space'); await settle(page);
     assert.equal(await windows.last().locator('.keywordPreviewTitle').innerText(), 'Thai Physical');
     await page.keyboard.press('Escape'); assert.equal(await page.evaluate(() => fixtureApp.inlineActive), true);
-    await windows.locator('.keywordPreviewContent .gamePreviewKw').first().hover(); await settle(page);
+    await windows.locator('.keywordPreviewContent .gamePreviewKw').first().click(); await settle(page);
     await windows.last().locator('.keywordPreviewTitle').click();
     for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
       await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
@@ -263,7 +341,7 @@ async function checkPointerBehavior(page, target, source, windows) {
     const long = await windows.first().evaluate(node => ({ bottom: node.getBoundingClientRect().bottom, scrollable: node.scrollHeight > node.clientHeight }));
     assert.ok(long.bottom <= 342 && long.scrollable, 'tall pinned card stays within resized viewport and scrolls');
     assert.deepEqual(errors, []);
-    console.log(JSON.stringify({ browser: executablePath, checks: 'immediate dismissal, contiguous root/nested pointer paths, hover blocking over cards and previews, captured header drag/pin/clamping, nested edge placement, translation/source, pin/close/focus/z-order, Escape isolation, file/game/language/source lifetime, SD and ClientText inline/full, safe markup, all themes, viewport bounds', screenshots: folder }));
+    console.log(JSON.stringify({ browser: executablePath, checks: 'autocomplete SD/ClientText inline/full: translated details below TL Note, pointer/keyboard selection, caret, Enter/ClientText Tab, typing/filtering, partial data, nested pins; trigger-only immediate dismissal, keyword-only pinning, card click raise/focus without pin, pinned root/nested pointer paths, hover blocking over cards and previews, captured header dragging of pinned cards and clamping, nested edge placement, translation/source, pin/close/focus/z-order, Escape isolation, file/game/language/source lifetime, SD and ClientText inline/full, safe markup, all themes, viewport bounds', screenshots: folder }));
   } finally {
     await browser?.close(); await new Promise(done => { server.close(done); server.closeAllConnections(); });
   }

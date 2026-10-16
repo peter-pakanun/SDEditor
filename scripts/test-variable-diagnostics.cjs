@@ -1266,7 +1266,8 @@ test('missing keyword translations stay empty and untrusted workbook markup stay
 test('keyword popup focus raising and explicit close preserve independently pinned children', async () => {
   const { editor } = loadEditor(); editor.ctActive = true; editor.ctUnits = []; editor.ctSaved = {};
   const open = (parent = null) => editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'Tag' }, true, parent);
-  const first = await open(), second = await open(first); editor.pinKeywordWindow(second);
+  const first = await open(); editor.pinKeywordWindow(first);
+  const second = await open(first); editor.pinKeywordWindow(second);
   const third = await open(first); editor.raiseKeywordWindow(first);
   assert.equal(editor.keywordWindows.at(-1).id, first.id);
   editor.closeKeywordWindow(first.id);
@@ -1292,17 +1293,19 @@ test('late reference lookup cannot publish a popup after the selected file chang
   assert.equal(await pending, undefined); assert.equal(editor.keywordWindows.length, 0);
 });
 
-test('hover dismissal is immediate, retains the actual nested branch and preserves independent pins', async () => {
+test('only the triggering keyword retains an unpinned popup; hovering its card does not', async () => {
   const { editor } = loadEditor(); editor.ctActive = true; editor.ctUnits = []; editor.ctSaved = {};
-  const parent = await editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'Parent' }, false);
-  const child = await editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'Child' }, false, parent);
-  const card = item => ({ closest: () => ({ dataset: { keywordWindow: String(item.id) } }) });
-  editor.dismissKeywordWindows(card(child)); assert.equal(editor.keywordWindows.length, 2);
-  editor.dismissKeywordWindows(card(parent)); assert.deepEqual(Array.from(editor.keywordWindows, item => item.id), [parent.id]);
-  const pinned = await editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'Pinned' }, false, parent);
-  editor.pinKeywordWindow(pinned); editor.dismissKeywordWindows(null);
-  assert.deepEqual(Array.from(editor.keywordWindows, item => item.id), [pinned.id]);
-  editor.raiseKeywordWindow(child); assert.equal(editor.keywordWindows.length, 1, 'a dismissed card cannot be resurrected by late focus');
+  const anchor = { isConnected: true };
+  const parent = await editor.previewKeywordEnter({ currentTarget: anchor }, { tagName: 'Parent' }, false);
+  const card = { closest: () => ({ dataset: { keywordWindow: String(parent.id) } }) };
+  editor.dismissKeywordWindows(anchor); assert.equal(editor.keywordWindows.length, 1);
+  editor.dismissKeywordWindows(card); assert.equal(editor.keywordWindows.length, 0);
+  editor.raiseKeywordWindow(parent); assert.equal(editor.keywordWindows.length, 0, 'a dismissed card cannot be resurrected by a late event');
+  const pinned = await editor.previewKeywordEnter({ currentTarget: anchor }, { tagName: 'Parent' }, false); editor.pinKeywordWindow(pinned);
+  const child = await editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'Child' }, false, pinned);
+  editor.pinKeywordWindow(child); editor.dismissKeywordWindows(null);
+  assert.equal(editor.keywordWindows.length, 2); editor.closeKeywordWindow(pinned.id);
+  assert.deepEqual(Array.from(editor.keywordWindows, item => item.id), [child.id]);
 });
 
 test('keyword placement touches its trigger on a fitting edge and stays within the viewport', () => {
@@ -1330,4 +1333,55 @@ test('oversize keyword cards use available adjacent space instead of covering th
   assert.ok(result.maxWidth < 380 || result.maxHeight < 380);
   const w = Math.min(380, result.maxWidth), h = Math.min(380, result.maxHeight);
   assert.ok(result.x + w <= anchor.left || result.x >= anchor.right || result.y + h <= anchor.top || result.y >= anchor.bottom);
+});
+
+
+test('autocomplete keyword details use translated fields and track keyboard or pointer selection without touching pins', async () => {
+  const { editor } = loadEditor(); editor.ctActive = true; editor.ctSaved = {};
+  const unit = (recordId, target) => ({ id: recordId, recordId, sheet: 'KeywordPopups', role: 'normal', fields: [
+    { id: 'title', name: 'Info Title', source: 'English ' + recordId, target },
+    { id: 'body', name: 'Info Content', source: 'English body', target: 'Translated [Other]' },
+  ] });
+  editor.ctUnits = [unit('Physical', 'Thai Physical'), unit('Other', 'Thai Other')];
+  const items = [{ kwTagName: 'Physical' }, { value: '[Other|Shown]' }, { value: '{0}' }];
+  editor.ctCompletion = { fieldId: 'Text', selectedIndex: 0, items };
+  await editor.updateKeywordAutocomplete(); assert.equal(editor.keywordAutocomplete.title[0].text, 'Thai Physical');
+  const detail = editor.keywordAutocomplete;
+  const child = await editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'Other' }, true, detail); editor.pinKeywordWindow(child);
+  editor.ctCompletion.selectedIndex = 1; await editor.updateKeywordAutocomplete();
+  assert.equal(editor.keywordAutocomplete.title[0].text, 'Thai Other'); assert.ok(editor.keywordWindows.includes(child));
+  editor.ctCompletion.selectedIndex = 2; await editor.updateKeywordAutocomplete(); assert.equal(editor.keywordAutocomplete, null);
+  editor.ctCompletion = null; await editor.updateKeywordAutocomplete(); assert.equal(editor.keywordAutocomplete, null);
+  assert.equal(child.context.entries.get('Physical').title, 'Thai Physical'); assert.ok(child.pinned);
+});
+
+test('autocomplete details reject missing records, keep missing translations empty and ignore stale resolution', async () => {
+  const { editor, context } = loadEditor(); editor.ctActive = true; editor.ctSaved = {};
+  editor.ctUnits = [{ id: 'Blank', recordId: 'Blank', role: 'normal', sheet: 'KeywordPopups', fields: [
+    { id: 'title', name: 'Info Title', source: 'Never English fallback', target: '' },
+    { id: 'body', name: 'Info Content', source: 'English body', target: '' },
+  ] }];
+  editor.ctCompletion = { selectedIndex: 0, items: [{ kwTagName: 'Unknown' }, { kwTagName: 'Blank' }] };
+  await editor.updateKeywordAutocomplete(); assert.equal(editor.keywordAutocomplete, null);
+  editor.ctCompletion.selectedIndex = 1; await editor.updateKeywordAutocomplete();
+  assert.equal(editor.keywordAutocomplete.title[0].text, '(empty)'); assert.match(editor.keywordAutocomplete.notice, /Missing Thai/);
+  const units = editor.ctUnits; editor.ctUnits = []; editor.ctRevision++; await editor.updateKeywordAutocomplete();
+  assert.equal(editor.keywordAutocomplete, null, 'partial workbooks without KeywordPopups have no detail card');
+  editor.ctUnits = units; editor.ctRevision++; await editor.updateKeywordAutocomplete();
+  let resolve; const frozen = context.window.KeywordPopups.snapshot(editor, [{ units: editor.ctUnits }], true);
+  editor._keywordAutocompleteCache = null; editor.keywordContext = () => new Promise(done => { resolve = done; });
+  const pending = editor.updateKeywordAutocomplete(); editor.ctCompletion = null; await editor.updateKeywordAutocomplete();
+  resolve(frozen); await pending; assert.equal(editor.keywordAutocomplete, null);
+});
+
+test('SD autocomplete uses the common resolver once per scope and clears unpinned detail descendants on selection changes', async () => {
+  const { editor } = loadEditor(); let loads = 0;
+  editor.keywordContext = async () => { loads++; return { entries: new Map([['A', { title: 'Thai A', content: '[B]' }], ['B', { title: 'Thai B', content: 'B body' }]]), translated: true, language: 'Thai', variables: {} }; };
+  editor.hlPopup.visible = true; editor.hlPopup.filtered = [{ kwTagName: 'A' }, { kwTagName: 'B' }];
+  await editor.updateKeywordAutocomplete(); const detail = editor.keywordAutocomplete;
+  await editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'B' }, true, detail);
+  assert.equal(editor.keywordWindows.length, 1);
+  editor.hlPopup.selectedIndex = 1; await editor.updateKeywordAutocomplete();
+  assert.equal(editor.keywordAutocomplete.title[0].text, 'Thai B'); assert.equal(editor.keywordWindows.length, 0); assert.equal(loads, 1);
+  editor.hlPopup.visible = false; await editor.updateKeywordAutocomplete(); assert.equal(editor.keywordAutocomplete, null);
 });

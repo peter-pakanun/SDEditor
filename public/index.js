@@ -4451,7 +4451,7 @@ const config = Vue.defineComponent({
       let popupHeight = Math.ceil(list ? Math.min(list.scrollHeight, viewportHeight * 0.4) + filterHeight + 24 : Math.min(360, Math.max(180, viewportHeight * 0.48)));
       let width = Math.min(Math.max(rect.width, 260), 640, Math.max(0, viewportWidth - margin * 2));
       let left = Math.max(margin, Math.min(rect.left, viewportWidth - width - margin));
-      let hasNote = !!this.hlPopupTlnote;
+      let hasNote = !!(this.hlPopupTlnote || this.keywordAutocomplete);
       if (hasNote && this.inlineActive) {
         // Keep inline notes over the source column, reserving room to the left.
         let noteWidth = Math.min(320, Math.max(0, viewportWidth - margin * 2 - width - gap));
@@ -8177,6 +8177,7 @@ if (window.ClientTextUI) {
 }
 if (window.EditorComponents?.TextField) app.component('editor-text-field', window.EditorComponents.TextField);
 if (window.KeywordPopups) app.component('keyword-popup-overlay', window.KeywordPopups.Overlay);
+if (window.KeywordPopups) app.component('keyword-autocomplete-details', window.KeywordPopups.Details);
 if (window.EditorComponents?.Preview) app.component('editor-preview', window.EditorComponents.Preview);
 if (window.EditorComponents?.Assistance) app.component('editor-assistance', window.EditorComponents.Assistance);
 if (window.EditorComponents?.DictionaryEntries) app.component('editor-dictionary-entries', window.EditorComponents.DictionaryEntries);

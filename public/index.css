@@ -2065,8 +2065,10 @@ button, label, th, td, input[type="checkbox"] {
   opacity: 0.8;
 }
 
+.hlPopupDetails { position: fixed; display: flex; flex-direction: column; gap: 6px; overflow-y: auto; overscroll-behavior: contain; }
+.hlPopupDetails > * { flex: 0 0 auto; }
+.hlPopupDetails .keywordAutocompleteCard { position: relative; width: 100%; max-width: none; max-height: none; box-shadow: none; }
 .hlPopupTlnote {
-  position: fixed;
   display: flex;
   flex-direction: column;
   gap: calc(0.5em * var(--density));

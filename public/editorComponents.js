@@ -711,9 +711,12 @@
             <div v-if="hlPopup.filtered.length === 0" class="hlPopupEmpty">No highlights</div>
           </div>
         </div>
-        <aside v-if="hlPopupTlnote" class="hlPopupTlnote" :style="{ left: hlPopup.noteX + 'px', top: hlPopup.noteY + 'px', width: hlPopup.noteWidth + 'px', maxHeight: hlPopup.noteMaxHeight + 'px' }" role="note" aria-label="TL note" @mousedown.stop>
+        <aside v-if="hlPopupTlnote || $root.keywordAutocomplete" class="hlPopupDetails" :style="autocompleteDetailsStyle?.(hlPopup) || { left: hlPopup.noteX + 'px', top: hlPopup.noteY + 'px', width: hlPopup.noteWidth + 'px', maxHeight: hlPopup.noteMaxHeight + 'px' }" aria-label="Suggestion details" @mousedown.stop>
+        <div v-if="hlPopupTlnote" class="hlPopupTlnote" :style="{ maxHeight: hlPopup.noteMaxHeight * ($root.keywordAutocomplete ? 0.4 : 1) + 'px' }" role="note" aria-label="TL note">
           <strong>TL note</strong>
           <div class="hlPopupTlnoteText" :lang="translationEditorBcp47">{{ hlPopupTlnote }}</div>
+        </div>
+        <keyword-autocomplete-details v-if="$root.keywordAutocomplete" :host="$root"></keyword-autocomplete-details>
         </aside>
       </div>`);
   const DiagnosticMeta = {
