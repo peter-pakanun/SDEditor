@@ -856,6 +856,15 @@
                 }
                 return ordered.filter(unit=>cache.ids.has(unit.id));
             },
+            ctRowPortraits(unit) {
+                const npc=this._ctNpcIndex,convo=this._ctConvoIndex,game=this.ctWorkspace?.scope.game || this.gameVersion;
+                let cache=this._ctPortraitResolver;
+                if(!cache || cache.npc!==npc || cache.convo!==convo || cache.game!==game)
+                    cache=this._ctPortraitResolver={npc,convo,game,resolve:root.ClientTextPortraits?.createResolver({npcIndex:npc,convoIndex:convo,game}),rows:new WeakMap()};
+                if(!cache.resolve || !unit)return [];
+                if(!cache.rows.has(unit))cache.rows.set(unit,cache.resolve(unit));
+                return cache.rows.get(unit);
+            },
             ctNpcRelation(unit) {
                 const memberships=this._ctNpcIndex?.memberships.get(unit?.id),evidence=this._ctNpcIndex?.referenceEvidence?.get(unit?.id),
                     details=evidence?[evidence.unresolved.length?`Unresolved NPC references: ${evidence.unresolved.join(', ')}`:'',
@@ -1291,7 +1300,7 @@
                 this.ctVariantSelections={};this._ctClassNameCache=null;this._ctReferenceIndexCache=null;
                 this._ctStatusCache = new WeakMap(); this._ctSortCache=new WeakMap();this._ctOrderCache=null;this._ctSelectRun={}; this.ctDraftDirty = false; this.ctDraftStageFailure=null; this.ctBusy = false;
                 this._ctConsistencyIndex=null;this._ctConsistencyByUnit=null;this.ctMemory=raw([]);
-                this._ctNpcIndex=null;this._ctBrowseCandidateCache=null;this._ctBrowseViews=null;this._ctBrowseGeneration=(this._ctBrowseGeneration || 0)+1;
+                this._ctNpcIndex=null;this._ctPortraitResolver=null;this._ctBrowseCandidateCache=null;this._ctBrowseViews=null;this._ctBrowseGeneration=(this._ctBrowseGeneration || 0)+1;
                 this._ctConvoIndex=null;this._ctConvoFocusRun=null;this._ctConvoTypeAhead=null;
                 this._ctBrowseTransitionRun=null;this._ctBrowseRestoring=false;this.ctBrowseBusy=false;
                 this.ctBrowseMode='sheets';this.ctNpcSelection='all';this.ctNpcKind='';this.ctNpcFilter='';
@@ -3141,7 +3150,8 @@
             <dl><div v-for="item in items" :key="item.name" class="ctContextEntry"><dt>{{ item.name }}</dt><dd class="ctContextValue"><span v-for="(part,index) in item.parts" :key="index" class="ctContextPart" :tabindex="part.tooltip ? 0 : undefined" :aria-label="part.tooltip || undefined" v-tooltip="part.tooltip">{{ part.text }}</span></dd></div></dl>
         </section>` };
     const fieldsComponent = { props: {host:Object,side:{type:String,default:'both'}},
-        components: root.ClientTextAudio ? {'ct-dialogue-audio':root.ClientTextAudio.controlsComponent} : {},
+        components: {...(root.ClientTextAudio ? {'ct-dialogue-audio':root.ClientTextAudio.controlsComponent} : {}),
+            ...(root.ClientTextPortraits ? {'ct-portraits':root.ClientTextPortraits.component} : {})},
         methods: {
             showTooltip(event,text) { this.host.showTooltip?.(event,text); },
             hideTooltip() { this.host.hideTooltip?.(); },
@@ -3181,6 +3191,7 @@
                         <editor-native-field v-else :controller="host.ctSourceFieldController(group,source)" kind="english" :compact="side !== 'both'"></editor-native-field>
                         </component>
                         <ct-dialogue-audio v-if="$options.components['ct-dialogue-audio'] && audioSource(group,source)" :host="host" :surface="side"></ct-dialogue-audio>
+                        <ct-portraits v-if="$options.components['ct-portraits'] && host.ctRowPortraits && audioSource(group,source)" :items="host.ctRowPortraits(host.ctCurrentUnit)"></ct-portraits>
                     </div>
                     </template>
                 </div>

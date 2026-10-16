@@ -85,6 +85,18 @@
 .ctList { min-width:0; }.ctFilePath { display:block; margin-top:4px; color:var(--ui-muted); font-size:11px; overflow-wrap:anywhere; }.ctMetadataValue { display:block; margin-top:4px; font-size:11px; color:var(--ui-muted); }
 .ctTable tr.isOutdated > td { background-color:color-mix(in srgb,var(--ui-dropped) 8%,transparent); }
 .ctTable .ctRowNumber { width:76px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.ctPortraitStack { display:block; position:relative; container-type:inline-size; width:min(100%,480px,calc(160px * var(--ct-portrait-count))); height:180px; margin-top:12px; isolation:isolate; }
+.ctPortraitCards { display:flex; position:relative; align-items:flex-start; width:100%; }
+.ctPortrait { --ct-card-width:min(160px,100cqw); display:block; position:relative; flex:none; box-sizing:border-box; width:var(--ct-card-width); height:180px; overflow:hidden; border:1px solid var(--ui-border); border-radius:5px; background:var(--color-element-alt); }
+.ctPortrait img { display:block; width:100%; height:100%; object-fit:contain; }
+.ctPortraitMissing { display:flex; width:100%; height:100%; align-items:center; justify-content:center; color:var(--ui-muted); font:24px/1 sans-serif; }
+.ctPortraitCaption { position:absolute; inset:auto 0 0; padding:18px 5px 5px; background:linear-gradient(transparent,#000d); color:#fff; font-size:11px; line-height:1.3; text-align:center; white-space:normal; }
+.ctPortraitMultiple .ctPortrait + .ctPortrait { margin-left:calc((100cqw - var(--ct-card-width) * var(--ct-portrait-count)) / (var(--ct-portrait-count) - 1)); }
+.ctPortraitMore { position:absolute; z-index:10; right:0; bottom:-8px; padding:1px 3px; border:1px solid var(--ui-border); border-radius:4px; background:var(--color-element); color:var(--color-font); font-size:9px; }
+.ctPortraitStack:focus-visible { outline:2px solid var(--ui-accent); outline-offset:3px; }
+.ctPortraitExpanded { z-index:20; }
+.ctPortraitExpanded .ctPortraitCards { position:absolute; left:0; top:0; flex-wrap:wrap; gap:6px; width:100%; padding:4px; box-sizing:border-box; background:var(--color-element); border-radius:5px; box-shadow:0 2px 8px #0006; }
+.ctPortraitExpanded .ctPortrait + .ctPortrait { margin-left:0; }
 .statusPill.outdated .statusDot,.filterChip.outdated { --filter-color:var(--ui-dropped); color:var(--ui-dropped); }
 .filterChip.outdated.selected { border-color:var(--ui-dropped); background:color-mix(in srgb,var(--ui-dropped) 10%,var(--color-element)); }
 .ctFullEditor.clipboardHidden { --clipboard-height:0px; }
