@@ -786,3 +786,17 @@ test('SHA scratch and bounded scalar memoization retain canonical hashes across 
     const mutable = { source: 'Before' }, first = State.hash(mutable); mutable.source = 'After';
     assert.notEqual(State.hash(mutable), first, 'Only immutable string values are memoized');
 });
+
+test('paired workbook packaging worker preserves both workbook bytes and cleans up after completion',async()=>{
+    const bytes=await workbook(),parsed=await Codec.parseWorkbook(bytes,{filename:'French.xlsx'}),unit=parsed.units[0],field=unit.fields[0];
+    const output=await Codec.exportWorkbook(bytes,{...parsed,units:[unit]},{[unit.id]:{values:{[field.id]:'Exact @ target\\n'},reviewed:{}}});
+    const messages=[],self={JSZip,postMessage:value=>messages.push(value)};
+    const context=createContext({self,importScripts(){},Uint8Array,Promise,Set,Map});
+    runInContext(readFileSync(require.resolve('../public/clientTextWorker.js'),'utf8'),context);
+    self.onmessage({data:{type:'packageWorkbooks',id:'paired',files:[{name:'French.xlsx',bytes:output},{name:'French_Gender.xlsx',bytes}]}});
+    await runInContext('queue',context);
+    const result=messages.find(message=>message.id==='paired' && message.type==='result');assert(result);
+    const zip=await JSZip.loadAsync(result.result);
+    assert.deepEqual(await zip.file('French.xlsx').async('uint8array'),output);assert.deepEqual(await zip.file('French_Gender.xlsx').async('uint8array'),bytes);
+    assert.equal(runInContext('cancelled.size',context),0);assert.equal(runInContext('incoming.size',context),0);
+});

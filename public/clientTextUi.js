@@ -4,6 +4,7 @@
     root.ClientTextUI = api;
 })(typeof window !== 'undefined' ? window : globalThis, function (root) {
     'use strict';
+    const exportProgress = root.ClientTextExportProgress || (typeof require === 'function' ? require('./clientTextExportProgress.js') : null);
     const teams = ['French', 'German', 'Spanish', 'Portuguese', 'Russian', 'Thai', 'Korean', 'Japanese', 'Simplified Chinese', 'Traditional Chinese', 'Turkish', 'Polish'];
     const copy = value => JSON.parse(JSON.stringify(value));
     const raw = value => root.Vue?.markRaw ? root.Vue.markRaw(value) : value;
@@ -96,6 +97,7 @@
     }
     const mixin = {
         data() { return {
+            ...exportProgress?.mixin.data(),
             ctActive: false, ctWorkspace: null, ctUnits: raw([]), ctSaved: raw({}), ctRevision: 0,
             ctSheet: '', ctSheetFilter: '', ctSearch: '', ctAppliedSearch: '', ctFilter: '', ctPage: 1, ctPageSize: 20,
             ctBrowseMode: 'sheets', ctNpcSelection: 'all', ctNpcKind: '', ctNpcFilter: '', ctBrowseBusy: false,
@@ -120,6 +122,7 @@
             activeContentGroup: null, ctTeamOptions: teams
         }; },
         computed: {
+            ...exportProgress?.mixin.computed,
             ctVersionWorkbookDropEnabled() {
                 return this.versionChooserVisible && !this.testMode && this.gameVersionSelected && !this.needsInitialSettings
                     && !this.workspaceInitializationActive && !this.showSetting && !this.settingsDialogVisible
@@ -625,6 +628,7 @@
         mounted() { this._ctStore = root.ClientTextStore.create(); this._ctWorker = root.ClientTextWorkerClient.create(); },
         beforeUnmount() { this.ctFence(); this._ctWorker?.dispose(); clearTimeout(this._ctSearchTimer); },
         methods: {
+            ...exportProgress?.mixin.methods,
             ctFieldController(field) {return root.EditorSession.fieldController(this,field);},
             ctSourceFieldController(group,source) {
                 const displayed=this.ctDisplayedFields(),field=group.fields.find(field=>field.id===this.ctFocusedField && field.source===source.text && displayed.includes(field))
@@ -1287,6 +1291,7 @@
             ctContext() { return { key: this.managedCatalogScope, scope: copy(this.ctWorkspace?.scope || {}), epoch: this._ctEpoch || 0 }; },
             ctCurrent(ctx) { return ctx.key === this.managedCatalogScope && ctx.epoch === (this._ctEpoch || 0) && JSON.stringify(ctx.scope) === JSON.stringify(this.ctWorkspace?.scope || {}); },
             ctFence(keepTestGroupId = null) {
+                this.ctAbortExport?.();
                 const exitingTest=this.ctOfflineTest;
                 this.ctCloseScanDialog(false);this.ctClearScanResults();
                 this.ctFlushDraft().catch(()=>{});
@@ -1518,7 +1523,7 @@
             ctDescribeOriginals(units,assets,options) {
                 return this._ctWorker?.buildDescriptors ? this._ctWorker.buildDescriptors(units,assets,options) : root.ClientTextState.buildDescriptors(units,assets,options);
             },
-            async ctCacheGroup(version,full,scope,{signal,current,initialization,comparison=false}={}) {
+            async ctCacheGroup(version,full,scope,{signal,current,initialization,comparison=false,worker=this._ctWorker}={}) {
                 const guard=current || (()=>!signal?.aborted),check=()=>{if(!guard())throw Object.assign(new Error('ClientText opening was cancelled or superseded.'),{stale:true,name:'AbortError'});},
                     units=[],assets=[],descriptors=(full.assets || []).map(asset=>({...asset,...asset.descriptor})),cached=[],reportProgress=progress=>{if(!comparison)this.ctReport(progress);};
                 if(!descriptors.length)throw new Error('This content group has no original workbook descriptors.');
@@ -1542,7 +1547,7 @@
                                 {responseType:'blob',timeout:180000,signal,onDownloadProgress:(completed,total)=>{if(!guard())return;report({completed,total,unit:'bytes',workbook:name});reportProgress({phase:'Downloading original',completed,total,workbook:name,sheet:''});}});check();return result;
                         },initialization);
                         const parsed=await this.ctInitializationStep('Parsing original: '+name,async report=>{
-                            const result=await this._ctWorker.parseWorkbook(await blob.arrayBuffer(),{filename:name,role:descriptor.role,language:scope.language,parserVersion:descriptor.parserVersion || 'clienttext-v1',signal,
+                            const result=await worker.parseWorkbook(await blob.arrayBuffer(),{filename:name,role:descriptor.role,language:scope.language,parserVersion:descriptor.parserVersion || 'clienttext-v1',signal,
                                 onProgress:progress=>{if(!guard())return;const detail={...progress,completed:progress.completed ?? progress.processed,workbook:name};report(detail);reportProgress(detail);}});check();return result;
                         },initialization);
                         if(hash && parsed.artifactHash!==hash)throw new Error('The original workbook hash differs from its published descriptor.');
@@ -1730,7 +1735,7 @@
             ctKeyboardOverlayOpen() {
                 return !!(root.AppDialogs?.isOpen
                     || this.versionChooserVisible || this.settingsDialogVisible || this.showSetting || this.ctUploadVisible
-                    || this.ctDiagnosticDialog()?.open || this.workspaceInitializationActive || this._importingSource
+                    || this.$refs?.ctExportDialog?.open || this.ctDiagnosticDialog()?.open || this.workspaceInitializationActive || this._importingSource
                     || this.cloudResolverVisible || this.cloudHistoryVisible || this.settingsImportDraft || this.draftRecoveryVisible);
             },
             ctKeyboardBlocked() {
@@ -2578,24 +2583,47 @@
                 } catch(error){if(key===this.managedCatalogScope && !error.stale && error.name!=='AbortError')this.ctError=error.message;return false;}
                 finally{this.ctFinishInitialization(initialization);if(this._ctOpenRun===opening && key===this.managedCatalogScope){this.ctBusy=false;this.ctProgress=null;this._ctOpenRun=null;}}
             },
-            async ctDownload(collection, group = this.ctWorkspace?.metadata.group, language = this.ctWorkspace?.scope.language || this.lang, version = this.ctWorkspace?.metadata.version) {
-                if (this.ctBusy || !group) return;
-                if (!await this.ctFlushDraft()) return;
-                const scope = this.ctScope(version.id, group.id, language), key = this.managedCatalogScope;
-                const store=this.ctStorage(scope);
-                if(this.ctOfflineTest && collection)return false;
-                let metadata=await store.getMetadata(scope);
-                if(metadata?.state!=='ready'){
-                    if(!await this.ctOpenGroup(version,group,language,false))return;
-                    metadata=await store.getMetadata(scope);
-                }
-                this.ctBusy = true; this.ctError = ''; this._ctAbort = new AbortController();
+            async ctDownload(collection, group = this.ctWorkspace?.metadata.group, language = this.ctWorkspace?.scope.language || this.lang, version = this.ctWorkspace?.metadata.version, operation) {
+                if (!group || !version || !operation && (this.ctBusy || this._ctExportRun)) return false;
+                const run = operation || this.ctBeginExport(collection ? 'Download collection' : 'Export saved ClientText');
+                if (!run) return false;
+                const signal = run.signal;
+                let scope, store;
+                const current = () => !signal.aborted && run.current() && this._ctExportRun === run;
+                const worker = () => {
+                    if (!run.worker) run.worker = root.ClientTextWorkerClient?.create ? root.ClientTextWorkerClient.create() : this._ctWorker;
+                    return run.worker;
+                };
+                let completed = false;
                 try {
-                    let saved = collection ? {} : await store.getSaved(scope), collectionAssets = null, collectionAssetSignature = '';
+                    scope = this.ctScope(version.id, group.id, language); store = this.ctStorage(scope);
+                    if (collection && !operation) run.accepted();
+                    await run.step('Checkpoint / preparation', async () => {
+                        if (!await this.ctFlushDraft()) throw new Error('The draft could not be checkpointed.');
+                        run.check();
+                        if (this.ctOfflineTest && collection) throw new Error('Online collections are unavailable in this offline test.');
+                    });
+                    let metadata = await run.step('Indexed original lookup', () => store.getMetadata(scope, { guard: current }));
+                    if (metadata?.state !== 'ready') {
+                        // Cold preparation uses the same verified cache path without switching workspace or taking over the screen.
+                        await run.step('Checkpoint / preparation', async () => {
+                            if (!this.cloudCanAccessAllLanguages && language !== this.cloudUser?.language) throw new Error('This team is not accessible.');
+                            await this.ctRequireTrustedProtocol(signal); run.check();
+                            const response = await this._cloud.request('/v1/content-groups/' + encodeURIComponent(group.id), { signal }); run.check();
+                            const full = response.group || response.contentGroup || response;
+                            if (full.id !== group.id || full.versionId !== version.id || full.contentMode !== 'clienttext' || full.language !== language
+                                || full.game && full.game !== scope.game || full.branchId && full.branchId !== scope.branchId) throw new Error('The returned content group differs from the selected scope.');
+                            await this.ctCacheGroup(version, full, scope, { signal, current, worker: worker(), comparison: true }); run.check();
+                        });
+                        metadata = await run.step('Indexed original lookup', () => store.getMetadata(scope, { guard: current }));
+                    }
+                    let saved = collection ? {} : await run.step('Checkpoint / preparation', () => store.getSaved(scope)), collectionAssets = null, collectionAssetSignature = '';
                     if (collection) {
+                        run.phase('Manifest retrieval (network + server)');
                         let cursor = '';
                         do {
-                            const response = await this._cloud.request('/v1/content-collections/' + encodeURIComponent(collection.id) + '/manifest' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''),{signal:this._ctAbort.signal});
+                            const response = await this._cloud.request('/v1/content-collections/' + encodeURIComponent(collection.id) + '/manifest' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''),{signal});
+                            run.check();
                             if (response.collection?.id !== collection.id) throw new Error('Collection identity changed.');
                             if(response.manifest?.groupId!==group.id || response.manifest?.versionId!==version.id || response.manifest?.language!==language)throw new Error('Collection scope differs from selected content group.');
                             const assets = response.manifest.assets;
@@ -2609,34 +2637,96 @@
                             for (const unit of response.manifest?.units || []) saved[unit.unitId || unit.id] = typeof unit.saved==='object' ? unit.saved : unit;
                             for (const unit of response.manifest?.sourceReviews || []) saved[unit.unitId || unit.id] = { ...unit,saved:false,values:unit.values || {} };
                             cursor = response.nextCursor || '';
-                        } while (cursor && key === this.managedCatalogScope && !this._ctAbort.signal.aborted);
+                        } while (cursor);
                     }
-                    const units = await store.getUnitsByIds(scope,Object.keys(saved),{guard:()=>key===this.managedCatalogScope && !this._ctAbort.signal.aborted}),
+                    run.phase('Indexed original lookup');
+                    const units = await run.wait(store.getUnitsByIds(scope,Object.keys(saved),{guard:current})),
                         roles = (metadata.descriptors || []).map(descriptor => descriptor.role), outputs = [];
                     if (collectionAssets && (collectionAssets.length !== roles.length || roles.some(role => !collectionAssets.some(asset => asset.role === role)))) throw new Error('Cached workbook roles differ from the collection originals.');
                     for (const role of roles) {
-                        const asset = await store.getAsset(scope, role); if (!asset) throw new Error('Open this content group once to verify and cache its originals before downloading.');
+                        run.phase('Indexed original lookup');
+                        const asset = await run.wait(store.getAsset(scope, role)); run.check(); if (!asset) throw new Error('Open this content group once to verify and cache its originals before downloading.');
                         const expected = collectionAssets?.find(item => item.role === role);
                         if (expected && (asset.parsed?.artifactHash !== expected.artifactHash
                             || (asset.parsed?.parserVersion || asset.descriptor?.parserVersion || 'clienttext-v1') !== (expected.descriptor.parserVersion || 'clienttext-v1'))) throw new Error('Cached workbook original or parser differs from the collection snapshot.');
                         const bytes = assetBytes(asset), buffer = bytes instanceof Blob ? await bytes.arrayBuffer() : bytes;
+                        run.check();
                         // The immutable package supplies untouched cells. Only
                         // affected units are needed to validate and patch work.
                         const parsed = { ...asset.parsed, units: units.filter(unit => unit.role === role && saved[unit.id]) };
                         const roleSaved=Object.fromEntries(parsed.units.filter(unit=>saved[unit.id]).map(unit=>[unit.id,saved[unit.id]]));
-                        const output = await this._ctWorker.exportWorkbook(buffer, parsed, roleSaved, { signal: this._ctAbort.signal, onProgress: progress => this.ctReport({...progress,workbook:asset.name}) });
+                        run.phase('Worker verification');
+                        const output = await run.wait(worker().exportWorkbook(buffer, parsed, roleSaved, { signal, onProgress: progress => {
+                            if (!current() || this._ctExportRun !== run) return;
+                            if (progress.phase === 'patching' || progress.phase === 'exporting') run.phase('Worker patching');
+                            else if (progress.phase === 'packing') run.phase('Worker compression');
+                        } }));
                         outputs.push({ name: asset.name || parsed.filename, bytes: output });
-                        if (key !== this.managedCatalogScope || this._ctAbort.signal.aborted) return;
+                        run.check();
                     }
                     if (!outputs.length) throw new Error('This workbook group is not cached. Open its editor before downloading.');
+                    run.phase('Packaging');
                     let blob, name;
                     if (outputs.length === 1) { blob = new Blob([outputs[0].bytes]); name = outputs[0].name; }
-                    else { const zip = new root.JSZip(); outputs.forEach(file => zip.file(file.name, file.bytes)); this.ctReport({ phase: 'Compressing paired workbooks', completed: 0, total: 100, sheet: '' }); blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' }, progress => {if(this._ctAbort.signal.aborted)throw Object.assign(new Error('Cancelled'),{name:'AbortError'});this.ctReport({ completed: progress.percent });}); name = `${version.name}_${language}_ClientText.zip`; }
-                    if (key === this.managedCatalogScope && !this._ctAbort.signal.aborted) {root.saveAs(blob, name);return true;}
-                } catch (error) { if (key === this.managedCatalogScope && error.name !== 'AbortError') this.ctError = error.message; }
-                finally { if (key === this.managedCatalogScope) { this.ctBusy = false; this.ctProgress = null; } }
+                    else {
+                        // Terminating this dedicated packaging worker interrupts compression too.
+                        const packaged = await run.wait(worker().packageWorkbooks(outputs, { signal }));
+                        blob = new Blob([packaged], { type: 'application/zip' }); name = `${version.name}_${language}_ClientText.zip`;
+                    }
+                    run.check(); run.phase('Download initiation');
+                    root.saveAs(blob, name); run.state.downloadStarted = true; completed = true;
+                    return true;
+                } catch (error) {
+                    if (run.current() && !signal.aborted && error.name !== 'AbortError') this.ctError = error.message;
+                    return false;
+                } finally {
+                    if (!operation) this.ctFinishExport(run, signal.aborted || !run.current() ? 'aborted' : completed ? 'done' : 'failed');
+                }
+            },
+            async ctCollectClientText(version, group, team, end) {
+                const run = this.ctBeginExport(end ? 'Download and end' : 'Download accepted Saved work');
+                if (!run) return false;
+                const client = this._cloud, store = this._ctStore;
+                const requestKey = 'collection:' + JSON.stringify([group.id, team.language, end]);
+                let completed = false;
+                try {
+                    const requestScope = this.ctRequestScope();
+                    run.phase('Checkpoint / preparation');
+                    let journal = await run.wait(store.getRequest(requestScope, requestKey)); run.check();
+                    if (!journal) {
+                        await store.putRequest(requestScope, requestKey, { kind: 'collection', groupId: group.id, language: team.language, endWindow: end, idempotencyKey: uuid() });
+                        run.check(); journal = await run.wait(store.getRequest(requestScope, requestKey)); run.check();
+                    }
+                    let collection = journal.payload.collection;
+                    if (!collection) {
+                        run.phase('Collection request (network + server)'); run.state.collection = 'uncertain'; run.tick();
+                        const response = await client.request('/v1/content-groups/' + encodeURIComponent(group.id) + '/teams/' + encodeURIComponent(team.language) + '/collections',
+                            { method: 'POST', body: { idempotencyKey: journal.payload.idempotencyKey, endWindow: end }, signal: run.signal });
+                        collection = response.collection;
+                        if (!collection?.id) throw new Error('The collection response has no identity. Retry the retained request.');
+                        run.accepted();
+                        // Persist an observed receipt even if Abort arrives after the response. Never invent a new end operation.
+                        if (!run.signal.aborted && run.current()) run.phase('Collection receipt checkpoint');
+                        await store.putRequest(requestScope, requestKey, { ...journal.payload, collection });
+                    } else run.accepted();
+                    run.check();
+                    completed = await this.ctDownload(collection, group, team.language, version, run);
+                    run.check();
+                    if (completed) { run.phase('Collection receipt cleanup'); await store.deleteRequest(requestScope, requestKey); }
+                    return completed;
+                } catch (error) {
+                    completed = false;
+                    if (run.current() && !run.signal.aborted && error.name !== 'AbortError') this.ctError = error.message;
+                    return false;
+                } finally {
+                    this.ctFinishExport(run, run.signal.aborted || !run.current() ? 'aborted' : completed ? 'done' : 'failed');
+                    // Ordinary catalog polling reconciles accepted/uncertain operations after cancellation as well.
+                    if (run.current()) this.managedReadDetails?.(version.id, false).catch(() => {});
+                }
             },
             async ctCollect(version, group, team, end = true) {
+                if (this.ctBusy || this._ctExportRun) return false;
+                if (mode(group) === 'clienttext') return this.ctCollectClientText(version, group, team, end);
                 const key = this.managedCatalogScope,epoch=this._ctEpoch || 0,client=this._cloud,current=()=>key===this.managedCatalogScope && epoch===(this._ctEpoch || 0); this.ctBusy = true;
                 try {
                     const requestKey='collection:'+JSON.stringify([group.id,team.language,end]),requestScope=this.ctRequestScope();

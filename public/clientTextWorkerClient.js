@@ -121,6 +121,11 @@
             const detached = { parsed: plain(parsed), saved: plain(saved instanceof Map ? Object.fromEntries(saved) : saved) };
             return this.request('exportWorkbook', bytes, options, detached);
         }
+        packageWorkbooks(files, options) {
+            // Typed workbook bytes need no recursive proxy walk. postMessage
+            // snapshots them without detaching the retained export outputs.
+            return this.request('packageWorkbooks', undefined, options, { files: files.map(file => ({ name: file.name, bytes: file.bytes })) });
+        }
         dispose() { this.disposed = true; this.failed(abortError()); }
     }
     return { Client, create: options => new Client(options) };

@@ -452,6 +452,7 @@
             if (declared !== undefined && parserVersion(declared) !== version) throw error('The export parser version does not match its parsed baseline.', 'CLIENTTEXT_PARSER_MISMATCH');
         }
         const zip = await open(bytes), saved = savedRecords(savedInput), units = new Map(parsed.units.map(unit => [unit.id, unit])), editsBySheet = new Map();
+        progress({ phase: 'patching', processed: 0, total: parsed.sheets.length, sheet: '' });
         let styles = null;
         for (const [unitId, record] of saved) {
             const unit = units.get(unitId);

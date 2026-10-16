@@ -7,7 +7,7 @@ const clone=value=>structuredClone(value),settle=async()=>{for(let i=0;i<8;i++)a
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};};
 function harness(changes={}){
     let nextId=0;
-    const window={ClientTextState:S,ClientTextStore:Store,TranslationDiagnostics:require('../public/translationDiagnostics.js'),
+    const window={ClientTextExportProgress:require('../public/clientTextExportProgress.js'),ClientTextState:S,ClientTextStore:Store,TranslationDiagnostics:require('../public/translationDiagnostics.js'),
         ClientTextNpcIndex:require('../public/clientTextNpcIndex.js'),
         ClientTextConvoIndex:require('../public/clientTextConvoIndex.js'),
         ClientTextIdentities:require('../public/clientTextIdentities.js'),
@@ -4236,4 +4236,113 @@ test('combined offline Open never opens failed, cancelled or superseded preparat
         const opening=app.ctOpenTestSheet();change(app);gate.resolve();
         assert.equal(await opening,false);assert.equal(app._ctTestOpenRun,null);
     }
+});
+
+// Explicit export lifecycle: held boundaries exercise real cancellation and durable collection receipts.
+function exportHarness() {
+    const h=harness(),{app,window,original}=h,hash='a'.repeat(64),journals=new Map(),workers=[],requests=[],downloads=[];
+    const version={id:scope.versionId,name:'Timing fixture'},group={id:scope.groupId,contentMode:'clienttext'},team={language:scope.language},collection={id:'timed-collection'};
+    const asset={role:'normal',name:'Fixture.xlsx',blob:new Blob(['immutable original']),parsed:{artifactHash:hash,parserVersion:'clienttext-v3'}};
+    const manifest={groupId:group.id,versionId:version.id,language:team.language,assets:[{role:'normal',artifactHash:hash,descriptor:{role:'normal',assetHash:hash,parserVersion:'clienttext-v3'}}],units:[{id:original.id,values:{[fieldId]:'PRIVATE TARGET @ secret'}}]};
+    app._ctStore={async getMetadata(){return{state:'ready',descriptors:[{role:'normal'}]};},async getSaved(){return{[original.id]:{values:{[fieldId]:'Local'}}};},async getUnitsByIds(){return[original];},async getAsset(){return asset;},
+        async getRequest(s,k){return journals.get(k);},async putRequest(s,k,payload){journals.set(k,{payload:clone(payload)});},async deleteRequest(s,k){journals.delete(k);}};
+    app.ctFlushDraft=async()=>true;app.managedReadDetails=async()=>{};
+    app._cloud={async request(route,options={}){requests.push({route,options});return route.endsWith('/collections')?{collection}:{collection,manifest};}};
+    window.saveAs=(blob,name)=>downloads.push({blob,name});
+    window.ClientTextWorkerClient={create(){const worker={disposed:0,async exportWorkbook(bytes,parsed,saved,options){worker.options=options;options.onProgress({phase:'patching'});options.onProgress({phase:'packing'});return new Uint8Array([1,2,3]);},async packageWorkbooks(){return new Uint8Array([4]);},dispose(){this.disposed++;}};workers.push(worker);return worker;}};
+    return{...h,version,group,team,collection,manifest,journals,workers,requests,downloads,asset,download:()=>app.ctDownload(collection,group,team.language,version),collect:()=>app.ctCollect(version,group,team,true)};
+}
+const flushExport=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));};
+test('timed collection success retains measured report, uses subset originals and releases each dedicated worker on repeated runs',async()=>{
+    const h=exportHarness(),{app}=h;
+    for(let i=0;i<3;i++){
+        assert.equal(await h.collect(),true);assert.equal(app.ctBusy,false);assert.equal(app._ctExportRun,null);
+        assert.equal(app.ctExportTiming.status,'done');assert.equal(app.ctExportTiming.downloadStarted,true);assert.equal(h.journals.size,0);
+        const labels=app.ctExportTiming.rows.map(row=>row.label);
+        for(const label of ['Checkpoint / preparation','Collection request (network + server)','Manifest retrieval (network + server)','Indexed original lookup','Worker verification','Worker patching','Worker compression','Packaging','Download initiation'])assert(labels.includes(label),label);
+        assert(app.ctExportTiming.rows.every(row=>row.status==='done' && row.elapsed>=0));assert(app.ctExportTiming.elapsed>=app.ctExportTiming.rows.reduce((sum,row)=>sum+row.elapsed,0));
+        const report=h.mixin.computed.ctExportLogText.call(app);assert(!report.includes('PRIVATE'));assert(!report.includes(scope.accountId));assert.match(report,/not server CPU/);
+    }
+    assert.equal(h.workers.length,3);assert(h.workers.every(worker=>worker.disposed===1));assert.equal(h.downloads.length,3);
+});
+test('timed export reserves busy before checkpoint and rejects a simultaneous collection or export',async()=>{
+    const h=exportHarness(),gate=deferred();h.app.ctFlushDraft=()=>gate.promise;
+    const running=h.download();await settle();assert.equal(h.app.ctBusy,true);assert.equal(await h.download(),false);assert.equal(await h.collect(),false);
+    h.app.ctAbortExport();assert.equal(await running,false);gate.resolve(true);await flushExport();assert.equal(h.requests.length,0);assert.equal(h.app.ctBusy,false);
+});
+for(const boundary of ['manifest','worker','packaging'])test('Abort during '+boundary+' suppresses download, terminates worker and ignores late progress/results',async()=>{
+    const h=exportHarness(),gate=deferred();let options;
+    if(boundary==='manifest')h.app._cloud.request=async(route,opts)=>{options=opts;return gate.promise;};
+    else h.window.ClientTextWorkerClient.create=()=>{const worker={disposed:0,dispose(){this.disposed++;},async exportWorkbook(b,p,s,opts){options=opts;return boundary==='worker'?gate.promise:new Uint8Array([1]);},async packageWorkbooks(files,opts){options=opts;return gate.promise;}};h.workers.push(worker);return worker;};
+    if(boundary==='packaging'){h.app._ctStore.getMetadata=async()=>({state:'ready',descriptors:[{role:'normal'},{role:'gender'}]});h.manifest.assets.push({...h.manifest.assets[0],role:'gender',descriptor:{...h.manifest.assets[0].descriptor,role:'gender'}});}
+    const running=h.download();await flushExport();assert(options);const run=h.app._ctExportRun;
+    h.app.ctAbortExport();
+    if(boundary==='manifest')gate.reject(Object.assign(new Error('cancelled'),{name:'AbortError'}));
+    assert.equal(await running,false);assert.equal(options.signal.aborted,true);assert.equal(h.app.ctBusy,false);assert.equal(run.timer,null);assert.equal(h.app.ctExportTiming.status,'aborted');
+    const report=clone(h.app.ctExportTiming);options.onProgress?.({phase:'packing'});gate.resolve(new Uint8Array([9]));await flushExport();
+    assert.deepEqual(clone(h.app.ctExportTiming),report);assert.equal(h.downloads.length,0);assert(h.workers.every(worker=>worker.disposed>=1));
+});
+test('Abort of in-flight collection reports uncertainty and retry reuses exact durable end request ID',async()=>{
+    const h=exportHarness(),posted=deferred(),ids=[];let first=true;
+    const normal=h.app._cloud.request;
+    h.app._cloud.request=async(route,options)=>{
+        if(!route.endsWith('/collections'))return normal(route,options);
+        ids.push(options.body.idempotencyKey);
+        if(first){first=false;options.signal.addEventListener('abort',()=>posted.reject(Object.assign(new Error('cancelled'),{name:'AbortError'})),{once:true});return posted.promise;}
+        return{collection:h.collection};
+    };
+    const running=h.collect();await flushExport();h.app.ctAbortExport();assert.equal(await running,false);
+    assert.equal(h.app.ctExportTiming.collection,'uncertain');assert.equal(h.journals.size,1);assert.equal(h.downloads.length,0);
+    assert.equal(await h.collect(),true);assert.equal(ids.length,2);assert.equal(ids[0],ids[1]);
+});
+test('Abort after collection response waits for receipt persistence and retries that collection without another end POST',async()=>{
+    const h=exportHarness(),gate=deferred(),put=h.app._ctStore.putRequest;let writes=0;
+    h.app._ctStore.putRequest=async(...args)=>{if(++writes===2)await gate.promise;return put(...args);};
+    const running=h.collect();await flushExport();assert.equal(h.app.ctExportTiming.collection,'accepted');h.app.ctAbortExport();
+    assert.equal(await h.collect(),false,'durable receipt checkpoint prevents overlap');gate.resolve();assert.equal(await running,false);
+    assert.equal([...h.journals.values()][0].payload.collection.id,h.collection.id);assert.equal(h.downloads.length,0);
+    assert.equal(await h.collect(),true);assert.equal(h.requests.filter(request=>request.route.endsWith('/collections')).length,1);
+});
+for(const failure of ['collection','manifest','worker','saveAs'])test('timed '+failure+' failure retains report and receipt for safe retry without exposing error payloads',async()=>{
+    const h=exportHarness(),normal=h.app._cloud.request;
+    if(['collection','manifest'].includes(failure))h.app._cloud.request=async(route,opts)=>{if(route.endsWith(failure==='collection'?'/collections':'/manifest'))throw new Error('PRIVATE token=abc');return normal(route,opts);};
+    if(failure==='worker')h.window.ClientTextWorkerClient.create=()=>({async exportWorkbook(){throw new Error('PRIVATE cell text');},dispose(){}});
+    if(failure==='saveAs')h.window.saveAs=()=>{throw new Error('PRIVATE filename');};
+    assert.equal(await h.collect(),false);assert.equal(h.app.ctBusy,false);assert.equal(h.app._ctExportRun,null);assert.equal(h.app.ctExportTiming.status,'failed');
+    assert.equal(h.journals.size,1);assert.equal(h.downloads.length,0);assert(!h.mixin.computed.ctExportLogText.call(h.app).includes('PRIVATE'));
+});
+test('receipt cleanup failure after download initiation remains visible and retryable',async()=>{
+    const h=exportHarness();h.app._ctStore.deleteRequest=async()=>{throw Error('Synthetic receipt cleanup failure');};
+    assert.equal(await h.collect(),false);assert.equal(h.downloads.length,1);assert.equal(h.journals.size,1);
+    assert.equal(h.app.ctExportTiming.downloadStarted,true);assert.equal(h.app.ctExportTiming.status,'failed');
+    assert.equal(h.app.ctExportTiming.rows.at(-1).label,'Collection receipt cleanup');assert.equal(h.app.ctExportTiming.rows.at(-1).status,'failed');
+    assert.equal(h.app.ctBusy,false);assert.equal(h.app._ctExportRun,null);assert.match(h.app.ctError,/receipt cleanup failure/);
+});
+test('scope change during indexed lookup cannot start worker or clear a newer scope busy flag',async()=>{
+    const h=exportHarness(),gate=deferred();h.app._ctStore.getUnitsByIds=()=>gate.promise;
+    const running=h.download();await flushExport();h.app.managedCatalogScope='new-account';h.app.ctBusy=true;gate.resolve([]);
+    assert.equal(await running,false);assert.equal(h.app.ctBusy,true);assert.equal(h.downloads.length,0);assert.equal(h.workers.length,0);assert.equal(h.app.ctExportTiming.status,'aborted');
+});
+
+test('export setup failures release busy state and timer before any workbook request',async()=>{
+    for(const setup of ['ctStorage','ctRequestScope']){
+        const h=exportHarness();h.app[setup]=()=>{throw Error('Fixture setup failure');};
+        assert.equal(await (setup==='ctStorage'?h.download():h.collect()),false);assert.equal(h.app.ctBusy,false);assert.equal(h.app._ctExportRun,null);assert.equal(h.app.ctExportTiming.status,'failed');assert.equal(h.requests.length,0);
+    }
+});
+function exportClipboardHarness(writeText){
+    const window={navigator:{clipboard:{writeText}}};vm.runInNewContext(fs.readFileSync(require.resolve('../public/clientTextExportProgress.js'),'utf8'),{window,AbortController,setInterval,clearInterval});
+    const mixin=window.ClientTextExportProgress.mixin,app={...mixin.data(),ctExportLogText:'Phase-only timings',_ctExportReportId:{},$refs:{}};
+    for(const [name,method]of Object.entries(mixin.methods))app[name]=method.bind(app);return app;
+}
+test('export clipboard acknowledgement cannot update a replacement report or duplicate a pending copy',async()=>{
+    const gate=deferred();let writes=0;const app=exportClipboardHarness(async()=>{writes++;await gate.promise;});
+    const copying=app.ctCopyExportLog();await app.ctCopyExportLog();assert.equal(writes,1);assert.equal(app.ctExportCopyMessage,'');
+    app._ctExportReportId={};app._ctExportCopyRequest={};app.ctExportCopyBusy=true;gate.resolve();await copying;
+    assert.equal(app.ctExportCopyMessage,'');assert.equal(app.ctExportCopyBusy,true);
+});
+test('export clipboard rejection expands and selects the retained timing report for manual copy',async()=>{
+    const app=exportClipboardHarness(async()=>{throw Error('Clipboard unavailable');});let focused=0,selected=0;
+    const details={open:false};app.$refs.ctExportLog={parentElement:details,focus(){focused++;},select(){selected++;}};
+    await app.ctCopyExportLog();assert.equal(details.open,true);assert.equal(focused,1);assert.equal(selected,1);assert.match(app.ctExportCopyMessage,/Ctrl.C/);assert.equal(app.ctExportCopyBusy,false);
 });

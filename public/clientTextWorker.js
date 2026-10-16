@@ -26,12 +26,17 @@ self.onmessage = event => {
         message.type = message.operation;
         if (message.type === 'exportWorkbook') { message.saved = Object.fromEntries(message.savedEntries); delete message.savedEntries; }
     }
-    if (!['parseWorkbook', 'exportWorkbook', 'buildManifest', 'buildDescriptors'].includes(message?.type) || typeof message.id !== 'string') return;
+    if (!['parseWorkbook', 'exportWorkbook', 'packageWorkbooks', 'buildManifest', 'buildDescriptors'].includes(message?.type) || typeof message.id !== 'string') return;
     const operation = queue.then(async () => {
         const onProgress = value => { if (!cancelled.has(message.id)) self.postMessage({ type: 'progress', id: message.id, value }); };
         if (cancelled.has(message.id)) throw Object.assign(new Error('ClientText work was cancelled.'), { name: 'AbortError' });
         const options = { ...(message.options || {}), onProgress };
-        const result = message.type === 'parseWorkbook'
+        const packageWorkbooks = async () => {
+            const zip = new self.JSZip();
+            for (const file of message.files) zip.file(file.name, file.bytes);
+            return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+        };
+        const result = message.type === 'packageWorkbooks' ? await packageWorkbooks() : message.type === 'parseWorkbook'
             ? await self.ClientTextCodec.parseWorkbook(message.bytes, options)
             : message.type === 'buildDescriptors'
                 ? await self.ClientTextState.buildDescriptors(message.units, message.assets, { onProgress, guard: () => !cancelled.has(message.id) })

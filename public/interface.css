@@ -273,6 +273,19 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 @media (prefers-reduced-motion: reduce) { .browserWorkSpinner { animation: none; border-right-color: var(--ui-accent); } }
 .workspaceInitialization { padding: 32px; box-sizing: border-box; }
 .workspaceInitializationPanel { display: flex; flex-direction: column; width: min(820px, 100%); min-width: 0; max-height: calc(100vh - 64px); }
+.ctExportDialog { width: min(640px, calc(100vw - 48px)); max-height: calc(100dvh - 48px); box-sizing: border-box; padding: 24px; border: 1px solid var(--ui-border); border-radius: 12px; background: var(--color-bg); color: var(--color-font); box-shadow: var(--ui-shadow); overflow: auto; }
+.ctExportDialog::backdrop { background: rgb(0 0 0 / .45); }
+.ctExportDialog .workspaceInitializationHeading { gap: 12px; }
+.ctExportDialog h2 { margin: 0; font-size: 20px; }
+.ctExportDialog p { font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.ctExportDialog .ctExportPhases { min-height: 80px; max-height: min(230px, 35vh); padding: 12px; box-shadow: none; }
+.ctExportActions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.ctExportActions > span { margin-right: auto; font-size: 12px; }
+.ctExportActions button { min-height: 36px; padding: 8px 14px; font: inherit; font-size: 13px; }
+.ctExportDialog summary { cursor: pointer; padding: 6px 0; }
+.ctExportDialog details { margin-top: 12px; }
+.ctExportDialog textarea { width: 100%; box-sizing: border-box; }
+@media (max-width: 480px) { .ctExportDialog { padding: 16px; width: calc(100vw - 24px); } .ctExportDialog .workspaceInitializationHeading { flex-wrap: wrap; } }
 .workspaceInitializationHeading { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 18px; }
 .workspaceInitializationHeading h1 { margin: 0; font-size: 26px; }
 .workspaceInitializationHeading p { margin: 6px 0 0; color: var(--ui-muted); }
