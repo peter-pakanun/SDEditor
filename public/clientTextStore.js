@@ -459,6 +459,22 @@
             const metadata=await requireReady(capture(rawScope).id,options),cache=cacheForUnit(metadata,unitId);
             return cache ? (await one(cache,stores.cacheUnits,unitId,options))?.unit : undefined;
         }
+        async function getUnitsByIds(rawScope, unitIds, options) {
+            const metadata=await requireReady(capture(rawScope).id,options),ids=[...new Set(unitIds)];
+            return transaction([stores.cacheUnits],'readonly',async tx=>{
+                const units=[];
+                for(let start=0;start<ids.length;start+=128){
+                    guard(options);
+                    const batch=await Promise.all(ids.slice(start,start+128).map(async unitId=>{
+                        const cache=cacheForUnit(metadata,unitId),row=cache ? await get(tx,stores.cacheUnits,key(cache,unitId)) : null;
+                        if(!row?.unit || row.unit.id!==unitId || row.unit.role!==JSON.parse(unitId)[0]) throw new Error('Saved ClientText unit is absent from its immutable original: '+unitId+'.');
+                        return row.unit;
+                    }));
+                    units.push(...batch);
+                }
+                return units;
+            },options);
+        }
         async function getSaved(rawScope, options) { return Object.fromEntries((await rows(capture(rawScope).id,stores.saved,options)).map(row => [row.unitId,row])); }
         async function getAsset(rawScope, role = 'normal', options) {
             const metadata=await requireReady(capture(rawScope).id,options),descriptor=metadata.descriptors.find(item=>item.role===role);
@@ -686,7 +702,7 @@
                 return row;
             },options);
         }
-        return { import:importContent,importContent,save,getMetadata,getUnits,getCompactUnits,getUnit,getSaved,getAsset,getProof,getCachedOriginal,migrateWorkspace,putDraft,getDraft,getDraftSummaries,discardDraft,
+        return { import:importContent,importContent,save,getMetadata,getUnits,getUnitsByIds,getCompactUnits,getUnit,getSaved,getAsset,getProof,getCachedOriginal,migrateWorkspace,putDraft,getDraft,getDraftSummaries,discardDraft,
             listHistory,listWorkspaces,getOutbox,markSending,applyRemote,acknowledge,putRequest,getRequest,listRequests,deleteRequest,getMemory,getMemoryHistory,normalizeScope,scopeKey };
     }
     return { stores,names,upgrade,normalizeScope,scopeKey,create };

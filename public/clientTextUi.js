@@ -2584,26 +2584,45 @@
                 const scope = this.ctScope(version.id, group.id, language), key = this.managedCatalogScope;
                 const store=this.ctStorage(scope);
                 if(this.ctOfflineTest && collection)return false;
-                if((await store.getMetadata(scope))?.state!=='ready' && !await this.ctOpenGroup(version,group,language,false))return;
+                let metadata=await store.getMetadata(scope);
+                if(metadata?.state!=='ready'){
+                    if(!await this.ctOpenGroup(version,group,language,false))return;
+                    metadata=await store.getMetadata(scope);
+                }
                 this.ctBusy = true; this.ctError = ''; this._ctAbort = new AbortController();
                 try {
-                    let saved = await store.getSaved(scope);
+                    let saved = collection ? {} : await store.getSaved(scope), collectionAssets = null, collectionAssetSignature = '';
                     if (collection) {
-                        saved = {}; let cursor = '';
+                        let cursor = '';
                         do {
                             const response = await this._cloud.request('/v1/content-collections/' + encodeURIComponent(collection.id) + '/manifest' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''),{signal:this._ctAbort.signal});
                             if (response.collection?.id !== collection.id) throw new Error('Collection identity changed.');
                             if(response.manifest?.groupId!==group.id || response.manifest?.versionId!==version.id || response.manifest?.language!==language)throw new Error('Collection scope differs from selected content group.');
+                            const assets = response.manifest.assets;
+                            if (!Array.isArray(assets) || !assets.length || assets.some(asset => !['normal','gender'].includes(asset.role)
+                                || !/^[a-f0-9]{64}$/.test(asset.artifactHash) || !asset.descriptor
+                                || asset.descriptor.assetHash !== asset.artifactHash || asset.descriptor.role !== asset.role)
+                                || new Set(assets.map(asset => asset.role)).size !== assets.length) throw new Error('Collection original identities are invalid.');
+                            const signature = JSON.stringify(assets.map(asset => [asset.role,asset.artifactHash,asset.descriptor.parserVersion || 'clienttext-v1']).sort((a,b)=>a[0].localeCompare(b[0])));
+                            if (collectionAssets && signature !== collectionAssetSignature) throw new Error('Collection original identities changed between pages.');
+                            collectionAssets = assets; collectionAssetSignature = signature;
                             for (const unit of response.manifest?.units || []) saved[unit.unitId || unit.id] = typeof unit.saved==='object' ? unit.saved : unit;
                             for (const unit of response.manifest?.sourceReviews || []) saved[unit.unitId || unit.id] = { ...unit,saved:false,values:unit.values || {} };
                             cursor = response.nextCursor || '';
                         } while (cursor && key === this.managedCatalogScope && !this._ctAbort.signal.aborted);
                     }
-                    const units = await store.getUnits(scope), roles = [...new Set(units.map(unit => unit.role))], outputs = [];
+                    const units = await store.getUnitsByIds(scope,Object.keys(saved),{guard:()=>key===this.managedCatalogScope && !this._ctAbort.signal.aborted}),
+                        roles = (metadata.descriptors || []).map(descriptor => descriptor.role), outputs = [];
+                    if (collectionAssets && (collectionAssets.length !== roles.length || roles.some(role => !collectionAssets.some(asset => asset.role === role)))) throw new Error('Cached workbook roles differ from the collection originals.');
                     for (const role of roles) {
                         const asset = await store.getAsset(scope, role); if (!asset) throw new Error('Open this content group once to verify and cache its originals before downloading.');
+                        const expected = collectionAssets?.find(item => item.role === role);
+                        if (expected && (asset.parsed?.artifactHash !== expected.artifactHash
+                            || (asset.parsed?.parserVersion || asset.descriptor?.parserVersion || 'clienttext-v1') !== (expected.descriptor.parserVersion || 'clienttext-v1'))) throw new Error('Cached workbook original or parser differs from the collection snapshot.');
                         const bytes = assetBytes(asset), buffer = bytes instanceof Blob ? await bytes.arrayBuffer() : bytes;
-                        const parsed = { ...asset.parsed, units: units.filter(unit => unit.role === role) };
+                        // The immutable package supplies untouched cells. Only
+                        // affected units are needed to validate and patch work.
+                        const parsed = { ...asset.parsed, units: units.filter(unit => unit.role === role && saved[unit.id]) };
                         const roleSaved=Object.fromEntries(parsed.units.filter(unit=>saved[unit.id]).map(unit=>[unit.id,saved[unit.id]]));
                         const output = await this._ctWorker.exportWorkbook(buffer, parsed, roleSaved, { signal: this._ctAbort.signal, onProgress: progress => this.ctReport({...progress,workbook:asset.name}) });
                         outputs.push({ name: asset.name || parsed.filename, bytes: output });

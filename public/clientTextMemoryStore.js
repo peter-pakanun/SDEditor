@@ -136,6 +136,14 @@
         }
         async function getUnits(rawScope, options) { return ready(capture(rawScope, options)).units; }
         async function getUnit(rawScope, unitId, options) { return S.copy(ready(capture(rawScope, options)).byId.get(unitId)); }
+        async function getUnitsByIds(rawScope, unitIds, options) {
+            const workspace=ready(capture(rawScope,options));
+            return [...new Set(unitIds)].map(unitId=>{
+                const unit=workspace.byId.get(unitId);
+                if(!unit)throw new Error('Saved ClientText unit is absent from its immutable original: '+unitId+'.');
+                return S.copy(unit);
+            });
+        }
         async function getSaved(rawScope, options) {
             const workspace = workspaces.get(capture(rawScope, options).id);
             return workspace ? Object.fromEntries([...workspace.saved].map(([id, value]) => [id, S.copy(value)])) : {};
@@ -201,7 +209,7 @@
             capture(rawScope, options); return { units: [], counts: { total: 0, text: 0, form: 0 } };
         }
         function dispose() { disposed = true; workspaces.clear(); }
-        return { import: importContent, importContent, getMetadata, listWorkspaces, seedPreviousVersion, getUnits, getUnit, getSaved, getAsset,
+        return { import: importContent, importContent, getMetadata, listWorkspaces, seedPreviousVersion, getUnits, getUnitsByIds, getUnit, getSaved, getAsset,
             putDraft, getDraft, getDraftSummaries, discardDraft, save, listHistory, getMemory, normalizeScope, scopeKey, dispose };
     }
     return { normalizeScope, scopeKey, create };

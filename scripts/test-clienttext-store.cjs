@@ -4,6 +4,19 @@ const S=require('../public/clientTextState.js');
 const CT=require('../public/clientTextStore.js');
 const {fixture,scope,fieldId,unit,asset}=require('./clienttext-storage-fixture.cjs');
 async function prepared(){const f=fixture();await f.store.import(scope,{units:[unit()],assets:[asset]});return f;}
+test('export original lookup reads only requested immutable unit keys and rejects absent references',async()=>{
+    const f=fixture(),units=Array.from({length:300},(_,index)=>({...unit(),id:JSON.stringify(['normal','ClientStrings','ID/'+index]),recordId:'ID/'+index}));
+    await f.store.import(scope,{units,assets:[asset]});f.operations.length=0;
+    const ids=[units[2].id,units[299].id,units[2].id],selected=await f.store.getUnitsByIds(scope,ids);
+    assert.deepEqual(selected.map(unit=>unit.id),ids.slice(0,2));
+    assert.equal(f.operations.filter(op=>op.name===CT.stores.cacheUnits && op.method==='get').length,2);
+    assert.equal(f.operations.filter(op=>op.name===CT.stores.cacheUnits && op.method==='getAll').length,0);
+    assert.equal(selected[0].fields[0].targetCell,'C2');assert.equal(selected[0].fields[0].sourceCell,'B2');
+    assert.deepEqual(await f.store.getUnitsByIds(scope,[]),[]);
+    await assert.rejects(f.store.getUnitsByIds(scope,[JSON.stringify(['normal','ClientStrings','missing'])]),/absent from its immutable original/);
+    await assert.rejects(f.store.getUnitsByIds({...scope,groupId:'other'},[units[2].id]),error=>error.code==='CLIENTTEXT_NOT_READY');
+    await assert.rejects(f.store.getUnitsByIds(scope,[units[2].id],{signal:AbortSignal.abort()}),error=>error.name==='AbortError');
+});
 async function legacyPrepared(units=[unit()],dependencies={}){
     const f=fixture(dependencies),manifest=await S.buildManifest(units,[{...asset,parserVersion:'clienttext-v1'}]),id=CT.scopeKey(scope);
     const put=(name,unitId,value,extras={})=>{const row={key:JSON.stringify([id,unitId]),scope:id,value,...extras};f.tables.get(name).set(row.key,row);};

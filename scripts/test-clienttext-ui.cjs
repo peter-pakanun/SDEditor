@@ -3459,20 +3459,36 @@ test('published originals replay each accepted parser version instead of reinter
 });
 
 test('frozen collection export excludes local work and carries source-only review facts without fabricating Saved',async()=>{
-    const {app,window,original}=harness(),sourceOnly=clone(original),exported=[],downloads=[];
+    const {app,window,original}=harness(),sourceOnly=clone(original),untouched=clone(original),exported=[],downloads=[],artifactHash='a'.repeat(64);
     sourceOnly.id=JSON.stringify(['normal',original.sheet,'source-only']);sourceOnly.recordId='source-only';
+    untouched.id=JSON.stringify(['normal',original.sheet,'untouched']);untouched.recordId='untouched';
     const group={id:scope.groupId,contentMode:'clienttext'},version={id:scope.versionId,name:'Snapshot'},collection={id:'cutoff'};
     const local={values:{[fieldId]:'Unaccepted local edit'},reviewed:{},revision:2};app.ctSaved={[original.id]:local};const savedView=app.ctSaved;
-    app._ctStore={async getMetadata(){return{state:'ready'};},async getSaved(){return clone(app.ctSaved);},async getUnits(){return[original,sourceOnly];},async getAsset(){return{role:'normal',name:'Thai_PoE2.xlsx',blob:new Blob(['original']),parsed:{artifactHash:'verified'}};}};
+    app._ctStore={async getMetadata(){return{state:'ready',descriptors:[{role:'normal'}]};},async getSaved(){throw Error('Collection export must not read local Saved work');},async getUnits(){throw Error('Export must not scan the complete original catalog');},async getUnitsByIds(captured,ids){assert.deepEqual(Array.from(ids),[original.id,sourceOnly.id]);return[original,sourceOnly];},async getAsset(){return{role:'normal',name:'Thai_PoE2.xlsx',blob:new Blob(['original']),parsed:{artifactHash,parserVersion:'clienttext-v3'}};}};
     app._cloud={async request(){return{collection,manifest:{groupId:group.id,versionId:version.id,language:scope.language,
+      assets:[{role:'normal',artifactHash,descriptor:{role:'normal',assetHash:artifactHash,parserVersion:'clienttext-v3'}}],
       units:[{id:original.id,values:{[fieldId]:'Accepted cutoff'},reviewed:{},saved:true}],sourceReviews:[{id:sourceOnly.id,outdated:[fieldId],reviewed:{}}]}};}};
     app._ctWorker={async exportWorkbook(bytes,parsed,saved){exported.push({bytes,parsed,saved});return new Uint8Array([1,2,3]);}};
     window.saveAs=(...args)=>downloads.push(args);
     assert.equal(await app.ctDownload(collection,group,scope.language,version),true);
     assert.equal(exported[0].saved[original.id].values[fieldId],'Accepted cutoff');
     assert.equal(exported[0].saved[sourceOnly.id].saved,false);assert.deepEqual(Array.from(exported[0].saved[sourceOnly.id].outdated),[fieldId]);
+    assert.deepEqual(Array.from(exported[0].parsed.units,unit=>unit.id),[original.id,sourceOnly.id],'worker receives Saved and source-review units without the untouched catalog');
     assert.equal(S.valuesFor(sourceOnly,exported[0].saved[sourceOnly.id])[fieldId],sourceOnly.fields[0].target);
     assert.equal(app.ctSaved,savedView);assert.equal(app.ctSaved[original.id],local);assert.equal(downloads[0][1],'Thai_PoE2.xlsx');
+});
+
+test('collection export verifies snapshot original and parser bindings before generating a workbook',async()=>{
+    for(const mismatch of ['hash','parser','roles','missing-assets','changed-page']){
+        const {app,window,original}=harness(),artifactHash='a'.repeat(64),group={id:scope.groupId,contentMode:'clienttext'},version={id:scope.versionId},collection={id:'frozen'};
+        let exports=0,downloads=0,pages=0;
+        app._ctStore={async getMetadata(){return{state:'ready',descriptors:[{role:'normal'}]};},async getUnitsByIds(){return[];},async getAsset(){return{role:'normal',blob:new Blob(['original']),parsed:{artifactHash:mismatch==='hash'?'b'.repeat(64):artifactHash,parserVersion:mismatch==='parser'?'clienttext-v2':'clienttext-v3'}};}};
+        app._cloud={async request(){pages++;const role=mismatch==='roles'?'gender':'normal',hash=mismatch==='changed-page' && pages>1?'b'.repeat(64):artifactHash;
+            return{collection,manifest:{groupId:group.id,versionId:version.id,language:scope.language,units:[],assets:mismatch==='missing-assets'?undefined:[{role,artifactHash:hash,descriptor:{role,assetHash:hash,parserVersion:'clienttext-v3'}}]},nextCursor:mismatch==='changed-page'&&pages===1?'next':''};}};
+        app._ctWorker={async exportWorkbook(){exports++;return new Uint8Array([1]);}};window.saveAs=()=>downloads++;
+        assert.notEqual(await app.ctDownload(collection,group,scope.language,version),true,mismatch);
+        assert.equal(exports,0,mismatch);assert.equal(downloads,0,mismatch);assert.match(app.ctError,/original|parser|roles/i,mismatch);
+    }
 });
 
 test('a fetched workbook group must belong to the selected version before parser or cache writes run',async()=>{

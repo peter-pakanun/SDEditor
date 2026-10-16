@@ -502,6 +502,19 @@ test('ClientText raw formatting survives draft, durable save, history and real X
     const before = await JSZip.loadAsync(bytes), after = await JSZip.loadAsync(output);
     assert.deepEqual(await after.file('xl/vbaProject.bin').async('uint8array'), await before.file('xl/vbaProject.bin').async('uint8array'));
 });
+test('affected-only export matches full-baseline bytes for Saved work and source-only reviews', async () => {
+    const bytes = await workbook({ macro: true }), parsed = await Codec.parseWorkbook(bytes, { filename: 'Thai.xlsm', role: 'normal', language: 'Thai' });
+    const changed = get(parsed, 'record'), sourceOnly = get(parsed, 'complete'), changedField = field(changed, 'Name'), reviewedField = field(sourceOnly, 'Name');
+    const saved = {
+        [changed.id]: { values: { [changedField.id]: 'Saved\r\nraw text' }, reviewed: {} },
+        [sourceOnly.id]: { values: {}, reviewed: {}, outdated: [reviewedField.id], saved: false }
+    };
+    const affected = { ...parsed, units: parsed.units.filter(unit => saved[unit.id]) };
+    assert.ok(affected.units.length < parsed.units.length);
+    assert.deepEqual(await Codec.exportWorkbook(bytes, affected, saved), await Codec.exportWorkbook(bytes, parsed, saved));
+    assert.deepEqual(await Codec.exportWorkbook(bytes, { ...parsed, units: [] }, {}), bytes, 'an untouched workbook role retains exact original bytes');
+});
+
 test('source advancement paints unresolved review orange, then green, without Revised', async () => {
     const bytes = await workbook(), parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsx' }), unit = get(parsed, 'complete'), f = field(unit, 'Name');
     const saved = { values: { [f.id]: f.target }, outdated: [f.id], saved: false };
