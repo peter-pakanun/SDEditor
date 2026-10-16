@@ -41,7 +41,7 @@
       variables: { ...host.gamePreviewVarValues }, font: host.getGamePreviewFontFamily(language) });
   }
   const mixin = {
-    data: () => ({ keywordWindows: [], keywordWindowSequence: 0, keywordAutocomplete: null }),
+    data: () => ({ keywordWindows: [], keywordWindowSequence: 0, keywordAutocomplete: null, keywordActiveId: null }),
     computed: {
       keywordPreviewOrigin() {
         return JSON.stringify([this.ctActive, this.ctActive ? this.ctWorkspace?.scope : this.sourceIdentity,
@@ -77,20 +77,54 @@
         this._keywordKeyboardFocus = true;
         if (event.key !== 'Escape' || event.isComposing) return;
         const id = event.target?.closest?.('[data-keyword-window]')?.dataset.keywordWindow;
-        if (!id) return;
+        if (!id || Number(id) !== this.keywordActiveId) return;
         event.preventDefault(); event.stopImmediatePropagation();
         this.closeKeywordWindow(Number(id));
       };
       document.addEventListener('keydown', this._keywordEscape, true);
       this._keywordPointer = event => {
         if (event.type === 'pointermove' || event.type === 'pointerdown') this._keywordKeyboardFocus = false;
+        if (event.type === 'pointerdown') {
+          const anchor = event.target?.closest?.('.gamePreviewKw[role="button"]');
+          this._keywordClick = null;
+          this._keywordPress = anchor && event.button === 0 ? { anchor, pointerId: event.pointerId,
+            parentId: Number(anchor.closest('[data-keyword-window]')?.dataset.keywordWindow) || null } : null;
+          // Native mousedown focus on a nested link must not activate its parent
+          // before we know whether this is a completed keyword click.
+          if (this._keywordPress) event.preventDefault();
+          else if (!event.target?.closest?.('[data-keyword-window]')) this.clearKeywordFocus();
+        }
         this._keywordPointerTarget = event.type === 'pointerout' ? event.relatedTarget : event.target;
         this.dismissKeywordWindows(this._keywordPointerTarget, this._keywordKeyboardFocus ? document.activeElement : null);
+      };
+      this._keywordRelease = event => {
+        const press = this._keywordPress;
+        if (!press || press.pointerId !== event.pointerId) return;
+        this._keywordPress = null;
+        if (event.type === 'pointercancel') { this._keywordClick = null; return; }
+        const target = document.elementFromPoint(event.clientX, event.clientY);
+        const inside = press.anchor.contains(target);
+        this._keywordClick = { anchor: press.anchor, inside };
+        if (inside && !press.parentId) this.clearKeywordFocus();
+        if (!inside) {
+          const id = Number(target?.closest?.('[data-keyword-window]')?.dataset.keywordWindow);
+          const parent = this.keywordWindows.find(item => item.id === id && id === press.parentId);
+          if (parent) this.focusKeywordWindow(parent);
+          else if (!id) this.clearKeywordFocus();
+        }
+      };
+      this._keywordFocus = event => {
+        if (this._keywordPress?.anchor.contains(event.target)) return;
+        const id = Number(event.target?.closest?.('[data-keyword-window]')?.dataset.keywordWindow);
+        this.keywordActiveId = this.keywordWindows.some(item => item.id === id) ? id : null;
       };
       document.addEventListener('pointerover', this._keywordPointer, true);
       document.addEventListener('pointerout', this._keywordPointer, true);
       document.addEventListener('pointermove', this._keywordPointer, true);
       document.addEventListener('pointerdown', this._keywordPointer, true);
+      document.addEventListener('pointerup', this._keywordRelease, true);
+      document.addEventListener('pointercancel', this._keywordRelease, true);
+      document.addEventListener('focusin', this._keywordFocus, true);
     },
     beforeUnmount() {
       this._keywordAutocompleteRun = null; this._keywordAutocompleteCache = null;
@@ -99,6 +133,9 @@
       document.removeEventListener('pointerout', this._keywordPointer, true);
       document.removeEventListener('pointermove', this._keywordPointer, true);
       document.removeEventListener('pointerdown', this._keywordPointer, true);
+      document.removeEventListener('pointerup', this._keywordRelease, true);
+      document.removeEventListener('pointercancel', this._keywordRelease, true);
+      document.removeEventListener('focusin', this._keywordFocus, true);
       this._keywordCatalog?.dispose();
     },
     methods: {
@@ -187,8 +224,15 @@
         }
       },
       async previewKeywordActivate(event, segment, translated, parent = null) {
+        if (event.type === 'click' && event.detail > 0 && this._keywordClick?.anchor === event.currentTarget) {
+          const inside = this._keywordClick.inside; this._keywordClick = null;
+          if (!inside) return;
+        }
         const item = await this.previewKeywordEnter(event, segment, translated, parent);
-        if (item) { this.pinKeywordWindow(item); await this.$nextTick(); document.getElementById('keyword-window-' + item.id)?.focus({ preventScroll: true }); }
+        if (item) {
+          this.pinKeywordWindow(item); await this.$nextTick();
+          if (this.keywordActiveId === item.id) document.getElementById('keyword-window-' + item.id)?.focus({ preventScroll: true });
+        }
       },
       dismissKeywordWindows(pointerTarget = this._keywordPointerTarget, focusTarget = null) {
         const keep = new Set();
@@ -197,17 +241,29 @@
         }
         const retained = this.keywordWindows.filter(item => item.pinned || keep.has(item.id));
         if (retained.length !== this.keywordWindows.length) this.keywordWindows = retained;
+        if (!retained.some(item => item.id === this.keywordActiveId)) this.keywordActiveId = null;
       },
       raiseKeywordWindow(item) {
         if (!this.keywordWindows.some(value => value.id === item.id)) return;
+        if (this.keywordWindows.at(-1)?.id === item.id) return;
         this.keywordWindows = [...this.keywordWindows.filter(value => value.id !== item.id), item];
       },
-      pinKeywordWindow(item) { item.pinned = true; this.raiseKeywordWindow(item); },
+      focusKeywordWindow(item, focus = true) {
+        if (!this.keywordWindows.some(value => value.id === item.id)) return;
+        this.keywordActiveId = item.id; this.raiseKeywordWindow(item);
+        if (focus) document.getElementById('keyword-window-' + item.id)?.focus({ preventScroll: true });
+      },
+      clearKeywordFocus() {
+        this.keywordActiveId = null;
+        if (document.activeElement?.closest?.('[data-keyword-window]')) document.activeElement.blur?.();
+      },
+      pinKeywordWindow(item) { item.pinned = true; this.focusKeywordWindow(item, false); },
       removeKeywordBranch(id) {
         const remove = new Set([id]);
         let changed = true;
         while (changed) { changed = false; for (const value of this.keywordWindows) if (!value.pinned && remove.has(value.parentId) && !remove.has(value.id)) { remove.add(value.id); changed = true; } }
         this.keywordWindows = this.keywordWindows.filter(value => !remove.has(value.id));
+        if (remove.has(this.keywordActiveId)) this.keywordActiveId = null;
       },
       closeKeywordWindow(id) {
         const item = this.keywordWindows.find(value => value.id === id);
@@ -289,7 +345,7 @@
         if (!drag || drag.id !== event.pointerId) return;
         if (!this.dragging) {
           if (Math.hypot(event.clientX - drag.clientX, event.clientY - drag.clientY) < 4) return;
-          this.host.raiseKeywordWindow(this.item); this.$el.focus({ preventScroll: true }); this.dragging = true;
+          this.host.focusKeywordWindow(this.item); this.dragging = true;
         }
         const bounds = this.$el.getBoundingClientRect();
         this.x = clamp(drag.x + event.clientX - drag.clientX, innerWidth - bounds.width - 8);
@@ -301,10 +357,12 @@
         this._drag = null; this.dragging = false;
         if (drag.handle.hasPointerCapture(drag.id)) drag.handle.releasePointerCapture(drag.id);
       },
-      click() { this.host.raiseKeywordWindow(this.item); this.$el.focus({ preventScroll: true }); },
+      click(event) {
+        if (!event.target.closest('.gamePreviewKw[role="button"]')) this.host.focusKeywordWindow(this.item);
+      },
     },
     template: `<section class="keywordPreviewWindow" :id="'keyword-window-'+item.id" :data-keyword-window="item.id" :data-language="item.context.language" tabindex="-1" role="dialog" aria-modal="false" :aria-labelledby="'keyword-title-'+item.id"
-      :style="{left:x+'px',top:y+'px',maxWidth:maxWidth+'px',maxHeight:maxHeight+'px',zIndex:order+1,fontFamily:item.context.font}" :class="{keywordPreviewDragging:dragging}" @keydown.stop @focusout="host.dismissKeywordWindows(host._keywordPointerTarget,$event.relatedTarget)" @click="click">
+      :style="{left:x+'px',top:y+'px',maxWidth:maxWidth+'px',maxHeight:maxHeight+'px',zIndex:order+1,fontFamily:item.context.font}" :class="{keywordPreviewDragging:dragging,keywordPreviewActive:host.keywordActiveId===item.id}" @keydown.stop @focusout="host.dismissKeywordWindows(host._keywordPointerTarget,$event.relatedTarget)" @click="click">
       <button v-if="item.pinned" class="keywordPreviewClose" type="button" aria-label="Close keyword popup" @click.stop="host.closeKeywordWindow(item.id)">×</button>
       <keyword-preview-card :host="host" :item="item" draggable @dragstart="startDrag" @dragmove="moveDrag" @dragfinish="finishDrag"></keyword-preview-card>
     </section>`,

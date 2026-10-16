@@ -2,7 +2,7 @@
 // Actual app, shared inline/full preview, parser and app-owned overlay in a
 // disposable Edge/Chrome profile. No production accounts or storage are used.
 const assert = require('node:assert/strict');
-const { readFileSync, existsSync, mkdirSync } = require('node:fs');
+const { readFileSync, writeFileSync, existsSync, mkdirSync } = require('node:fs');
 const { join, resolve } = require('node:path');
 const { createServer } = require('node:http');
 const express = require('express');
@@ -41,6 +41,76 @@ async function dragCard(page, card, x, y) {
   await page.mouse.move(start.x, start.y); await page.mouse.down();
   await page.mouse.move(start.x + x - box.x, start.y + y - box.y, { steps: 8 });
   await page.mouse.up(); await settle(page);
+}
+async function checkFocusGestures(page, target, windows) {
+  await target.click(); await settle(page);
+  const parentId=await windows.first().getAttribute('id'), parent=page.locator('#'+parentId);
+  const keyword=parent.locator('.keywordPreviewContent .gamePreviewKw').first();
+  await page.locator('.gamePreviewTargetPane .gamePreviewKw').nth(1).click();await settle(page);
+  const otherId=await windows.last().getAttribute('id'), other=page.locator('#'+otherId);
+  await dragCard(page,other,8,600);await keyword.hover();await settle(page);
+  const childId=await windows.last().getAttribute('id'), child=page.locator('#'+childId);
+  await page.evaluate(()=>{
+    const host=fixtureApp;window.keywordGestureTrace=[];
+    window.keywordTraceRaise=host.raiseKeywordWindow;window.keywordTracePin=host.pinKeywordWindow;
+    host.raiseKeywordWindow=item=>{keywordGestureTrace.push({kind:'raise',id:item.id});return keywordTraceRaise(item);};
+    host.pinKeywordWindow=item=>{keywordGestureTrace.push({kind:'pin',id:item.id});return keywordTracePin(item);};
+    window.keywordTraceFocus=event=>keywordGestureTrace.push({kind:'focus',id:Number(event.target.closest?.('[data-keyword-window]')?.dataset.keywordWindow)||null});
+    document.addEventListener('focusin',keywordTraceFocus,true);
+  });
+  const state=()=>page.evaluate(()=>({active:fixtureApp.keywordActiveId,order:fixtureApp.keywordWindows.map(item=>item.id),trace:keywordGestureTrace.slice()}));
+  const parentNumber=Number(parentId.replace('keyword-window-','')), childNumber=Number(childId.replace('keyword-window-',''));
+  const otherNumber=Number(otherId.replace('keyword-window-',''));
+  await keyword.hover();await page.evaluate(()=>{keywordGestureTrace.length=0;});
+  await page.mouse.down();await settle(page);
+  let current=await state();assert.equal(current.active,otherNumber);assert.equal(current.order.at(-1),childNumber);
+  assert.ok(!current.trace.some(event=>event.id===parentNumber),'pressing nested keyword must not focus/raise parent');
+  await page.mouse.up();await settle(page);current=await state();
+  assert.equal(current.active,childNumber);assert.equal(current.order.at(-1),childNumber);
+  assert.ok(!current.trace.some(event=>event.id===parentNumber),'completed nested click never activates parent at any event stage');
+  assert.deepEqual(current.trace.filter(event=>event.kind==='pin').map(event=>event.id),[childNumber]);
+  const completed=current;
+  await other.locator('.keywordPreviewClose').click();await dragCard(page,child,800,400);
+
+  // A canceled keyword click activates its containing card only on release.
+  await keyword.hover();await page.evaluate(()=>{keywordGestureTrace.length=0;});await page.mouse.down();
+  current=await state();assert.equal(current.active,childNumber);assert.ok(!current.trace.length);
+  const p=await parent.boundingBox();await page.mouse.move(p.x+5,p.y+5,{steps:5});
+  current=await state();assert.equal(current.active,childNumber);assert.ok(!current.trace.some(event=>event.kind==='raise'));
+  await page.mouse.up();await settle(page);current=await state();
+  assert.equal(current.active,parentNumber);assert.equal(current.order.at(-1),parentNumber);
+  assert.ok(!current.trace.some(event=>event.kind==='pin'),'release outside keyword never pins the child');
+  writeFileSync(join(folder,'nested-click-events.json'),JSON.stringify({parent:parentNumber,child:childNumber,completed,canceled:current},null,2));
+
+  // Both top/left padding and the blank right edge belong to the drag handle.
+  let b=await child.boundingBox(), h=await child.locator('.keywordPreviewHeader').boundingBox();
+  assert.ok(h.x<=b.x+1.1&&h.y<=b.y+1.1&&h.x+h.width>=b.x+b.width-1.1,'header reaches card borders');
+  await page.mouse.move(b.x+5,b.y+5);await page.mouse.down();await page.mouse.move(b.x+7,b.y+5);
+  assert.equal((await state()).active,parentNumber,'sub-threshold movement does not activate drag');
+  await page.mouse.move(b.x+85,b.y+55,{steps:6});await page.mouse.up();await settle(page);
+  let moved=await child.boundingBox();assert.ok(Math.abs(moved.x-b.x-80)<1&&Math.abs(moved.y-b.y-50)<1);
+  assert.equal((await state()).active,childNumber);
+  await page.mouse.move(moved.x+moved.width-5,moved.y+30);await page.mouse.down();
+  await page.mouse.move(moved.x+moved.width-45,moved.y+10,{steps:5});await page.mouse.up();await settle(page);
+  b=await child.boundingBox();assert.ok(Math.abs(b.x-moved.x+40)<1&&Math.abs(b.y-moved.y+20)<1,'right blank header padding drags');
+  const alpha=card=>card.evaluate(node=>({bg:getComputedStyle(node).backgroundColor,opacity:getComputedStyle(node).opacity}));
+  assert.equal((await alpha(child)).bg,'rgb(18, 17, 16)');assert.match((await alpha(parent)).bg,/0\.7\)/);
+  assert.equal((await alpha(child)).opacity,'1');assert.equal(await page.evaluate(()=>String(getSelection())), '');
+  await parent.locator('.keywordPreviewContent').click({position:{x:5,y:5}});await settle(page);
+  assert.equal((await state()).active,parentNumber);assert.equal((await alpha(parent)).bg,'rgb(18, 17, 16)');assert.match((await alpha(child)).bg,/0\.7\)/);
+  await page.screenshot({path:join(folder,'focus-active.png')});
+
+  const positions=[await parent.boundingBox(),await child.boundingBox()];
+  await page.mouse.click(5,5);await settle(page);assert.equal((await state()).active,null);
+  assert.match((await alpha(parent)).bg,/0\.7\)/);assert.match((await alpha(child)).bg,/0\.7\)/);
+  assert.deepEqual([await parent.boundingBox(),await child.boundingBox()],positions,'outside click retains pinned positions');
+  await page.screenshot({path:join(folder,'focus-cleared.png')});
+  await page.keyboard.press('Escape');await settle(page);assert.equal(await windows.count(),2,'Escape after outside click never closes an arbitrary pin');
+  await page.evaluate(async()=>{fixtureApp.ctEditor=true;await fixtureApp.$nextTick();});
+  await child.locator('.keywordPreviewContent').click({position:{x:5,y:5}});await page.keyboard.press('Escape');await settle(page);
+  assert.equal(await child.count(),0);assert.equal(await parent.count(),1,'Escape closes only active card');
+  await parent.locator('.keywordPreviewClose').click();assert.equal(await windows.count(),0,'X remains excluded from dragging');
+  await page.evaluate(()=>{fixtureApp.raiseKeywordWindow=keywordTraceRaise;fixtureApp.pinKeywordWindow=keywordTracePin;document.removeEventListener('focusin',keywordTraceFocus,true);});
 }
 async function checkPointerBehavior(page, target, source, windows) {
   await target.hover(); await page.waitForSelector('.keywordPreviewWindow');
@@ -225,6 +295,7 @@ async function checkAutocomplete(page, ct, label) {
     const source = page.locator('.gamePreviewSourcePane .gamePreviewKw').first();
     const target = page.locator('.gamePreviewTargetPane .gamePreviewKw').first();
     const windows = page.locator('.keywordPreviewWindow');
+    await checkFocusGestures(page,target,windows);
     await checkPointerBehavior(page, target, source, windows);
     await checkAutocomplete(page,true,'clienttext-full');
     await page.evaluate(async()=>{fixtureApp.ctSelectedFilters=['missing','outdated','revised','saved','unchanged'];fixtureApp.ctEditor=false;await fixtureApp.$nextTick();});
@@ -324,9 +395,9 @@ async function checkAutocomplete(page, ct, label) {
       await page.setViewportSize({ width: 900, height: 650 }); await settle(page);
       const bounds = await windows.evaluateAll(items => items.map(item => {
         const rect = item.getBoundingClientRect(), style = getComputedStyle(item);
-        return { x: rect.x, y: rect.y, right: rect.right, bottom: rect.bottom, bg: style.backgroundColor, opacity: style.opacity };
+        return { x: rect.x, y: rect.y, right: rect.right, bottom: rect.bottom, bg: style.backgroundColor, opacity: style.opacity, active:item.classList.contains('keywordPreviewActive') };
       }));
-      for (const rect of bounds) { assert.ok(rect.x >= 7 && rect.y >= 7 && rect.right <= 893 && rect.bottom <= 643, JSON.stringify(rect)); assert.match(rect.bg, /0\.7\)/); assert.equal(rect.opacity, '1'); }
+      for (const rect of bounds) { assert.ok(rect.x >= 7 && rect.y >= 7 && rect.right <= 893 && rect.bottom <= 643, JSON.stringify(rect)); if(rect.active)assert.equal(rect.bg,'rgb(18, 17, 16)');else assert.match(rect.bg, /0\.7\)/); assert.equal(rect.opacity, '1'); }
       await page.screenshot({ path: join(folder, theme + '.png') });
     }
     await windows.last().locator('.keywordPreviewClose').click();
@@ -341,7 +412,7 @@ async function checkAutocomplete(page, ct, label) {
     const long = await windows.first().evaluate(node => ({ bottom: node.getBoundingClientRect().bottom, scrollable: node.scrollHeight > node.clientHeight }));
     assert.ok(long.bottom <= 342 && long.scrollable, 'tall pinned card stays within resized viewport and scrolls');
     assert.deepEqual(errors, []);
-    console.log(JSON.stringify({ browser: executablePath, checks: 'autocomplete SD/ClientText inline/full: translated details below TL Note, pointer/keyboard selection, caret, Enter/ClientText Tab, typing/filtering, partial data, nested pins; trigger-only immediate dismissal, keyword-only pinning, card click raise/focus without pin, pinned root/nested pointer paths, hover blocking over cards and previews, captured header dragging of pinned cards and clamping, nested edge placement, translation/source, pin/close/focus/z-order, Escape isolation, file/game/language/source lifetime, SD and ClientText inline/full, safe markup, all themes, viewport bounds', screenshots: folder }));
+    console.log(JSON.stringify({ browser: executablePath, checks: 'nested pointer-down/up traces without parent activation, canceled keyword release, blank header dragging, active/inactive alpha, outside focus clear and focused Escape; autocomplete SD/ClientText inline/full: translated details below TL Note, pointer/keyboard selection, caret, Enter/ClientText Tab, typing/filtering, partial data, nested pins; trigger-only immediate dismissal, keyword-only pinning, card click raise/focus without pin, pinned root/nested pointer paths, hover blocking over cards and previews, captured header dragging of pinned cards and clamping, nested edge placement, translation/source, pin/close/focus/z-order, Escape isolation, file/game/language/source lifetime, SD and ClientText inline/full, safe markup, all themes, viewport bounds', screenshots: folder }));
   } finally {
     await browser?.close(); await new Promise(done => { server.close(done); server.closeAllConnections(); });
   }

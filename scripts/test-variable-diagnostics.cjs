@@ -1385,3 +1385,24 @@ test('SD autocomplete uses the common resolver once per scope and clears unpinne
   assert.equal(editor.keywordAutocomplete.title[0].text, 'Thai B'); assert.equal(editor.keywordWindows.length, 0); assert.equal(loads, 1);
   editor.hlPopup.visible = false; await editor.updateKeywordAutocomplete(); assert.equal(editor.keywordAutocomplete, null);
 });
+
+test('popup activation tracks one active card, outside clearing preserves order and inactive closure preserves focus', async () => {
+  const { editor } = loadEditor(); editor.ctActive=true;editor.ctUnits=[];editor.ctSaved={};
+  const open=()=>editor.previewKeywordEnter({currentTarget:{isConnected:true}},{tagName:'Tag'},true);
+  const first=await open();editor.pinKeywordWindow(first);const second=await open();editor.pinKeywordWindow(second);
+  assert.equal(editor.keywordActiveId,second.id);editor.focusKeywordWindow(first,false);
+  assert.equal(editor.keywordActiveId,first.id);assert.equal(editor.keywordWindows.at(-1).id,first.id);
+  const order=Array.from(editor.keywordWindows,item=>item.id);editor.clearKeywordFocus();
+  assert.equal(editor.keywordActiveId,null);assert.deepEqual(Array.from(editor.keywordWindows,item=>item.id),order);
+  editor.focusKeywordWindow(first,false);editor.closeKeywordWindow(second.id);assert.equal(editor.keywordActiveId,first.id);
+  editor.closeKeywordWindow(first.id);assert.equal(editor.keywordActiveId,null);
+});
+
+test('Escape ignores pinned cards after focus is cleared and closes only the active targeted card', async () => {
+  const {editor,context}=loadEditor();editor.ctActive=true;editor.ctUnits=[];editor.ctSaved={};
+  context.document.addEventListener=()=>{};context.window.KeywordPopups.mixin.mounted.call(editor);
+  const item=await editor.previewKeywordEnter({currentTarget:{isConnected:true}},{tagName:'Tag'},true);editor.pinKeywordWindow(item);
+  let handled=0;const event={key:'Escape',target:{closest:()=>({dataset:{keywordWindow:String(item.id)}})},preventDefault(){handled++;},stopImmediatePropagation(){}};
+  editor.clearKeywordFocus();editor._keywordEscape(event);assert.equal(editor.keywordWindows.length,1);assert.equal(handled,0);
+  editor.focusKeywordWindow(item,false);editor._keywordEscape(event);assert.equal(editor.keywordWindows.length,0);assert.equal(handled,1);
+});
