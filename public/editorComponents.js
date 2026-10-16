@@ -599,7 +599,7 @@
             </div>
           </div>
           <div class="gamePreviewMainRow">
-            <label v-if="ctActive && ctSkillBaseModel?.reason === 'choose-related-skill'" class="ctSkillRelatedChoice">Related skill <select v-model="ctSkillRelatedId"><option value="">Choose a related skill</option><option v-for="id in ctSkillBaseModel.candidates" :key="id" :value="id">{{ctSkillCatalog.cards.find(card=>card.id===id)?.title.source || id}}</option></select></label>
+            <label v-if="ctActive && ctSkillChoices?.length > 1" class="ctSkillRelatedChoice">Related skill <select :value="ctSkillSelectedId" @change="ctSkillRelatedId=$event.target.value"><option value="">Choose a related skill</option><option v-for="card in ctSkillChoices" :key="card.id" :value="card.id">{{card.title.source}} · {{card.itemTitle.source}}</option></select></label>
             <div class="gamePreviewFrameWrap">
               <div class="gamePreviewFramesColumn">
                 <div v-if="!hideSourceInPreviewPanel" class="gamePreviewSourcePane" :tabindex="gamePreviewFullEditor ? 0 : undefined" :role="gamePreviewFullEditor ? 'region' : undefined" :aria-label="gamePreviewFullEditor ? 'English preview' : undefined">

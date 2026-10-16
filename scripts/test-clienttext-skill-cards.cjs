@@ -231,3 +231,20 @@ test('example input validation rejects markup, non-finite, out-of-range and frac
     assert.equal(Cards.normalizeExamples({ 'skill-card:critical-chance': '0.25' }).values['skill-card:critical-chance'], '0.25');
     assert.equal(Cards.normalizeExamples({ 'skill-card:quality': '-5' }).values['skill-card:quality'], '-5');
 });
+
+test('related-row drafts stay scoped, preserve intentional blanks and yield to the live field draft', () => {
+    const f=fixture(),item=f.units.find(unit=>unit.sheet==='BaseItemTypes'),field=item.fields[0];
+    const drafts={[f.unit.id]:{scope:f.scope,unitId:f.unit.id,values:{[f.unit.fields[1].id]:'Checkpointed description'}},
+        [item.id]:{scope:f.scope,unitId:item.id,values:{[field.id]:''}}};
+    const result=compose(f,{unit:item,drafts});assert.equal(result.target.title.text,'');assert.equal(result.target.description.text,'Checkpointed description');
+    assert.equal(compose(f,{unit:item,drafts,draft:{scope:f.scope,unitId:item.id,values:{[field.id]:'Live title'}}}).target.title.text,'Live title');
+    drafts[f.unit.id].scope={...f.scope,accountId:'another'};assert.notEqual(compose(f,{unit:item,drafts}).target.description.text,'Checkpointed description');
+});
+
+test('edit references resolve only exact current workbook fields and matched scoped identities', () => {
+    const f=fixture(),resolver=Cards.createResolver(f.catalog,f.units,f.scope),ref=f.card.description;
+    assert.equal(resolver.resolveReference(ref,f.scope).unit,f.unit);assert.equal(resolver.resolveReference(ref,f.scope).field.name,'Description');
+    assert.equal(resolver.resolveReference(ref,{...f.scope,sourceHash:'other'}),null);assert.equal(resolver.resolveReference({...ref,field:'Other'},f.scope),null);
+    f.unit.fields.find(field=>field.name==='Description').source='Changed source';assert.equal(resolver.resolveReference(ref,f.scope),null);
+    assert.ok(resolver.referencedUnits(f.card.id).includes(f.unit),'the unchanged verified title still references this unit');
+});

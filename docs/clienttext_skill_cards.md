@@ -3,8 +3,9 @@
 The isolated `ClientTextSkillCards` module composes preview models from a private,
 versioned relationship catalog and immutable ClientText units. It does not change
 workbook parsing, saves, source identities, exports or status calculation. The
-initial private catalog contains one reviewed active skill and its gem item.
-Other item types, supports and arbitrary workbook sheets remain outside scope.
+private catalog is generated from verified active/meta gem relationships rather
+than a skill-specific list. Other item types, support layouts and arbitrary
+workbook sheets remain outside scope.
 
 ## Implementation and integration status
 
@@ -12,7 +13,7 @@ Other item types, supports and arbitrary workbook sheets remain outside scope.
 `public/clientTextSkillCardUi.js` loads the protected catalog, mounts the shared
 inline/full card and manages its artwork. `index.html`, `clientTextUi.js`,
 `editorComponents.js` and `index.js` connect it to the existing preview and
-variable list. The initial card applies to verified active-skill descriptions,
+variable list. Cards apply to verified active-skill descriptions,
 names, gem item names and mapped related tags/labels. Short descriptions retain
 the ordinary field preview because they belong to a different game surface.
 
@@ -28,11 +29,54 @@ English. Incomplete reference workbooks can still show a verified primary card.
 One resolver is retained for the active immutable unit array, catalog revision
 and full scope. Composition follows selected fields, drafts, Saved values and
 preview examples. Unsupported or incompatible rows retain the single-field
-preview. Shared tags require a related-skill choice when several cards match.
+preview. Shared tags/labels retain the last explicit skill context when it still
+matches; otherwise they require a choice. The chooser remains available to switch
+between matching skills. Context is cleared on account/source/language/access
+changes and never defaults to a particular skill.
 The mounted card shows a heading, tags, examples, description, mode tabs and
 footer; unresolved combat rows are omitted explicitly. Decorative frames use
 CSS. The full editor gives contextual cards a larger initial preview height and
 retains manual resizing.
+
+Workbook-backed card text navigates to its exact editable translation field.
+Related-sheet navigation checkpoints the outgoing draft using the existing
+guarded selection flow and refuses to move after a failed checkpoint or scope
+change. Related checkpointed drafts are read locally for the current card and
+remain visible alongside its live current-field draft. Plain text can be clicked;
+the small Edit button supplies keyboard access and an independent action for
+keyword-only labels. Keyword clicks keep their existing popup/pin behavior.
+Missing catalog-only English has no edit action. Preview sample values remain
+independent controls rather than workbook text.
+
+## Generated coverage
+
+The reviewed client build supplies 1,191 gem records: 642 support-layout records
+are excluded and 549 active/meta records are considered. Exact workbook/client
+matching currently enables 423 cards. The other 126 have source mismatches (49),
+missing or ambiguous text (57), or missing workbook rows (20); they retain ordinary
+field previews. This is coverage of compatible translation records, not a claim
+that every record is a released or currently obtainable gem.
+
+The generator uses the authoritative SkillGems → GemEffects → GrantedEffects →
+ActiveSkills join, preserves displayed GemTags order, and resolves named visible
+statset labels. Null/internal Hidden/Shown labels are not invented. Secondary
+granted abilities are recorded in private coverage evidence and do not receive
+guessed tags or independent layouts. Runtime combat rows remain omitted.
+
+Artwork coverage is separate: all 423 cards have indexed local icon/inventory
+references and 87 have local UI-sprite illustrations. The published catalog uses
+only the private asset worker's verified active-skill/gem mappings: 193 distinct
+asset identities currently serve 197 card-icon mappings, 196 inventory mappings
+and 63 illustrations. Several cards can share an asset identity. Missing art
+keeps the text card usable.
+
+Repeatable extraction and generation live in the private API's
+`scripts/skill-cards/`; the deployed catalog and detailed coverage remain under
+its `assets/skill-cards/`. The extractor verifies the installed Steam build,
+schema row lengths, table/index hashes and UI sprite definitions using the
+already installed trusted tool. The generator emits stable relationship IDs,
+English fingerprints and a content-versioned revision, with no translated
+targets. Image IDs come from the matching verified private asset manifest.
 
 ## Private catalog contract
 
@@ -232,6 +276,7 @@ Pinned floating windows keep their opening snapshot across record changes.
 
 ```text
 node scripts/test-clienttext-skill-cards.cjs
+node scripts/test-clienttext-skill-navigation.cjs
 node scripts/test-private-assets.cjs
 node scripts/test-private-media-ui.cjs
 node scripts/test-private-image-ui.cjs

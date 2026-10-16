@@ -27,7 +27,11 @@ const card={id:'example',activeSkillId:'example_skill',baseItemId:'ExampleGem',t
 for(const id of ['Quality','Critical']){ref('KeywordPopups',id,'Info Title',id+' concept','Target '+id+' concept');ref('KeywordPopups',id,'Info Content','Example explanation. '+(id==='Quality'?'[Critical]':''),'Target explanation. '+(id==='Quality'?'[Critical|Target critical]':''));}
 const audioRef=ref('NPCTextAudio','ExampleAudio','Text','Example dialogue.');
 units.find(u=>u.sheet==='NPCTextAudio').metadata['Audio File']='synthetic/example.wav';
-const catalog={schemaVersion:1,game:'poe2',revision:'synthetic-browser-1',clientBuild:'12345',cards:[card]};
+const secondCard={...card,id:'second-example',activeSkillId:'second_skill',baseItemId:'SecondGem',
+    title:ref('ActiveSkills','second_skill','DisplayName','Second ability'),itemTitle:ref('BaseItemTypes','SecondGem','Display Name','Second gem'),
+    description:ref('ActiveSkills','second_skill','Description','Second ability description.'),assets:undefined,
+    tabs:[...card.tabs,{id:'other-mode',label:ref('GrantedEffectLabels','OtherMode','LabelString','Other mode'),lines:[]}]};
+const catalog={schemaVersion:1,game:'poe2',revision:'synthetic-browser-1',clientBuild:'12345',cards:[card,secondCard]};
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');
 const wav=Buffer.alloc(44+882000);wav.write('RIFF',0);wav.writeUInt32LE(wav.length-8,4);wav.write('WAVEfmt ',8);wav.writeUInt32LE(16,16);wav.writeUInt16LE(1,20);wav.writeUInt16LE(1,22);wav.writeUInt32LE(44100,24);wav.writeUInt32LE(88200,28);wav.writeUInt16LE(2,32);wav.writeUInt16LE(16,34);wav.write('data',36);wav.writeUInt32LE(882000,40);
 const requests=[],app=express(),server=createServer(app);
@@ -78,6 +82,18 @@ const settle=page=>page.evaluate(()=>new Promise(done=>requestAnimationFrame(()=
     assert.match(await target.locator('.ctSkillCardDescription').innerText(),/Current edited description/);assert.match(await source.locator('.ctSkillCardDescription').innerText(),/An example Quality description/);
     assert.equal(await page.evaluate(()=>JSON.stringify(fixtureApp.ctUnits)===fixtureUnitsBefore),true);
     await target.locator('.ctSkillCardProperties .gamePreviewKw').first().click();await page.waitForSelector('.keywordPreviewWindow');assert.match(await page.locator('.keywordPreviewWindow').innerText(),/Target Quality concept/);await page.locator('.keywordPreviewClose').click();
+    assert.equal(await page.evaluate(()=>fixtureApp.ctCurrentUnit.recordId),'example_skill','keyword actions never navigate fields');
+    await page.locator('textarea[data-ct-target="Description"]:visible').fill('Unsaved navigation [Quality|draft]');
+    await source.locator('h3 .skillCardEditable').click();await page.waitForFunction(()=>document.activeElement?.dataset.ctTarget==='DisplayName');
+    await source.locator('.ctSkillCardType .skillCardEdit').click();await page.waitForFunction(()=>fixtureApp.ctCurrentUnit?.sheet==='GemTags' && document.activeElement?.dataset.ctTarget==='Display Name');
+    assert.equal(await page.locator('.ctSkillRelatedChoice select').inputValue(),'example','shared tag retains the explicit originating skill');
+    await page.waitForFunction(()=>fixtureApp.ctSkillPreviewModel?.target.description.text.includes('Unsaved navigation'));
+    assert.match(await target.locator('.ctSkillCardDescription').innerText(),/Unsaved navigation draft/,'related-row preview preserves checkpointed unsaved draft');
+    await page.locator('.ctSkillRelatedChoice select').selectOption('second-example');await page.waitForFunction(()=>fixtureApp.ctSkillPreviewModel?.skillId==='second-example');assert.match(await target.locator('h3').innerText(),/Second ability/);
+    await target.locator('.ctSkillCardDescription .skillCardEditable').click();await page.waitForFunction(()=>fixtureApp.ctCurrentUnit?.recordId==='second_skill' && document.activeElement?.dataset.ctTarget==='Description');
+    await target.getByRole('tab',{name:'Target Other mode'}).click();await page.waitForFunction(()=>fixtureApp.ctCurrentUnit?.recordId==='OtherMode' && document.activeElement?.dataset.ctTarget==='LabelString');
+    await page.evaluate(async()=>{const host=fixtureApp,unit=host.ctUnits.find(u=>u.sheet==='ActiveSkills' && u.recordId==='example_skill');await host.ctSelect(unit,true,{focus:false});host.ctTool='preview';await host.$nextTick();});await page.waitForFunction(()=>fixtureApp.ctSkillPreviewModel?.skillId==='example');
+    assert.match(await page.locator('textarea[data-ct-target="Description"]:visible').inputValue(),/Unsaved navigation/,'returning restores the same durable unsaved draft');
     for(const theme of ['light','grey','dark','modern-dark']){await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);await settle(page);await page.screenshot({path:join(folder,'card-'+theme+'.png')});}
     await page.setViewportSize({width:1150,height:850});await settle(page);assert.equal(await target.isVisible(),true);
     await page.evaluate(async()=>{fixtureApp.ctUnits=Vue.markRaw(fixtureApp.ctUnits.filter(u=>u.sheet!=='GemTags'));fixtureApp._ctUnitIndex=Vue.markRaw(new Map(fixtureApp.ctUnits.map(u=>[u.id,u])));fixtureApp.ctRevision++;await fixtureApp.$nextTick();});await settle(page);assert.equal(await target.locator('.ctSkillCardPartial').count(),1);

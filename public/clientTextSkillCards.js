@@ -69,7 +69,7 @@
                 ids.add(line.id);
             }
         }
-        for (const card of list(catalog.cards, 256, 'cards')) {
+        for (const card of list(catalog.cards, 1024, 'cards')) {
             if (!card || !slug(card.id) || ids.has(card.id) || !text(card.activeSkillId, 1024) || !text(card.baseItemId, 1024)) invalid('card identity');
             ids.add(card.id);
             reference(card.title); reference(card.itemTitle); reference(card.description);
@@ -96,7 +96,7 @@
         const catalog = copy(validateCatalog(catalogInput));
         const context = Object.fromEntries(SCOPE_KEYS.map(key => [key, scope?.[key] ?? '']));
         const capturedScope = scopeKey(context), game = context.game;
-        const unitIndex = new Map(), related = new Map(), cards = new Map();
+        const unitIndex = new Map(), related = new Map(), cards = new Map(), referenceIndex = new Map();
         for (const unit of units || []) {
             if (unit?.role !== 'normal' || !SHEETS.has(unit.sheet)) continue;
             const key = identity(unit);
@@ -104,6 +104,10 @@
         }
         for (const card of catalog.cards) {
             cards.set(card.id, card);
+            for (const ref of refs(card)) {
+                const key = JSON.stringify([ref.sheet, ref.recordId, ref.field]), previous = referenceIndex.get(key);
+                referenceIndex.set(key, referenceIndex.has(key) && previous?.sourceHash !== ref.sourceHash ? null : ref);
+            }
             for (const key of new Set(refs(card).map(identity))) {
                 if (!related.has(key)) related.set(key, []);
                 related.get(key).push(card.id);
@@ -111,7 +115,7 @@
         }
         function candidates(unit) {
             if (!capturedScope || catalog.game !== game || unit?.role !== 'normal') return [];
-            return [...(related.get(identity(unit)) || [])];
+            return [...(related.get(identity(unit)) || [])].sort();
         }
         function lookup(ref) {
             const key = identity(ref), unit = unitIndex.get(key);
@@ -149,6 +153,9 @@
                 if (valid) {
                     const values = State.valuesFor(match.unit, options.saved?.[match.unit.id]);
                     target = String(values[match.field.id] ?? '');
+                    const storedDraft = options.drafts?.[match.unit.id];
+                    if (storedDraft?.unitId === match.unit.id && scopeKey(storedDraft.scope) === capturedScope && own(storedDraft.values, match.field.id))
+                        target = String(storedDraft.values[match.field.id] ?? '');
                     if (draft?.unitId === match.unit.id && own(draft.values, match.field.id)) target = String(draft.values[match.field.id] ?? '');
                 }
                 const value = { source: valid ? match.field.source : missing ? ref.source : '', target,
@@ -203,7 +210,18 @@
                 assets: card.assets ? { ...card.assets, game: catalog.game } : null,
                 compatibility: { matched: primary.filter(result => result.status === 'matched').length, total: primary.length } };
         }
-        return { candidates, compose };
+        function resolveReference(reference, currentScope) {
+            if (!reference || scopeKey(currentScope) !== capturedScope || !capturedScope) return null;
+            const ref = referenceIndex.get(JSON.stringify([reference.sheet, reference.recordId, reference.field]));
+            if (!ref) return null;
+            const match = lookup(ref);
+            return match.status === 'matched' ? { unit: match.unit, field: match.field } : null;
+        }
+        function referencedUnits(cardId) {
+            const card = cards.get(cardId);
+            return card ? [...new Set(refs(card).map(lookup).filter(match => match.status === 'matched').map(match => match.unit))] : [];
+        }
+        return { candidates, compose, resolveReference, referencedUnits };
     }
     return { SCHEMA_VERSION, EXAMPLE_VARIABLES, EXAMPLE_KEYS, exampleDefaults, defaultExampleValue, resetExamples, normalizeExamples, scopeKey, validateCatalog, createResolver };
 });

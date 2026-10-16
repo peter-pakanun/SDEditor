@@ -4,7 +4,7 @@
     const emptyKeys = Object.freeze([]);
     const raw = value => root.Vue?.markRaw ? root.Vue.markRaw(value) : value;
     const mixin = {
-        data: () => ({ ctSkillCatalog: null, ctSkillRelatedId: '', ctSkillImages: {} }),
+        data: () => ({ ctSkillCatalog: null, ctSkillRelatedId: '', ctSkillContextId: '', ctSkillImages: {}, ctSkillDrafts: {} }),
         computed: {
             ctSkillScope() { return { ...(this.ctWorkspace?.scope || {}), accessKey: this.privateMediaKey }; },
             ctSkillContextKey() {
@@ -17,7 +17,16 @@
             },
             ctSkillBaseModel() {
                 return this.ctCurrentUnit && this.ctSkillResolver?.compose({ scope: this.ctSkillScope,
-                    unit: this.ctCurrentUnit, cardId: this.ctSkillRelatedId || undefined });
+                    unit: this.ctCurrentUnit, cardId: this.ctSkillSelectedId || undefined });
+            },
+            ctSkillChoices() {
+                const choices = this.ctSkillResolver?.candidates(this.ctCurrentUnit) || [];
+                return choices.map(id => this.ctSkillCatalog.cards.find(card => card.id === id)).filter(Boolean)
+                    .sort((a,b) => a.title.source.localeCompare(b.title.source) || a.id.localeCompare(b.id));
+            },
+            ctSkillSelectedId() {
+                const choices = this.ctSkillResolver?.candidates(this.ctCurrentUnit) || [];
+                return [this.ctSkillRelatedId, this.ctSkillContextId].find(id => choices.includes(id)) || '';
             },
             ctSkillVariableKeys() {
                 if (this.ctPreviewField?.name === 'Short Description') return emptyKeys;
@@ -28,8 +37,11 @@
                 this.ctRevision;
                 if (!this.ctSkillVariableKeys.length) return null;
                 return this.ctSkillResolver.compose({ scope: this.ctSkillScope, unit: this.ctCurrentUnit,
-                    cardId: this.ctSkillRelatedId || undefined, fieldId: this.ctPreviewField?.id, saved: this.ctSaved,
-                    draft: { scope: this.ctSkillScope, unitId: this.ctCurrentUnit.id, values: this.ctValues }, variables: this.ctPreviewGggVars });
+                    cardId: this.ctSkillSelectedId || undefined, fieldId: this.ctPreviewField?.id, saved: this.ctSaved,
+                    draft: { scope: this.ctSkillScope, unitId: this.ctCurrentUnit.id, values: this.ctValues }, drafts: this.ctSkillDrafts, variables: this.ctPreviewGggVars });
+            },
+            ctSkillDraftKey() {
+                return this.ctSkillBaseModel?.skillId ? JSON.stringify([this.ctSkillContextKey,this.ctSkillBaseModel.skillId,this.ctSelection,this.ctRevision]) : '';
             },
             ctSkillAssetKey() {
                 const assets = this.ctSkillBaseModel?.assets;
@@ -39,21 +51,23 @@
         watch: {
             ctSkillContextKey: { immediate: true, flush: 'sync', handler() { this.ctLoadSkillCatalog(); } },
             ctSkillAssetKey: { immediate: true, flush: 'sync', handler() { this.ctLoadSkillImages(); } },
-            ctSelection() { this.ctSkillRelatedId = ''; }
+            ctSkillDraftKey: { immediate: true, handler() { this.ctLoadSkillDrafts(); } },
+            ctSelection() { this.ctSkillRelatedId = ''; },
+            ctSkillBaseModel(model) { if (model?.skillId) this.ctSkillContextId = model.skillId; }
         },
         mounted() {
             this._ctSkillOnline = () => { if (this.ctSkillContextKey) { if (!this.ctSkillCatalog) this.ctLoadSkillCatalog(); else this.ctLoadSkillImages(); } };
             root.addEventListener?.('online', this._ctSkillOnline);
         },
         beforeUnmount() {
-            this._ctSkillCatalogRun = null; this._ctSkillCatalogAbort?.abort(); this.ctClearSkillImages();
+            this._ctSkillCatalogRun = null; this._ctSkillDraftRun = null; this._ctSkillNavigateRun = null; this._ctSkillCatalogAbort?.abort(); this.ctClearSkillImages();
             root.removeEventListener?.('online', this._ctSkillOnline);
         },
         methods: {
             async ctLoadSkillCatalog() {
                 this._ctSkillCatalogAbort?.abort();
                 const key = this.ctSkillContextKey, run = this._ctSkillCatalogRun = {};
-                this.ctSkillCatalog = null; this.ctSkillRelatedId = '';
+                this.ctSkillCatalog = null; this.ctSkillRelatedId = ''; this.ctSkillContextId = ''; this.ctSkillDrafts = {}; this._ctSkillDraftRun = null;
                 if (!key) return;
                 const controller = this._ctSkillCatalogAbort = new AbortController();
                 try {
@@ -90,6 +104,38 @@
                 }));
             },
             ctResetSkillExamples() { this.ctPreviewGggVars = root.ClientTextSkillCards.resetExamples(this.ctPreviewGggVars); },
+            async ctLoadSkillDrafts() {
+                const key = this.ctSkillDraftKey, run = this._ctSkillDraftRun = {}, resolver = this.ctSkillResolver;
+                if (!key || !this.ctStorage || !this.ctContext) return;
+                const scope = this.ctSkillScope, context = this.ctContext(), units = resolver.referencedUnits(this.ctSkillBaseModel.skillId);
+                try {
+                    const rows = await Promise.all(units.map(async unit => [unit.id, await this.ctStorage(context.scope).getDraft(context.scope,unit.id)]));
+                    if (run !== this._ctSkillDraftRun || key !== this.ctSkillDraftKey || resolver !== this.ctSkillResolver) return;
+                    const next = { ...this.ctSkillDrafts };
+                    for (const [id,draft] of rows) { if (draft?.values) next[id] = { scope, unitId:id, values:draft.values }; else delete next[id]; }
+                    this.ctSkillDrafts = next;
+                } catch (_) { /* The active field draft remains live when related drafts cannot be read. */ }
+            },
+            ctSkillCanEdit(entry) { return entry?.origin === 'workbook' && !!this.ctSkillResolver?.resolveReference(entry.reference, this.ctSkillScope); },
+            async ctSkillEditField(entry, event) {
+                if (event?.target?.closest?.('.gamePreviewKw') || !this.ctSkillCanEdit(entry) || this.ctBusy || this.ctBrowseBusy) return false;
+                const resolver = this.ctSkillResolver, target = resolver.resolveReference(entry.reference, this.ctSkillScope);
+                const key = this.ctSkillContextKey, cardId = this.ctSkillPreviewModel?.skillId, run = this._ctSkillNavigateRun = {}, full = this.ctEditor;
+                const current = () => this._ctSkillNavigateRun === run && key === this.ctSkillContextKey
+                    && this.ctSkillResolver === resolver && this._ctUnitIndex?.get(target.unit.id) === target.unit;
+                if (target.unit !== this.ctCurrentUnit && !await this.ctChangeBrowse(() => {
+                    this.ctBrowseMode = 'sheets'; this.ctSheet = JSON.stringify([target.unit.role,target.unit.sheet]);
+                    this.ctSearch = ''; this.ctAppliedSearch = ''; this.ctFilter = '';
+                    this.ctSelectedFilters = ['missing','outdated','revised','saved','unchanged']; this.ctPage = 1;
+                })) return false;
+                if (!current() || !await this.ctSelect(target.unit, full, { focus: false, guard: current }) || !current()) return false;
+                this.ctTool = 'preview'; if (cardId) this.ctSkillContextId = cardId;
+                const index = this.ctRows.findIndex(unit => unit.id === target.unit.id);
+                if (index >= 0) this.ctPage = Math.floor(index / this.ctEffectivePageSize) + 1;
+                await this.$nextTick();
+                if (!current() || this.ctSelection !== target.unit.id) return false;
+                return this.ctFocusTarget(false, target.field.id);
+            },
             ctSkillExampleLabel(key) {
                 const model = this.ctSkillPreviewModel;
                 const translated = model?.target.properties.find(property => property.key === key)?.label;
@@ -99,10 +145,12 @@
         }
     };
     const Text = {
-        name: 'SkillCardText', props: { host: Object, text: String, translated: Boolean },
-        computed: { segments() { return this.host.buildGamePreviewSegments(this.text || '', { contentMode: 'clienttext' }).segments; } },
-        template: `<span class="skillCardText"><template v-for="(seg,index) in segments" :key="index">
-            <span v-if="seg.type==='text'" :style="seg.decorStyle">{{seg.text}}</span>
+        name: 'SkillCardText', props: { host: Object, text: String, translated: Boolean, entry: Object },
+        computed: { segments() { return this.host.buildGamePreviewSegments(this.text || '', { contentMode: 'clienttext' }).segments; },
+            editable() { return this.host.ctSkillCanEdit?.(this.entry); }, editLabel() { return this.editable ? 'Edit '+this.entry.reference.field+' in '+this.entry.reference.sheet : undefined; } },
+        methods: { edit(event) { if(this.editable)this.host.ctSkillEditField(this.entry,event); } },
+        template: `<span class="skillCardText" :title="editLabel" @click="edit"><template v-for="(seg,index) in segments" :key="index">
+            <span v-if="seg.type==='text'" :style="seg.decorStyle" :class="{skillCardEditable:editable}">{{seg.text}}</span>
             <span v-else-if="seg.type==='kw'" class="gamePreviewKw" :style="seg.decorStyle" tabindex="0" role="button" aria-haspopup="dialog"
                 @mouseenter="host.previewKeywordEnter?.($event,seg,translated)" @mouseleave="host.previewKeywordLeave?.($event)"
                 @focus="host.previewKeywordEnter?.($event,seg,translated)" @blur="host.previewKeywordLeave?.($event)"
@@ -110,7 +158,7 @@
                 @keydown.space.prevent.stop="host.previewKeywordActivate?.($event,seg,translated)">{{host.gamePreviewKeywordText(seg)}}</span>
             <span v-else-if="seg.type==='var'" :style="seg.decorStyle">{{seg.prefix + (host.gamePreviewVarValues[seg.key] ?? host.defaultPreviewVarValue(seg.key))}}{{seg.trailingPercent?'%':''}}</span>
             <br v-else-if="seg.type==='break'">
-        </template></span>`
+        </template><button v-if="editable" type="button" class="skillCardEdit" :aria-label="editLabel" :title="editLabel" @click.stop="edit">✎</button></span>`
     };
     const Card = {
         name: 'ClientTextSkillCard', components: { 'skill-card-text': Text },
@@ -126,16 +174,16 @@
         },
         template: `<article class="ctSkillCard" :style="style" :aria-label="(translated?'Translation':'English')+' skill-card preview'">
             <header class="ctSkillCardHeading"><img v-if="host.ctSkillImages.icon" :src="host.ctSkillImages.icon" alt="" width="56" height="56">
-                <div><h3 :class="{'ctSkillFocused':side.title.focused}"><skill-card-text :host="host" :text="side.title.text || '(empty)'" :translated="translated"/></h3>
-                    <div class="ctSkillCardType"><template v-for="(tag,index) in side.tags.filter(tag=>tag.position==='type' && tag.available)" :key="index"><skill-card-text :host="host" :text="tag.text" :translated="translated"/></template></div>
+                <div><h3 :class="{'ctSkillFocused':side.title.focused}"><skill-card-text :host="host" :entry="side.title" :text="side.title.text || '(empty)'" :translated="translated"/></h3>
+                    <div class="ctSkillCardType"><template v-for="(tag,index) in side.tags.filter(tag=>tag.position==='type' && tag.available)" :key="index"><skill-card-text :host="host" :entry="tag" :text="tag.text" :translated="translated"/></template></div>
                 </div></header>
-            <div class="ctSkillCardTags"><template v-for="(tag,index) in side.tags.filter(tag=>tag.position==='tag' && tag.available)" :key="index"><span v-if="index">, </span><skill-card-text :host="host" :text="tag.text" :translated="translated"/></template></div>
-            <dl class="ctSkillCardProperties"><template v-for="property in side.properties" :key="property.key"><dt><skill-card-text :host="host" :text="property.label.text" :translated="translated"/>:</dt><dd><skill-card-text :host="host" :text="property.text || '(empty)'" :translated="translated"/></dd></template></dl>
+            <div class="ctSkillCardTags"><template v-for="(tag,index) in side.tags.filter(tag=>tag.position==='tag' && tag.available)" :key="index"><span v-if="index">, </span><skill-card-text :host="host" :entry="tag" :text="tag.text" :translated="translated"/></template></div>
+            <dl class="ctSkillCardProperties"><template v-for="property in side.properties" :key="property.key"><dt><skill-card-text :host="host" :entry="property.label" :text="property.label.text" :translated="translated"/>:</dt><dd><skill-card-text :host="host" :text="property.text || '(empty)'" :translated="translated"/></dd></template></dl>
             <p class="ctSkillCardExample">Preview examples · change values in the variable list</p>
-            <p class="ctSkillCardDescription" :class="{'ctSkillFocused':side.description.focused}"><skill-card-text :host="host" :text="side.description.text || '(empty)'" :translated="translated"/></p>
-            <div v-if="side.tabs.length" class="ctSkillCardTabs" role="tablist" aria-label="Skill modes"><button v-for="item in side.tabs" :key="item.id" type="button" role="tab" :aria-selected="tab?.id===item.id" @click="selectedTab=item.id"><skill-card-text :host="host" :text="item.label.text || '(empty)'" :translated="translated"/></button></div>
+            <p class="ctSkillCardDescription" :class="{'ctSkillFocused':side.description.focused}"><skill-card-text :host="host" :entry="side.description" :text="side.description.text || '(empty)'" :translated="translated"/></p>
+            <div v-if="side.tabs.length" class="ctSkillCardTabs" role="tablist" aria-label="Skill modes"><button v-for="item in side.tabs" :key="item.id" type="button" role="tab" :aria-selected="tab?.id===item.id" @click="selectedTab=item.id;host.ctSkillEditField(item.label,$event)"><skill-card-text :host="host" :text="item.label.text || '(empty)'" :translated="translated"/></button></div>
             <p v-if="!tab?.lines.length" class="ctSkillCardOmitted">Combat values omitted from this translation preview.</p>
-            <footer v-if="side.footer?.available"><skill-card-text :host="host" :text="side.footer.text" :translated="translated"/></footer>
+            <footer v-if="side.footer?.available"><skill-card-text :host="host" :entry="side.footer" :text="side.footer.text" :translated="translated"/></footer>
             <p v-if="model.warnings.includes('partial-workbook')" class="ctSkillCardPartial">Related workbook text is unavailable; missing translations remain empty.</p>
         </article>`
     };

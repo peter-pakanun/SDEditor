@@ -1638,6 +1638,9 @@ button, label, th, td, input[type="checkbox"] {
 .keywordPreviewClose { position: absolute; z-index: 1; right: 3px; top: 2px; padding: 0 5px; border: 0; background: transparent; color: #fffbd6; font: 18px/1.2 sans-serif; cursor: pointer; }
 .keywordPreviewNotice { margin-bottom: 0; font: 12px/1.4 sans-serif; color: #f0c58a; }
 .keywordSheetPreview.keywordPreviewWindow { position: relative; inset: auto; z-index: auto; box-sizing: border-box; width: 100%; max-width: none; max-height: none; }
+.skillCardEditable { cursor:pointer; }
+.skillCardEdit { border:0; background:transparent; color:inherit; font:inherit; font-size:.7em; padding:0 .2em; opacity:0; cursor:pointer; }
+.skillCardText:hover>.skillCardEdit,.skillCardEdit:focus-visible { opacity:1; }
 
 .gamePreviewVarDisplay {
   display: inline;
