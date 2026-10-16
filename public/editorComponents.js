@@ -315,7 +315,7 @@
         return {
           '--editor-notice-height': this.noticeHeight + 'px',
           '--editor-preview-requested-height': Number.isFinite(height) ? height + 'px' : '',
-          '--editor-preview-default-height': this.controller.gamePreviewTargetRows?.length > 1
+          '--editor-preview-default-height': this.controller.ctSkillPreviewModel ? 'min(480px, 50dvh)' : this.controller.ctCurrentUnit?.sheet === 'KeywordPopups' ? 'min(360px, 40dvh)' : this.controller.gamePreviewTargetRows?.length > 1
             ? 'calc(340px * var(--density))' : 'calc(200px * var(--density))',
         };
       },
@@ -599,12 +599,15 @@
             </div>
           </div>
           <div class="gamePreviewMainRow">
+            <label v-if="ctActive && ctSkillBaseModel?.reason === 'choose-related-skill'" class="ctSkillRelatedChoice">Related skill <select v-model="ctSkillRelatedId"><option value="">Choose a related skill</option><option v-for="id in ctSkillBaseModel.candidates" :key="id" :value="id">{{ctSkillCatalog.cards.find(card=>card.id===id)?.title.source || id}}</option></select></label>
             <div class="gamePreviewFrameWrap">
               <div class="gamePreviewFramesColumn">
                 <div v-if="!hideSourceInPreviewPanel" class="gamePreviewSourcePane" :tabindex="gamePreviewFullEditor ? 0 : undefined" :role="gamePreviewFullEditor ? 'region' : undefined" :aria-label="gamePreviewFullEditor ? 'English preview' : undefined">
                 <div class="gamePreviewLine">
                   <div class="gamePreviewLineLabel">EN</div>
-                  <div class="gamePreviewWindow" :class="['gamePreviewWindow--' + gamePreviewFrame, { 'gamePreviewWindow--dialogue': gamePreviewIsDialogue }]" :style="{ fontFamily: gamePreviewSourceFontFamily, color: gamePreviewDefaultTextColor }">
+                  <keyword-sheet-preview v-if="ctActive && ctCurrentUnit?.sheet==='KeywordPopups'" :host="$root"></keyword-sheet-preview>
+                  <client-text-skill-card v-else-if="ctActive && ctSkillPreviewModel" :host="$root" :model="ctSkillPreviewModel"></client-text-skill-card>
+                  <div v-else class="gamePreviewWindow" :class="['gamePreviewWindow--' + gamePreviewFrame, { 'gamePreviewWindow--dialogue': gamePreviewIsDialogue }]" :style="{ fontFamily: gamePreviewSourceFontFamily, color: gamePreviewDefaultTextColor }">
                     <template v-for="(seg, si) in gamePreviewAudioSegments(gamePreviewDisplaySource)" :key="'gps-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
                       <span v-if="seg.type === 'text'" class="gamePreviewText" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle">{{ seg.text }}</span>
                       <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle" tabindex="0" role="button" aria-haspopup="dialog"
@@ -638,7 +641,9 @@
                 <div v-if="row.label" class="gamePreviewVariantLabel">{{ row.label }}</div>
                 <div class="gamePreviewLine" :data-preview-variant="row.key">
                   <div class="gamePreviewLineLabel">{{ translationEditorBcp47 || lang || 'TL' }}</div>
-                  <div class="gamePreviewWindow" :class="['gamePreviewWindow--' + gamePreviewFrame, { 'gamePreviewWindow--dialogue': gamePreviewIsDialogue }]" :style="{ fontFamily: gamePreviewFontFamily, color: gamePreviewDefaultTextColor }">
+                  <keyword-sheet-preview v-if="ctActive && ctCurrentUnit?.sheet==='KeywordPopups'" :host="$root" translated></keyword-sheet-preview>
+                  <client-text-skill-card v-else-if="ctActive && ctSkillPreviewModel" :host="$root" :model="ctSkillPreviewModel" translated></client-text-skill-card>
+                  <div v-else class="gamePreviewWindow" :class="['gamePreviewWindow--' + gamePreviewFrame, { 'gamePreviewWindow--dialogue': gamePreviewIsDialogue }]" :style="{ fontFamily: gamePreviewFontFamily, color: gamePreviewDefaultTextColor }">
                     <template v-for="(seg, si) in row.segments" :key="'gp-' + si + '-' + seg.type + (seg.type === 'var' ? seg.key : '')">
                       <span v-if="seg.type === 'text'" class="gamePreviewText" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle">{{ seg.text }}</span>
                       <span v-else-if="seg.type === 'kw'" class="gamePreviewKw" :class="seg.decorTag ? 'gamePreviewDecor--' + seg.decorTag : ''" :style="seg.decorStyle" tabindex="0" role="button" aria-haspopup="dialog"
@@ -689,10 +694,12 @@
                   <div class="gamePreviewVarInput gamePreviewVarInputPlaceholder">No variables</div>
                 </div>
                 <template v-if="gamePreviewVarKeyList.length">
+                  <button v-if="ctActive && ctSkillVariableKeys?.length" type="button" class="ctSkillResetExamples" @click="ctResetSkillExamples">Reset preview examples</button>
                   <div class="gamePreviewVarField" v-for="k in gamePreviewVarKeyList" :key="'gp-var-field-' + k">
-                    <label class="gamePreviewVarLabel">{{ '{' + k + '}' }}</label>
+                    <label class="gamePreviewVarLabel"><skill-card-text v-if="ctActive && ctSkillVariableKeys?.includes(k)" :host="$root" :text="ctSkillExampleLabel(k).text" :translated="ctSkillExampleLabel(k).translated"></skill-card-text><template v-else>{{ '{' + k + '}' }}</template></label>
                     <input type="text" class="gamePreviewVarInput" v-model="gamePreviewVarValues[k]" :lang="translationEditorBcp47"
-                      :aria-label="'Variable {' + k + '}'">
+                      :aria-invalid="ctActive && ctSkillPreviewModel?.invalidExampleKeys.includes(k) || undefined"
+                      :aria-label="ctActive && ctSkillVariableKeys?.includes(k) ? 'Preview example: '+k.split(':')[1] : 'Variable {' + k + '}'">
                   </div>
                 </template>
               </div>

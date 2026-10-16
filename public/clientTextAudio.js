@@ -82,6 +82,7 @@
             contextKey() {
                 const host = this.host;
                 return JSON.stringify([host.ctWorkspace?.scope, host.cloudProfileId, host.cloudUser?.id, host.managedCatalogScope,
+                    host.privateMediaKey,
                     host.gameVersion, host.branchId, host.lang, host._ctEpoch, host.ctSelection, host.ctCurrentUnit?.role,
                     host.ctCurrentUnit?.sheet, host.ctCurrentUnit?.id, host.ctCurrentUnit?.metadata?.['Audio File']]);
             },
@@ -165,6 +166,8 @@
             },
             reset(clearErrors = false) {
                 const player = this.player();
+                this._mediaAbort?.abort(); this._mediaAbort = null;
+                this._mediaLease?.release(); this._mediaLease = null;
                 this.request = null;
                 this._trackFocus = null;
                 this._originButton = null;
@@ -193,7 +196,7 @@
                 return 'Play ' + clip.label;
             },
             current(request, player) {
-                return !this._disposed && this.visible && this.request === request && request.context === this.contextKey
+                return !!request && !this._disposed && this.visible && this.request === request && request.context === this.contextKey
                     && (!player || player === this.player());
             },
             async play(index = this.selectedIndex, event) {
@@ -212,20 +215,28 @@
                 this.reset();
                 this.selectedIndex = index;
                 delete this.trackErrors[clip.path];
-                const url = audioUrl(clip.path);
-                if (!url) {
+                if (!normalizeReference(clip.path) || !this.host.privateMediaAllowed) {
                     this.error = this.trackErrors[clip.path] = 'Audio is unavailable.';
                     this.playbackState = 'error';
                     return;
                 }
                 this._requestSerial = (this._requestSerial || 0) + 1;
-                this.request = { url, path: clip.path, label: clip.label, context: this.contextKey, token: this._requestSerial, started: false };
+                this.request = { url: '', path: clip.path, label: clip.label, context: this.contextKey, token: this._requestSerial, started: false };
                 const request = this.request;
                 this.holdTrackFocus(event, request);
                 this.playbackState = 'loading';
                 this.hideTooltip();
                 playbackOwner = this;
                 this.measureFooter();
+                const controller = this._mediaAbort = new root.AbortController();
+                try {
+                    const lease = await this.host.privateMediaLoad('/audio/poe2db?path=' + encodeURIComponent(clip.path), 'audio', { signal: controller.signal });
+                    if (!this.current(request)) { lease.release(); return; }
+                    this._mediaLease = lease; request.url = lease.url;
+                } catch (error) {
+                    if (this.current(request)) this.setFailure(request, error.status ? 'Audio request failed (HTTP ' + error.status + ').' : 'Audio is unavailable.');
+                    return;
+                }
                 await this.$nextTick();
                 await this.start(request);
             },
@@ -259,22 +270,8 @@
                 return this.diagnoseFailure(request, player);
             },
             async diagnoseFailure(request, player) {
-                if (typeof root.fetch !== 'function' || !this.current(request, player)) return;
-                this.cancelDiagnosis();
-                request.diagnosing = true;
-                const controller = root.AbortController ? new root.AbortController() : null;
-                const diagnosis = this._diagnosis = { controller, timer: null };
-                if (controller && root.setTimeout) diagnosis.timer = root.setTimeout(() => controller.abort(), 5000);
-                try {
-                    const response = await root.fetch(request.url, { method: 'HEAD', credentials: 'omit', ...(controller ? { signal: controller.signal } : {}) });
-                    if (this._diagnosis === diagnosis && this.current(request, player) && !response.ok) {
-                        this.setFailure(request, 'Audio request failed (HTTP ' + response.status + ').');
-                    }
-                } catch (_) { /* The native media error remains useful when HEAD or CORS fails. */ }
-                finally {
-                    if (diagnosis.timer != null) root.clearTimeout?.(diagnosis.timer);
-                    if (this._diagnosis === diagnosis) this._diagnosis = null;
-                }
+                // Download failures were reported by the authenticated Blob request.
+                // Native errors now concern the local decoder; never send an unauthenticated HEAD.
             },
             playing(event, request) {
                 if (!this.current(request, event.currentTarget)) return;
@@ -316,7 +313,7 @@
         template: `<span class="ctAudioSession">
             <span class="srOnly" role="status" aria-live="polite">{{ error }}</span>
             <teleport to="body"><div v-show="playbackState === 'playing'" class="ctAudioFloating" :class="{ctAudioFloatingFull:surface === 'both'}" :style="{'--ct-audio-footer-height':footerHeight+'px'}" data-inline-focus-surface @focusout="host.ctInlineFocusOut?.($event)" @click.stop @dblclick.stop>
-                <template v-for="active in request ? [request] : []" :key="active.token"><audio ref="player" :src="active.url" controls preload="none" tabindex="0" :aria-label="'Dialogue audio: '+active.label" @error="failed($event,active)" @playing="playing($event,active)" @waiting="waiting($event,active)" @stalled="stalled($event,active)" @pause="paused($event,active)" @ended="ended($event,active)"></audio></template>
+                <template v-for="active in request ? [request] : []" :key="active.token"><audio ref="player" :src="active.url || undefined" controls preload="none" tabindex="0" :aria-label="'Dialogue audio: '+active.label" @error="failed($event,active)" @playing="playing($event,active)" @waiting="waiting($event,active)" @stalled="stalled($event,active)" @pause="paused($event,active)" @ended="ended($event,active)"></audio></template>
             </div></teleport>
         </span>`,
     };

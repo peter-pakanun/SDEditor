@@ -49,7 +49,7 @@ async function run() {
             <div id="fixturePreviewHost"></div><editor-preview :controller="host" target="#fixturePreviewHost"></editor-preview>
             <ct-audio-session :host="host" :surface="host.ctEditor ? 'both' : 'source'"></ct-audio-session>
             <footer v-if="!host.ctEditor" class="workspaceFooter fixtureFooter">Fixture workspace status bar</footer></main>
-            <script src="/fixture/vue.js"></script><script src="/cloudUi.js"></script><script src="/clientTextState.js"></script><script src="/editorComponents.js"></script><script src="/clientTextAudio.js"></script><script src="/clientTextUi.js"></script>
+            <script src="/fixture/vue.js"></script><script src="/cloudUi.js"></script><script src="/privateAssets.js"></script><script src="/clientTextState.js"></script><script src="/editorComponents.js"></script><script src="/clientTextAudio.js"></script><script src="/clientTextUi.js"></script>
             <script>const field={id:'Text',name:'Text',kind:'text',source:'Welcome to the camp of the lost, stranger.',targetCell:'D2'};
                 const host=window.fixtureHost=Vue.reactive({ctActive:true,ctBusy:false,ctEditor:false,inlineEditor:true,ctInlineClosed:false,ctAudioController:null,
                 ctWorkspace:{scope:{accountId:'guest',game:'poe2',branchId:'default',versionId:'local:test:audio',groupId:'local:test:audio',language:'Thai'}},
@@ -65,6 +65,14 @@ async function run() {
                 gamePreviewDisplaySource:[{type:'text',text:'First dialogue block.'},{type:'continue'},{type:'text',text:'Silent dialogue block.'},{type:'continue'},{type:'text',text:'Last dialogue block.'}],
                 get gamePreviewTargetRows(){return [{key:'target',label:'',segments:this.gamePreviewDisplaySource}];},
                 gamePreviewAudioSegments(segments){return ClientTextAudio.previewSegments(segments,ClientTextAudio.clipsFor(this.ctCurrentUnit));}});
+                // Trusted test-session adapter; full session/role checks live in the API fixture.
+                const token='x'.repeat(43),mediaKey=()=>JSON.stringify([host.ctWorkspace.scope,host.ctCurrentUnit?.id]);
+                const loader=PrivateAssets.create({current:ctx=>ctx.key===mediaKey(),request:async(path,options)=>{
+                    const response=await fetch(CloudUI.apiBase()+path,{...options,headers:{Authorization:'Bearer '+token,'X-SDEditor-Language':'Thai'}});
+                    if(!response.ok)throw Object.assign(new Error('Audio request failed'),{status:response.status});return response;
+                }});
+                host.privateMediaAllowed=true;Object.defineProperty(host,'privateMediaKey',{get:mediaKey});
+                host.privateMediaLoad=(path,kind,options={})=>loader.load(path,{...options,kind,context:{key:mediaKey()}});
                 const app=Vue.createApp({data:()=>({host})});app.component('ct-fields',ClientTextUI.fieldsComponent);
                 app.component('ct-audio-session',ClientTextAudio.component);app.component('ct-audio-controls',ClientTextAudio.controlsComponent);
                 app.component('editor-preview',EditorComponents.Preview);
@@ -77,10 +85,13 @@ async function run() {
         const origin = urlFor(frontServer), calls = [], requests = [];
         const config = loadConfig({ DATA_DIR: folder, FRONTEND_ORIGIN: origin, AUDIO_CACHE_MAX_BYTES: '2097152' });
         api.use((req, res, next) => {
+            res.set({'Access-Control-Allow-Origin':origin,'Access-Control-Allow-Headers':'Authorization,X-SDEditor-Language','Access-Control-Allow-Methods':'GET,HEAD,OPTIONS'});
+            if(req.method==='OPTIONS')return res.status(204).end();
             requests.push({ method: req.method, range: req.get('Range') || '', path: req.url });
             res.set({ 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': origin, 'X-Content-Type-Options': 'nosniff' }); next();
         });
-        installAudioRoutes(api, { config, limit: (req, res, next) => next(), fetchImpl: async (url, options) => {
+        const revalidate=req=>{if(req.get('Authorization')!=='Bearer '+'x'.repeat(43) || req.get('X-SDEditor-Language')!=='Thai')throw Object.assign(new Error('Fixture authorization required'),{status:401});};
+        installAudioRoutes(api, { config, authorize:(req,res,next)=>{try{revalidate(req);next();}catch(error){next(error);}},revalidate,limit: (req, res, next) => next(), fetchImpl: async (url, options) => {
             calls.push(url); assert.equal(options.headers.Referer, 'https://poe2db.tw/');
             if (url.endsWith('first.wav')) await firstResponse;
             if (url.endsWith('missing.wav') && !missingAvailable) return new Response('', { status: 404 });
@@ -148,7 +159,8 @@ async function run() {
         await playing();
         assert.equal(await page.locator('.ctAudioTrack.active').count(),2,'Field and English preview share the playing state.');
         assert.equal(await page.locator('audio').count(),1,'All playback buttons use one media element.');
-        assert.equal(calls.length, 1); assert.ok(requests.some(request => request.range.startsWith('bytes=')), 'Native playback uses range requests.');
+        assert.equal(calls.length, 1); assert.ok(requests.every(request => !request.range), 'Authenticated fetch downloads a complete Blob; native seeking stays local.');
+        assert.match(await floating.locator('audio').getAttribute('src'),/^blob:/);
         assert.equal(await first().getAttribute('aria-label'), 'Stop First.wav');
         assert.equal(await first().locator('.ctAudioSpeakIcon').count(), 1);
         assert.ok((await first().getAttribute('class')).includes('active'));
@@ -217,13 +229,13 @@ async function run() {
         await first().click(); await playing();
         assert.equal(calls.length, callsBeforeReplay, 'Replaying a clip does not re-download it upstream.');
         await checkLayout('full');
-        // A full fetch has a deterministic browser-cache check in addition to
-        // native media buffering (which varies between browser engines).
+        // Private responses bypass browser HTTP caches; the API retains its bounded upstream cache.
         const url = urlFor(apiServer) + '/audio/poe2db?path=4.0%2Fnpc%2Ffixture%2Fcache.wav';
-        await page.evaluate(async url => { const response = await fetch(url); await response.arrayBuffer(); }, url);
+        const fetchPrivate=url=>page.evaluate(async url=>{const response=await fetch(url,{cache:'no-store',headers:{Authorization:'Bearer '+'x'.repeat(43),'X-SDEditor-Language':'Thai'}});if(!response.ok)throw new Error('Private audio failed');await response.arrayBuffer();},url);
+        await fetchPrivate(url);
         const beforeCacheRead = requests.length;
-        await page.evaluate(async url => { const response = await fetch(url); await response.arrayBuffer(); }, url);
-        assert.equal(requests.length, beforeCacheRead, 'Fresh browser HTTP cache avoids another API request.');
+        const downloadsBeforeCacheRead=calls.length;await fetchPrivate(url);
+        assert.equal(requests.length, beforeCacheRead+1, 'Private no-store media revalidates API access on every fetch.');assert.equal(calls.length,downloadsBeforeCacheRead,'API upstream cache avoids another download.');
         await page.evaluate(() => { window.previousAudio = document.querySelector('.ctAudioFloating audio'); fixtureHost.ctWorkspace.scope.versionId = 'local:test:another'; });
         await stopped();
         assert.equal(await oldStopped(), true, 'Scope changes stop playback.');
@@ -263,7 +275,7 @@ async function run() {
             'A leading NullFile slot leaves the first block without controls.');
         await sourcePreview.first().click(); await playing();
         assert.equal(await first().getAttribute('aria-label'),'Stop First.wav','Preview positions still address the correct shared toolbar track.');
-        assert.match(await floating.locator('audio').getAttribute('src'),/first\.wav$/);
+        assert.match(await floating.locator('audio').getAttribute('src'),/^blob:/);
         await first().click(); await stopped();
         const requestsBeforePlaceholders = requests.length;
         await page.evaluate(() => { fixtureHost.versionChooserVisible = false; fixtureHost.ctCurrentUnit = { id: 'null-audio', sheet: 'NPCTextAudio', metadata: { 'Audio File': 'Audio/Dialogue/NullFile/Null_3s.ogg, 4.0/NULLFILE/Other.wav' } }; });

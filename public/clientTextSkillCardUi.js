@@ -1,0 +1,143 @@
+/* Scoped skill-card UI; catalog content and images arrive only through the private API. */
+(function (root) {
+    'use strict';
+    const emptyKeys = Object.freeze([]);
+    const raw = value => root.Vue?.markRaw ? root.Vue.markRaw(value) : value;
+    const mixin = {
+        data: () => ({ ctSkillCatalog: null, ctSkillRelatedId: '', ctSkillImages: {} }),
+        computed: {
+            ctSkillScope() { return { ...(this.ctWorkspace?.scope || {}), accessKey: this.privateMediaKey }; },
+            ctSkillContextKey() {
+                return this.ctActive && this.gameVersion === 'poe2' && this.privateMediaAllowed
+                    ? JSON.stringify([this.privateMediaKey, this.ctWorkspace?.scope]) : '';
+            },
+            ctSkillResolver() {
+                return this.ctSkillCatalog && this.ctActive
+                    ? raw(root.ClientTextSkillCards.createResolver(this.ctSkillCatalog, this.ctUnits, this.ctSkillScope)) : null;
+            },
+            ctSkillBaseModel() {
+                return this.ctCurrentUnit && this.ctSkillResolver?.compose({ scope: this.ctSkillScope,
+                    unit: this.ctCurrentUnit, cardId: this.ctSkillRelatedId || undefined });
+            },
+            ctSkillVariableKeys() {
+                if (this.ctPreviewField?.name === 'Short Description') return emptyKeys;
+                return this.ctSkillBaseModel?.state !== 'unavailable' && this.ctSkillBaseModel?.variableKeys?.length
+                    ? root.ClientTextSkillCards.EXAMPLE_KEYS : emptyKeys;
+            },
+            ctSkillPreviewModel() {
+                this.ctRevision;
+                if (!this.ctSkillVariableKeys.length) return null;
+                return this.ctSkillResolver.compose({ scope: this.ctSkillScope, unit: this.ctCurrentUnit,
+                    cardId: this.ctSkillRelatedId || undefined, fieldId: this.ctPreviewField?.id, saved: this.ctSaved,
+                    draft: { scope: this.ctSkillScope, unitId: this.ctCurrentUnit.id, values: this.ctValues }, variables: this.ctPreviewGggVars });
+            },
+            ctSkillAssetKey() {
+                const assets = this.ctSkillBaseModel?.assets;
+                return assets && this.privateMediaAllowed ? JSON.stringify([this.privateMediaKey, assets.game, assets.id]) : '';
+            }
+        },
+        watch: {
+            ctSkillContextKey: { immediate: true, flush: 'sync', handler() { this.ctLoadSkillCatalog(); } },
+            ctSkillAssetKey: { immediate: true, flush: 'sync', handler() { this.ctLoadSkillImages(); } },
+            ctSelection() { this.ctSkillRelatedId = ''; }
+        },
+        mounted() {
+            this._ctSkillOnline = () => { if (this.ctSkillContextKey) { if (!this.ctSkillCatalog) this.ctLoadSkillCatalog(); else this.ctLoadSkillImages(); } };
+            root.addEventListener?.('online', this._ctSkillOnline);
+        },
+        beforeUnmount() {
+            this._ctSkillCatalogRun = null; this._ctSkillCatalogAbort?.abort(); this.ctClearSkillImages();
+            root.removeEventListener?.('online', this._ctSkillOnline);
+        },
+        methods: {
+            async ctLoadSkillCatalog() {
+                this._ctSkillCatalogAbort?.abort();
+                const key = this.ctSkillContextKey, run = this._ctSkillCatalogRun = {};
+                this.ctSkillCatalog = null; this.ctSkillRelatedId = '';
+                if (!key) return;
+                const controller = this._ctSkillCatalogAbort = new AbortController();
+                try {
+                    await this.$nextTick();
+                    if (run !== this._ctSkillCatalogRun || key !== this.ctSkillContextKey) return;
+                    const catalog = await this.privateMediaJson('/v1/skill-card-catalogs/poe2/v1', { signal: controller.signal });
+                    if (run !== this._ctSkillCatalogRun || key !== this.ctSkillContextKey) return;
+                    root.ClientTextSkillCards.validateCatalog(catalog);
+                    this.ctSkillCatalog = raw(catalog);
+                } catch (_) { /* Missing access/catalog keeps the ordinary local field preview usable. */ }
+            },
+            ctClearSkillImages() {
+                this._ctSkillImageRun = null;
+                this._ctSkillImageAbort?.abort(); this._ctSkillImageAbort = null;
+                for (const lease of this._ctSkillImageLeases || []) lease.release();
+                this._ctSkillImageLeases = []; this.ctSkillImages = {};
+            },
+            async ctLoadSkillImages() {
+                this.ctClearSkillImages();
+                const key = this.ctSkillAssetKey, assets = this.ctSkillBaseModel?.assets;
+                if (!key || !assets) return;
+                const run = this._ctSkillImageRun = {};
+                await this.$nextTick();
+                if (run !== this._ctSkillImageRun || key !== this.ctSkillAssetKey) return;
+                let context;
+                try { context = this.privateMediaContext(); } catch (_) { return; }
+                const controller = this._ctSkillImageAbort = new AbortController();
+                await Promise.all(['icon', 'background'].filter(kind => assets[kind]).map(async kind => {
+                    try {
+                        const lease = await this.privateMediaLoad('/skill-assets/' + assets.game + '/' + assets.id + '/' + kind, 'image', { context, signal: controller.signal });
+                        if (run !== this._ctSkillImageRun || key !== this.ctSkillAssetKey) { lease.release(); return; }
+                        this._ctSkillImageLeases.push(lease); this.ctSkillImages = { ...this.ctSkillImages, [kind]: lease.url };
+                    } catch (_) { /* Text is sufficient when artwork cannot be loaded. */ }
+                }));
+            },
+            ctResetSkillExamples() { this.ctPreviewGggVars = root.ClientTextSkillCards.resetExamples(this.ctPreviewGggVars); },
+            ctSkillExampleLabel(key) {
+                const model = this.ctSkillPreviewModel;
+                const translated = model?.target.properties.find(property => property.key === key)?.label;
+                const source = model?.source.properties.find(property => property.key === key)?.label;
+                return translated?.available ? { text: translated.text, translated: true } : { text: source?.text || key, translated: false };
+            }
+        }
+    };
+    const Text = {
+        name: 'SkillCardText', props: { host: Object, text: String, translated: Boolean },
+        computed: { segments() { return this.host.buildGamePreviewSegments(this.text || '', { contentMode: 'clienttext' }).segments; } },
+        template: `<span class="skillCardText"><template v-for="(seg,index) in segments" :key="index">
+            <span v-if="seg.type==='text'" :style="seg.decorStyle">{{seg.text}}</span>
+            <span v-else-if="seg.type==='kw'" class="gamePreviewKw" :style="seg.decorStyle" tabindex="0" role="button" aria-haspopup="dialog"
+                @mouseenter="host.previewKeywordEnter?.($event,seg,translated)" @mouseleave="host.previewKeywordLeave?.($event)"
+                @focus="host.previewKeywordEnter?.($event,seg,translated)" @blur="host.previewKeywordLeave?.($event)"
+                @click.stop="host.previewKeywordActivate?.($event,seg,translated)" @keydown.enter.prevent.stop="host.previewKeywordActivate?.($event,seg,translated)"
+                @keydown.space.prevent.stop="host.previewKeywordActivate?.($event,seg,translated)">{{host.gamePreviewKeywordText(seg)}}</span>
+            <span v-else-if="seg.type==='var'" :style="seg.decorStyle">{{seg.prefix + (host.gamePreviewVarValues[seg.key] ?? host.defaultPreviewVarValue(seg.key))}}{{seg.trailingPercent?'%':''}}</span>
+            <br v-else-if="seg.type==='break'">
+        </template></span>`
+    };
+    const Card = {
+        name: 'ClientTextSkillCard', components: { 'skill-card-text': Text },
+        props: { host: Object, model: Object, translated: Boolean }, data: () => ({ selectedTab: '' }),
+        computed: {
+            side() { return this.translated ? this.model.target : this.model.source; },
+            tab() { return this.side.tabs.find(tab => tab.id === this.selectedTab) || this.side.tabs[0]; },
+            style() {
+                const background = this.host.ctSkillImages.background;
+                return { fontFamily: this.translated ? this.host.gamePreviewFontFamily : this.host.gamePreviewSourceFontFamily,
+                    ...(background?.startsWith('blob:') ? { backgroundImage: 'linear-gradient(0deg,#101514 12%,transparent 85%),url("' + background + '")' } : {}) };
+            }
+        },
+        template: `<article class="ctSkillCard" :style="style" :aria-label="(translated?'Translation':'English')+' skill-card preview'">
+            <header class="ctSkillCardHeading"><img v-if="host.ctSkillImages.icon" :src="host.ctSkillImages.icon" alt="" width="56" height="56">
+                <div><h3 :class="{'ctSkillFocused':side.title.focused}"><skill-card-text :host="host" :text="side.title.text || '(empty)'" :translated="translated"/></h3>
+                    <div class="ctSkillCardType"><template v-for="(tag,index) in side.tags.filter(tag=>tag.position==='type' && tag.available)" :key="index"><skill-card-text :host="host" :text="tag.text" :translated="translated"/></template></div>
+                </div></header>
+            <div class="ctSkillCardTags"><template v-for="(tag,index) in side.tags.filter(tag=>tag.position==='tag' && tag.available)" :key="index"><span v-if="index">, </span><skill-card-text :host="host" :text="tag.text" :translated="translated"/></template></div>
+            <dl class="ctSkillCardProperties"><template v-for="property in side.properties" :key="property.key"><dt><skill-card-text :host="host" :text="property.label.text" :translated="translated"/>:</dt><dd><skill-card-text :host="host" :text="property.text || '(empty)'" :translated="translated"/></dd></template></dl>
+            <p class="ctSkillCardExample">Preview examples · change values in the variable list</p>
+            <p class="ctSkillCardDescription" :class="{'ctSkillFocused':side.description.focused}"><skill-card-text :host="host" :text="side.description.text || '(empty)'" :translated="translated"/></p>
+            <div v-if="side.tabs.length" class="ctSkillCardTabs" role="tablist" aria-label="Skill modes"><button v-for="item in side.tabs" :key="item.id" type="button" role="tab" :aria-selected="tab?.id===item.id" @click="selectedTab=item.id"><skill-card-text :host="host" :text="item.label.text || '(empty)'" :translated="translated"/></button></div>
+            <p v-if="!tab?.lines.length" class="ctSkillCardOmitted">Combat values omitted from this translation preview.</p>
+            <footer v-if="side.footer?.available"><skill-card-text :host="host" :text="side.footer.text" :translated="translated"/></footer>
+            <p v-if="model.warnings.includes('partial-workbook')" class="ctSkillCardPartial">Related workbook text is unavailable; missing translations remain empty.</p>
+        </article>`
+    };
+    root.ClientTextSkillCardUI = { mixin, Card, Text };
+})(typeof window !== 'undefined' ? window : globalThis);

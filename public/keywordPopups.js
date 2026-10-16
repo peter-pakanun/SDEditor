@@ -28,8 +28,8 @@
       if (unit.sheet !== 'KeywordPopups' || unit.role !== 'normal') continue;
       if (entries.has(unit.recordId)) continue; // Active workbook wins over sibling references.
       if (!entries.size) scope = source.scope || {};
-      const values = unit.id === host.ctCurrentUnit?.id && host.ctActive ? host.ctValues
-        : root.ClientTextState.valuesFor(unit, source.saved?.[unit.id]);
+      const originalValues = root.ClientTextState.valuesFor(unit, source.saved?.[unit.id]);
+      const values = unit.id === host.ctCurrentUnit?.id && host.ctActive ? { ...originalValues, ...host.ctValues } : originalValues;
       const read = name => {
         const field = unit.fields.find(field => field.name === name);
         return String((translated ? values?.[field?.id] : field?.source) ?? '');
@@ -40,6 +40,14 @@
     return raw({ entries, language, translated, scope: copy(scope),
       variables: { ...host.gamePreviewVarValues }, font: host.getGamePreviewFontFamily(language) });
   }
+  function cardContent(host, tag, context, extra = {}) {
+    const entry = context.entries.get(tag);
+    const parse = text => host.buildGamePreviewSegments(text, { contentMode: 'clienttext' }).segments;
+    return { context, tagName: tag, title: parse(entry?.title || (entry ? '(empty)' : tag)), content: parse(entry?.content || '(empty)'),
+      notice: !context.entries.size ? 'KeywordPopups data unavailable. Prepare ClientText references in Lookup.'
+        : !entry ? 'Keyword not found in this workbook.'
+          : context.translated && (!entry.title.trim() || !entry.content.trim()) ? 'Missing ' + context.language + ' translation.' : '', ...extra };
+  }
   const mixin = {
     data: () => ({ keywordWindows: [], keywordWindowSequence: 0, keywordAutocomplete: null, keywordActiveId: null }),
     computed: {
@@ -47,6 +55,13 @@
         return JSON.stringify([this.ctActive, this.ctActive ? this.ctWorkspace?.scope : this.sourceIdentity,
           this.gameVersion, this.lang, this.ctActive ? this.ctSelection : this.editorCurrentEditingDesc?.filepath,
           this.cloudUser?.id]);
+      },
+      keywordSheetPreviewKeys() {
+        const unit = this.ctCurrentUnit;
+        if (!this.ctActive || unit?.sheet !== 'KeywordPopups') return [];
+        return [...new Set(unit.fields.filter(field => ['Info Title', 'Info Content'].includes(field.name))
+          .flatMap(field => [field.source, this.ctValues[field.id] ?? ''])
+          .flatMap(text => this.buildGamePreviewSegments(text, { contentMode: 'clienttext' }).keysOrder))];
       },
       keywordAutocompleteTag() {
         const item = this.ctActive ? this.ctCompletion?.items?.[this.ctCompletion.selectedIndex]
@@ -153,13 +168,7 @@
         return snapshot(this, sources || [], translated);
       },
       keywordCard(tag, context, extra = {}) {
-        const entry = context.entries.get(tag);
-        const parse = text => this.buildGamePreviewSegments(text, { contentMode: 'clienttext' }).segments;
-        return { id: ++this.keywordWindowSequence, context, tagName: tag, pinned: false,
-          title: parse(entry?.title || (entry ? '(empty)' : tag)), content: parse(entry?.content || '(empty)'),
-          notice: !context.entries.size ? 'KeywordPopups data unavailable. Prepare ClientText references in Lookup.'
-            : !entry ? 'Keyword not found in this workbook.'
-              : context.translated && (!entry.title.trim() || !entry.content.trim()) ? 'Missing ' + context.language + ' translation.' : '', ...extra };
+        return cardContent(this, tag, context, { id: ++this.keywordWindowSequence, pinned: false, ...extra });
       },
       clearKeywordAutocomplete() {
         const previous = this.keywordAutocomplete; this.keywordAutocomplete = null;
@@ -313,6 +322,22 @@
     props: ['host'], components: { 'keyword-preview-card': Card },
     template: `<section v-if="host.keywordAutocomplete" class="keywordPreviewWindow keywordAutocompleteCard" :data-keyword-detail="host.keywordAutocomplete.id" :data-language="host.keywordAutocomplete.context.language" :style="{fontFamily:host.keywordAutocomplete.context.font}" aria-label="Keyword information" @mousedown.prevent><keyword-preview-card :host="host" :item="host.keywordAutocomplete" linked-title></keyword-preview-card></section>`,
   };
+  const SheetPreview = {
+    props: { host: Object, translated: Boolean }, components: { 'keyword-preview-card': Card },
+    computed: {
+      units() { return this.host.ctUnits.filter(unit => unit.role === 'normal' && unit.sheet === 'KeywordPopups'); },
+      context() {
+        this.host.ctRevision;
+        return snapshot(this.host, [{ units: this.units, saved: this.host.ctSaved, scope: this.host.ctWorkspace?.scope }], this.translated);
+      },
+      sheetId() { return this.translated ? -2 : -1; },
+      item() { return cardContent(this.host, this.host.ctCurrentUnit?.recordId || '', this.context,
+        { id: this.sheetId, origin: this.host.keywordPreviewOrigin }); }
+    },
+    watch: { item() { this.host.removeKeywordBranch(this.sheetId); } },
+    beforeUnmount() { this.host.removeKeywordBranch(this.sheetId); },
+    template: `<section class="keywordPreviewWindow keywordSheetPreview" :data-language="item.context.language" :style="{fontFamily:item.context.font}" :aria-label="(translated?'Translation':'English')+' keyword-card preview'"><keyword-preview-card :host="host" :item="item"></keyword-preview-card></section>`
+  };
   const Window = {
     props: ['host', 'item', 'order'], components: { 'keyword-preview-card': Card },
     data: () => ({ x: 8, y: 8, maxWidth: null, maxHeight: null, dragging: false }),
@@ -371,5 +396,5 @@
     props: ['host'], components: { 'keyword-preview-window': Window },
     template: `<teleport to="body"><div class="keywordPreviewOverlay" data-inline-focus-surface :data-density="host.uiDensity"><keyword-preview-window v-for="(item,index) in host.keywordWindows" :key="item.id" :host="host" :item="item" :order="index"></keyword-preview-window></div></teleport>`,
   };
-  root.KeywordPopups = { mixin, Overlay, Details, snapshot, adjacentPosition };
+  root.KeywordPopups = { mixin, Overlay, Details, SheetPreview, Card, Text, snapshot, cardContent, adjacentPosition };
 })(typeof window === 'object' ? window : globalThis);

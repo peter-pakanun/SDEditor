@@ -86,10 +86,27 @@
         catch (_) { return ''; }
     }
     const component = {
-        name:'ClientTextPortraits',props:{items:{type:Array,default:()=>[]}},data(){return {failed:{},expanded:false};},
-        mounted(){this._online=()=>{this.failed={};};root.addEventListener?.('online',this._online);},
-        beforeUnmount(){root.removeEventListener?.('online',this._online);},
-        methods:{url:portraitUrl,tooltip(item){return item.relation+': '+item.name+'\n'+item.paths.join('\n')+(item.provisional?'\nProvisional class portrait; review at PoE2 1.0.':'')+(item.id && !this.failed[this.url(item.id,item.game)]?'':'\nPortrait unavailable.');},
+        name:'ClientTextPortraits',props:{items:{type:Array,default:()=>[]}},data(){return {failed:{},expanded:false,images:{}};},
+        computed:{mediaKey(){return JSON.stringify([this.$root.privateMediaKey,this.items.map(item=>[item.game,item.id])]);}},
+        watch:{mediaKey:{immediate:true,flush:'sync',handler(){this.loadImages();}}},
+        mounted(){this._online=()=>this.loadImages();root.addEventListener?.('online',this._online);},
+        beforeUnmount(){this.clearImages();root.removeEventListener?.('online',this._online);},
+        methods:{url(id,game){return this.images[game+':'+id] || '';},
+            clearImages(){this._mediaRun=null;this._mediaAbort?.abort();this._mediaAbort=null;for(const lease of this._mediaLeases || [])lease.release();this._mediaLeases=[];this.images={};this.failed={};},
+            async loadImages(){
+                this.clearImages();const host=this.$root,run=this._mediaRun={},key=this.mediaKey;
+                if(!host.privateMediaAllowed)return;
+                await this.$nextTick();if(run!==this._mediaRun || key!==this.mediaKey)return;
+                let context;try{context=host.privateMediaContext();}catch(_){return;}
+                const controller=this._mediaAbort=new root.AbortController();
+                await Promise.all(this.items.filter(item=>item.id && ['poe1','poe2'].includes(item.game) && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(item.id)).map(async item=>{
+                    try{const lease=await host.privateMediaLoad('/portraits/'+item.game+'/'+item.id+'.webp?v='+VERSION,'image',{context,signal:controller.signal});
+                        if(run!==this._mediaRun || key!==this.mediaKey){lease.release();return;}
+                        this._mediaLeases.push(lease);this.images={...this.images,[item.game+':'+item.id]:lease.url};
+                    }catch(_){/* Named placeholders preserve local editing without private image access. */}
+                }));
+            },
+            tooltip(item){return item.relation+': '+item.name+'\n'+item.paths.join('\n')+(item.provisional?'\nProvisional class portrait; review at PoE2 1.0.':'')+(item.id && this.url(item.id,item.game) && !this.failed[this.url(item.id,item.game)]?'':'\nPortrait unavailable.');},
             keydown(event){if(event.key==='Escape')this.expanded=false;}},
         template:`<span v-if="items.length" class="ctPortraitStack" :class="{ctPortraitMultiple:items.length>1,ctPortraitExpanded:expanded && items.length>2}" :style="{'--ct-portrait-count':Math.min(items.length,4)}" role="group" :aria-label="'Related characters: '+items.map(item=>item.name).join(', ')" :tabindex="items.length>2?0:undefined" @mouseenter="expanded=true" @mouseleave="expanded=$el.contains($el.ownerDocument.activeElement)" @focusin="expanded=true" @focusout="expanded=$el.contains($event.relatedTarget)" @keydown.stop="keydown">
             <span class="ctPortraitCards">

@@ -84,6 +84,7 @@
       },
       async cloudApply(snapshot) {
         if (!snapshot) return;
+        this.privateMediaRefreshAccess?.();
         const settings = window.CloudSync.completeSettings(snapshot.settings);
         const oldUser = this.cloudUser || {}, nextUser = snapshot.user || {};
         const nextProfile = snapshot.profileId || nextUser.id || 'guest';

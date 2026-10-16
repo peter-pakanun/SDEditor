@@ -113,9 +113,9 @@ async function checkFocusGestures(page, target, windows) {
   await page.evaluate(()=>{fixtureApp.raiseKeywordWindow=keywordTraceRaise;fixtureApp.pinKeywordWindow=keywordTracePin;document.removeEventListener('focusin',keywordTraceFocus,true);});
 }
 async function checkPointerBehavior(page, target, source, windows) {
-  await target.hover(); await page.waitForSelector('.keywordPreviewWindow');
+  await target.hover(); await page.waitForSelector('.keywordPreviewWindow[data-keyword-window]');
   const transient = windows.first(), box = await transient.boundingBox();
-  await page.evaluate(() => document.querySelector('.keywordPreviewWindow').click());
+  await page.evaluate(() => document.querySelector('.keywordPreviewWindow[data-keyword-window]').click());
   assert.equal(await page.evaluate(() => fixtureApp.keywordWindows[0].pinned), false, 'card click raises/focuses but never pins');
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   assert.equal(await windows.count(), 0, 'entering an unpinned card dismisses it immediately');
@@ -164,6 +164,59 @@ async function checkPointerBehavior(page, target, source, windows) {
     await page.setViewportSize({width:1440,height:900});
   }
 }
+async function checkAutocompleteWheel(page, ct, label) {
+  const details=page.locator('.hlPopupDetails'), card=page.locator('.keywordAutocompleteCard');
+  const snapshot=()=>page.evaluate(ct=>{
+    const host=fixtureApp,input=document.querySelector('[data-autocomplete-fixture-input]');
+    return {value:input.value,selection:[input.selectionStart,input.selectionEnd],focused:document.activeElement===input,
+      index:ct?host.ctCompletion?.selectedIndex:host.hlPopup.selectedIndex,visible:ct?!!host.ctCompletion:host.hlPopup.visible,
+      active:host.keywordActiveId,details:document.querySelector('.hlPopupDetails').scrollTop,
+      editor:[...document.querySelectorAll('.editor .edit,.fileTableScroll,.ctTableScroll,.workspaceContent')].map(node=>[node.scrollLeft,node.scrollTop]),
+      page:[scrollX,scrollY],inputScroll:[input.scrollLeft,input.scrollTop]};
+  },ct);
+  const stable=(actual,before)=>{const {details:ignored,...rest}=actual;const {details:previous,...expected}=before;assert.deepEqual(rest,expected,'wheel preserves editor, page, menu selection and caret: '+label);};
+  await page.evaluate(async()=>{
+    const host=fixtureApp;window.keywordWheelContent=host.keywordAutocomplete.content;
+    host.keywordAutocomplete.content=host.buildGamePreviewSegments('Long keyword information\n'+Array.from({length:100},(_,index)=>'Wheel paragraph '+index+' remains readable.').join('\n'),{contentMode:'clienttext'}).segments;
+    await host.$nextTick();
+  });
+  const d=await details.boundingBox(), c=await card.boundingBox(), point={x:c.x+10,y:Math.min(c.y+60,d.y+d.height-12)};
+  await page.mouse.move(point.x,point.y);
+  assert.equal(await page.evaluate(p=>!!document.elementFromPoint(p.x,p.y)?.closest('.keywordAutocompleteCard'),point),true,'wheel targets the card, not its scrollbar');
+  const before=await snapshot();assert.equal(before.focused,true);
+  await page.mouse.wheel(0,180);await page.waitForTimeout(150);
+  let after=await snapshot();assert.ok(after.details>before.details,'actual mouse wheel scrolls keyword details: '+label);stable(after,before);
+  const mouseScroll=after.details;
+  await page.mouse.wheel(2.5,37.5);await page.waitForTimeout(150);
+  after=await snapshot();assert.ok(after.details>mouseScroll,'fractional diagonal trackpad-style delta scrolls details');stable(after,before);
+  await page.mouse.wheel(0,100000);await page.waitForTimeout(150);
+  let bounds=await details.evaluate(node=>({top:node.scrollTop,max:node.scrollHeight-node.clientHeight}));
+  assert.ok(Math.abs(bounds.top-bounds.max)<=1,'wheel reaches detail bottom');
+  await page.mouse.wheel(0,500);await page.waitForTimeout(150);stable(await snapshot(),before);
+  assert.ok(Math.abs((await snapshot()).details-bounds.max)<=1,'bottom boundary does not chain');
+  for(let attempt=0;attempt<4;attempt++){
+    await page.mouse.wheel(0,-100000);await page.waitForTimeout(150);
+    if((await snapshot()).details<=1)break;
+  }
+  assert.ok((await snapshot()).details<=1);
+  await page.mouse.wheel(0,-500);await page.waitForTimeout(150);stable(await snapshot(),before);assert.equal((await snapshot()).details,0);
+
+  // The adjacent TL Note owns its own overflow. Wheel at its boundary must not
+  // start moving the surrounding keyword/detail area or the editor underneath.
+  const note=page.locator('.hlPopupTlnoteText'), oldNote=await note.innerText();
+  await note.evaluate(node=>node.textContent=Array.from({length:80},(_,index)=>'Long translator note '+index).join('\n'));
+  const n=await note.boundingBox();await page.mouse.move(n.x+n.width/2,n.y+n.height/2);
+  await page.mouse.wheel(0,140);await page.waitForTimeout(150);
+  assert.ok(await note.evaluate(node=>node.scrollTop>0),'TL Note scrolls with wheel');stable(await snapshot(),before);assert.equal((await snapshot()).details,0);
+  await page.mouse.wheel(0,100000);await page.waitForFunction(()=>{const n=document.querySelector('.hlPopupTlnoteText');return n.scrollTop>=n.scrollHeight-n.clientHeight-1;});await page.mouse.wheel(0,500);await page.waitForTimeout(150);
+  assert.equal((await snapshot()).details,0,'TL Note bottom contains scrolling');stable(await snapshot(),before);
+  await page.mouse.wheel(0,-100000);await page.waitForFunction(()=>document.querySelector('.hlPopupTlnoteText').scrollTop<=1);await page.mouse.wheel(0,-500);await page.waitForTimeout(150);
+  assert.equal(await note.evaluate(node=>node.scrollTop),0);assert.equal((await snapshot()).details,0);stable(await snapshot(),before);
+  await note.evaluate((node,text)=>node.textContent=text,oldNote);
+
+  await page.evaluate(async()=>{fixtureApp.keywordAutocomplete.content=keywordWheelContent;await fixtureApp.$nextTick();});
+  console.log(JSON.stringify({wheel:label,mouseScroll,details:'top/bottom contained',note:'wheel and boundaries passed',editor:'selection, caret and page unchanged'}));
+}
 async function checkAutocomplete(page, ct, label) {
   const card = page.locator('.keywordAutocompleteCard'), windows = page.locator('.keywordPreviewWindow[data-keyword-window]');
   const prepare = async () => {
@@ -198,6 +251,7 @@ async function checkAutocomplete(page, ct, label) {
   assert.ok(b.y>=n.y+n.height,'keyword information appears beneath TL note');
   await page.screenshot({path:join(folder,'autocomplete-'+label+'-with-note.png')});
   assert.equal(await input.evaluate(node=>document.activeElement===node),true,'showing details never steals caret focus');
+  await checkAutocompleteWheel(page,ct,label);
   await input.press('ArrowDown'); await settle(page);
   assert.equal(await card.locator('.keywordPreviewTitle').innerText(),'Thai Armour Title');assert.equal(await note.count(),0);
   await input.press('ArrowDown');await settle(page);assert.equal(await card.count(),0,'ordinary variable suggestion clears keyword details');
@@ -294,19 +348,19 @@ async function checkAutocomplete(page, ct, label) {
     await settle(page);
     const source = page.locator('.gamePreviewSourcePane .gamePreviewKw').first();
     const target = page.locator('.gamePreviewTargetPane .gamePreviewKw').first();
-    const windows = page.locator('.keywordPreviewWindow');
+    const windows = page.locator('.keywordPreviewWindow[data-keyword-window]');
     await checkFocusGestures(page,target,windows);
     await checkPointerBehavior(page, target, source, windows);
     await checkAutocomplete(page,true,'clienttext-full');
     await page.evaluate(async()=>{fixtureApp.ctSelectedFilters=['missing','outdated','revised','saved','unchanged'];fixtureApp.ctEditor=false;await fixtureApp.$nextTick();});
     await checkAutocomplete(page,true,'clienttext-inline');
     await page.evaluate(async()=>{fixtureApp.ctEditor=true;await fixtureApp.$nextTick();});
-    await target.hover(); await page.waitForSelector('.keywordPreviewWindow');
+    await target.hover(); await page.waitForSelector('.keywordPreviewWindow[data-keyword-window]');
     assert.equal(await windows.locator('.keywordPreviewTitle').innerText(), 'Thai Physical');
     assert.match(await windows.locator('.keywordPreviewContent').innerText(), /^Thai body/);
     const parentId = await windows.getAttribute('id'); await target.click();
     await windows.locator('.keywordPreviewContent .gamePreviewKw').hover();
-    await page.waitForFunction(() => document.querySelectorAll('.keywordPreviewWindow').length === 2);
+    await page.waitForFunction(() => document.querySelectorAll('.keywordPreviewWindow[data-keyword-window]').length === 2);
     const nested = windows.last();
     assert.equal(await nested.locator('.keywordPreviewTitle').innerText(), 'Thai Armour Title');
     await page.locator('#'+parentId+' .keywordPreviewContent .gamePreviewKw').click();
@@ -320,7 +374,7 @@ async function checkAutocomplete(page, ct, label) {
     // Focus restored to the parent keyword must not immediately reopen the child.
     await page.waitForTimeout(80); assert.equal(await windows.count(), 1);
     await page.locator('#' + parentId + ' .keywordPreviewTitle').click();
-    await source.hover(); await page.waitForFunction(() => document.querySelectorAll('.keywordPreviewWindow').length === 2);
+    await source.hover(); await page.waitForFunction(() => document.querySelectorAll('.keywordPreviewWindow[data-keyword-window]').length === 2);
     const englishId = await windows.last().getAttribute('id'); await source.click();
     assert.equal(await page.locator('#' + englishId + ' .keywordPreviewTitle').innerText(), 'Physical Damage');
     assert.match(await page.locator('#' + englishId + ' .keywordPreviewContent').innerText(), /^English body/);
@@ -358,7 +412,7 @@ async function checkAutocomplete(page, ct, label) {
       fixtureApp.ctWorkspace.scope = { ...fixtureApp.ctWorkspace.scope, game: 'poe2', language: 'German', versionId: 'next' };
       fixtureApp.ctUnits = []; fixtureApp.ctRevision++; await fixtureApp.$nextTick();
     });
-    const oldChild = page.locator('.keywordPreviewWindow').filter({ hasText: 'English nested body' });
+    const oldChild = page.locator('.keywordPreviewWindow[data-keyword-window]').filter({ hasText: 'English nested body' });
     await oldChild.locator('.gamePreviewKw').hover(); await settle(page);
     assert.equal(await windows.last().locator('.keywordPreviewTitle').innerText(), 'Physical Damage');
     assert.equal(await windows.last().getAttribute('data-language'), 'English');

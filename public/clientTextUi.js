@@ -245,7 +245,7 @@
                 ];
             },
             ctPreviewKeys() { return [...new Set([...this.ctGamePreview.source.keysOrder,...this.ctGamePreview.target.keysOrder,
-                ...this.ctGamePreviewVariants.flatMap(variant=>variant.keysOrder)])]; },
+                ...this.ctGamePreviewVariants.flatMap(variant=>variant.keysOrder), ...(this.ctSkillVariableKeys || []), ...(this.keywordSheetPreviewKeys || [])])]; },
             ctFieldGroups() { return groupFields({fields:this.ctFieldsFor()}); },
             ctHistoryChoices() {
                 return [{ key: 'original', label: 'Original workbook' }, { key: 'current', label: 'Current translation' },

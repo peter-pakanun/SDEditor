@@ -167,7 +167,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
 const config = Vue.defineComponent({
-  mixins: [window.KeywordPopups?.mixin || {}, window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}],
+  mixins: [window.PrivateMediaUI?.mixin || {}, window.ClientTextSkillCardUI?.mixin || {}, window.KeywordPopups?.mixin || {}, window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -1062,7 +1062,7 @@ const config = Vue.defineComponent({
           out.push(k);
         }
       }
-      return out;
+      return [...new Set([...out, ...(this.ctActive ? this.ctSkillVariableKeys || [] : [])])];
     }
   },
   methods: {
@@ -1561,6 +1561,8 @@ const config = Vue.defineComponent({
       return '"Fontin", "Noto Serif", serif';
     },
     defaultPreviewVarValue(key) {
+      const example = window.ClientTextSkillCards?.defaultExampleValue(key);
+      if (example !== undefined) return example;
       return "10";
     },
     mergePreviewGggVars(keysOrder) {
@@ -8178,7 +8180,10 @@ if (window.ClientTextUI) {
 if (window.EditorComponents?.TextField) app.component('editor-text-field', window.EditorComponents.TextField);
 if (window.KeywordPopups) app.component('keyword-popup-overlay', window.KeywordPopups.Overlay);
 if (window.KeywordPopups) app.component('keyword-autocomplete-details', window.KeywordPopups.Details);
+if (window.KeywordPopups?.SheetPreview) app.component('keyword-sheet-preview', window.KeywordPopups.SheetPreview);
 if (window.EditorComponents?.Preview) app.component('editor-preview', window.EditorComponents.Preview);
+if (window.ClientTextSkillCardUI) app.component('client-text-skill-card', window.ClientTextSkillCardUI.Card);
+if (window.ClientTextSkillCardUI) app.component('skill-card-text', window.ClientTextSkillCardUI.Text);
 if (window.EditorComponents?.Assistance) app.component('editor-assistance', window.EditorComponents.Assistance);
 if (window.EditorComponents?.DictionaryEntries) app.component('editor-dictionary-entries', window.EditorComponents.DictionaryEntries);
 if (window.EditorComponents?.Tools) app.component('editor-tools', window.EditorComponents.Tools);

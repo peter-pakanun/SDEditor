@@ -6,11 +6,18 @@ const first='4.0/NPC/Part1/Act1/Una/Una_01A.ogg';
 const second='4.0/NPC/Tujen/Tujen_A4_Intro_SkippedAlvaRog_01=StrDex4.ogg';
 const unit=(audio=first,sheet='NPCTextAudio')=>({id:'una',sheet,metadata:{'Audio File':audio}});
 function harness(changes={},environment={}){
-    const calls={play:0,pause:0,load:0,removed:[],hidden:0};
-    const player={play:async()=>{calls.play++;},pause:()=>calls.pause++,load:()=>calls.load++,removeAttribute:name=>calls.removed.push(name)};
+    const calls={play:0,pause:0,load:0,removed:[],hidden:0,media:[],leases:[],released:[]};
+    const player={play:async()=>{assert.match(app.request.url,/^blob:/,'native playback only receives an authenticated Blob URL');calls.play++;},pause:()=>calls.pause++,load:()=>calls.load++,removeAttribute:name=>calls.removed.push(name)};
     const window={CloudUI:{apiBase:()=> 'https://api.example.test'},AbortController,setTimeout,clearTimeout,...environment};
     vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../public/clientTextAudio.js'),'utf8'),{window});
-    const component=window.ClientTextAudio.component,host={ctActive:true,ctEditor:true,ctCurrentUnit:unit(),ctWorkspace:{scope:{accountId:'alice',game:'poe2',language:'Thai',groupId:'v1'}},hideTooltip:()=>calls.hidden++,...changes};
+    const component=window.ClientTextAudio.component,host={ctActive:true,ctEditor:true,ctCurrentUnit:unit(),ctWorkspace:{scope:{accountId:'alice',game:'poe2',language:'Thai',groupId:'v1'}},hideTooltip:()=>calls.hidden++,
+        privateMediaAllowed:true,privateMediaKey:'alice:translator:Thai:access1',
+        privateMediaLoad:async(path,kind,options)=>{
+            calls.media.push({path,kind,options});
+            let released=false;
+            const lease={url:'blob:audio-'+calls.leases.length,release(){if(!released){released=true;calls.released.push(lease.url);}}};
+            calls.leases.push(lease);return lease;
+        },...changes};
     const app={...component.data(),host,surface:'both',$refs:{player:[player]},$nextTick:async()=>{}};
     for(const[name,method]of Object.entries(component.methods))app[name]=method.bind(app);
     for(const[name,get]of Object.entries(component.computed))Object.defineProperty(app,name,{get:()=>get.call(app)});
@@ -110,30 +117,37 @@ test('field and preview controls use the same session and unmounting one view ke
     assert.equal(field.session.trackState(0),'loading');
     await h.app.playing({currentTarget:h.player},request);assert.equal(preview.session.trackState(0),'playing');
     controls.beforeUnmount.call(preview);assert.equal(field.session.trackState(0),'playing');assert.equal(h.calls.play,1);
+    assert.deepEqual(h.calls.released,[],'unmounting presentation controls must retain the shared playing lease');
     await field.session.play(0);assert.equal(h.app.request,null);assert.equal(preview.session.trackState(0),'idle');
+    assert.deepEqual(h.calls.released,[request.url],'explicit stop releases shared media exactly once');
     h.app.host.ctInlineClosed=true;
     await h.app.play(0);assert.ok(h.app.request,'preview-only playback works after the inline fields close');
 });
 
-test('opening and selecting records stays network silent; explicit play uses the shared API resolver without credentials',async()=>{
+test('opening and selecting records stay network silent; explicit play uses authenticated media and a Blob URL',async()=>{
     let fetched=0;const h=harness({}, {fetch:async()=>{fetched++;return {ok:true};}});
     assert.equal(h.app.request,null);assert.equal(h.calls.play,0);assert.equal(h.app.clips.length,1);
     await h.app.play();
-    assert.equal(h.calls.play,1);assert.equal(h.app.request.url,'https://api.example.test/audio/poe2db?path='+encodeURIComponent(first.toLowerCase()));
+    assert.equal(h.calls.play,1);assert.equal(h.app.request.url,'blob:audio-0');
+    assert.equal(h.calls.media.length,1);assert.equal(h.calls.media[0].path,'/audio/poe2db?path='+encodeURIComponent(first.toLowerCase()));
+    assert.equal(h.calls.media[0].kind,'audio');assert.ok(h.calls.media[0].options.signal instanceof AbortSignal);
     assert.equal(h.app.request.url.includes('token'),false);
     assert.equal(h.app.playbackState,'loading');assert.equal(fetched,0);
     assert.match(h.component.template,/controls preload="none"/);
     h.app.host.ctCurrentUnit=unit(second);
     h.component.watch.contextKey.handler.call(h.app);
     assert.equal(h.app.request,null);assert.equal(h.calls.pause,2);assert.equal(h.app.error,'');
+    assert.deepEqual(h.calls.released,['blob:audio-0']);assert.equal(h.calls.media[0].options.signal.aborted,true);
     assert.equal(fetched,0);
 });
 
 test('scope, record, hidden surface and unmount cancel playback and ignore stale events',async()=>{
-    for(const change of [app=>app.host.ctCurrentUnit=unit(second),app=>app.host.cloudProfileId='bob',app=>app.host.gameVersion='poe1',app=>app.host.ctWorkspace.scope.language='French']){
+    for(const change of [app=>app.host.ctCurrentUnit=unit(second),app=>app.host.cloudProfileId='bob',app=>app.host.gameVersion='poe1',app=>app.host.ctWorkspace.scope.language='French',app=>app.host.privateMediaKey='alice:translator:Thai:access2']){
         const h=harness();await h.app.play();const request=h.app.request;change(h.app);
+        assert.equal(h.calls.play,1);assert.ok(request,'each fixture has active authenticated playback before switching');
         h.component.watch.contextKey.handler.call(h.app);h.app.failed({currentTarget:h.player},request);
         assert.equal(h.app.request,null);assert.equal(h.app.error,'');assert.equal(h.calls.pause,2);
+        assert.deepEqual(h.calls.released,[request.url]);assert.equal(h.calls.media[0].options.signal.aborted,true);
     }
     const h=harness();await h.app.play();const request=h.app.request;
     h.app.host.ctEditor=false;h.component.watch.visible.handler.call(h.app,false);
@@ -176,48 +190,95 @@ test('switching tracks stops the previous clip, and its late media events cannot
     const h=harness({ctCurrentUnit:unit(first+', '+second)});await h.app.play();
     const old=h.app.request;h.app.playing({currentTarget:h.player},old);
     await h.app.play(1);assert.equal(h.app.selectedClip.path,second.toLowerCase());assert.equal(h.calls.play,2);
-    assert.ok(h.app.request.url.endsWith(encodeURIComponent(second.toLowerCase())));
+    assert.equal(h.calls.media.at(-1).path,'/audio/poe2db?path='+encodeURIComponent(second.toLowerCase()));
+    assert.equal(h.app.request.url,'blob:audio-1');assert.deepEqual(h.calls.released,[old.url]);
     const current=h.app.request;
     for(const event of ['playing','waiting','stalled','paused','ended','failed'])h.app[event]({currentTarget:h.player},old);
     assert.equal(h.app.request,current);assert.equal(h.app.playbackState,'loading');
     h.app.playing({currentTarget:h.player},current);assert.equal(h.app.trackState(1),'playing');assert.equal(h.app.trackState(0),'idle');
 });
 
-test('native failures obtain bounded HTTP details only after failure and retain each track error until retry',async()=>{
-    const requests=[];
-    const h=harness({ctCurrentUnit:unit(first+', '+second)},{fetch:async(url,options)=>{requests.push({url,options});return {ok:false,status:404};}});
-    await h.app.play(0);assert.equal(requests.length,0);
-    h.player.error={code:4};const before=h.calls.pause;await h.app.failed({currentTarget:h.player},h.app.request);
+test('authenticated fetch failures retain HTTP details per track until retry without anonymous probes',async()=>{
+    let fetched=0;
+    const h=harness({ctCurrentUnit:unit(first+', '+second)},{fetch:async()=>{fetched++;throw new Error('Anonymous probes are forbidden');}});
+    const successfulLoad=h.app.host.privateMediaLoad;
+    h.app.host.privateMediaLoad=async(...args)=>{if(args[0].endsWith(encodeURIComponent(first.toLowerCase())))throw Object.assign(new Error('Not found'),{status:404});return successfulLoad(...args);};
+    const before=h.calls.pause;await h.app.play(0);
     assert.equal(h.app.playbackState,'error');assert.equal(h.app.trackState(0),'error');
     assert.ok(h.calls.pause>before,'errors stop native playback before hiding its controls');
     assert.match(h.app.trackTooltip(h.app.clips[0],0),/HTTP 404.*Click to retry/);
-    assert.equal(requests.length,1);assert.equal(requests[0].options.method,'HEAD');assert.equal(requests[0].options.credentials,'omit');
+    assert.equal(h.calls.play,0,'failed authenticated downloads never reach the native player');assert.equal(fetched,0);
     await h.app.play(1);assert.equal(h.app.trackState(0),'error');assert.equal(h.app.trackState(1),'loading');
+    h.app.host.privateMediaLoad=successfulLoad;
     await h.app.play(0);assert.equal(h.app.trackState(0),'loading');assert.equal(h.app.error,'');
-    assert.equal(requests.length,1,'retry playback does not preflight');
+    assert.equal(fetched,0,'retry playback uses only the authenticated loader');
     h.app.reset();
 });
 
-test('stale HTTP diagnostics and play promise failures are fenced after context changes',async()=>{
+test('stale authenticated fetch failures and play promise failures are fenced after context changes',async()=>{
     let finish,signal;
-    const h=harness({}, {fetch:(_url,options)=>{signal=options.signal;return new Promise(resolve=>{finish=resolve;});}});
-    await h.app.play();const request=h.app.request;
-    const failure=h.app.failed({currentTarget:h.player},request);
+    const h=harness({privateMediaLoad:(_path,_kind,options)=>{signal=options.signal;return new Promise((_resolve,reject)=>{finish=reject;});}});
+    const failure=h.app.play();
     assert.equal(signal.aborted,false);h.app.host.cloudProfileId='bob';h.component.watch.contextKey.handler.call(h.app);
-    assert.equal(signal.aborted,true);finish({ok:false,status:404});await failure;
+    assert.equal(signal.aborted,true);finish(Object.assign(new Error('Not found'),{status:404}));await failure;
     assert.equal(h.app.request,null);assert.equal(h.app.error,'');assert.deepEqual(Object.keys(h.app.trackErrors),[]);
     let rejectPlay,started;const playStarted=new Promise(resolve=>{started=resolve;});
+    h.app.host.privateMediaLoad=async()=>({url:'blob:retry',release(){}});
     h.player.play=()=>new Promise((_resolve,reject)=>{rejectPlay=reject;started();});
     const pending=h.app.play();await playStarted;h.app.reset();rejectPlay(new Error('late failure'));await pending;
     assert.equal(h.app.playbackState,'idle');assert.equal(h.app.error,'');
 });
 
-test('HEAD failure preserves native decode detail and playback rejection remains retryable',async()=>{
-    const h=harness({}, {fetch:async()=>{throw new TypeError('CORS');}});
+test('native decode detail needs no HTTP probe and browser playback rejection remains retryable',async()=>{
+    let fetched=0;const h=harness({}, {fetch:async()=>{fetched++;throw new TypeError('CORS');}});
     await h.app.play();h.player.error={code:3};await h.app.failed({currentTarget:h.player},h.app.request);
     assert.match(h.app.error,/decoded/);assert.match(h.app.trackTooltip(h.app.clips[0],0),/Click to retry/);
     h.player.play=async()=>{throw Object.assign(new Error('blocked'),{name:'NotAllowedError'});};
     await h.app.play();assert.equal(h.app.playbackState,'error');assert.match(h.app.error,/blocked by the browser/);
+    assert.equal(fetched,0,'native decoder errors must not issue unauthenticated HEAD requests');
+    h.app.reset();
+});
+
+test('signed-out or denied access never loads media or passes a direct API URL to the player',async()=>{
+    let fetched=0;const h=harness({privateMediaAllowed:false},{fetch:async()=>{fetched++;}});
+    const snapshot=structuredClone(h.app.host.ctCurrentUnit);
+    await h.app.play();
+    assert.equal(h.calls.media.length,0);assert.equal(h.calls.play,0);assert.equal(fetched,0);
+    assert.equal(h.app.request,null);assert.equal(h.app.playbackState,'error');assert.match(h.app.error,/unavailable/);
+    assert.deepEqual(h.app.host.ctCurrentUnit,snapshot,'authorization failure does not modify workbook data');
+});
+
+test('a download completing after an access change is released and cannot start former-account playback',async()=>{
+    let finish,signal,released=0;
+    const h=harness({privateMediaLoad:(_path,_kind,options)=>{signal=options.signal;return new Promise(resolve=>{finish=resolve;});}});
+    const pending=h.app.play();assert.equal(h.app.playbackState,'loading');assert.equal(h.calls.play,0);
+    const previous=h.app.contextKey;
+    h.app.host.privateMediaAllowed=false;h.app.host.privateMediaKey='signed-out';
+    assert.notEqual(h.app.contextKey,previous,'access revision participates in the media scope');
+    h.component.watch.contextKey.handler.call(h.app);
+    assert.equal(signal.aborted,true);finish({url:'blob:former-account',release(){released++;}});await pending;
+    assert.equal(released,1);assert.equal(h.calls.play,0);assert.equal(h.app.request,null);
+    assert.equal(h.app.playbackState,'idle');assert.equal(h.app.error,'');
+});
+
+test('unmount cancels a pending download and releases a late lease without retaining a controller',async()=>{
+    let finish,signal,released=0;
+    const h=harness({privateMediaLoad:(_path,_kind,options)=>{signal=options.signal;return new Promise(resolve=>{finish=resolve;});}});
+    h.app.host.ctAudioController=h.app;
+    const pending=h.app.play();h.component.beforeUnmount.call(h.app);
+    assert.equal(signal.aborted,true);assert.equal(h.app._mediaAbort,null);assert.equal(h.app.host.ctAudioController,null);
+    finish({url:'blob:unmounted',release(){released++;}});await pending;
+    assert.equal(released,1);assert.equal(h.calls.play,0);assert.equal(h.app._mediaLease,null);assert.equal(h.app.request,null);
+});
+
+test('native pause retains the local seekable Blob until end or reset releases it exactly once',async()=>{
+    const h=harness();await h.app.play();const request=h.app.request;
+    h.app.playing({currentTarget:h.player},request);await h.app.paused({currentTarget:h.player},request);
+    assert.deepEqual(h.calls.released,[]);assert.equal(h.calls.media.length,1);
+    await h.app.play();assert.equal(h.calls.media.length,1,'native resume reuses its already authorized local media');
+    h.app.playing({currentTarget:h.player},request);h.app.ended({currentTarget:h.player},request);
+    h.app.reset();h.component.beforeUnmount.call(h.app);
+    assert.deepEqual(h.calls.released,[request.url]);assert.equal(h.app._mediaLease,null);
 });
 
 test('visible footer measurement follows resize observers and removes observers/listeners on unmount',()=>{
