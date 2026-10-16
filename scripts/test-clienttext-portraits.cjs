@@ -4,20 +4,7 @@ const assert=require('node:assert/strict');
 const Portraits=require('../public/clientTextPortraits.js');
 const NPC=require('../public/clientTextNpcIndex.js');
 const Convo=require('../public/clientTextConvoIndex.js');
-const UI=require('../public/clientTextUi.js');
 const unit=(sheet,id,metadata={},name='')=>({id:JSON.stringify(['normal',sheet,id]),role:'normal',sheet,recordId:id,metadata,fields:[{name:'Name',source:name}]});
-test('portraits follow the visible English preview and return to source when it is hidden',()=>{
-    const visible=UI.mixin.computed.ctPortraitsInPreview,items=UI.mixin.computed.ctPreviewPortraits;
-    const row=unit('Other','Ailith'),portraits=[{id:'ailith'}],host={ctPreviewMounted:true,hideSourceInPreviewPanel:false,ctEditor:true,ctTool:'dictionary',inlineSidebarVisible:true,ctCurrentUnit:row,
-        ctRowPortraits(value){assert.equal(value,row);return portraits;}};
-    assert.equal(visible.call(host),true,'full English preview owns portraits');
-    assert.equal(items.call({...host,ctPortraitsInPreview:true}),portraits);
-    for(const change of [{hideSourceInPreviewPanel:true},{ctPreviewMounted:false},{ctEditor:false},{ctEditor:false,ctTool:'preview',inlineSidebarVisible:false}]){
-        assert.equal(visible.call({...host,...change}),false,'closed or hidden preview leaves source portraits visible');
-        assert.deepEqual(items.call({...host,...change,ctPortraitsInPreview:false}),[]);
-    }
-    assert.equal(visible.call({...host,ctEditor:false,ctTool:'preview'}),true,'open inline preview owns portraits');
-});
 async function fixture(){
     const ailith='Metadata/NPC/League/Chayula/ChayulaFarmerHub',ailithOther='Metadata/NPC/League/Chayula/ChayulaFarmerNearDreamer',
         doryani='Metadata/NPC/Four_Act4/DoryaniTownKingsmarchIntro',hood='Metadata/NPC/Four_Act4/HoodedMentorKingsmarchIntro';

@@ -8169,7 +8169,6 @@ if (window.ClientTextAudio) {
   app.component('ct-audio-session', window.ClientTextAudio.component);
   app.component('ct-audio-controls', window.ClientTextAudio.controlsComponent);
 }
-if (window.ClientTextPortraits) app.component('ct-portraits', window.ClientTextPortraits.component);
 if (window.ClientTextUI) {
   app.component('ct-context', window.ClientTextUI.contextComponent);
   app.component('ct-fields', window.ClientTextUI.fieldsComponent);

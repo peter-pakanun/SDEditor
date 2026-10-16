@@ -198,11 +198,6 @@
             },
             ctCurrentUnit() { this.ctUnits;const id=this.ctSelection;return this._ctUnitIndex?.get(id) || null; },
             ctPreviewMounted() { return this.ctActive && !this.versionChooserVisible && !!this.ctCurrentUnit && (this.ctEditor || this.inlineEditor); },
-            ctPortraitsInPreview() {
-                return this.ctPreviewMounted && !this.hideSourceInPreviewPanel
-                    && (this.ctEditor || this.ctTool==='preview' && this.inlineSidebarVisible);
-            },
-            ctPreviewPortraits() { return this.ctPortraitsInPreview ? this.ctRowPortraits(this.ctCurrentUnit) : []; },
             ctPreviewField() {
                 const fields=this.ctFieldsFor();
                 return fields.find(field=>field.id===this.ctFocusedField && field.kind!=='gender') || fields.find(field=>field.kind!=='gender') || null;
@@ -3196,7 +3191,7 @@
                         <editor-native-field v-else :controller="host.ctSourceFieldController(group,source)" kind="english" :compact="side !== 'both'"></editor-native-field>
                         </component>
                         <ct-dialogue-audio v-if="$options.components['ct-dialogue-audio'] && audioSource(group,source)" :host="host" :surface="side"></ct-dialogue-audio>
-                        <ct-portraits v-if="$options.components['ct-portraits'] && !host.ctPortraitsInPreview && host.ctRowPortraits && audioSource(group,source)" :items="host.ctRowPortraits(host.ctCurrentUnit)"></ct-portraits>
+                        <ct-portraits v-if="$options.components['ct-portraits'] && host.ctRowPortraits && audioSource(group,source)" :items="host.ctRowPortraits(host.ctCurrentUnit)"></ct-portraits>
                     </div>
                     </template>
                 </div>
