@@ -549,11 +549,11 @@ test('ClientText exposes selected record reference metadata separately from deve
     const {app,original}=harness(),raw='Metadata/Characters/Dex/DexFourb\r\n raw\\n ';
     original.metadata={Character:raw,'Character Class':'Metadata/Characters/Str/StrFourb',Tags:'Retained privately'};
     original.developerNotes='Actual note';const before=clone(original);
-    assert.deepEqual(clone(app.ctReferenceMetadata()),[
-        {name:'Character',value:raw,parts:[{text:raw}]},
-        {name:'Character Class',value:original.metadata['Character Class'],parts:[{text:original.metadata['Character Class']}]},
-        {name:'Tags',value:'Retained privately',parts:[{text:'Retained privately'}]}
-    ]);
+    const references=clone(app.ctReferenceMetadata());
+    assert.equal(references[0].display,'Huntress\r\n raw\\n ');assert.equal(references[0].value,raw);
+    assert.match(references[0].parts[0].tooltip,/Static Character mapping \(poe2\)/);
+    assert.equal(references[1].display,'Warrior');assert.equal(references[1].value,original.metadata['Character Class']);
+    assert.deepEqual(references[2],{name:'Tags',value:'Retained privately',parts:[{text:'Retained privately'}]});
     assert.deepEqual(Array.from(app.ctNotes()),['Actual note']);assert.deepEqual(original,before);
     app.ctSelection='another record';assert.deepEqual(clone(app.ctReferenceMetadata()),[]);
 });
@@ -563,7 +563,7 @@ test('context reference labels read a prepared scoped index without scanning ori
         character={...namedUnit(path),sheet:'Characters',recordId:path,fields:[{id:'Name',name:'Name',kind:'text',source:'Huntress',target:'Local translation',sourceCell:'B10'}]};
     original.metadata={Character:path};app.ctUnits=[original,character];const before=clone(original);
     const adapter=window.ContentAdapters.clienttext;
-    assert.equal(app.ctReferenceMetadata()[0].display,undefined,'unprepared rendering retains the raw reference');
+    assert.equal(app.ctReferenceMetadata()[0].display,'Huntress','unprepared rendering uses the exact static fallback');
     await adapter.contextReferenceIndex(app.ctUnits);
     const first=app.ctReferenceMetadata();assert.equal(first[0].display,'Huntress');assert.ok(first[0].parts[0].tooltip.includes(path));assert.ok(first[0].parts[0].tooltip.includes('Characters!B10'));
     const cached=app._ctReferenceIndexCache;app.ctReferenceMetadata();assert.equal(app._ctReferenceIndexCache,cached);
@@ -571,7 +571,7 @@ test('context reference labels read a prepared scoped index without scanning ori
     await adapter.contextReferenceIndex(app.ctUnits);
     assert.equal(app.ctReferenceMetadata()[0].display,'Different original');assert.notEqual(app._ctReferenceIndexCache,cached);
     const newCache=app._ctReferenceIndexCache;app.ctWorkspace={...app.ctWorkspace};app.ctReferenceMetadata();assert.notEqual(app._ctReferenceIndexCache,newCache);
-    app.ctUnits=[original];assert.deepEqual(clone(app.ctReferenceMetadata()),[{name:'Character',value:path,parts:[{text:path}]}]);assert.deepEqual(original,before);
+    app.ctUnits=[original];assert.equal(app.ctReferenceMetadata()[0].display,'Huntress');assert.match(app.ctReferenceMetadata()[0].parts[0].tooltip,/Static Character mapping/);assert.deepEqual(original,before);
     const calls=[],component={host:{showTooltip(event,text){calls.push([event,text]);},hideTooltip(){calls.push('hide');}}},event={clientX:4};
     window.ClientTextUI.contextComponent.methods.showTooltip.call(component,event,'Character details');window.ClientTextUI.contextComponent.methods.hideTooltip.call(component);
     assert.deepEqual(calls,[[event,'Character details'],'hide']);

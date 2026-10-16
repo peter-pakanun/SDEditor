@@ -305,6 +305,16 @@ test('ClientText lookup exposes every populated metadata heading with literal va
   assert.equal(unit.metadata.Context, '  Metadata/Characters/NPC/Clearfell/Lachlann\\n<tag>\r\nLine two  ');
 });
 
+test('ClientText lookup uses source-game Character and variant fallbacks for partial workbooks', () => {
+  const unit={id:'partial',role:'normal',sheet:'NPCTextAudio',recordId:'PartialContext',metadata:{Character:'Metadata/Characters/Int/IntFourb','Ascendancy Filter':'Witch3, Witch3b'},
+    fields:[{id:'text',name:'Text',kind:'text',source:'Greetings',target:''}]};
+  const source={mode:'clienttext',language:'Thai',scope:{game:'poe2'},units:[unit],saved:{}};
+  const {model}=loadLookup({lookupCatalogSources:[source]});model.lookupCatalogKey=model.lookupSessionKey;
+  search(model,'PartialContext','path');model.lookupSelect(model.lookupVisibleResults[0].key);
+  assert.deepEqual(Array.from(model.lookupSelectedReference.referenceMetadata,entry=>entry.display),['Sorceress','Lich, Abyssal Lich']);
+  assert.equal(unit.metadata.Character,'Metadata/Characters/Int/IntFourb');
+});
+
 test('ClientText lookup safely omits blank metadata and sparse units without metadata', async () => {
   const units = [
     { id: 'blank', role: 'NPCText', sheet: 'NPCText', recordId: 'BlankContext',

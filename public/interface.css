@@ -367,7 +367,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .appNoticeStackSticky { position: sticky; top: 0; z-index: 42; }
 .appNoticeStack:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: -2px; }
 .editor {
-  --editor-preview-height: clamp(min(calc(160px * var(--density)), 50dvh), var(--editor-preview-requested-height, var(--editor-preview-default-height)), 50dvh);
+  --editor-preview-height: clamp(min(var(--editor-preview-min-height, calc(160px * var(--density))), 50dvh), var(--editor-preview-requested-height, var(--editor-preview-default-height)), 50dvh);
 }
 .editorPreviewPane { position: sticky; top: var(--editor-notice-height, 0px); z-index: 40; display: flex; flex-direction: column; height: var(--editor-preview-height); margin: 0 calc(-0.35em * var(--density)) calc(0.75em * var(--density)); background: var(--color-bg2); border-bottom: 1px solid var(--ui-border); box-sizing: border-box; }
 .editorPreviewPane .gamePreviewStrip { position: static; flex: 1; min-height: 0; height: auto; margin: 0; border-bottom: 0; }

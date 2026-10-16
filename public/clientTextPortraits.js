@@ -9,8 +9,20 @@
     const catalog = root.ClientTextPortraitCatalog || (typeof require === 'function' ? require('./clientTextPortraitCatalog.js') : { games:{} });
     const own = (object,key) => Object.prototype.hasOwnProperty.call(object || {},key);
     const references = value => typeof value === 'string' ? [...new Set(value.split(/[,\r\n]+/u).map(x=>x.trim()).filter(Boolean))] : [];
+    const nameKey=value=>String(value || '').trim().replace(/\s+/g,' ').toLowerCase();
+    // Reviewed default where exact English names span distinct source forms.
+    const nameDefaults={poe2:{'the hooded one':'hooded-one'}};
     function createResolver({ npcIndex, convoIndex, game }) {
         const registry=own(catalog.games,game) ? catalog.games[game] : {npcs:{},characters:{},labels:{},overrides:{}};
+        const names=new Map();
+        for(const [id,name]of Object.values(registry.npcs)){
+            const key=nameKey(name);if(!id || !key)continue;
+            if(!names.has(key))names.set(key,new Set());names.get(key).add(id);
+        }
+        const fallbackName=name=>{
+            const key=nameKey(name),ids=names.get(key),reviewed=nameDefaults[game]?.[key];
+            return reviewed && ids?.has(reviewed) ? reviewed : ids?.size===1 ? ids.values().next().value : '';
+        };
         const paths = new Map();
         for (const group of npcIndex?.groups || []) for (const path of group.paths) {
             if (!paths.has(path)) paths.set(path, new Set());
@@ -21,16 +33,22 @@
             if (!group) return null;
             const candidates=references?.length ? references : group.paths;
             const entries=candidates.map(path=>entryForNpc(path)),ids=[...new Set(entries.map(item=>item?.[0]).filter(Boolean))];
-            // A name group can contain several forms. Only an unambiguous exact mapping supplies art.
-            const id=ids.length===1 && entries.every(item=>item?.[0]) ? ids[0] : '';
-            return { key:id ? 'portrait:'+game+':'+id : 'npc:'+key, id, game, name:group.label, paths:candidates };
+            const fallback=candidates.some(path=>/^Metadata\/(?:NPC|Monsters|Pet)\//.test(path)) ? fallbackName(group.label) : '';
+            // Exact forms stay primary. Unmapped aliases can use an exact English
+            // name only when unique or covered by an explicit reviewed default.
+            const id=ids.length===1 && (entries.every(item=>item?.[0]) || fallback) ? ids[0] : fallback;
+            return { key:id ? 'portrait:'+game+':'+id : 'npc:'+key, groupKey:key, id, game, name:group.label, paths:candidates };
         }
         return unit => {
             if (!unit) return [];
-            const result=[],seen=new Set();
+            const result=[],seen=new Map(),resolvedNpcGroups=new Set();
             const add=(item,relation)=>{
-                if(!item || seen.has(item.key))return;
-                seen.add(item.key);result.push({...item,relation,provisional:!!registry.labels[item.id]?.provisional});
+                if(!item)return;
+                if(item.id && item.groupKey)resolvedNpcGroups.add(item.groupKey);
+                const previous=seen.get(item.key);
+                if(previous){previous.paths=[...new Set([...previous.paths,...item.paths])];return;}
+                const entry={...item,relation,provisional:!!registry.labels[item.id]?.provisional};
+                seen.set(item.key,entry);result.push(entry);
             };
             const npcRefs=references(unit.metadata?.NPC);
             const override=unit.sheet?.replace(/_Gender$/,'')==='NPCTextAudio' && own(registry.overrides,unit.recordId) ? registry.overrides[unit.recordId] : null;
@@ -59,7 +77,7 @@
                 if(owners?.size===1)add(npc(owners.values().next().value,[path],entryForNpc),'NPC reference');
                 else if(!owners?.size){const entry=entryForNpc(path);if(entry)add(direct(entry,[path]),'NPC reference');}
             }
-            return result;
+            return result.filter(item=>item.id || !resolvedNpcGroups.has(item.groupKey));
         };
     }
     function portraitUrl(id,game='poe2') {

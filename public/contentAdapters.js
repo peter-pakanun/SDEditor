@@ -1,9 +1,10 @@
 /* Content-mode boundary: editor text and durable evidence keep their raw shape. */
 (function(root,factory){
     const node=typeof module==='object'&&module.exports;
-    const api=factory(root,node?require('./clientTextState.js'):root.ClientTextState,node?require('./translationMemory.js'):root.TranslationMemory);
+    const api=factory(root,node?require('./clientTextState.js'):root.ClientTextState,node?require('./translationMemory.js'):root.TranslationMemory,
+        node?require('./clientTextIdentities.js'):null);
     if(node)module.exports=api;else root.ContentAdapters=api;
-})(typeof globalThis==='object'?globalThis:self,function(root,State,Memory){
+})(typeof globalThis==='object'?globalThis:self,function(root,State,Memory,Identities){
     'use strict';
     const copy=value=>value===undefined?undefined:JSON.parse(JSON.stringify(value));
     const normalizeMode=value=>String(value||'statdescription').toLowerCase();
@@ -15,7 +16,8 @@
     const contextIndexes=new WeakMap();
     // Candidates have exact raw-string offsets. Delimiters and surrounding
     // whitespace remain ordinary text, including literal backslash-n.
-    function contextCandidates(value){
+    const variantMetadata=name=>/^(?:Prohibited )?Ascendancy Filter$/.test(name);
+    function contextCandidates(value,splitIds=false){
         const spans=new Map(),add=(text,start)=>{
             const trimmed=text.trim();if(!trimmed)return;
             const offset=text.indexOf(trimmed),from=start+offset,to=from+trimmed.length;
@@ -24,6 +26,7 @@
         add(value,0);
         for(const match of value.matchAll(/[^,\r\n]+/g))add(match[0],match.index);
         for(const match of value.matchAll(/[^\s,;()[\]{}<>"']+\/[^\s,;()[\]{}<>"']+/g))add(match[0],match.index);
+        if(splitIds)for(const match of value.matchAll(/[^\s,;()[\]{}<>"']+/g))add(match[0],match.index);
         return [...spans.values()].sort((a,b)=>a.start-b.start||b.end-a.end);
     }
     const structuredPath=value=>/^[^\s,;()[\]{}<>"']+(?:\/[^\s,;()[\]{}<>"']+)+$/.test(value);
@@ -54,8 +57,8 @@
             check();if(force||now()-started>=8){await pause();check();started=now();}
         };
         for(const unit of originals){
-            for(const value of Object.values(unit?.metadata||{}))if(typeof value==='string'&&value.trim())
-                for(const candidate of contextCandidates(value))candidates.add(candidate.value);
+            for(const [name,value]of Object.entries(unit?.metadata||{}))if(typeof value==='string'&&value.trim())
+                for(const candidate of contextCandidates(value,variantMetadata(name)))candidates.add(candidate.value);
             if(++processed%256===0)await checkpoint(false);
         }
         await checkpoint(true);processed=0;
@@ -80,20 +83,28 @@
         if(candidates.length>4)details.push('+'+(candidates.length-4)+' more matching records');
         return (resolved?'Full path: ':'Related matches for: ')+id+'\n\n'+details.join('\n\n');
     }
-    function referenceMetadata(unit,index){
+    function referenceMetadata(unit,index,options={}){
+        // Share the portrait catalog's exact, game-scoped Character identities.
+        // Browser scripts load the catalog later; resolve it when displaying context.
+        const identities=Identities || root.ClientTextIdentities;
         return Object.entries(unit?.metadata||{}).flatMap(([name,value])=>{
             if(typeof value!=='string'||!value.trim())return [];
             const parts=[];let offset=0,matched=false;
-            if(index)for(const span of contextCandidates(value)){
+            if(index || identities && options.game)for(const span of contextCandidates(value,variantMetadata(name))){
                 if(span.start<offset)continue;
-                const candidates=index.get(span.value);if(!candidates?.length)continue;
+                const candidates=index?.get(span.value) || [];
+                const identity=identities?.reference(span.value,options.game,{variants:variantMetadata(name)});
                 // Worksheet order supplies a generic label without knowing
                 // target sheet/column names. Biography and other fields stay
                 // in the tooltip; paragraphs are not promoted to inline labels.
                 const label=candidates.length===1?candidates[0].fields[0]?.source:undefined;
-                const resolved=structuredPath(span.value)&&typeof label==='string'&&label.length<=160&&!/[\r\n]/.test(label);
+                const resolved=(structuredPath(span.value) || identity?.kind==='class variant')&&typeof label==='string'&&label.length<=160&&!/[\r\n]/.test(label);
+                const fallback=!resolved && identity ? identity.label : '';
+                if(!candidates.length && !fallback)continue;
+                const tooltip=fallback ? 'Full path: '+span.value+'\nStatic '+identity.kind+' mapping ('+options.game+')'
+                    +(candidates.length?'\n\n'+referenceTooltip(span.value,candidates,false):'') : referenceTooltip(span.value,candidates,resolved);
                 if(span.start>offset)parts.push({text:value.slice(offset,span.start)});
-                parts.push({text:resolved?label:span.value,tooltip:referenceTooltip(span.value,candidates,resolved)});
+                parts.push({text:resolved?label:fallback || span.value,tooltip});
                 offset=span.end;matched=true;
             }
             if(offset<value.length)parts.push({text:value.slice(offset)});

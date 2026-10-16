@@ -173,7 +173,7 @@
       for (const unit of source.units || []) {
         const values = window.ContentAdapters?.clienttext?.values(unit, source.saved?.[unit.id])
           || window.ClientTextState?.valuesFor(unit, source.saved?.[unit.id]) || { ...Object.fromEntries((unit.fields || []).map(field => [field.id, field.target])), ...source.saved?.[unit.id]?.values };
-        const referenceMetadata = window.ContentAdapters?.clienttext?.referenceMetadata(unit, contextReferences) || [];
+        const referenceMetadata = window.ContentAdapters?.clienttext?.referenceMetadata(unit, contextReferences, {game:source.scope?.game}) || [];
         for (const field of unit.fields || []) {
           const filepath = [unit.role, unit.sheet, unit.recordId, field.name || field.id, field.form].filter(value => value != null && value !== '').join(' · ');
           const english = String(field.source ?? ''), translation = String(values[field.id] ?? '');

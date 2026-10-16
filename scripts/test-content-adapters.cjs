@@ -7,6 +7,41 @@ const character=(recordId,source,role='normal',sourceCell='B10')=>({
     id:JSON.stringify([role,'Characters',recordId]),role,sheet:'Characters',recordId,metadata:{},
     fields:[{id:JSON.stringify(['Name',null]),name:'Name',kind:'text',source,target:'Translated label',sourceCell,targetCell:'C10'}]
 });
+
+test('Character metadata falls back to the shared game catalog while workbook labels remain primary',async()=>{
+    const witch='Metadata/Characters/Int/IntFour',sorceress=witch+'b',unknown='Metadata/Characters/Int/IntFourFuture',original=unit();
+    original.metadata={Character:' '+witch+',\r\n'+sorceress+'; '+unknown,Other:'Unchanged value'};
+    const before=structuredClone(original),options={game:'poe2'};
+    const [entry,other]=A.clienttext.referenceMetadata(original,undefined,options);
+    assert.equal(entry.display,' Witch,\r\nSorceress; '+unknown);assert.equal(entry.value,original.metadata.Character);
+    assert.equal(entry.parts.filter(part=>part.tooltip).length,2);
+    assert.match(entry.parts.find(part=>part.text==='Witch').tooltip,/Full path: Metadata\/Characters\/Int\/IntFour\nStatic Character mapping \(poe2\)/);
+    assert.deepEqual(other,plainEntry('Other','Unchanged value'));assert.deepEqual(original,before);
+    assert.equal(A.clienttext.referenceMetadata(original,undefined,{game:'poe1'})[0].display,undefined,'no cross-game identity fallback');
+    for(const bad of [witch.toLowerCase(),witch+'Suffix',witch+'\\n'])assert.equal(A.clienttext.referenceMetadata({...original,metadata:{Character:bad}},undefined,options)[0].display,undefined);
+    const resolved=await A.clienttext.contextReferenceIndex([original,character(witch,'Workbook Witch')]);
+    assert.equal(A.clienttext.referenceMetadata({...original,metadata:{Character:witch}},resolved,options)[0].display,'Workbook Witch');
+    const unresolved=await A.clienttext.contextReferenceIndex([original,character(witch,''),character(witch,'Conflicting label','gender')]);
+    const [fallback]=A.clienttext.referenceMetadata({...original,metadata:{Character:witch}},unresolved,options);
+    assert.equal(fallback.display,'Witch');assert.match(fallback.parts[0].tooltip,/Static Character mapping/);assert.match(fallback.parts[0].tooltip,/Related matches/);
+});
+
+test('Ascendancy metadata retains exact variants, workbook precedence, separators and unknown IDs',async()=>{
+    const original=unit(),options={game:'poe2'};
+    original.metadata={'Ascendancy Filter':' Witch3, Witch3b; Sorceress2\r\nMercenary3, Monk3, Witch3Future',Other:'Witch3'};
+    const before=structuredClone(original),[entry,other]=A.clienttext.referenceMetadata(original,undefined,options);
+    assert.equal(entry.display,' Lich, Abyssal Lich; Chronomancer\r\nGemling Legionnaire, Acolyte of Chayula, Witch3Future');
+    assert.equal(entry.value,original.metadata['Ascendancy Filter']);assert.deepEqual(other,plainEntry('Other','Witch3'));
+    assert.match(entry.parts.find(part=>part.text==='Abyssal Lich').tooltip,/Static class variant mapping \(poe2\)/);
+    const source={...character('Witch3b','Workbook Abyssal label'),sheet:'Ascendancy'},index=await A.clienttext.contextReferenceIndex([original,source]);
+    assert.match(A.clienttext.referenceMetadata(original,index,options)[0].display,/Lich, Workbook Abyssal label;/);
+    assert.match(A.clienttext.referenceMetadata(original,index,options)[0].parts.find(part=>part.text==='Workbook Abyssal label').tooltip,/Ascendancy!B10/);
+    assert.equal(A.clienttext.referenceMetadata(original,undefined,{game:'poe1'})[0].display,undefined);
+    const prohibited=A.clienttext.referenceMetadata({...original,metadata:{'Prohibited Ascendancy Filter':'Witch3, Witch3b'}},undefined,options)[0];
+    assert.equal(prohibited.display,'Lich, Abyssal Lich');assert.deepEqual(original,before);
+    const portraits=require('../public/clientTextPortraits.js').createResolver({game:'poe2'});
+    assert.deepEqual(portraits(original),[],'variant/filter hints do not infer artwork');
+});
 test('ClientText context displays every populated heading in workbook order, without changing raw metadata',()=>{
     const original=unit();original.metadata={Context:'Raw <img src=x onerror=alert(1)>',Character:' path\r\nliteral\\n ',
         'Character Class':'Metadata/Characters/Str/StrFourb',Tags:'0',FutureHeading:'false',Empty:' \r\n ',Blank:'',Null:null};

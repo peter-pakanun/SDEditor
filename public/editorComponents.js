@@ -312,11 +312,13 @@
     computed: {
       previewStyle() {
         const height = this.previewDragHeight ?? this.controller.fullEditorPreviewHeight;
+        const portraits = this.controller.ctPreviewPortraits?.length > 0;
+        const defaultHeight = this.controller.gamePreviewTargetRows?.length > 1 ? 340 : 200;
         return {
           '--editor-notice-height': this.noticeHeight + 'px',
           '--editor-preview-requested-height': Number.isFinite(height) ? height + 'px' : '',
-          '--editor-preview-default-height': this.controller.gamePreviewTargetRows?.length > 1
-            ? 'calc(340px * var(--density))' : 'calc(200px * var(--density))',
+          '--editor-preview-min-height': portraits ? 'calc(160px * var(--density) + 192px)' : '',
+          '--editor-preview-default-height': `calc(${defaultHeight}px * var(--density)${portraits ? ' + 192px' : ''})`,
         };
       },
     },
@@ -338,7 +340,7 @@
         if (!pane) return;
         const density = parseFloat(getComputedStyle(this.$el).getPropertyValue('--density')) || 1;
         this.previewMaxHeight = window.innerHeight / 2;
-        this.previewMinHeight = Math.min(160 * density, this.previewMaxHeight);
+        this.previewMinHeight = Math.min(160 * density + (this.controller.ctPreviewPortraits?.length ? 192 : 0), this.previewMaxHeight);
         this.previewMeasuredHeight = Math.round(pane.getBoundingClientRect().height);
       },
       clampPreviewHeight(height) { return Math.max(this.previewMinHeight, Math.min(this.previewMaxHeight, height)); },
@@ -589,7 +591,8 @@
     },
     template: String.raw`<span class="gamePreviewAudioMarker" :data-audio-marker="segment.full" tabindex="0" role="img" :aria-label="segment.tooltip" v-tooltip="segment.tooltip"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 9h4l5-4v14l-5-4H3z"></path><path d="M19 6v7"></path><circle class="gamePreviewAudioDot" cx="19" cy="17" r="1"></circle></svg></span>`,
   };
-  const SharedPreview = sharedSurface('EditorPreview', String.raw`<div class="gamePreviewStrip" :class="{ 'gamePreviewStrip--variants': gamePreviewTargetRows.length > 1, 'gamePreviewStrip--split': gamePreviewFullEditor && ctActive, 'gamePreviewStrip--source-hidden': hideSourceInPreviewPanel }">
+  const SharedPreview = sharedSurface('EditorPreview', String.raw`<div class="gamePreviewStrip" :class="{ 'gamePreviewStrip--variants': gamePreviewTargetRows.length > 1, 'gamePreviewStrip--split': gamePreviewFullEditor && ctActive, 'gamePreviewStrip--source-hidden': hideSourceInPreviewPanel, 'gamePreviewStrip--portraits': ctActive && ctPreviewPortraits.length > 0 }">
+          <div v-if="ctActive && ctPreviewPortraits.length" class="ctPreviewPortraitBand"><ct-portraits :items="ctPreviewPortraits"></ct-portraits></div>
           <div v-if="gamePreviewFullEditor && !ctActive" class="gamePreviewToolbar twoSided">
             <span class="gamePreviewLabel">Preview size</span>
             <div class="gamePreviewFrameBtns">

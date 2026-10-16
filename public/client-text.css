@@ -97,6 +97,10 @@
 .ctPortraitExpanded { z-index:20; }
 .ctPortraitExpanded .ctPortraitCards { position:absolute; left:0; top:0; flex-wrap:wrap; gap:6px; width:100%; padding:4px; box-sizing:border-box; background:var(--color-element); border-radius:5px; box-shadow:0 2px 8px #0006; }
 .ctPortraitExpanded .ctPortrait + .ctPortrait { margin-left:0; }
+.gamePreviewStrip--portraits { display:flex; flex-direction:column; height:calc(200px * var(--density) + 192px); }
+.ctPreviewPortraitBand { flex:none; min-width:0; height:180px; margin-bottom:12px; }
+.ctPreviewPortraitBand .ctPortraitStack { margin-top:0; }
+.gamePreviewStrip--portraits .gamePreviewMainRow { flex:1; height:auto; }
 .statusPill.outdated .statusDot,.filterChip.outdated { --filter-color:var(--ui-dropped); color:var(--ui-dropped); }
 .filterChip.outdated.selected { border-color:var(--ui-dropped); background:color-mix(in srgb,var(--ui-dropped) 10%,var(--color-element)); }
 .ctFullEditor.clipboardHidden { --clipboard-height:0px; }

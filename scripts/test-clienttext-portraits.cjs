@@ -4,7 +4,20 @@ const assert=require('node:assert/strict');
 const Portraits=require('../public/clientTextPortraits.js');
 const NPC=require('../public/clientTextNpcIndex.js');
 const Convo=require('../public/clientTextConvoIndex.js');
+const UI=require('../public/clientTextUi.js');
 const unit=(sheet,id,metadata={},name='')=>({id:JSON.stringify(['normal',sheet,id]),role:'normal',sheet,recordId:id,metadata,fields:[{name:'Name',source:name}]});
+test('portraits follow the visible English preview and return to source when it is hidden',()=>{
+    const visible=UI.mixin.computed.ctPortraitsInPreview,items=UI.mixin.computed.ctPreviewPortraits;
+    const row=unit('Other','Ailith'),portraits=[{id:'ailith'}],host={ctPreviewMounted:true,hideSourceInPreviewPanel:false,ctEditor:true,ctTool:'dictionary',inlineSidebarVisible:true,ctCurrentUnit:row,
+        ctRowPortraits(value){assert.equal(value,row);return portraits;}};
+    assert.equal(visible.call(host),true,'full English preview owns portraits');
+    assert.equal(items.call({...host,ctPortraitsInPreview:true}),portraits);
+    for(const change of [{hideSourceInPreviewPanel:true},{ctPreviewMounted:false},{ctEditor:false},{ctEditor:false,ctTool:'preview',inlineSidebarVisible:false}]){
+        assert.equal(visible.call({...host,...change}),false,'closed or hidden preview leaves source portraits visible');
+        assert.deepEqual(items.call({...host,...change,ctPortraitsInPreview:false}),[]);
+    }
+    assert.equal(visible.call({...host,ctEditor:false,ctTool:'preview'}),true,'open inline preview owns portraits');
+});
 async function fixture(){
     const ailith='Metadata/NPC/League/Chayula/ChayulaFarmerHub',ailithOther='Metadata/NPC/League/Chayula/ChayulaFarmerNearDreamer',
         doryani='Metadata/NPC/Four_Act4/DoryaniTownKingsmarchIntro',hood='Metadata/NPC/Four_Act4/HoodedMentorKingsmarchIntro';
@@ -87,9 +100,43 @@ test('exact NPC forms preserve helmet/night variants and do not assign art to St
     const key=JSON.stringify(['name','the raven']),group={key,label:'The Raven',paths:['Metadata/NPC/League/Affliction/RavenBoy','Metadata/NPC/League/Affliction/StrangeVoice']};
     const npcIndex={groups:[group],groupByKey:new Map([[key,group]]),memberships:new Map()};
     const contextual=Portraits.createResolver({npcIndex,convoIndex:{memberships:new Map([['family',{parentKey:key}]])},game:'poe2'});
-    assert.equal(contextual({id:'family',metadata:{NPC:''}})[0].id,'','a name group with an unassigned form cannot choose boy art');
+    assert.equal(contextual({id:'family',metadata:{NPC:''}})[0].id,'ravenboy','the verified unique English name now supplies the requested fallback');
     assert.equal(contextual({id:'family',metadata:{NPC:group.paths[0]}})[0].id,'ravenboy');
-    assert.equal(contextual({id:'family',metadata:{NPC:group.paths[1]}})[0].id,'');
+    assert.equal(contextual({id:'family',metadata:{NPC:group.paths[1]}})[0].id,'ravenboy');
+});
+
+test('exact resolved English names provide scoped unique/default fallback and preserve exact variants',()=>{
+    const paths=['Metadata/NPC/UnmappedAlva','Metadata/NPC/UnmappedAlvaAlias'],key='alva',group={key,label:'  aLVa  ',paths};
+    const index={groups:[group],groupByKey:new Map([[key,group]]),memberships:new Map()},convoIndex={memberships:new Map([['row',{parentKey:key}]])};
+    const resolve=Portraits.createResolver({npcIndex:index,convoIndex,game:'poe2'});
+    const items=resolve({id:'row',metadata:{NPC:paths.join(', ')}});
+    assert.deepEqual(items.map(x=>x.id),['alva']);assert.deepEqual(items[0].paths,paths,'all deduplicated aliases remain discoverable');
+    const check=(label,refs,game='poe2')=>{
+        const g={key:'g',label,paths:refs},npcIndex={groups:[g],groupByKey:new Map([['g',g]]),memberships:new Map()};
+        return Portraits.createResolver({npcIndex,convoIndex:{memberships:new Map([['r',{parentKey:'g'}]])},game})({id:'r',metadata:{NPC:refs.join(',')}});
+    };
+    assert.equal(check('The Hooded One',['Metadata/NPC/Four_Act5/HoodedMentorPantheon'])[0].id,'hooded-one');
+    assert.equal(check('The Hooded One',['Metadata/NPC/Four_Act1/HoodedMentor'])[0].id,'hooded-one-night','valid exact night form wins over name default');
+    assert.equal(check('The Hooded One',['Metadata/NPC/Unmapped'],'poe1')[0].id,'','no cross-game fallback');
+    assert.equal(check('Unknown NPC',['Metadata/NPC/Unmapped'])[0].id,'');
+    assert.equal(check('Alva',['Metadata/Info/Alva'])[0].id,'','Info and object context does not become NPC artwork by name');
+    assert.equal(check('Aoife',['Metadata/NPC/Unmapped'])[0].id,'','ambiguous names have no arbitrary first-match default');
+    const both=check('Doryani',['Metadata/NPC/Four_Act4/DoryaniTownKingsmarchIntro','Metadata/NPC/Unmapped']);
+    assert.deepEqual(both.map(x=>x.id),['doryanihelmet'],'resolved canonical artwork replaces its duplicate group placeholder');
+});
+
+test('observed Harbour and Pantheon Hooded One records deduplicate verified name fallback',async()=>{
+    const paths=['Cradle','Harbour','LumeriusSummon','Pantheon','RampartEncampment','TownIntro'].map(x=>'Metadata/NPC/Four_Act5/HoodedMentor'+x);
+    const parent=unit('NPCTalkDialogueTextAudio','Mentor_A5_ArriveHarbour_A1',{NPC:paths.join(', ')}),
+        reply=unit('NPCTalkDialogueTextAudio','Mentor_A5_ArriveHarbour_A3_Int4',{NPC:'',Character:'Metadata/Characters/Int/IntFour'}),
+        oriath=unit('NPCTalkDialogueTextAudio','Mentor_A5_OnOriath_A1',{NPC:paths.join(', ')}),
+        pantheon=unit('NPCTalkDialogueTextAudio','PantheonAfterCutscene_A1_Sin',{NPC:paths[3]}),
+        rows=[...paths.map(path=>unit('NPCs',path,{},'The Hooded One')),parent,reply,oriath,pantheon];
+    const before=structuredClone(rows),npcIndex=await NPC.buildNpcIndex(rows),convoIndex=await Convo.buildConvoIndex(rows,npcIndex),resolve=Portraits.createResolver({npcIndex,convoIndex,game:'poe2'});
+    assert.deepEqual(resolve(parent).map(x=>x.id),['hooded-one']);
+    assert.deepEqual(resolve(reply).map(x=>x.id),['hooded-one','witch']);
+    assert.deepEqual(resolve(oriath).map(x=>x.id),['hooded-one'],'reported Oriath line has one canonical portrait and no alias placeholder');
+    assert.deepEqual(resolve(pantheon).map(x=>x.id),['hooded-one']);assert.deepEqual(rows,before);
 });
 
 test('identifier catalog contains no image payloads or external image locations',()=>{
