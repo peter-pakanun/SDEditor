@@ -38,13 +38,17 @@ footer; unresolved combat rows are omitted explicitly. Decorative frames use
 CSS. The full editor gives contextual cards a larger initial preview height and
 retains manual resizing.
 
-Workbook-backed card text navigates to its exact editable translation field.
+Clicking the skill name or description, or Alt+Clicking any mapped workbook text,
+navigates to its exact editable translation field in the selected workspace
+language, from either preview side.
 Related-sheet navigation checkpoints the outgoing draft using the existing
 guarded selection flow and refuses to move after a failed checkpoint or scope
 change. Related checkpointed drafts are read locally for the current card and
-remain visible alongside its live current-field draft. Plain text can be clicked;
-the small Edit button supplies keyboard access and an independent action for
-keyword-only labels. Keyword clicks keep their existing popup/pin behavior.
+remain visible alongside its live current-field draft. A subtle dotted hover
+underline and tooltip explain the gesture without adding controls to the card.
+Ordinary keyword hover/click and keyboard actions keep their existing popup/pin
+behavior; Alt+Click on a mapped keyword navigates once without pinning a popup.
+Other labels require Alt+Click; ordinary mode-tab clicks only select the mode.
 Missing catalog-only English has no edit action. Preview sample values remain
 independent controls rather than workbook text.
 

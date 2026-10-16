@@ -63,6 +63,17 @@ function harness() {
     const entry = { origin: 'workbook', reference: { sheet: alpha.itemTitle.sheet, recordId: alpha.itemTitle.recordId, field: alpha.itemTitle.field } };
     return { app, calls, drafts, units, catalog, alpha, beta, tag, primary, item, entry, mixin, window, ref };
 }
+function textControl(h, entry, clickToEdit = false) {
+    const component = h.window.ClientTextSkillCardUI.Text, control = { host: h.app, entry, clickToEdit };
+    for (const name of ['editable', 'editLabel']) Object.defineProperty(control, name, { get: () => component.computed[name].call(control) });
+    control.edit = component.methods.edit.bind(control);
+    return control;
+}
+function clickEvent(changes = {}, keyword = false) {
+    return { button: 0, altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, defaultPrevented: false, stopped: false,
+        target: { closest: selector => keyword && selector === '.gamePreviewKw' ? {} : null },
+        preventDefault() { this.defaultPrevented = true; }, stopPropagation() { this.stopped = true; }, ...changes };
+}
 
 test('cross-sheet navigation checkpoints unsaved text, uses guarded ctSelect, then focuses the exact field', async () => {
     const h = harness(), original = clone({ units: h.units, catalog: h.catalog }), outgoing = clone(h.app.ctValues);
@@ -120,12 +131,65 @@ test('read-only catalog text, missing/mismatched references and busy navigation 
     }
 });
 
-test('keyword clicks cannot navigate even if delivered to the editable-text parent', async () => {
-    const h = harness(), event = { target: { closest: selector => selector === '.gamePreviewKw' ? {} : null } };
-    assert.equal(await h.app.ctSkillEditField(h.entry, event), false);
-    const text = { host: h.app, entry: h.entry, editable: true };
-    h.window.ClientTextSkillCardUI.Text.methods.edit.call(text, event);
-    await Promise.resolve(); assert.equal(h.calls.browse, 0); assert.equal(h.calls.select.length, 0); assert.equal(h.calls.focus.length, 0);
+test('plain and Alt+Click on either preview name/description focus the exact selected-language translation field', async () => {
+    for (const side of ['source', 'target']) for (const name of ['title', 'description']) for (const altKey of [false, true]) {
+        const h = harness(), entry = h.app.ctSkillPreviewModel[side][name], text = textControl(h, entry, true), event = clickEvent({ altKey });
+        const before = clone(h.app.ctValues);
+        assert.equal(await text.edit(event), true); assert.equal(event.defaultPrevented, true); assert.equal(event.stopped, true);
+        assert.equal(h.calls.select.length, 1); assert.equal(h.calls.focus.length, 1); assert.equal(h.calls.browse, 0);
+        assert.equal(h.calls.focus[0].fieldId, name === 'title' ? h.primary.fields[0].id : h.primary.fields[1].id);
+        assert.equal(h.app.ctWorkspace.scope.language, 'Thai'); assert.deepEqual(h.app.ctValues, before);
+        assert.match(text.editLabel, /Click or Alt\+Click.*ActiveSkills \(Thai\)/);
+    }
+});
+
+test('other mapped text requires Alt+Click and checkpoints the outgoing draft across sheets once', async () => {
+    for (const side of ['source', 'target']) {
+        const h = harness(), text = textControl(h, h.app.ctSkillPreviewModel[side].tags[0]), plain = clickEvent(), before = clone(h.app.ctValues);
+        assert.equal(await text.edit(plain), false); assert.equal(plain.defaultPrevented, false); assert.equal(plain.stopped, false);
+        assert.equal(h.calls.select.length, 0); assert.equal(h.calls.writes.length, 0); assert.match(text.editLabel, /^Alt\+Click/);
+        const alt = clickEvent({ altKey: true }); assert.equal(await text.edit(alt), true);
+        assert.equal(alt.stopped, true); assert.equal(h.calls.select.length, 1); assert.equal(h.calls.focus.length, 1); assert.equal(h.calls.writes.length, 1);
+        assert.equal(h.app.ctCurrentUnit.sheet, 'GemTags'); assert.equal(h.calls.focus[0].fieldId, h.app.ctCurrentUnit.fields[0].id);
+        assert.deepEqual(h.calls.writes[0].draft.values, before); assert.equal(h.app.ctWorkspace.scope.language, 'Thai');
+    }
+});
+
+test('ordinary keyword clicks reach the popup handler; Alt+Click captures navigation once in both text categories', async () => {
+    for (const clickToEdit of [false, true]) {
+        const h = harness(), entry = clickToEdit ? h.app.ctSkillPreviewModel.target.description : h.app.ctSkillPreviewModel.target.tags[0];
+        const text = textControl(h, entry, clickToEdit), ordinary = clickEvent({}, true);
+        assert.equal(await text.edit(ordinary), false); assert.equal(ordinary.stopped, false); assert.equal(ordinary.defaultPrevented, false);
+        assert.equal(h.calls.select.length, 0); assert.equal(h.calls.focus.length, 0);
+        const alt = clickEvent({ altKey: true }, true); assert.equal(await text.edit(alt), true);
+        assert.equal(alt.stopped, true); assert.equal(alt.defaultPrevented, true);
+        assert.equal(h.calls.select.length, 1); assert.equal(h.calls.focus.length, 1);
+    }
+});
+
+test('unmapped and unavailable text have no edit hint or destination, and unavailable Alt+Click cannot pin a keyword', async () => {
+    for (const entry of [undefined, { origin: 'client-catalog', reference: {} }, { origin: 'unavailable', reference: {} },
+        { origin: 'workbook', reference: { sheet: 'ActiveSkills', recordId: 'missing', field: 'Description' } }]) {
+        const h = harness(), text = textControl(h, entry, true), event = clickEvent({ altKey: true }, true);
+        assert.equal(!!text.editable, false); assert.equal(text.editLabel, undefined); assert.equal(await text.edit(event), false);
+        assert.equal(event.stopped, !!entry); assert.equal(h.calls.select.length, 0); assert.equal(h.calls.writes.length, 0);
+    }
+});
+
+test('non-primary buttons, handled clicks and other modifier chords do not trigger workbook navigation', async () => {
+    for (const changes of [{ button: 1 }, { ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { defaultPrevented: true },
+        { altKey: true, ctrlKey: true }, { altKey: true, metaKey: true }, { altKey: true, shiftKey: true }]) {
+        const h = harness(), text = textControl(h, h.app.ctSkillPreviewModel.target.description, true), event = clickEvent(changes);
+        assert.equal(await text.edit(event), false); assert.equal(event.stopped, false); assert.equal(h.calls.select.length, 0);
+    }
+});
+
+test('shared text captures navigation without appended controls and only name/description opt into plain click', () => {
+    const h = harness(), { Text, Card } = h.window.ClientTextSkillCardUI;
+    assert.match(Text.template, /@click.capture="edit"/); assert.doesNotMatch(Text.template, /<button|skillCardEdit["\s]/);
+    const ordinary = [...Card.template.matchAll(/<skill-card-text\b[^>]*click-to-edit[^>]*\/>/g)].map(match => match[0]);
+    assert.equal(ordinary.length, 2); assert.match(ordinary[0], /:entry="side.title"/); assert.match(ordinary[1], /:entry="side.description"/);
+    assert.match(Card.template, /:entry="item.label"/); assert.doesNotMatch(Card.template, /host\.ctSkillEditField/);
 });
 
 test('same-unit field focus keeps draft and browse context while using guarded selection', async () => {

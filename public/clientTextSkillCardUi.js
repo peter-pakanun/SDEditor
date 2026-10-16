@@ -117,9 +117,10 @@
                 } catch (_) { /* The active field draft remains live when related drafts cannot be read. */ }
             },
             ctSkillCanEdit(entry) { return entry?.origin === 'workbook' && !!this.ctSkillResolver?.resolveReference(entry.reference, this.ctSkillScope); },
-            async ctSkillEditField(entry, event) {
-                if (event?.target?.closest?.('.gamePreviewKw') || !this.ctSkillCanEdit(entry) || this.ctBusy || this.ctBrowseBusy) return false;
+            async ctSkillEditField(entry) {
+                if (!this.ctSkillCanEdit(entry) || this.ctBusy || this.ctBrowseBusy) return false;
                 const resolver = this.ctSkillResolver, target = resolver.resolveReference(entry.reference, this.ctSkillScope);
+                if (!target) return false;
                 const key = this.ctSkillContextKey, cardId = this.ctSkillPreviewModel?.skillId, run = this._ctSkillNavigateRun = {}, full = this.ctEditor;
                 const current = () => this._ctSkillNavigateRun === run && key === this.ctSkillContextKey
                     && this.ctSkillResolver === resolver && this._ctUnitIndex?.get(target.unit.id) === target.unit;
@@ -145,12 +146,20 @@
         }
     };
     const Text = {
-        name: 'SkillCardText', props: { host: Object, text: String, translated: Boolean, entry: Object },
+        name: 'SkillCardText', props: { host: Object, text: String, translated: Boolean, entry: Object, clickToEdit: Boolean },
         computed: { segments() { return this.host.buildGamePreviewSegments(this.text || '', { contentMode: 'clienttext' }).segments; },
-            editable() { return this.host.ctSkillCanEdit?.(this.entry); }, editLabel() { return this.editable ? 'Edit '+this.entry.reference.field+' in '+this.entry.reference.sheet : undefined; } },
-        methods: { edit(event) { if(this.editable)this.host.ctSkillEditField(this.entry,event); } },
-        template: `<span class="skillCardText" :title="editLabel" @click="edit"><template v-for="(seg,index) in segments" :key="index">
-            <span v-if="seg.type==='text'" :style="seg.decorStyle" :class="{skillCardEditable:editable}">{{seg.text}}</span>
+            editable() { return this.host.ctSkillCanEdit?.(this.entry); },
+            editLabel() { return this.editable ? (this.clickToEdit ? 'Click or Alt+Click' : 'Alt+Click')+' to edit '+this.entry.reference.field+' in '+this.entry.reference.sheet+' ('+this.host.ctSkillScope.language+')' : undefined; } },
+        methods: { edit(event) {
+            if (!this.entry || !event || event.ctrlKey || event.metaKey || event.shiftKey || event.defaultPrevented || event.button !== 0) return false;
+            if (!event.altKey && (!this.clickToEdit || event.target?.closest?.('.gamePreviewKw'))) return false;
+            // Capture before a nested keyword's click handler can pin its popup.
+            // An unavailable destination still consumes this navigation gesture.
+            event.preventDefault(); event.stopPropagation();
+            return this.editable ? this.host.ctSkillEditField(this.entry) : false;
+        } },
+        template: `<span class="skillCardText" :class="{skillCardEditable:editable,skillCardClickEditable:editable && clickToEdit}" :title="editLabel" @click.capture="edit"><template v-for="(seg,index) in segments" :key="index">
+            <span v-if="seg.type==='text'" :style="seg.decorStyle">{{seg.text}}</span>
             <span v-else-if="seg.type==='kw'" class="gamePreviewKw" :style="seg.decorStyle" tabindex="0" role="button" aria-haspopup="dialog"
                 @mouseenter="host.previewKeywordEnter?.($event,seg,translated)" @mouseleave="host.previewKeywordLeave?.($event)"
                 @focus="host.previewKeywordEnter?.($event,seg,translated)" @blur="host.previewKeywordLeave?.($event)"
@@ -158,7 +167,7 @@
                 @keydown.space.prevent.stop="host.previewKeywordActivate?.($event,seg,translated)">{{host.gamePreviewKeywordText(seg)}}</span>
             <span v-else-if="seg.type==='var'" :style="seg.decorStyle">{{seg.prefix + (host.gamePreviewVarValues[seg.key] ?? host.defaultPreviewVarValue(seg.key))}}{{seg.trailingPercent?'%':''}}</span>
             <br v-else-if="seg.type==='break'">
-        </template><button v-if="editable" type="button" class="skillCardEdit" :aria-label="editLabel" :title="editLabel" @click.stop="edit">✎</button></span>`
+        </template></span>`
     };
     const Card = {
         name: 'ClientTextSkillCard', components: { 'skill-card-text': Text },
@@ -174,14 +183,14 @@
         },
         template: `<article class="ctSkillCard" :style="style" :aria-label="(translated?'Translation':'English')+' skill-card preview'">
             <header class="ctSkillCardHeading"><img v-if="host.ctSkillImages.icon" :src="host.ctSkillImages.icon" alt="" width="56" height="56">
-                <div><h3 :class="{'ctSkillFocused':side.title.focused}"><skill-card-text :host="host" :entry="side.title" :text="side.title.text || '(empty)'" :translated="translated"/></h3>
+                <div><h3 :class="{'ctSkillFocused':side.title.focused}"><skill-card-text :host="host" :entry="side.title" :text="side.title.text || '(empty)'" :translated="translated" click-to-edit/></h3>
                     <div class="ctSkillCardType"><template v-for="(tag,index) in side.tags.filter(tag=>tag.position==='type' && tag.available)" :key="index"><skill-card-text :host="host" :entry="tag" :text="tag.text" :translated="translated"/></template></div>
                 </div></header>
             <div class="ctSkillCardTags"><template v-for="(tag,index) in side.tags.filter(tag=>tag.position==='tag' && tag.available)" :key="index"><span v-if="index">, </span><skill-card-text :host="host" :entry="tag" :text="tag.text" :translated="translated"/></template></div>
             <dl class="ctSkillCardProperties"><template v-for="property in side.properties" :key="property.key"><dt><skill-card-text :host="host" :entry="property.label" :text="property.label.text" :translated="translated"/>:</dt><dd><skill-card-text :host="host" :text="property.text || '(empty)'" :translated="translated"/></dd></template></dl>
             <p class="ctSkillCardExample">Preview examples · change values in the variable list</p>
-            <p class="ctSkillCardDescription" :class="{'ctSkillFocused':side.description.focused}"><skill-card-text :host="host" :entry="side.description" :text="side.description.text || '(empty)'" :translated="translated"/></p>
-            <div v-if="side.tabs.length" class="ctSkillCardTabs" role="tablist" aria-label="Skill modes"><button v-for="item in side.tabs" :key="item.id" type="button" role="tab" :aria-selected="tab?.id===item.id" @click="selectedTab=item.id;host.ctSkillEditField(item.label,$event)"><skill-card-text :host="host" :text="item.label.text || '(empty)'" :translated="translated"/></button></div>
+            <p class="ctSkillCardDescription" :class="{'ctSkillFocused':side.description.focused}"><skill-card-text :host="host" :entry="side.description" :text="side.description.text || '(empty)'" :translated="translated" click-to-edit/></p>
+            <div v-if="side.tabs.length" class="ctSkillCardTabs" role="tablist" aria-label="Skill modes"><button v-for="item in side.tabs" :key="item.id" type="button" role="tab" :aria-selected="tab?.id===item.id" @click="selectedTab=item.id"><skill-card-text :host="host" :entry="item.label" :text="item.label.text || '(empty)'" :translated="translated"/></button></div>
             <p v-if="!tab?.lines.length" class="ctSkillCardOmitted">Combat values omitted from this translation preview.</p>
             <footer v-if="side.footer?.available"><skill-card-text :host="host" :entry="side.footer" :text="side.footer.text" :translated="translated"/></footer>
             <p v-if="model.warnings.includes('partial-workbook')" class="ctSkillCardPartial">Related workbook text is unavailable; missing translations remain empty.</p>

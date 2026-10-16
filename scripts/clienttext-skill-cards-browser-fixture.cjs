@@ -16,7 +16,7 @@ function ref(sheet,recordId,field,source,target){
     unit.fields.push({id:field,name:field,kind:'text',source,target:target ?? 'Target '+source,required:true});
     return {sheet,recordId,field,source,sourceHash:State.sourceHash(source)};
 }
-const card={id:'example',activeSkillId:'example_skill',baseItemId:'ExampleGem',title:ref('ActiveSkills','example_skill','DisplayName','Example ability'),
+const card={id:'example',activeSkillId:'example_skill',baseItemId:'ExampleGem',title:ref('ActiveSkills','example_skill','DisplayName','Example [Quality|ability]'),
     itemTitle:ref('BaseItemTypes','ExampleGem','Display Name','Example gem'),description:ref('ActiveSkills','example_skill','Description','An example [Quality] description.'),
     tags:[{position:'type',ref:ref('GemTags','example_tag','Display Name','[Quality|Example type]','[Quality|Target type]')}],
     tabs:[{id:'example-mode',label:ref('GrantedEffectLabels','ExampleMode','LabelString','Example mode'),lines:[]}],
@@ -47,6 +47,13 @@ app.get('/portraits/poe2/example-person.webp',(_req,res)=>res.type('png').send(p
 app.get('/audio/poe2db',(_req,res)=>res.type('audio/wav').send(wav));
 app.use(express.static(join(root,'public')));
 const settle=page=>page.evaluate(()=>new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done))));
+const plainText=locator=>locator.locator('.skillCardText>span:not(.gamePreviewKw)').first();
+const navigationState=page=>page.evaluate(()=>({calls:fixtureNavigation.length,pins:fixturePins.length,selection:fixtureApp.ctSelection,language:fixtureApp.ctWorkspace.scope.language}));
+async function jump(page,locator,sheet,field,alt=false){
+    const before=await navigationState(page);await locator.click({modifiers:alt?['Alt']:[]});
+    await page.waitForFunction(({sheet,field})=>fixtureApp.ctCurrentUnit?.sheet===sheet && document.activeElement?.dataset.ctTarget===field,{sheet,field});
+    const after=await navigationState(page);assert.equal(after.calls,before.calls+1,'one navigation per click');assert.equal(after.pins,before.pins,'navigation never pins a keyword');assert.equal(after.language,'Thai');
+}
 (async()=>{let browser;try{
     mkdirSync(folder,{recursive:true});await new Promise(done=>server.listen(0,'127.0.0.1',done));
     browser=await chromium.launch({executablePath,headless:true});const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];
@@ -72,6 +79,8 @@ const settle=page=>page.evaluate(()=>new Promise(done=>requestAnimationFrame(()=
     try{await page.waitForSelector('.ctSkillCard');}catch(error){console.log('Fixture state',JSON.stringify(await page.evaluate(()=>({active:fixtureApp.ctActive,workspace:fixtureApp.ctWorkspace,signedIn:fixtureApp.cloudSignedIn,allowed:fixtureApp.privateMediaAllowed,catalog:!!fixtureApp.ctSkillCatalog,scope:fixtureApp.ctSkillContextKey,model:fixtureApp.ctSkillBaseModel,selection:fixtureApp.ctSelection,fields:fixtureApp.ctPreviewField?.name}))),errors,requests);throw error;}await page.waitForFunction(()=>fixtureApp.ctSkillImages.icon?.startsWith('blob:'));
     assert.equal(await page.locator('.ctSkillCard').count(),2);
     const source=page.locator('.gamePreviewSourcePane .ctSkillCard'),target=page.locator('.gamePreviewTargetPane .ctSkillCard');
+    assert.equal(await page.locator('.skillCardEdit').count(),0,'no trailing edit controls');
+    assert.equal(await source.locator('.skillCardClickEditable').count(),2,'only name and description use ordinary click');
     assert.deepEqual(await source.locator('dd').allTextContents(),['1','+10%','5 Mana','7.00%']);
     assert.match(await target.innerText(),/Target quality/);assert.match(await target.innerText(),/5 Target mana/);
     const input=page.getByRole('textbox',{name:'Preview example: level',exact:true});await input.fill('6');await settle(page);assert.equal(await source.locator('dd').first().innerText(),'6');
@@ -83,20 +92,52 @@ const settle=page=>page.evaluate(()=>new Promise(done=>requestAnimationFrame(()=
     assert.equal(await page.evaluate(()=>JSON.stringify(fixtureApp.ctUnits)===fixtureUnitsBefore),true);
     await target.locator('.ctSkillCardProperties .gamePreviewKw').first().click();await page.waitForSelector('.keywordPreviewWindow');assert.match(await page.locator('.keywordPreviewWindow').innerText(),/Target Quality concept/);await page.locator('.keywordPreviewClose').click();
     assert.equal(await page.evaluate(()=>fixtureApp.ctCurrentUnit.recordId),'example_skill','keyword actions never navigate fields');
+    await page.evaluate(()=>{const host=fixtureApp,navigate=host.ctSkillEditField,pin=host.pinKeywordWindow;window.fixtureNavigation=[];window.fixturePins=[];
+        host.ctSkillEditField=(...args)=>{fixtureNavigation.push(args[0].reference);return navigate(...args);};host.pinKeywordWindow=item=>{fixturePins.push(item.id);return pin(item);};});
     await page.locator('textarea[data-ct-target="Description"]:visible').fill('Unsaved navigation [Quality|draft]');
-    await source.locator('h3 .skillCardEditable').click();await page.waitForFunction(()=>document.activeElement?.dataset.ctTarget==='DisplayName');
-    await source.locator('.ctSkillCardType .skillCardEdit').click();await page.waitForFunction(()=>fixtureApp.ctCurrentUnit?.sheet==='GemTags' && document.activeElement?.dataset.ctTarget==='Display Name');
+    await jump(page,plainText(source.locator('h3')),'ActiveSkills','DisplayName');
+    await jump(page,plainText(target.locator('.ctSkillCardDescription')),'ActiveSkills','Description');
+    for(const [keyword,language] of [[source.locator('h3 .gamePreviewKw'),'English'],[target.locator('.ctSkillCardDescription .gamePreviewKw'),'Thai']]){
+        const before=await navigationState(page);await keyword.hover();await settle(page);assert.equal(await page.locator('[data-keyword-window]').getAttribute('data-language'),language);
+        await keyword.click();await settle(page);const after=await navigationState(page);assert.equal(after.calls,before.calls);assert.equal(after.pins,before.pins+1);await page.locator('.keywordPreviewClose').click();
+    }
+    await jump(page,plainText(source.locator('h3')),'ActiveSkills','DisplayName',true);
+    await jump(page,target.locator('.ctSkillCardDescription .gamePreviewKw'),'ActiveSkills','Description',true);
+    await jump(page,source.locator('h3 .gamePreviewKw'),'ActiveSkills','DisplayName',true);
+    for(const locator of [plainText(source.locator('footer')),plainText(target.locator('dt').first()),target.getByRole('tab').first()]){
+        const before=await navigationState(page);await locator.click();await settle(page);assert.deepEqual(await navigationState(page),before,'other mapped text does not navigate on plain click');
+    }
+    const unmapped=target.locator('dd .skillCardText').first(),beforeUnmapped=await navigationState(page);assert.equal(await unmapped.getAttribute('title'),null);await unmapped.click({modifiers:['Alt']});assert.deepEqual(await navigationState(page),beforeUnmapped,'generated sample values are not mapped workbook text');
+    await jump(page,plainText(source.locator('footer')),'ClientStrings','Text',true);assert.equal(await page.evaluate(()=>fixtureApp.ctCurrentUnit.recordId),'ExampleFooter');
+    await jump(page,plainText(target.locator('dt').first()),'ClientStrings','Text',true);assert.equal(await page.evaluate(()=>fixtureApp.ctCurrentUnit.recordId),'ExampleLevel');
+    await jump(page,target.locator('.ctSkillCardProperties .gamePreviewKw').first(),'ClientStrings','Text',true);assert.equal(await page.evaluate(()=>fixtureApp.ctCurrentUnit.recordId),'ExampleQuality');
+    await jump(page,source.locator('.ctSkillCardType .gamePreviewKw'),'GemTags','Display Name',true);
     assert.equal(await page.locator('.ctSkillRelatedChoice select').inputValue(),'example','shared tag retains the explicit originating skill');
     await page.waitForFunction(()=>fixtureApp.ctSkillPreviewModel?.target.description.text.includes('Unsaved navigation'));
     assert.match(await target.locator('.ctSkillCardDescription').innerText(),/Unsaved navigation draft/,'related-row preview preserves checkpointed unsaved draft');
     await page.locator('.ctSkillRelatedChoice select').selectOption('second-example');await page.waitForFunction(()=>fixtureApp.ctSkillPreviewModel?.skillId==='second-example');assert.match(await target.locator('h3').innerText(),/Second ability/);
-    await target.locator('.ctSkillCardDescription .skillCardEditable').click();await page.waitForFunction(()=>fixtureApp.ctCurrentUnit?.recordId==='second_skill' && document.activeElement?.dataset.ctTarget==='Description');
-    await target.getByRole('tab',{name:'Target Other mode'}).click();await page.waitForFunction(()=>fixtureApp.ctCurrentUnit?.recordId==='OtherMode' && document.activeElement?.dataset.ctTarget==='LabelString');
+    const otherMode=target.getByRole('tab',{name:'Target Other mode'}),beforeTab=await navigationState(page);await otherMode.click();assert.equal(await otherMode.getAttribute('aria-selected'),'true');assert.deepEqual(await navigationState(page),beforeTab,'plain tabs select mode without changing workbook row');
+    await jump(page,otherMode.locator('.skillCardText'),'GrantedEffectLabels','LabelString',true);assert.equal(await page.evaluate(()=>fixtureApp.ctCurrentUnit.recordId),'OtherMode');
+    await jump(page,plainText(target.locator('.ctSkillCardDescription')),'ActiveSkills','Description');assert.equal(await page.evaluate(()=>fixtureApp.ctCurrentUnit.recordId),'second_skill');
     await page.evaluate(async()=>{const host=fixtureApp,unit=host.ctUnits.find(u=>u.sheet==='ActiveSkills' && u.recordId==='example_skill');await host.ctSelect(unit,true,{focus:false});host.ctTool='preview';await host.$nextTick();});await page.waitForFunction(()=>fixtureApp.ctSkillPreviewModel?.skillId==='example');
     assert.match(await page.locator('textarea[data-ct-target="Description"]:visible').inputValue(),/Unsaved navigation/,'returning restores the same durable unsaved draft');
-    for(const theme of ['light','grey','dark','modern-dark']){await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);await settle(page);await page.screenshot({path:join(folder,'card-'+theme+'.png')});}
+    const layout=[];
+    for(const theme of ['light','grey','dark','modern-dark']){
+        await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);await page.mouse.move(0,0);await settle(page);
+        const measure=()=>source.evaluate(node=>[node,...node.querySelectorAll('h3,.ctSkillCardType,.ctSkillCardProperties,.ctSkillCardDescription,footer')].map(element=>{const rect=element.getBoundingClientRect();return {x:rect.x,y:rect.y,width:rect.width,height:rect.height};}));
+        const before=await measure();await plainText(source.locator('h3')).hover();await settle(page);assert.deepEqual(await measure(),before,'hover hint preserves all card geometry');
+        assert.match(await source.locator('h3 .skillCardText').getAttribute('title'),/Click or Alt\+Click.*DisplayName.*Thai/);assert.match(await source.locator('footer .skillCardText').getAttribute('title'),/^Alt\+Click/);
+        assert.equal(await page.locator('.skillCardEdit').count(),0);layout.push({theme,rects:before});await page.screenshot({path:join(folder,'card-'+theme+'.png')});
+    }
+    writeFileSync(join(folder,'navigation-layout.json'),JSON.stringify(layout,null,2));
+    await page.evaluate(async()=>{fixtureApp.ctEditor=false;fixtureApp.ctInlineClosed=false;await fixtureApp.$nextTick();});await settle(page);assert.equal(await page.locator('#inlineEditorPreviewHost .ctSkillCard').count(),2);
+    await jump(page,source.locator('.ctSkillCardType .gamePreviewKw'),'GemTags','Display Name',true);assert.equal(await page.evaluate(()=>fixtureApp.ctEditor),false);
+    await jump(page,plainText(target.locator('.ctSkillCardDescription')),'ActiveSkills','Description');assert.match(await page.locator('textarea[data-ct-target="Description"]:visible').inputValue(),/Unsaved navigation/);
+    await page.evaluate(async()=>{fixtureApp.ctEditor=true;await fixtureApp.$nextTick();});await settle(page);
     await page.setViewportSize({width:1150,height:850});await settle(page);assert.equal(await target.isVisible(),true);
     await page.evaluate(async()=>{fixtureApp.ctUnits=Vue.markRaw(fixtureApp.ctUnits.filter(u=>u.sheet!=='GemTags'));fixtureApp._ctUnitIndex=Vue.markRaw(new Map(fixtureApp.ctUnits.map(u=>[u.id,u])));fixtureApp.ctRevision++;await fixtureApp.$nextTick();});await settle(page);assert.equal(await target.locator('.ctSkillCardPartial').count(),1);
+    const unavailable=source.locator('.ctSkillCardType .skillCardText'),beforeUnavailable=await navigationState(page);assert.equal(await unavailable.getAttribute('title'),null);await unavailable.locator('.gamePreviewKw').click({modifiers:['Alt']});await settle(page);assert.deepEqual(await navigationState(page),beforeUnavailable,'unavailable mapped text neither navigates nor pins a popup');
+    const navigation=await navigationState(page);
     // The KeywordPopups sheet assembles the same Card used by floating popups.
     await page.evaluate(async()=>{const host=fixtureApp,unit=host.ctUnits.find(u=>u.sheet==='KeywordPopups' && u.recordId==='Quality');clearTimeout(host._ctDraftTimer);host.ctReviewed={};host.ctDraftDirty=false;host._ctDraftRevision=null;host.ctDraftStageFailure=null;host.ctSelection=unit.id;host.ctSheet=JSON.stringify(['normal','KeywordPopups']);host.ctFocusedField='Info Title';host.ctValues=ClientTextState.valuesFor(unit);host.ctRevision++;await host.$nextTick();});await settle(page);
     const keywordSource=page.locator('.gamePreviewSourcePane .keywordSheetPreview'),keywordTarget=page.locator('.gamePreviewTargetPane .keywordSheetPreview'),windows=page.locator('[data-keyword-window]');
@@ -117,6 +158,6 @@ const settle=page=>page.evaluate(()=>new Promise(done=>requestAnimationFrame(()=
     await page.evaluate(async()=>{fixtureApp.cloudSignedIn=false;await fixtureApp.$nextTick();});await settle(page);assert.equal(await page.locator('.ctSkillCard').count(),0);assert.equal(await page.locator('.gamePreviewWindow').count(),2);
     assert.equal(await page.locator('.ctPortrait img').count(),0);assert.equal(await page.locator('audio').count(),0);assert.equal(await page.evaluate(urls=>urls.every(url=>fixtureRevoked.includes(url)),[portraitUrl,audioUrl]),true,'logout revokes both native-media Blob URLs');
     assert.ok(requests.length>=3);assert.ok(requests.every(r=>r.authorized && r.language===undefined && !r.path.includes('xxxxxxxx')));
-    assert.deepEqual(errors,[]);writeFileSync(join(folder,'results.json'),JSON.stringify({passed:true,requests,checks:['defaults','edit','reset','validation','source-target separation','draft','no mutation','keyword popup','four themes','resized desktop','partial workbook','assembled keyword sheet before blur/full/inline/nested/language/blank/record switch','portrait and audio authenticated Blob sources','logout URL revocation']},null,2));
-    console.log('Skill-card browser fixture passed: examples, drafts, themes, partial workbook, live full/inline keyword cards, authenticated native portraits/audio and logout revocation; '+requests.length+' authenticated private requests.');
+    assert.deepEqual(errors,[]);writeFileSync(join(folder,'results.json'),JSON.stringify({passed:true,requests,navigation,checks:['defaults','edit','reset','validation','source-target separation','draft','no mutation','keyword popup','plain name/description clicks','Alt+Click all mapped categories and nested keywords exactly once without pinning','other plain clicks and unmapped values do not navigate','cross-sheet drafts and selected language/full/inline','no trailing controls or hover layout changes in four themes','resized desktop','partial workbook and unavailable destination','assembled keyword sheet before blur/full/inline/nested/language/blank/record switch','portrait and audio authenticated Blob sources','logout URL revocation']},null,2));
+    console.log('Skill-card browser fixture passed: click/Alt+Click navigation, keyword precedence, preserved drafts/language, full/inline cards, stable layout in four themes, unavailable targets, examples and authenticated media; '+requests.length+' authenticated private requests.');
 }finally{await browser?.close();await new Promise(done=>{server.close(done);server.closeAllConnections();});}})().catch(error=>{console.error(error);process.exitCode=1;});
