@@ -33,7 +33,8 @@ function loadEditor() {
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
-  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'index.js']) {
+  // Use the browser's real completeness validator for resolver choices and scans.
+  for (const name of ['statDescCodec.js', 'workspaceState.js', 'dictionaryScope.js', 'helper.js', 'regexEngine.js', 'translationDiagnostics.js', 'terminologyDiagnostics.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign(config.data(), config.methods, {
@@ -154,9 +155,12 @@ test('a consistency result preserves accepted peer merges, before text, and reso
   const { editor, first } = setup();
   const baseline = snapshot(editor.descs), sourceHash = 'a'.repeat(64), oldHash = 'b'.repeat(64);
   editor.sourceIdentity = sourceHash;
-  editor.localDescs = W.initializeWorkspace({ sourceHash, descs: [], status: {} }, { source: baseline, sourceHash, game: 'poe1', language: 'Thai' });
+  editor.localDescs = W.initializeWorkspace({ sourceHash, workspaceOrigin: 'online', descs: [], status: {} }, { source: baseline, sourceHash, game: 'poe1', language: 'Thai' });
+  const local = W.dropTranslation(editor.localDescs, baseline[0], 'Thai',
+    { id: 'browser-recovery', ownership: 'local', game: 'poe1', originSourceHash: oldHash, targetSourceHash: sourceHash });
+  const localBefore = snapshot(editor.localDescs.droppedArchive[local.id]);
   const candidate = W.dropTranslation(editor.localDescs, baseline[0], 'Thai',
-    { id: 'local-candidate', game: 'poe1', originSourceHash: oldHash, targetSourceHash: sourceHash });
+    { id: 'pending-candidate', ownership: 'online', game: 'poe1', originSourceHash: oldHash, targetSourceHash: sourceHash });
   const priorText = [...baseline[0].translations.Thai]; let committed, accepted;
   editor.persistTranslationBatch = async (updates, origin, options) => {
     assert.equal(origin, 'consistency');
@@ -165,7 +169,7 @@ test('a consistency result preserves accepted peer merges, before text, and reso
       revision: 3, beforeTranslations: [...baseline.find(item => item.filepath === desc.filepath).translations.Thai] }));
     accepted.find(file => file.filepath === first.filepath).translations[1] = 'peer duration {2}';
     for (const file of accepted) W.stageTranslation(committed, file, 'Thai', { source: baseline, sourceHash,
-      ...(file.filepath === first.filepath ? { promoteDropped: { id: candidate.id, revision: 0, targetSourceHash: sourceHash } } : {}) });
+      ...(file.filepath === first.filepath ? { promoteDropped: { id: candidate.id, ownership: 'online', revision: 0, targetSourceHash: sourceHash } } : {}) });
     W.acceptDropped(committed, [{ ...snapshot(candidate), id: 'server-candidate', revision: 2, status: 'promoted', snapshot: null }],
       { acknowledge: true, acknowledgeId: candidate.id, acknowledgeKind: 'put' });
     editor.localDescs = committed;
@@ -177,12 +181,16 @@ test('a consistency result preserves accepted peer merges, before text, and reso
   assert.equal(editor.localDescs, committed, 'The detached pre-ACK workspace must not replace the committed result.');
   const saved = editor.localDescs.staged.Thai[first.filepath];
   assert.equal(saved.translations[1], 'peer duration {2}'); assert.deepEqual(saved.before, priorText);
-  assert.equal(editor.localDescs.droppedAliases['local-candidate'].id, 'server-candidate');
-  assert.equal(editor.localDescs.droppedAliases['local-candidate'].revision, 2);
+  assert.equal(editor.localDescs.droppedAliases[candidate.id].id, 'server-candidate');
+  assert.equal(editor.localDescs.droppedAliases[candidate.id].revision, 2);
   assert.equal(editor.localDescs.droppedArchive['server-candidate'].status, 'promoted');
+  assert.deepEqual(snapshot(editor.localDescs.droppedArchive[local.id]), localBefore,
+    'A shared promotion receipt must retain the independent local recovery unchanged.');
+  assert.equal(editor.localDescs.droppedAliases[local.id], undefined);
   assert.equal(editor.localDescs.droppedOutbox.length, 0);
   const status = W.workspaceFile(editor.localDescs, baseline[0], 'Thai');
   assert.equal(status.hasChanges, true); assert.equal(status.isDropped, false); assert.equal(status.translations[1], 'peer duration {2}');
+  assert.equal(status.hasLocalRecovery, true);
 });
 
 test('accepting another version advances matching editor baselines and clears a clean editor', async () => {
@@ -568,24 +576,29 @@ test('missing and excess table columns reject a version before storage or model 
   }
 });
 
-test('explicitly accepting an empty plain-text version clears all matching entries', async () => {
-  const { editor } = loadEditor();
-  const first = description('first', ['Fire damage'], ['ความเสียหายไฟ']);
-  const peer = description('peer', ['Fire damage'], ['']);
-  peer.isMissing = true;
-  editor.descs = [first, peer];
-  openFile(editor, first);
-  await editor.openConsistencyResolver(0);
-  const empty = editor.buildConsistencyChoice('');
-  assert.equal(empty.errors.length, 0);
-  assert.ok(empty.warnings.some(warning => /Empty translation/.test(warning.message)));
-  assert.equal(await editor.applyConsistencyVersion(''), true);
-  assert.equal(first.translations.Thai[0], '');
-  assert.equal(peer.translations.Thai[0], '');
-  assert.equal(first.isMissing, true);
-  assert.equal(editor.editorBlocks[0].translation, '');
-  assert.equal(editor.editorOriginalTranslations[0], '');
-  assert.equal(editor.editorHaveChanges(), false);
+test('blank consistency choices reject the entire replacement without changing saved text or drafts', async t => {
+  for (const blank of ['', ' \t ', '\u200b', '\n', '@']) await t.test(JSON.stringify(blank), async () => {
+    const { editor, writes, dialogs } = loadEditor();
+    const first = description('first', ['Fire damage'], ['ความเสียหายไฟ']);
+    const peer = description('peer', ['Fire damage'], [blank]);
+    peer.isMissing = true;
+    editor.descs = [first, peer];
+    editor.localDescs = { descs: snapshot(editor.descs), status: {} };
+    editor.testMode = false;
+    openFile(editor, first, ['Unsaved translation']);
+    await editor.openConsistencyResolver(0);
+    const before = snapshot({ descs: editor.descs, workspace: editor.localDescs,
+      blocks: editor.editorBlocks, baseline: editor.editorOriginalTranslations });
+    const choice = editor.buildConsistencyChoice(blank);
+    assert.ok(choice.errors.some(error => error.code === 'blank-translation'));
+    assert.equal(await editor.applyConsistencyVersion(blank), false);
+    assert.ok(editor.consistencyResolverError);
+    assert.ok(editor.consistencyResolver);
+    assert.equal(dialogs.closed, 0);
+    assert.equal(writes.length, 0, 'An invalid choice must not reach durable storage.');
+    assert.deepEqual(snapshot({ descs: editor.descs, workspace: editor.localDescs,
+      blocks: editor.editorBlocks, baseline: editor.editorOriginalTranslations }), before);
+  });
 });
 
 test('valid table replacement updates every column and stays consistent after editor serialization', async () => {

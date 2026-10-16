@@ -43,7 +43,8 @@ function loadEditor() {
       nextTick(callback) { callback?.(); return Promise.resolve(); },
     },
   });
-  for (const name of ['workspaceState.js', 'dictionaryScope.js', 'helper.js', 'regexEngine.js', 'index.js']) {
+  // File-list status derivation uses the same codec as the browser.
+  for (const name of ['statDescCodec.js', 'workspaceState.js', 'dictionaryScope.js', 'helper.js', 'regexEngine.js', 'index.js']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8'), context, { filename: name });
   }
   const editor = Object.assign(config.data(), config.methods, {
