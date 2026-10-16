@@ -54,7 +54,7 @@ async function run() {
                 const host=window.fixtureHost=Vue.reactive({ctActive:true,ctBusy:false,ctEditor:false,inlineEditor:true,ctInlineClosed:false,ctAudioController:null,
                 ctWorkspace:{scope:{accountId:'guest',game:'poe2',branchId:'default',versionId:'local:test:audio',groupId:'local:test:audio',language:'Thai'}},
                 cloudProfileId:'guest',cloudUser:null,managedCatalogScope:'guest:poe2',gameVersion:'poe2',branchId:'default',lang:'Thai',
-                ctCurrentUnit:{id:'audio-one',sheet:'NPCTextAudio',metadata:{'Audio File':'4.0/NPC/Fixture/First.wav, 4.0/NPC/Fixture/Second=StrDex4.wav, 4.0/NPC/Fixture/Missing.wav'}},
+                ctCurrentUnit:{id:'audio-one',sheet:'NPCTextAudio',metadata:{'Audio File':'NullFile/Null_3s.ogg, 4.0/NPC/Fixture/First.wav, 4.0/NULLFILE/Other.wav, 4.0/NPC/Fixture/Second=StrDex4.wav, 4.0/NPC/Fixture/Missing.wav'}},
                 ctNotes:()=>[],ctChoices:[],ctFieldGroups:[{key:'Text',name:'Text',source:field.source,fields:[field],forms:false}],
                 ctGroupSources:group=>[{key:'Text',label:'Text',source:group.source,fieldIds:['Text']}],
                 ctSourceFieldController:(group,source)=>({value:source.source}),ctClassFields:()=>[],ctFieldsKeydown:()=>{},ctResizeFields:()=>{},
@@ -248,6 +248,12 @@ async function run() {
         await page.evaluate(() => { window.previousAudio = document.querySelector('.ctAudioFloating audio'); fixtureHost.versionChooserVisible = true; });
         await stopped();
         assert.equal(await oldStopped(), true, 'Hidden editors stop playback.');
+        const requestsBeforePlaceholders = requests.length;
+        await page.evaluate(() => { fixtureHost.versionChooserVisible = false; fixtureHost.ctCurrentUnit = { id: 'null-audio', sheet: 'NPCTextAudio', metadata: { 'Audio File': 'Audio/Dialogue/NullFile/Null_3s.ogg, 4.0/NULLFILE/Other.wav' } }; });
+        assert.equal(await toolbar.count(), 0, 'Silent placeholders do not produce a field audio bar.');
+        assert.equal(await sourcePreview.count(), 0, 'Silent placeholders do not produce preview playback buttons.');
+        assert.equal(requests.length, requestsBeforePlaceholders, 'Silent placeholders are never requested.');
+        assert.ok(requests.every(request => !/nullfile/i.test(request.path)), 'Mixed track lists also exclude silent placeholders.');
         await page.evaluate(() => { fixtureHost.versionChooserVisible = false; fixtureHost.ctCurrentUnit = { id: 'no-audio', sheet: 'ClientStrings', metadata: {} }; });
         assert.equal(await toolbar.count(), 0, 'Records without valid audio have no audio bar.');
         assert.deepEqual(errors, []);

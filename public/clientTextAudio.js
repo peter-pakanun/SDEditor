@@ -20,7 +20,7 @@
         const clips = [], seen = new Set();
         for (const reference of value.split(',')) {
             const path = normalizeReference(reference);
-            if (!path || seen.has(path)) continue;
+            if (!path || /(?:^|\/)nullfile\//.test(path) || seen.has(path)) continue;
             seen.add(path);
             clips.push({ path, label: reference.trim().split('/').pop() });
         }

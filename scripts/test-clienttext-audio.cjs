@@ -32,6 +32,21 @@ test('untrusted workbook audio cannot create arbitrary URLs or traversal request
     assert.deepEqual(Audio.clipsFor(unit('https://evil.test/a.ogg, '+first)).map(clip=>clip.path),[first.toLowerCase()]);
 });
 
+test('NullFile directories are excluded from playback without using text markers or changing metadata',()=>{
+    const placeholders=['NullFile/Null_3s.ogg','Audio/Dialogue/NullFile/Null_3s.ogg','4.0/NULLFILE/Other.wav'];
+    for(const sheet of ['NPCTextAudio','NPCTalkDialogueTextAudio','NPCTextAudio_Gender','NPCTalkDialogueTextAudio_Gender']){
+        for(const reference of placeholders)assert.deepEqual(Audio.clipsFor(unit(reference,sheet)),[]);
+    }
+    const record=unit(placeholders[0]+', '+first+', '+placeholders[2]+', '+second);
+    record.fields=[{id:'Text',source:'[NOAUDIO] Dialogue still has a valid recording.'}];
+    const original=structuredClone(record);
+    assert.deepEqual(Audio.clipsFor(record).map(clip=>clip.path),[first.toLowerCase(),second.toLowerCase()]);
+    assert.deepEqual(record,original,'filtering playback choices preserves workbook references and authored text');
+    const similar=['4.0/NPC/NullFileActor/Speech.ogg','4.0/NPC/NullFile.ogg'];
+    assert.deepEqual(Audio.clipsFor(unit(similar.join(', '))).map(clip=>clip.path),similar.map(path=>path.toLowerCase()),
+        'only the exact directory name denotes a placeholder');
+});
+
 test('preview tracks follow continue blocks, with every surplus track on the last text block',()=>{
     const clips=Array.from({length:4},(_,index)=>({path:index+'.ogg'}));
     const text=value=>({type:'text',text:value}),separator={type:'continue'};
