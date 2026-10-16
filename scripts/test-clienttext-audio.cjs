@@ -61,6 +61,32 @@ test('preview tracks follow continue blocks, with every surplus track on the las
     assert.equal(Audio.previewSegments(source,[]),source);
 });
 
+test('filtering NullFile tracks preserves leading, middle and trailing dialogue slots',()=>{
+    const silent='NullFile/Null_3s.ogg',extra='4.0/NPC/Extra.ogg';
+    const cases=[
+        {references:[silent,first,second],blocks:3,expected:[[],[0],[1]]},
+        {references:[first,silent,second],blocks:3,expected:[[0],[],[1]]},
+        {references:[first,second,silent],blocks:3,expected:[[0],[1],[]]},
+        {references:[silent,silent,first,silent,second],blocks:5,expected:[[],[],[0],[],[1]]},
+        {references:[first,silent,second,extra],blocks:3,expected:[[0],[],[1,2]]},
+        {references:[silent,first,second],blocks:1,expected:[[0,1]]},
+        {references:[silent,first],blocks:3,expected:[[],[0],[]]},
+        {references:[silent,silent],blocks:2,expected:[[],[]]},
+    ];
+    for(const {references,blocks,expected} of cases){
+        const segments=Array.from({length:blocks},(_,index)=>[{type:'text',text:'Block '+index},
+            ...(index < blocks-1 ? [{type:'continue'}] : [])]).flat();
+        const snapshot=structuredClone(segments),record=unit(references.join(', ')),clips=Audio.clipsFor(record),assigned=[[]];
+        for(const segment of Audio.previewSegments(segments,clips)){
+            if(segment.type==='continue')assigned.push([]);
+            else if(segment.type==='playback')assigned.at(-1).push(...segment.tracks);
+        }
+        assert.deepEqual(assigned,expected,references.join(', '));
+        assert.deepEqual(clips.map(clip=>clip.referenceIndex),references.flatMap((reference,index)=>reference===silent?[]:[index]));
+        assert.deepEqual(segments,snapshot,'track placement never rewrites preview text');
+    }
+});
+
 test('empty continue blocks and trailing newlines do not move controls away from the spoken text',()=>{
     const styled={type:'text',text:'Spoken',decorStyle:{color:'red'}},separator={type:'continue'},newline={type:'break'};
     const parts=Audio.previewSegments([separator,styled,newline,separator,{type:'text',text:' '}],[{},{}]);

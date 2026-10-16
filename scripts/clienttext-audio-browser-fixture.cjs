@@ -54,7 +54,7 @@ async function run() {
                 const host=window.fixtureHost=Vue.reactive({ctActive:true,ctBusy:false,ctEditor:false,inlineEditor:true,ctInlineClosed:false,ctAudioController:null,
                 ctWorkspace:{scope:{accountId:'guest',game:'poe2',branchId:'default',versionId:'local:test:audio',groupId:'local:test:audio',language:'Thai'}},
                 cloudProfileId:'guest',cloudUser:null,managedCatalogScope:'guest:poe2',gameVersion:'poe2',branchId:'default',lang:'Thai',
-                ctCurrentUnit:{id:'audio-one',sheet:'NPCTextAudio',metadata:{'Audio File':'NullFile/Null_3s.ogg, 4.0/NPC/Fixture/First.wav, 4.0/NULLFILE/Other.wav, 4.0/NPC/Fixture/Second=StrDex4.wav, 4.0/NPC/Fixture/Missing.wav'}},
+                ctCurrentUnit:{id:'audio-one',sheet:'NPCTextAudio',metadata:{'Audio File':'4.0/NPC/Fixture/First.wav, 4.0/NULLFILE/Other.wav, 4.0/NPC/Fixture/Second=StrDex4.wav, 4.0/NPC/Fixture/Missing.wav'}},
                 ctNotes:()=>[],ctChoices:[],ctFieldGroups:[{key:'Text',name:'Text',source:field.source,fields:[field],forms:false}],
                 ctGroupSources:group=>[{key:'Text',label:'Text',source:group.source,fieldIds:['Text']}],
                 ctSourceFieldController:(group,source)=>({value:source.source}),ctClassFields:()=>[],ctFieldsKeydown:()=>{},ctResizeFields:()=>{},
@@ -62,7 +62,7 @@ async function run() {
                 gamePreviewDefaultTextColor:'#fffbd6',gamePreviewFontFamily:'Arial',gamePreviewSourceFontFamily:'Fontin, serif',
                 hideSourceInPreviewPanel:false,gamePreviewSourceIsTable:false,gamePreviewTargetIsTable:false,gamePreviewVarKeyList:[],
                 gamePreviewVarValues:{},ctPossessivePreviewForms:null,translationEditorBcp47:'th',
-                gamePreviewDisplaySource:[{type:'text',text:'First dialogue block.'},{type:'continue'},{type:'text',text:'Last dialogue block.'}],
+                gamePreviewDisplaySource:[{type:'text',text:'First dialogue block.'},{type:'continue'},{type:'text',text:'Silent dialogue block.'},{type:'continue'},{type:'text',text:'Last dialogue block.'}],
                 get gamePreviewTargetRows(){return [{key:'target',label:'',segments:this.gamePreviewDisplaySource}];},
                 gamePreviewAudioSegments(segments){return ClientTextAudio.previewSegments(segments,ClientTextAudio.clipsFor(this.ctCurrentUnit));}});
                 const app=Vue.createApp({data:()=>({host})});app.component('ct-fields',ClientTextUI.fieldsComponent);
@@ -107,11 +107,21 @@ async function run() {
         const oldStopped = () => page.evaluate(() => previousAudio.paused && !previousAudio.hasAttribute('src'));
         await toolbar.waitFor();
         const sourcePreview=page.locator('.gamePreviewSourcePane .ctAudioTrack');
+        const previewBlockTracks = () => page.locator('.gamePreviewSourcePane .gamePreviewWindow').evaluate(frame => {
+            const blocks=[[]];
+            for(const child of frame.children){
+                if(child.classList.contains('gamePreviewContinue'))blocks.push([]);
+                else if(child.classList.contains('ctPreviewAudioControls'))blocks.at(-1).push(...Array.from(child.querySelectorAll('.ctAudioTrack'),button=>button.getAttribute('data-audio-path')));
+            }
+            return blocks;
+        });
         await sourcePreview.first().waitFor();
         assert.equal(await page.locator('.gamePreviewTargetPane .ctAudioTrack').count(),0,'Only the English preview has dialogue playback buttons.');
-        assert.equal(await page.locator('.gamePreviewSourcePane .ctPreviewAudioControls').count(),2,'Each nonempty continue block receives playback controls.');
+        assert.equal(await page.locator('.gamePreviewSourcePane .ctPreviewAudioControls').count(),2,'Only dialogue blocks with playable tracks receive playback controls.');
         assert.equal(await page.locator('.gamePreviewSourcePane .ctPreviewAudioControls').nth(0).locator('.ctAudioTrack').count(),1);
         assert.equal(await page.locator('.gamePreviewSourcePane .ctPreviewAudioControls').nth(1).locator('.ctAudioTrack').count(),2,'Extra tracks belong to the last text block.');
+        assert.deepEqual(await previewBlockTracks(),[['4.0/npc/fixture/first.wav'],[],['4.0/npc/fixture/second=strdex4.wav','4.0/npc/fixture/missing.wav']],
+            'A middle NullFile slot leaves its text block without controls and does not shift later tracks.');
         assert.equal(await toolbar.count(), 1, 'Inline source has one audio bar; translation has none.');
         assert.equal(await tracks.count(), 3, 'Every available track has its own icon button.');
         assert.equal((await toolbar.textContent()).trim(), '', 'The toolbar is icon-only.');
@@ -248,6 +258,13 @@ async function run() {
         await page.evaluate(() => { window.previousAudio = document.querySelector('.ctAudioFloating audio'); fixtureHost.versionChooserVisible = true; });
         await stopped();
         assert.equal(await oldStopped(), true, 'Hidden editors stop playback.');
+        await page.evaluate(() => { fixtureHost.versionChooserVisible = false; fixtureHost.ctCurrentUnit = { id: 'leading-null-audio', sheet: 'NPCTextAudio', metadata: { 'Audio File': 'NullFile/Null_3s.ogg, 4.0/NPC/Fixture/First.wav, 4.0/NPC/Fixture/Second=StrDex4.wav, 4.0/NPC/Fixture/Missing.wav' } }; });
+        assert.deepEqual(await previewBlockTracks(),[[],['4.0/npc/fixture/first.wav'],['4.0/npc/fixture/second=strdex4.wav','4.0/npc/fixture/missing.wav']],
+            'A leading NullFile slot leaves the first block without controls.');
+        await sourcePreview.first().click(); await playing();
+        assert.equal(await first().getAttribute('aria-label'),'Stop First.wav','Preview positions still address the correct shared toolbar track.');
+        assert.match(await floating.locator('audio').getAttribute('src'),/first\.wav$/);
+        await first().click(); await stopped();
         const requestsBeforePlaceholders = requests.length;
         await page.evaluate(() => { fixtureHost.versionChooserVisible = false; fixtureHost.ctCurrentUnit = { id: 'null-audio', sheet: 'NPCTextAudio', metadata: { 'Audio File': 'Audio/Dialogue/NullFile/Null_3s.ogg, 4.0/NULLFILE/Other.wav' } }; });
         assert.equal(await toolbar.count(), 0, 'Silent placeholders do not produce a field audio bar.');

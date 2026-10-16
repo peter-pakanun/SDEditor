@@ -18,11 +18,11 @@
         const value = unit?.metadata?.['Audio File'];
         if (typeof value !== 'string') return [];
         const clips = [], seen = new Set();
-        for (const reference of value.split(',')) {
+        for (const [referenceIndex, reference] of value.split(',').entries()) {
             const path = normalizeReference(reference);
             if (!path || /(?:^|\/)nullfile\//.test(path) || seen.has(path)) continue;
             seen.add(path);
-            clips.push({ path, label: reference.trim().split('/').pop() });
+            clips.push({ path, label: reference.trim().split('/').pop(), referenceIndex });
         }
         return clips;
     }
@@ -45,13 +45,14 @@
             || segment.type === 'text' && String(segment.text || '').trim()) ? index : -1).filter(index => index >= 0);
         if (!spoken.length) spoken.push(blocks.length - 1);
         const result = [], separators = segments.filter(segment => segment.type === 'continue');
-        let nextTrack = 0;
+        const blockTracks = blocks.map(() => []);
+        clips.forEach((clip,index) => {
+            // Filtered placeholders still occupy their original dialogue slot.
+            const position = Number.isInteger(clip.referenceIndex) && clip.referenceIndex >= 0 ? clip.referenceIndex : index;
+            blockTracks[spoken[Math.min(position, spoken.length - 1)]].push(index);
+        });
         blocks.forEach((block,index) => {
-            const tracks = [];
-            if (spoken.includes(index) && nextTrack < clips.length) {
-                const end = index === spoken.at(-1) ? clips.length : nextTrack + 1;
-                while (nextTrack < end) tracks.push(nextTrack++);
-            }
+            const tracks = blockTracks[index];
             let end = block.length;
             while (end && (block[end - 1].type === 'break' || block[end - 1].type === 'text' && !String(block[end - 1].text || '').trim())) end--;
             result.push(...block.slice(0,end));
