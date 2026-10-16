@@ -15,6 +15,110 @@ app.get('/index.js', (_req, res) => res.type('js').send(readFileSync(join(root, 
 app.use(express.static(join(root, 'public')));
 const server = createServer(app);
 const settle = page => page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+async function enterAdjacentCard(page, trigger, card) {
+  const a = await trigger.boundingBox(), b = await card.boundingBox();
+  let from, to;
+  if (Math.abs(b.y - a.y - a.height) < 1) {
+    const x = Math.max(b.x + 2, Math.min(a.x + a.width / 2, b.x + b.width - 2));
+    from = [x, a.y + a.height - 1]; to = [x, b.y + 2];
+  } else if (Math.abs(b.y + b.height - a.y) < 1) {
+    const x = Math.max(b.x + 2, Math.min(a.x + a.width / 2, b.x + b.width - 2));
+    from = [x, a.y + 1]; to = [x, b.y + b.height - 2];
+  } else if (Math.abs(b.x - a.x - a.width) < 1) {
+    const y = Math.max(b.y + 2, Math.min(a.y + a.height / 2, b.y + b.height - 2));
+    from = [a.x + a.width - 1, y]; to = [b.x + 2, y];
+  } else {
+    assert.ok(Math.abs(b.x + b.width - a.x) < 1, 'card touches a keyword edge: ' + JSON.stringify({ a, b }));
+    const y = Math.max(b.y + 2, Math.min(a.y + a.height / 2, b.y + b.height - 2));
+    from = [a.x + 1, y]; to = [b.x + b.width - 2, y];
+  }
+  await page.mouse.move(...from); await page.mouse.move(...to, { steps: 5 });
+  assert.equal(await card.count(), 1, 'crossing the touching edge retains the card without a timeout');
+}
+async function dragCard(page, card, x, y) {
+  const box = await card.boundingBox(), header = await card.locator('.keywordPreviewHeader').boundingBox();
+  const start = { x: header.x + header.width / 2, y: header.y + header.height / 2 };
+  await page.mouse.move(start.x, start.y); await page.mouse.down();
+  await page.mouse.move(start.x + x - box.x, start.y + y - box.y, { steps: 8 });
+  await page.mouse.up(); await settle(page);
+}
+async function checkPointerBehavior(page, target, source, windows) {
+  await target.hover(); await page.waitForSelector('.keywordPreviewWindow');
+  await page.mouse.move(5, 5);
+  assert.equal(await windows.count(), 0, 'unpinned popup disappears on the leave event, without waiting');
+  await target.hover(); const parent = windows.first(), parentId = await parent.getAttribute('id');
+  await enterAdjacentCard(page, target, parent);
+  const keyword = parent.locator('.keywordPreviewContent .gamePreviewKw').first();
+  await keyword.hover(); const child = windows.last(), childId = await child.getAttribute('id');
+  assert.equal(await windows.count(), 2); await enterAdjacentCard(page, keyword, child);
+  // Dragging a previously unpinned child pins it. Leaving the whole branch
+  // immediately removes its unpinned parent, while the child remains independent.
+  await dragCard(page, child, 350, 350); await page.mouse.move(5, 5);
+  assert.equal(await page.locator('#' + parentId).count(), 0);
+  assert.equal(await page.locator('#' + childId).count(), 1);
+  assert.equal(await child.locator('.keywordPreviewClose').count(), 1);
+  assert.equal(await child.evaluate(node => document.activeElement === node), true);
+  assert.equal(await page.evaluate(() => String(getSelection())), '', 'header dragging never selects workbook text');
+  await dragCard(page, child, -1000, -1000);
+  let box = await child.boundingBox(); assert.equal(box.x, 8); assert.equal(box.y, 8);
+  await dragCard(page, child, 3000, 3000);
+  box = await child.boundingBox(); assert.ok(box.x + box.width <= 1432 && box.y + box.height <= 892);
+  await page.keyboard.press('Escape'); assert.equal(await windows.count(), 0);
+  assert.equal(await page.evaluate(() => fixtureApp.ctEditor), true);
+
+  await target.hover(); await windows.first().locator('.keywordPreviewTitle').click();
+  const pinnedParent = windows.first(), pinnedParentId = await pinnedParent.getAttribute('id');
+  const coveredKeyword = pinnedParent.locator('.keywordPreviewContent .gamePreviewKw').first();
+  await coveredKeyword.hover(); const covering = windows.last(), coveringId = await covering.getAttribute('id');
+  // The top card must block both a lower card's keyword and a preview keyword.
+  for (const trigger of [coveredKeyword, source]) {
+    const a = await trigger.boundingBox(), point = { x: a.x + a.width / 2, y: a.y + a.height / 2 };
+    await dragCard(page, covering, point.x - 80, point.y - 40);
+    await page.mouse.move(point.x, point.y);
+    assert.equal(await page.evaluate(point => document.elementFromPoint(point.x, point.y)?.closest('[data-keyword-window]')?.id, point), coveringId);
+    assert.equal(await windows.count(), 2, 'covered keyword cannot open a popup through the top card');
+  }
+  await page.keyboard.press('Escape'); assert.equal(await windows.count(), 1);
+  assert.equal(await windows.first().getAttribute('id'), pinnedParentId);
+  await windows.first().locator('.keywordPreviewClose').click(); assert.equal(await windows.count(), 0);
+
+  // Removing a keyboard-focused child can expose background under the pointer.
+  // Focus returns to its parent's keyword; the next real mouse departure still
+  // dismisses the unpinned branch immediately.
+  await page.setViewportSize({ width: 700, height: 650 }); await settle(page); await target.hover();
+  const keyboardParent = windows.first(), keyboardParentId = await keyboardParent.getAttribute('id');
+  const keyboardTrigger = keyboardParent.locator('.keywordPreviewContent .gamePreviewKw').first();
+  await keyboardTrigger.hover(); const keyboardChild = windows.last();
+  await keyboardChild.hover(); await keyboardChild.focus(); await page.keyboard.press('Escape'); await settle(page);
+  assert.equal(await windows.count(), 1); assert.equal(await windows.first().getAttribute('id'), keyboardParentId);
+  await page.mouse.move(5, 5); assert.equal(await windows.count(), 0);
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // Pin and move the parent to each viewport edge, then verify that every child
+  // is placed against its own keyword, including the left fallback at the right edge.
+  for (const x of [8, 1052]) {
+    await target.hover(); await windows.first().locator('.keywordPreviewTitle').click();
+    const parent = windows.first(); await dragCard(page, parent, x, 250);
+    const trigger = parent.locator('.keywordPreviewContent .gamePreviewKw').first();
+    await trigger.hover(); const child = windows.last(); await enterAdjacentCard(page, trigger, child);
+    const b = await child.boundingBox(); assert.ok(b.x >= 8 && b.x + b.width <= 1432 && b.y >= 8 && b.y + b.height <= 892);
+    await page.mouse.move(5, 5); assert.equal(await windows.count(), 1, 'only the pinned parent remains after leaving');
+    await windows.first().locator('.keywordPreviewClose').click();
+  }
+  for (const [y, side] of [[80, 'bottom'], [500, 'top']]) {
+    await target.hover(); await windows.first().locator('.keywordPreviewTitle').click();
+    const parent = windows.first(); await page.setViewportSize({ width: 700, height: 650 }); await settle(page);
+    const trigger = parent.locator('.keywordPreviewContent .gamePreviewKw').first();
+    const a = await trigger.boundingBox(), p = await parent.boundingBox();
+    await dragCard(page, parent, 350 - (a.x + a.width / 2 - p.x), y);
+    await trigger.hover(); const child = windows.last(); await enterAdjacentCard(page, trigger, child);
+    const b = await child.boundingBox(), k = await trigger.boundingBox();
+    assert.ok(Math.abs(side === 'bottom' ? b.y - k.y - k.height : b.y + b.height - k.y) < 1, 'nested ' + side + ' fallback touches keyword');
+    await page.screenshot({ path: join(folder, 'nested-' + side + '.png') });
+    await page.mouse.move(5, 5); assert.equal(await windows.count(), 1);
+    await windows.first().locator('.keywordPreviewClose').click(); await page.setViewportSize({ width: 1440, height: 900 });
+  }
+}
 (async () => {
   let browser;
   try {
@@ -51,6 +155,7 @@ const settle = page => page.evaluate(() => new Promise(done => requestAnimationF
     const source = page.locator('.gamePreviewSourcePane .gamePreviewKw').first();
     const target = page.locator('.gamePreviewTargetPane .gamePreviewKw').first();
     const windows = page.locator('.keywordPreviewWindow');
+    await checkPointerBehavior(page, target, source, windows);
     await target.hover(); await page.waitForSelector('.keywordPreviewWindow');
     assert.equal(await windows.locator('.keywordPreviewTitle').innerText(), 'Thai Physical');
     assert.match(await windows.locator('.keywordPreviewContent').innerText(), /^Thai body/);
@@ -147,8 +252,18 @@ const settle = page => page.evaluate(() => new Promise(done => requestAnimationF
       await page.screenshot({ path: join(folder, theme + '.png') });
     }
     await windows.last().locator('.keywordPreviewClose').click();
+    // Long pinned content must remain scrollable and fully reachable after a
+    // resized desktop viewport becomes shorter than the original card.
+    await page.evaluate(async () => {
+      const item = fixtureApp.keywordWindows[0];
+      item.content = Array.from({ length: 100 }, (_, i) => [{ type: 'text', text: 'Long popup line ' + i }, { type: 'break' }]).flat();
+      await fixtureApp.$nextTick();
+    });
+    await page.setViewportSize({ width: 700, height: 350 }); await settle(page);
+    const long = await windows.first().evaluate(node => ({ bottom: node.getBoundingClientRect().bottom, scrollable: node.scrollHeight > node.clientHeight }));
+    assert.ok(long.bottom <= 342 && long.scrollable, 'tall pinned card stays within resized viewport and scrolls');
     assert.deepEqual(errors, []);
-    console.log(JSON.stringify({ browser: executablePath, checks: 'nested hover, translation/source, pin/close/focus/z-order, Escape isolation, file/game/language/source lifetime, SD and ClientText inline/full, safe markup, all themes, viewport bounds', screenshots: folder }));
+    console.log(JSON.stringify({ browser: executablePath, checks: 'immediate dismissal, contiguous root/nested pointer paths, hover blocking over cards and previews, captured header drag/pin/clamping, nested edge placement, translation/source, pin/close/focus/z-order, Escape isolation, file/game/language/source lifetime, SD and ClientText inline/full, safe markup, all themes, viewport bounds', screenshots: folder }));
   } finally {
     await browser?.close(); await new Promise(done => { server.close(done); server.closeAllConnections(); });
   }

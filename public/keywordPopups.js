@@ -4,6 +4,23 @@
   'use strict';
   const raw = value => root.Vue?.markRaw ? root.Vue.markRaw(value) : value;
   const copy = value => JSON.parse(JSON.stringify(value));
+  const clamp = (value, maximum) => Math.max(8, Math.min(value, maximum));
+  function adjacentPosition(anchor, size, viewport, nested = false) {
+    const width = Math.min(size.width, viewport.width - 16), height = Math.min(size.height, viewport.height - 16);
+    const room = { bottom: viewport.height - 8 - anchor.bottom, top: anchor.top - 8,
+      right: viewport.width - 8 - anchor.right, left: anchor.left - 8 };
+    const sides = nested ? ['right', 'left', 'bottom', 'top'] : ['bottom', 'top', 'right', 'left'];
+    const required = side => ['top', 'bottom'].includes(side) ? height : width;
+    const side = sides.find(side => room[side] >= required(side))
+      || sides.reduce((best, side) => room[side] / required(side) > room[best] / required(best) ? side : best);
+    const vertical = side === 'top' || side === 'bottom';
+    const maxWidth = vertical ? viewport.width - 16 : Math.max(1, room[side]);
+    const maxHeight = vertical ? Math.max(1, room[side]) : viewport.height - 16;
+    const w = Math.min(width, maxWidth), h = Math.min(height, maxHeight);
+    const x = side === 'left' ? anchor.left - w : side === 'right' ? anchor.right : (anchor.left + anchor.right - w) / 2;
+    const y = side === 'top' ? anchor.top - h : side === 'bottom' ? anchor.bottom : (anchor.top + anchor.bottom - h) / 2;
+    return { x: clamp(x, viewport.width - w - 8), y: clamp(y, viewport.height - h - 8), maxWidth, maxHeight, side };
+  }
   function snapshot(host, sources, translated) {
     const entries = new Map();
     let scope = {};
@@ -34,12 +51,13 @@
     },
     watch: {
       keywordPreviewOrigin() {
-        this._keywordAnchor = null; this._keywordHovered = null;
-        if (this.keywordWindows.length) this.scheduleKeywordDismiss();
+        this._keywordAnchor = null; this._keywordPointerTarget = null;
+        this.dismissKeywordWindows(null);
       },
     },
     mounted() {
       this._keywordEscape = event => {
+        this._keywordKeyboardFocus = true;
         if (event.key !== 'Escape' || event.isComposing) return;
         const id = event.target?.closest?.('[data-keyword-window]')?.dataset.keywordWindow;
         if (!id) return;
@@ -47,19 +65,35 @@
         this.closeKeywordWindow(Number(id));
       };
       document.addEventListener('keydown', this._keywordEscape, true);
+      this._keywordPointer = event => {
+        if (event.type === 'pointermove' || event.type === 'pointerdown') this._keywordKeyboardFocus = false;
+        this._keywordPointerTarget = event.type === 'pointerout' ? event.relatedTarget : event.target;
+        this.dismissKeywordWindows(this._keywordPointerTarget, this._keywordKeyboardFocus ? document.activeElement : null);
+      };
+      document.addEventListener('pointerover', this._keywordPointer, true);
+      document.addEventListener('pointerout', this._keywordPointer, true);
+      document.addEventListener('pointermove', this._keywordPointer, true);
+      document.addEventListener('pointerdown', this._keywordPointer, true);
     },
     beforeUnmount() {
-      clearTimeout(this._keywordDismissTimer);
       document.removeEventListener('keydown', this._keywordEscape, true);
+      document.removeEventListener('pointerover', this._keywordPointer, true);
+      document.removeEventListener('pointerout', this._keywordPointer, true);
+      document.removeEventListener('pointermove', this._keywordPointer, true);
+      document.removeEventListener('pointerdown', this._keywordPointer, true);
       this._keywordCatalog?.dispose();
     },
     methods: {
       async previewKeywordEnter(event, segment, translated, parent = null) {
         const anchor = event.currentTarget;
         if (this._keywordRestoreAnchor === anchor) { this._keywordRestoreAnchor = null; return; }
+        // A covering card owns hit testing, even if a stale enter arrives from
+        // a keyword underneath it while layout or stacking changes.
+        const pointer = event.type === 'mouseenter';
+        if (pointer && !anchor.contains(document.elementFromPoint(event.clientX, event.clientY))) return;
         const origin = parent ? parent.origin : this.keywordPreviewOrigin;
         this._keywordAnchor = anchor;
-        this.keepKeywordWindow(parent);
+        this.dismissKeywordWindows(pointer ? anchor : this._keywordPointerTarget, pointer ? null : anchor, parent?.id);
         const matches = item => item.anchor === anchor && item.origin === origin && item.parentId === (parent?.id || null);
         const existing = this.keywordWindows.find(matches);
         if (existing) return existing;
@@ -77,6 +111,7 @@
             }
           }
           if (this.keywordPreviewOrigin !== origin || this._keywordAnchor !== anchor || !anchor.isConnected) return;
+          if (pointer && !anchor.contains(document.elementFromPoint(event.clientX, event.clientY))) return;
           context = snapshot(this, sources || [], translated);
         }
         const opened = this.keywordWindows.find(matches);
@@ -95,37 +130,29 @@
       },
       previewKeywordLeave(event) {
         if (this._keywordAnchor === event.currentTarget) this._keywordAnchor = null;
-        this.scheduleKeywordDismiss();
+        if (event.type === 'blur') this.dismissKeywordWindows(this._keywordPointerTarget, event.relatedTarget);
+        else {
+          this._keywordPointerTarget = event.relatedTarget;
+          this.dismissKeywordWindows(event.relatedTarget, this._keywordKeyboardFocus ? document.activeElement : null);
+        }
       },
       async previewKeywordActivate(event, segment, translated, parent = null) {
         const item = await this.previewKeywordEnter(event, segment, translated, parent);
         if (item) { this.pinKeywordWindow(item); await this.$nextTick(); document.getElementById('keyword-window-' + item.id)?.focus({ preventScroll: true }); }
       },
-      keepKeywordWindow(item) {
-        clearTimeout(this._keywordDismissTimer);
-        this._keywordHovered = item?.id || null;
-      },
-      leaveKeywordWindow(item) {
-        if (this._keywordHovered === item.id) this._keywordHovered = null;
-        this.scheduleKeywordDismiss();
-      },
-      scheduleKeywordDismiss() {
-        clearTimeout(this._keywordDismissTimer);
-        this._keywordDismissTimer = setTimeout(() => {
-          const keep = new Set();
-          const retain = id => { while (id && !keep.has(id)) { keep.add(id); id = this.keywordWindows.find(item => item.id === id)?.parentId; } };
-          retain(this._keywordHovered);
-          const focused = Number(document.activeElement?.closest?.('[data-keyword-window]')?.dataset.keywordWindow);
-          if (this.keywordWindows.find(item => item.id === focused)?.pinned) keep.add(focused);
-          else retain(focused);
-          for (const item of this.keywordWindows) {
-            if (item.pinned) keep.add(item.id);
-            if (item.anchor === this._keywordAnchor) retain(item.id);
-          }
-          this.keywordWindows = this.keywordWindows.filter(item => keep.has(item.id));
-        }, 450);
+      dismissKeywordWindows(pointerTarget = this._keywordPointerTarget, focusTarget = null, parentId = null) {
+        const keep = new Set();
+        const retain = id => { while (id && !keep.has(id)) { keep.add(id); id = this.keywordWindows.find(item => item.id === id)?.parentId; } };
+        retain(parentId);
+        for (const target of [pointerTarget, focusTarget]) {
+          retain(Number(target?.closest?.('[data-keyword-window]')?.dataset.keywordWindow));
+          for (const item of this.keywordWindows) if (item.anchor === target || item.anchor.contains?.(target)) retain(item.id);
+        }
+        const retained = this.keywordWindows.filter(item => item.pinned || keep.has(item.id));
+        if (retained.length !== this.keywordWindows.length) this.keywordWindows = retained;
       },
       raiseKeywordWindow(item) {
+        if (!this.keywordWindows.some(value => value.id === item.id)) return;
         this.keywordWindows = [...this.keywordWindows.filter(value => value.id !== item.id), item];
       },
       pinKeywordWindow(item) { item.pinned = true; this.raiseKeywordWindow(item); },
@@ -167,30 +194,51 @@
   Text.components = { 'keyword-preview-text': Text };
   const Window = {
     props: ['host', 'item', 'order'], components: { 'keyword-preview-text': Text },
-    data: () => ({ x: 8, y: 8 }),
+    data: () => ({ x: 8, y: 8, maxWidth: null, maxHeight: null, dragging: false }),
     mounted() {
       this._resize = new ResizeObserver(() => this.place()); this._resize.observe(this.$el);
       this._place = () => this.place(); window.addEventListener('resize', this._place); this.place();
+      document.addEventListener('scroll', this._place, true);
     },
-    beforeUnmount() { this._resize.disconnect(); window.removeEventListener('resize', this._place); },
+    beforeUnmount() { this.finishDrag(); this._resize.disconnect(); window.removeEventListener('resize', this._place); document.removeEventListener('scroll', this._place, true); },
     methods: {
       place() {
         const bounds = this.$el.getBoundingClientRect(), anchor = this.item.anchor.getBoundingClientRect();
-        const parent = this.item.parentId && this.item.anchor.closest('[data-keyword-window]')?.getBoundingClientRect();
-        let x = parent ? parent.right + 8 : anchor.left, y = parent ? anchor.top : anchor.bottom + 8;
-        if (parent && x + bounds.width > innerWidth - 8) x = parent.left - bounds.width - 8;
-        if (!parent && y + bounds.height > innerHeight - 8) y = anchor.top - bounds.height - 8;
-        // Once pinned, resizing clamps its existing position even after its anchor disappears.
-        if (this._placed && this.item.pinned) { x = this.x; y = this.y; }
-        this.x = Math.max(8, Math.min(x, innerWidth - bounds.width - 8));
-        this.y = Math.max(8, Math.min(y, innerHeight - bounds.height - 8)); this._placed = true;
+        if (this._placed && this.item.pinned) {
+          this.maxWidth = Math.min(this.maxWidth, innerWidth - 16); this.maxHeight = Math.min(this.maxHeight, innerHeight - 16);
+          this.x = clamp(this.x, innerWidth - Math.min(bounds.width, this.maxWidth) - 8);
+          this.y = clamp(this.y, innerHeight - Math.min(bounds.height, this.maxHeight) - 8);
+        } else {
+          Object.assign(this, adjacentPosition(anchor, bounds, { width: innerWidth, height: innerHeight }, !!this.item.parentId));
+        }
+        this._placed = true;
+      },
+      startDrag(event) {
+        if (event.button !== 0 || this._drag || event.target.closest('button,[role="button"]')) return;
+        event.preventDefault(); event.stopPropagation();
+        this.host.pinKeywordWindow(this.item); this.$el.focus({ preventScroll: true });
+        this._drag = { id: event.pointerId, handle: event.currentTarget, x: this.x, y: this.y, clientX: event.clientX, clientY: event.clientY };
+        event.currentTarget.setPointerCapture(event.pointerId); this.dragging = true;
+      },
+      moveDrag(event) {
+        const drag = this._drag;
+        if (!drag || drag.id !== event.pointerId) return;
+        const bounds = this.$el.getBoundingClientRect();
+        this.x = clamp(drag.x + event.clientX - drag.clientX, innerWidth - bounds.width - 8);
+        this.y = clamp(drag.y + event.clientY - drag.clientY, innerHeight - bounds.height - 8);
+      },
+      finishDrag(event) {
+        const drag = this._drag;
+        if (!drag || event && drag.id !== event.pointerId) return;
+        this._drag = null; this.dragging = false;
+        if (drag.handle.hasPointerCapture(drag.id)) drag.handle.releasePointerCapture(drag.id);
       },
       click(event) { this.host.pinKeywordWindow(this.item); if (!event.target.closest('button,[role="button"]')) this.$el.focus({ preventScroll: true }); },
     },
     template: `<section class="keywordPreviewWindow" :id="'keyword-window-'+item.id" :data-keyword-window="item.id" :data-language="item.context.language" tabindex="-1" role="dialog" aria-modal="false" :aria-labelledby="'keyword-title-'+item.id"
-      :style="{left:x+'px',top:y+'px',zIndex:order+1,fontFamily:item.context.font}" @keydown.stop @mouseenter="host.keepKeywordWindow(item)" @mouseleave="host.leaveKeywordWindow(item)" @focusin="host.raiseKeywordWindow(item)" @focusout="host.scheduleKeywordDismiss()" @click="click">
+      :style="{left:x+'px',top:y+'px',maxWidth:maxWidth+'px',maxHeight:maxHeight+'px',zIndex:order+1,fontFamily:item.context.font}" :class="{keywordPreviewDragging:dragging}" @keydown.stop @focusin="host.raiseKeywordWindow(item)" @focusout="host.dismissKeywordWindows(host._keywordPointerTarget,$event.relatedTarget)" @click="click">
       <button v-if="item.pinned" class="keywordPreviewClose" type="button" aria-label="Close keyword popup" @click.stop="host.closeKeywordWindow(item.id)">×</button>
-      <div class="keywordPreviewTitle" :id="'keyword-title-'+item.id"><keyword-preview-text :host="host" :segments="item.title" :item="item"></keyword-preview-text></div>
+      <div class="keywordPreviewHeader" title="Drag to move and pin" @pointerdown="startDrag" @pointermove="moveDrag" @pointerup="finishDrag" @pointercancel="finishDrag" @lostpointercapture="finishDrag"><div class="keywordPreviewTitle" :id="'keyword-title-'+item.id"><keyword-preview-text :host="host" :segments="item.title" :item="item"></keyword-preview-text></div></div>
       <div class="gamePreviewContinue keywordPreviewSeparator" role="separator"></div>
       <div class="keywordPreviewContent"><keyword-preview-text :host="host" :segments="item.content" :item="item"></keyword-preview-text></div>
       <p v-if="item.notice" class="keywordPreviewNotice">{{ item.notice }}</p>
@@ -200,5 +248,5 @@
     props: ['host'], components: { 'keyword-preview-window': Window },
     template: `<teleport to="body"><div class="keywordPreviewOverlay" data-inline-focus-surface :data-density="host.uiDensity"><keyword-preview-window v-for="(item,index) in host.keywordWindows" :key="item.id" :host="host" :item="item" :order="index"></keyword-preview-window></div></teleport>`,
   };
-  root.KeywordPopups = { mixin, Overlay, snapshot };
+  root.KeywordPopups = { mixin, Overlay, snapshot, adjacentPosition };
 })(typeof window === 'object' ? window : globalThis);

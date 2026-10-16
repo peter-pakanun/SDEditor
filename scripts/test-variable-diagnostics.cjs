@@ -1236,6 +1236,7 @@ test('keyword windows freeze translated or English workbook fields, nested ident
   editor.ctSaved = { Armour: { values: { 'Info Content': 'Saved Thai armour' } } }; editor.ctPreviewGggVars = { '0': '42' };
   const anchor = () => ({ isConnected: true });
   const translated = await editor.previewKeywordEnter({ currentTarget: anchor() }, { tagName: 'Physical' }, true);
+  editor.pinKeywordWindow(translated);
   const english = await editor.previewKeywordEnter({ currentTarget: anchor() }, { tagName: 'Physical' }, false);
   assert.equal(translated.title[0].text, 'Thai title'); assert.equal(english.title[0].text, 'English title');
   assert.equal(translated.context.variables['0'], '42');
@@ -1246,7 +1247,6 @@ test('keyword windows freeze translated or English workbook fields, nested ident
   assert.equal(nested.content[0].text, 'Saved Thai armour'); assert.equal(nested.context, translated.context);
   assert.equal(nested.context.scope.versionId, 'old'); assert.equal(nested.context.variables['0'], '42');
   assert.ok(editor.keywordWindows.some(item => item.id === translated.id && item.pinned));
-  clearTimeout(editor._keywordDismissTimer);
 });
 
 test('missing keyword translations stay empty and untrusted workbook markup stays text', async () => {
@@ -1266,8 +1266,8 @@ test('missing keyword translations stay empty and untrusted workbook markup stay
 test('keyword popup focus raising and explicit close preserve independently pinned children', async () => {
   const { editor } = loadEditor(); editor.ctActive = true; editor.ctUnits = []; editor.ctSaved = {};
   const open = (parent = null) => editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'Tag' }, true, parent);
-  const first = await open(), second = await open(first), third = await open(first);
-  editor.pinKeywordWindow(second); editor.raiseKeywordWindow(first);
+  const first = await open(), second = await open(first); editor.pinKeywordWindow(second);
+  const third = await open(first); editor.raiseKeywordWindow(first);
   assert.equal(editor.keywordWindows.at(-1).id, first.id);
   editor.closeKeywordWindow(first.id);
   assert.deepEqual(Array.from(editor.keywordWindows, item => item.id), [second.id]);
@@ -1292,13 +1292,42 @@ test('late reference lookup cannot publish a popup after the selected file chang
   assert.equal(await pending, undefined); assert.equal(editor.keywordWindows.length, 0);
 });
 
-test('hover dismissal retains nested ancestors and pinned windows, then removes the transient branch on departure', async () => {
+test('hover dismissal is immediate, retains the actual nested branch and preserves independent pins', async () => {
   const { editor } = loadEditor(); editor.ctActive = true; editor.ctUnits = []; editor.ctSaved = {};
   const parent = await editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'Parent' }, false);
   const child = await editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'Child' }, false, parent);
-  editor._keywordAnchor = null; editor.keepKeywordWindow(child); editor.scheduleKeywordDismiss();
-  await new Promise(done => setTimeout(done, 480)); assert.equal(editor.keywordWindows.length, 2);
-  editor.pinKeywordWindow(child); editor.leaveKeywordWindow(child);
-  await new Promise(done => setTimeout(done, 480));
-  assert.deepEqual(Array.from(editor.keywordWindows, item => item.id), [child.id]);
+  const card = item => ({ closest: () => ({ dataset: { keywordWindow: String(item.id) } }) });
+  editor.dismissKeywordWindows(card(child)); assert.equal(editor.keywordWindows.length, 2);
+  editor.dismissKeywordWindows(card(parent)); assert.deepEqual(Array.from(editor.keywordWindows, item => item.id), [parent.id]);
+  const pinned = await editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'Pinned' }, false, parent);
+  editor.pinKeywordWindow(pinned); editor.dismissKeywordWindows(null);
+  assert.deepEqual(Array.from(editor.keywordWindows, item => item.id), [pinned.id]);
+  editor.raiseKeywordWindow(child); assert.equal(editor.keywordWindows.length, 1, 'a dismissed card cannot be resurrected by late focus');
+});
+
+test('keyword placement touches its trigger on a fitting edge and stays within the viewport', () => {
+  const { context } = loadEditor(), place = context.window.KeywordPopups.adjacentPosition;
+  const size = { width: 150, height: 120 }, viewport = { width: 500, height: 400 };
+  for (const [anchor, nested, side] of [
+    [{ left: 220, right: 260, top: 40, bottom: 60 }, false, 'bottom'],
+    [{ left: 220, right: 260, top: 360, bottom: 380 }, false, 'top'],
+    [{ left: 10, right: 40, top: 160, bottom: 180 }, true, 'right'],
+    [{ left: 450, right: 490, top: 160, bottom: 180 }, true, 'left'],
+  ]) {
+    const result = place(anchor, size, viewport, nested); assert.equal(result.side, side);
+    assert.ok(result.x >= 8 && result.y >= 8 && result.x + size.width <= 492 && result.y + size.height <= 392);
+    if (side === 'bottom') assert.equal(result.y, anchor.bottom);
+    if (side === 'top') assert.equal(result.y + size.height, anchor.top);
+    if (side === 'right') assert.equal(result.x, anchor.right);
+    if (side === 'left') assert.equal(result.x + size.width, anchor.left);
+  }
+});
+
+test('oversize keyword cards use available adjacent space instead of covering their trigger', () => {
+  const { context } = loadEditor(), place = context.window.KeywordPopups.adjacentPosition;
+  const anchor = { left: 220, right: 260, top: 180, bottom: 200 };
+  const result = place(anchor, { width: 380, height: 380 }, { width: 500, height: 400 });
+  assert.ok(result.maxWidth < 380 || result.maxHeight < 380);
+  const w = Math.min(380, result.maxWidth), h = Math.min(380, result.maxHeight);
+  assert.ok(result.x + w <= anchor.left || result.x >= anchor.right || result.y + h <= anchor.top || result.y >= anchor.bottom);
 });
