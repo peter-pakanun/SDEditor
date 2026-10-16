@@ -26,7 +26,7 @@ function harness(changes={}){
     Object.defineProperty(app,'ctCurrentUnit',{get:()=>app._ctUnitIndex.get(app.ctSelection)||null});
     Object.defineProperty(app,'ctOfflineTest',{get:()=>mixin.computed.ctOfflineTest.call(app)});
     Object.defineProperty(app,'ctPreviewField',{get:()=>mixin.computed.ctPreviewField.call(app)});
-    for(const name of ['ctHasScanSelection','ctScanScopeKey','ctScanPercent','ctScanResultFiles','ctScanResultPageCount','ctScanResultRangeLabel','ctScanVisibleResults','ctScanIssueCounts','ctDiagnosticScanController','ctDraftBlocked'])
+    for(const name of ['ctVersionWorkbookDropEnabled','ctHasScanSelection','ctScanScopeKey','ctScanPercent','ctScanResultFiles','ctScanResultPageCount','ctScanResultRangeLabel','ctScanVisibleResults','ctScanIssueCounts','ctDiagnosticScanController','ctDraftBlocked'])
         Object.defineProperty(app,name,{get:()=>mixin.computed[name].call(app)});
     for(const name of ['ctSheetSeverities','ctNpcGroups','ctNpcFilteredGroups','ctNpcBrowseTitle','ctNpcTotal','ctNpcKindOptions','ctNpcSeverities',
         'ctConvoParents','ctConvoTree','ctConvoBrowseTitle','ctConvoTotal','ctConvoSeverities'])
@@ -3975,6 +3975,65 @@ test('offline sheet testing is available to every role including guests and does
         assert.equal(app.ctUploadVisible,true);
         assert.equal(app.ctUploadTest,true);assert.equal(app.ctUploadLocal,true);assert.equal(app.ctUploadHistory,false);
         assert.equal(app.ctUploadHistoryFiles.length,0);app.ctCloseUpload();
+    }
+});
+
+function workbookDropEvent(files=[],type='drop',types=['Files']) {
+    return {type,dataTransfer:{files,types},preventDefault(){this.defaultPrevented=true;}};
+}
+function workbookDropHarness(changes={}) {
+    return cloudAccessHarness(harness({versionChooserVisible:true,gameVersionSelected:true,ctActive:false,...changes}), 'Thai');
+}
+
+test('dropping workbooks on the version screen opens offline Current workbooks for every role without parsing, storage or requests',async()=>{
+    for(const role of ['manager','admin','translator','guest']){
+        const {app}=workbookDropHarness();app.cloudUser.role=role;
+        if(role==='guest'){app.cloudSignedIn=false;app.cloudProfileId='guest';app.cloudUser=null;}
+        app._cloud={request(){assert.fail('Workbook drops stay offline');}};
+        app._ctStore=new Proxy({},{get(){assert.fail('Workbook drops must not access durable storage');}});
+        app.ctPrepareUpload=()=>assert.fail('Open remains an explicit action');
+        const normal=new File(['original normal'],'French.xlsx'),gender=new File(['original gender'],'French_Gender.XLSM'),
+            unknown=new File(['original unknown'],'custom.xlsx'),zip=new File(['ignored'],'StatDescriptions.zip');
+        const event=workbookDropEvent([normal,gender,unknown,zip]);
+        assert.equal(await app.ctDropVersionWorkbooks(event),true);assert.equal(event.defaultPrevented,true);
+        assert.equal(app.ctUploadVisible,true);assert.equal(app.ctUploadTest,true);assert.equal(app.ctUploadLocal,true);assert.equal(app.ctUploadVersion,null);
+        assert.equal(app.ctActive,false);assert.equal(app.ctPrepared.length,0);assert.equal(app.ctUploadHistory,false);assert.equal(app.ctUploadHistoryFiles.length,0);
+        assert.deepEqual(Array.from(app.ctUploadFiles,item=>[item.file.name,item.language,item.role,item.testVersion]),[
+            ['French.xlsx','French','normal','current'],['French_Gender.XLSM','French','gender','current'],['custom.xlsx','','normal','current']]);
+        assert.strictEqual(app.ctUploadFiles[0].file,normal);assert.strictEqual(app.ctUploadFiles[1].file,gender);assert.strictEqual(app.ctUploadFiles[2].file,unknown);
+    }
+});
+
+test('version workbook drops ignore nonfiles and unsupported files and preserve selections while unavailable',async()=>{
+    const file=new File(['original'],'Thai.xlsx');
+    for(const changes of [{ctBusy:true},{ctUploading:true},{managedVersionBusy:true},{ctUploadVisible:true},{showSetting:true},
+        {settingsDialogVisible:true},{workspaceInitializationActive:true},{needsInitialSettings:true},{versionChooserVisible:false},{gameVersionSelected:false},{testMode:true}]){
+        const {app}=workbookDropHarness(changes),current=[{file}],previous=[{file}];app.ctUploadFiles=current;app.ctUploadHistoryFiles=previous;
+        app.ctOpenOfflineTest=()=>assert.fail('An unavailable screen cannot open a test');app.ctWorkbookDragDepth=2;
+        const event=workbookDropEvent([file]);assert.equal(await app.ctDropVersionWorkbooks(event),false);assert.equal(event.defaultPrevented,true);
+        assert.strictEqual(app.ctUploadFiles,current);assert.strictEqual(app.ctUploadHistoryFiles,previous);assert.equal(app.ctWorkbookDragDepth,0);
+    }
+    const {app}=workbookDropHarness();
+    for(const files of [[],[new File(['zip'],'StatDescriptions.zip')],[new File(['text'],'Thai.txt')]]){
+        const event=workbookDropEvent(files);assert.equal(await app.ctDropVersionWorkbooks(event),false);assert.equal(event.defaultPrevented,true);assert.equal(app.ctUploadVisible,false);
+    }
+    const text=workbookDropEvent([],'drop',['text/plain']);assert.equal(await app.ctDropVersionWorkbooks(text),false);assert.equal(text.defaultPrevented,undefined);
+});
+
+test('version workbook drag feedback survives child transitions and clears on leave or a blocked drag',()=>{
+    const {app}=workbookDropHarness(),enter=workbookDropEvent([],'dragenter');
+    app.ctVersionWorkbookDrag(enter);assert.equal(enter.defaultPrevented,true);assert.equal(enter.dataTransfer.dropEffect,'copy');assert.equal(app.ctWorkbookDragDepth,1);
+    app.ctVersionWorkbookDrag(enter);app.ctVersionWorkbookDragLeave();assert.equal(app.ctWorkbookDragDepth,1);
+    app.ctVersionWorkbookDrag(workbookDropEvent([],'dragover'));assert.equal(app.ctWorkbookDragDepth,1);
+    app.ctVersionWorkbookDragLeave();app.ctVersionWorkbookDragLeave();assert.equal(app.ctWorkbookDragDepth,0);
+    const text=workbookDropEvent([],'dragenter',['text/plain']);app.ctVersionWorkbookDrag(text);assert.equal(text.defaultPrevented,undefined);assert.equal(app.ctWorkbookDragDepth,0);
+    app.ctBusy=true;app.ctWorkbookDragDepth=2;app.ctVersionWorkbookDrag(enter);assert.equal(enter.dataTransfer.dropEffect,'none');assert.equal(app.ctWorkbookDragDepth,0);
+});
+
+test('a workbook drop cannot populate a closed, replaced or differently scoped dialog after opening',async()=>{
+    for(const change of [app=>app.ctCloseUpload(),app=>{app.ctCloseUpload();app.ctOpenOfflineTest();},app=>{app.gameVersion='poe1';}]){
+        const {app}=workbookDropHarness(),opening=app.ctDropVersionWorkbooks(workbookDropEvent([new File(['original'],'Thai.xlsx')]));
+        change(app);assert.equal(await opening,false);assert.equal(app.ctUploadFiles.length,0);
     }
 });
 

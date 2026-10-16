@@ -7,6 +7,8 @@
     const teams = ['French', 'German', 'Spanish', 'Portuguese', 'Russian', 'Thai', 'Korean', 'Japanese', 'Simplified Chinese', 'Traditional Chinese', 'Turkish', 'Polish'];
     const copy = value => JSON.parse(JSON.stringify(value));
     const raw = value => root.Vue?.markRaw ? root.Vue.markRaw(value) : value;
+    const fileDrag = event => Array.from(event.dataTransfer?.types || []).includes('Files')
+        || Array.from(event.dataTransfer?.files || []).length > 0;
     const unproxy = value => root.Vue?.toRaw ? root.Vue.toRaw(value) : value;
     const uuid = () => root.crypto.randomUUID();
     const mode = group => String(group?.contentMode || group?.mode || '').toLowerCase();
@@ -113,11 +115,16 @@
             ctDictionaryPack:null, ctDraftSummaries:[], ctCommentPostError:'',
             ctPeers: [], ctLocalWorkspaces: [], ctRequests: [], ctUploadVisible: false, ctUploadLocal: false, ctUploadTest: false,
             ctUploadVersion: null, ctUploadPredecessor: null, ctUploadName: '', ctUploadDeadline: '', ctUploadFiles: raw([]), ctPrepared: raw([]),
-            ctUploadHistory: false, ctUploadHistoryFiles: raw([]),
+            ctUploadHistory: false, ctUploadHistoryFiles: raw([]), ctWorkbookDragDepth: 0,
             ctUploadAssignments: teams.slice(), ctPolicy: null, ctPolicyText: '', ctUploadError: '', ctUploading: false, ctDuplicateChoices: {},
             activeContentGroup: null, ctTeamOptions: teams
         }; },
         computed: {
+            ctVersionWorkbookDropEnabled() {
+                return this.versionChooserVisible && !this.testMode && this.gameVersionSelected && !this.needsInitialSettings
+                    && !this.workspaceInitializationActive && !this.showSetting && !this.settingsDialogVisible
+                    && !this.ctUploadVisible && !this.managedVersionBusy && !this.ctBusy && !this.ctUploading;
+            },
             ctOfflineTest() { return String(this.ctWorkspace?.scope.groupId || '').startsWith('local:test:'); },
             ctGroups() {
                 const version=this.managedSelectedVersion;
@@ -588,6 +595,7 @@
             },
         },
         watch: {
+            ctVersionWorkbookDropEnabled(enabled) { if(!enabled)this.ctWorkbookDragDepth=0; },
             ctDictionaryFilter() {this.ctDictionaryPage=1;},
             ctDictionaryPageCount(value) {this.ctDictionaryPage=Math.min(this.ctDictionaryPage,value);},
             ctDictionaryScopeKey() {this.ctDictionaryEndEdit();this.ctDictionaryPage=1;},
@@ -1293,7 +1301,7 @@
                 this.ctWorkspace=null;this.ctUnits=raw([]);this.ctSaved=raw({});this.activeContentGroup=null;
                 this._ctUnitIndex=raw(new Map());this._ctWorkUnits=raw(new Map());this._ctSheets=raw([]);this.ctSheetFilter='';
                 this.ctResetHistory();
-                this.ctUploadVisible=false;this.ctUploading=false;this.ctUploadPredecessor=null;this._ctUploadOpenRun=null;this.ctRequests=[];
+                this.ctUploadVisible=false;this.ctUploading=false;this.ctUploadPredecessor=null;this._ctUploadOpenRun=null;this.ctRequests=[];this.ctWorkbookDragDepth=0;
                 for(const [id,store] of this._ctTestStores || [])if(id!==keepTestGroupId){store.dispose();this._ctTestStores.delete(id);}
                 if(this.ctUploadTest){this.ctUploadFiles=raw([]);this.ctUploadHistoryFiles=raw([]);this.ctUploadHistory=false;this.ctPrepared=raw([]);}
                 if(exitingTest){
@@ -2716,6 +2724,25 @@
                 if (!this.managedOnlineAvailable || (!this.cloudCanAccessAllLanguages && ctx.scope.language!==this.cloudUser?.language) || String(ctx.scope.groupId).startsWith('local:')) return;
                 try { await this._cloud.request('/v1/content-groups/' + encodeURIComponent(ctx.scope.groupId) + '/presence', { method: 'POST', body: { unitId: this.ctSelection || null, sessionId: this.instanceTabId, language: ctx.scope.language } }); const response=await this._cloud.request('/v1/content-groups/'+encodeURIComponent(ctx.scope.groupId)+'/presence'); if (this.ctCurrent(ctx)) this.ctPeers = response.presence || []; } catch (_) { /* Translation requests retain their own failures. */ }
             },
+            ctVersionWorkbookDrag(event) {
+                if(!fileDrag(event))return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect=this.ctVersionWorkbookDropEnabled ? 'copy' : 'none';
+                if(!this.ctVersionWorkbookDropEnabled){this.ctWorkbookDragDepth=0;return;}
+                if(event.type==='dragenter')this.ctWorkbookDragDepth++;
+            },
+            ctVersionWorkbookDragLeave() { this.ctWorkbookDragDepth=Math.max(0,this.ctWorkbookDragDepth-1); },
+            async ctDropVersionWorkbooks(event) {
+                this.ctWorkbookDragDepth=0;
+                if(!fileDrag(event))return false;
+                event.preventDefault();
+                const files=Array.from(event.dataTransfer.files || []).filter(file=>/\.(xlsx|xlsm)$/i.test(file.name));
+                if(!this.ctVersionWorkbookDropEnabled || !files.length)return false;
+                const key=this.managedCatalogScope,opening=this.ctOpenOfflineTest(),run=this._ctUploadOpenRun;
+                if(!await opening || key!==this.managedCatalogScope || this._ctUploadOpenRun!==run
+                    || !this.ctUploadVisible || !this.ctUploadTest || this.ctUploading)return false;
+                return this.ctAddUploadFiles(files);
+            },
             ctOpenOfflineTest() { return this.ctOpenUpload(null, true, true); },
             async ctOpenTestSheet() {
                 if(!this.ctUploadTest || !this.ctUploadVisible || this.ctUploading || this.ctBusy || this._ctTestOpenRun || !this.ctUploadFiles.length)return false;
@@ -2764,12 +2791,15 @@
                 this.ctUploadHistory=!!enabled;this.ctPrepared=raw([]);this.ctUploadError='';
             },
             ctChooseFiles(event, history = false) {
-                if(this.ctUploading || history && (!this.ctUploadTest || !this.ctUploadHistory))return;
+                if(this.ctAddUploadFiles(event.target.files,history) && this.ctUploadTest)event.target.value='';
+            },
+            ctAddUploadFiles(files, history = false) {
+                if(this.ctUploading || history && (!this.ctUploadTest || !this.ctUploadHistory))return false;
                 this.ctPrepared = raw([]); this.ctUploadError = '';
-                const selected = Array.from(event.target.files || []).filter(file => (this.ctUploadTest ? /\.(xlsx|xlsm)$/i : /\.(xlsx|xlsm|zip)$/i).test(file.name)).map(file => ({ file, ...detect(file.name), ...(this.ctUploadTest ? { testVersion: history ? 'previous' : 'current' } : {}) }));
+                const selected = Array.from(files || []).filter(file => (this.ctUploadTest ? /\.(xlsx|xlsm)$/i : /\.(xlsx|xlsm|zip)$/i).test(file.name)).map(file => ({ file, ...detect(file.name), ...(this.ctUploadTest ? { testVersion: history ? 'previous' : 'current' } : {}) }));
                 const list=history ? 'ctUploadHistoryFiles' : 'ctUploadFiles';
                 this[list] = raw(this.ctUploadTest ? [...this[list], ...selected] : selected);
-                if(this.ctUploadTest)event.target.value='';
+                return true;
             },
             ctRemoveTestFile(index, history = false) {
                 if(!this.ctUploadTest || this.ctUploading)return;

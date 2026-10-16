@@ -302,7 +302,7 @@
       </div>
     </div>
 
-    <section v-if="!testMode && gameVersionSelected && versionChooserVisible && !needsInitialSettings" v-show="!workspaceInitializationActive" class="versionCatalog" :inert="showSetting || workspaceInitializationActive" aria-label="Source versions">
+    <section v-if="!testMode && gameVersionSelected && versionChooserVisible && !needsInitialSettings" v-show="!workspaceInitializationActive" class="versionCatalog" :class="{ versionWorkbookDragActive: ctWorkbookDragDepth > 0 && ctVersionWorkbookDropEnabled }" :inert="showSetting || workspaceInitializationActive" aria-label="Source versions" @dragenter="ctVersionWorkbookDrag" @dragover="ctVersionWorkbookDrag" @dragleave="ctVersionWorkbookDragLeave" @drop="ctDropVersionWorkbooks">
       <header class="versionCatalogHeader">
         <div><h1>{{ cloudCanAccessAllLanguages ? 'Manage version' : 'Choose a source version' }}</h1><p><a v-if="cloudCanAccessAllLanguages" class="workspaceContextLink" href="#select-game-version" @click.prevent="showGameVersionSelector" :aria-disabled="managedVersionBusy ? 'true' : undefined" title="Return to game version selection" :aria-label="'Return to game version selection from ' + gameVersionLabel">{{ gameVersionLabel }}</a><span v-else>{{ gameVersionLabel }}</span> · {{ cloudCanAccessAllLanguages ? (cloudUser?.isAdmin ? 'Admin' : 'Manager') : (cloudUser?.language || lang) }}</p></div>
         <div class="versionActions"><button v-if="cloudCanAccessAllLanguages && managedOnlineAvailable" class="primaryAction" @click="ctOpenUpload()" :disabled="managedVersionBusy || ctUploading || !!managedNextVersionBlockedReason" v-tooltip="managedNextVersionBlockedReason">Upload next version</button><button @click="openSettings()">Settings</button><span v-if="browserWorkTooltip" class="browserWorkStatus" role="img" :aria-label="browserWorkTooltip" v-tooltip="browserWorkTooltip"><span class="browserWorkSpinner" aria-hidden="true"></span></span></div>
@@ -364,6 +364,7 @@
           </template>
           <div v-if="managedOfflineVersion" class="versionActions"><button @click="managedImportOffline(false)" :disabled="managedVersionBusy || !managedLocalVersionsLoaded">Import next/update</button><button @click="managedImportOffline(true)" :disabled="managedVersionBusy">Import translated</button></div>
           <div class="versionActions"><button @click="ctOpenOfflineTest" :disabled="managedVersionBusy || ctBusy || ctUploading">Test Sheet Offline</button></div>
+          <p class="versionMuted versionWorkbookDropHint">Drop XLSX/XLSM workbooks here to open Test Sheet Offline.</p>
           <div v-for="request in ctRequests.filter(request=>['publication','metadata'].includes(request.payload.kind))" :key="request.requestId"><button @click="ctResumePublication(request)">Resume {{ request.payload.name }} · {{ request.payload.kind === 'metadata' ? 'version draft' : 'content upload' }}</button></div>
         </section>
       </div>

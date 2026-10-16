@@ -303,10 +303,54 @@ async function run() {
         });
         const upload = page.getByRole('region', { name: 'Content upload' });
         const workspace = page.getByRole('region', { name: 'ClientText workspace' });
+        const versions = page.getByRole('region', { name: 'Source versions' });
+        async function droppedFiles(files) {
+            return page.evaluateHandle(files => {
+                const transfer = new DataTransfer();
+                for (const file of files) transfer.items.add(new File([new Uint8Array(file.bytes)], file.name, { type: file.mimeType }));
+                return transfer;
+            }, files.map(file => ({ name: file.name, mimeType: file.mimeType || '', bytes: Array.from(file.buffer) })));
+        }
+        const dropFiles = [{ name: 'French.xlsx', buffer: normal }, { name: 'French_Gender.XLSM', buffer: gender },
+            { name: 'StatDescriptions.zip', buffer: Buffer.from('ignored') }];
+        const transfer = await droppedFiles(dropFiles);
+        await monitor(page, true);
+        await versions.dispatchEvent('dragenter', { dataTransfer: transfer });
+        await page.waitForFunction(() => document.querySelector('.versionWorkbookDragActive'));
+        await versions.locator('h1').dispatchEvent('dragenter', { dataTransfer: transfer });
+        await versions.dispatchEvent('dragleave', { dataTransfer: transfer });
+        assert.equal(await versions.evaluate(element => element.classList.contains('versionWorkbookDragActive')), true, 'Nested elements retain the drop cue');
+        await layout(page, versions, 'Version screen workbook drop cue');
+        assert.equal(await versions.evaluate(element => element.contains(document.elementFromPoint(innerWidth / 2, innerHeight - 2))), true,
+            'Empty space near the bottom of the version screen accepts workbook drops');
+        mkdirSync(disposableFolder, { recursive: true });
+        await page.screenshot({ path: join(disposableFolder, 'workbook-drop-version-screen.png') });
+        await versions.locator('h1').dispatchEvent('drop', { dataTransfer: transfer });
+        await upload.getByRole('heading', { name: 'Test Sheet Offline', exact: true }).waitFor();
+        const currentDropRows = upload.getByRole('region', { name: 'Current workbooks', exact: true }).locator('.ctUploadFiles tbody tr');
+        assert.equal(await currentDropRows.count(), 2, 'A multi-file drop populates Current workbooks and excludes ZIPs');
+        assert.match(await currentDropRows.nth(0).textContent(), /French.xlsx/);assert.match(await currentDropRows.nth(1).textContent(), /French_Gender.XLSM/);
+        assert.equal(await currentDropRows.nth(0).getByRole('combobox').nth(0).inputValue(), 'French');
+        assert.equal(await currentDropRows.nth(1).getByRole('combobox').nth(1).inputValue(), 'gender');
+        assert.equal(await upload.getByRole('checkbox', { name: 'Add history workbook for comparison', exact: true }).isChecked(), false);
+        assert.equal(await versions.evaluate(element => element.classList.contains('versionWorkbookDragActive')), false);
+        await layout(page, upload, 'Dropped Current workbooks');
+        await page.screenshot({ path: join(disposableFolder, 'workbook-drop-current-workbooks.png') });
+        await upload.getByRole('button', { name: 'Close', exact: true }).click();
+        await transfer.dispose();
+        const unsupported = await droppedFiles([{ name: 'StatDescriptions.zip', buffer: Buffer.from('ignored') }]);
+        await versions.dispatchEvent('drop', { dataTransfer: unsupported });await unsupported.dispose();
+        assert.equal(await upload.count(), 0, 'Unsupported file drops do not open a workbook dialog');
+        await assertLocal(page, 'Workbook drag and drop');
+        await monitor(page, false);
+        results.push('Version-screen workbook drops open offline Current workbooks with inferred language/roles, theme-safe drag feedback and no durable/cloud side effects');
         let layoutChecked = false;
-        async function openTest(files, previousFiles = [], hiddenPreviousFiles = []) {
+        async function openTest(files, previousFiles = [], hiddenPreviousFiles = [], viaDrop = false) {
             const selectedLanguage = await page.evaluate(() => window.__offlineTestApp.lang);
-            await offline.getByRole('button', { name: 'Test Sheet Offline', exact: true }).click();
+            if (viaDrop) {
+                const dataTransfer = await droppedFiles(files);
+                await versions.dispatchEvent('drop', { dataTransfer });await dataTransfer.dispose();
+            } else await offline.getByRole('button', { name: 'Test Sheet Offline', exact: true }).click();
             await upload.getByRole('heading', { name: 'Test Sheet Offline', exact: true }).waitFor();
             const current = upload.getByRole('region', { name: 'Current workbooks', exact: true }),
                 previous = upload.getByRole('region', { name: 'Previous workbooks', exact: true }),
@@ -319,8 +363,10 @@ async function run() {
             assert.equal(await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).count(), 0, 'Test sheets combine preparation and opening into one action');
             assert.equal(await upload.getByRole('button', { name: 'Open test sheet', exact: true }).count(), 0, 'The previous separate opening action is absent');
             if (!layoutChecked) await layout(page, upload, 'Offline workbook importer');
-            await current.locator('input[type=file]').first().setInputFiles(files.slice(0,1));
-            if(files.length>1)await current.locator('input[type=file]').first().setInputFiles(files.slice(1));
+            if (!viaDrop) {
+                await current.locator('input[type=file]').first().setInputFiles(files.slice(0,1));
+                if(files.length>1)await current.locator('input[type=file]').first().setInputFiles(files.slice(1));
+            }
             assert.equal(await current.locator('.ctUploadFiles tbody tr').count(),files.length,'Current workbook choices append within their own list');
             const selectedPrevious=previousFiles.length ? previousFiles : hiddenPreviousFiles;
             if(selectedPrevious.length){
@@ -368,7 +414,7 @@ async function run() {
         // A French Normal workbook alone is allowed here even though a
         // published French content group normally requires its Gender pair.
         await openTest([{ name: 'French.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: normal }], [],
-            [{ name: 'Thai.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: normal }]);
+            [{ name: 'Thai.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: normal }], true);
         await layout(page, workspace, 'Offline ClientText list');
         const unit = await page.evaluate(() => {
             const unit = window.__offlineTestApp.ctUnits.find(unit => unit.recordId === 'offline-test-record');
