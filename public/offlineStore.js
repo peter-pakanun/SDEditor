@@ -1037,9 +1037,16 @@
     return 'version_collection_v1:' + catalogKey(scope) + ':' + JSON.stringify(endWindow ? [versionId, language] : [versionId, language, 'download_only']);
   }
   function getVersionCollectionRequest(scope, versionId, language, endWindow = true) { return kvGet(collectionRequestKey(scope, versionId, language, endWindow)); }
+  function getVersionCollectionReceipt(scope, versionId, language, endWindow = true) { return kvGet(collectionRequestKey(scope, versionId, language, endWindow) + ':receipt'); }
+  function setVersionCollectionReceipt(scope, versionId, language, requestId, collection, endWindow = true) {
+    if (typeof requestId !== 'string' || !requestId || !collection?.id) throw new TypeError('Invalid collection receipt.');
+    return kvSet(collectionRequestKey(scope, versionId, language, endWindow) + ':receipt', JSON.parse(JSON.stringify({ requestId, collection })));
+  }
   function setVersionCollectionRequest(scope, versionId, language, requestId, endWindow = true) {
     const key = collectionRequestKey(scope, versionId, language, endWindow);
-    if (requestId == null) return kvDel(key);
+    if (requestId == null) return withStore(STORE_KV, 'readwrite', async store => {
+      await Promise.all([requestToPromise(store.delete(key)), requestToPromise(store.delete(key + ':receipt'))]);
+    });
     if (typeof requestId !== 'string' || !requestId || requestId.length > 256) throw new TypeError('Invalid collection recovery identifier.');
     return kvSet(key, requestId);
   }
@@ -1855,6 +1862,8 @@
     getVersionUpload,
     setVersionUpload,
     getVersionCollectionRequest,
+    getVersionCollectionReceipt,
+    setVersionCollectionReceipt,
     setVersionCollectionRequest,
     adoptGuestVersion,
     migrateFromLocalStorageIfNeeded,

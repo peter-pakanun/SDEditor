@@ -82,13 +82,14 @@
     return { extract, verifyZip, stats: () => ({ opens, extractions, archives: archives.size }), clear: () => archives.clear() };
   }
   function createWorkerClient({ Worker = root.Worker, url = 'sdBaselineWorker.js', engine = createArchiveEngine(), readyTimeout = 5000 } = {}) {
-    let worker, sequence = 0, readyTimer, settled = false;
+    let worker, sequence = 0, readyTimer, settled = false, disposed = false;
+    const stopped = () => Object.assign(new Error('Source worker cancelled.'), { name: 'AbortError', stale: true });
     const pending = new Map(); let resolveReady;
     const ready = new Promise(resolve => { resolveReady = resolve; });
     const fail = () => {
       clearTimeout(readyTimer); worker?.terminate(); worker = null;
       if (!settled) { settled = true; resolveReady(false); }
-      for (const request of pending.values()) request.reject(Object.assign(new Error('The source extraction worker stopped.'), { workerFailed: true }));
+      for (const request of pending.values()) request.reject(disposed ? stopped() : Object.assign(new Error('The source extraction worker stopped.'), { workerFailed: true }));
       pending.clear();
     };
     try {
@@ -111,18 +112,21 @@
       return type === 'verify' ? engine.verifyZip(input.blob, input.archive).then(({ descriptor }) => descriptor) : engine.extract(input.blob, input.archive, input.filepath);
     };
     async function run(type, input) {
+      if (disposed) throw stopped();
       await ready;
+      if (disposed) throw stopped();
       if (!worker) return fallback(type, input);
       try {
         return await new Promise((resolve, reject) => { const id = ++sequence; pending.set(id, { resolve, reject });
           try { worker.postMessage({ id, type, ...input }); } catch (error) { pending.delete(id); reject(Object.assign(error, { workerFailed: true })); fail(); } });
       } catch (error) {
+        if (disposed) throw stopped();
         if (!error.workerFailed) throw error;
         return fallback(type, input);
       }
     }
     return { extract: (blob, archive, filepath) => run('extract', { blob, archive, filepath }), verify: (blob, archive) => run('verify', { blob, archive }),
-      hash: blob => run('hash', { blob }), dispose: fail };
+      hash: blob => run('hash', { blob }), dispose() { disposed = true; fail(); } };
   }
   function createResolver({ store = root.OfflineStore, extractor, maxFiles = 64, maxBytes = 16 * 1024 * 1024 } = {}) {
     const files = new Map(), pending = new Map(); let retainedBytes = 0;

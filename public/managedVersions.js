@@ -571,22 +571,105 @@
           }
         }
       },
-      async managedDownloadStatGroupCollection(version, group, team, collection) {
-        if (group.legacyVersionId) return this.managedDownloadCollection({ ...team, latestCollection: collection }, collection.id);
-        const key = this.managedCatalogScope, current = () => key === this.managedCatalogScope;
-        const files = []; let cursor = '', manifest;
-        do {
-          const result = await this._cloud.request('/v1/content-collections/' + encodeURIComponent(collection.id) + '/manifest' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''));
-          manifest = result.manifest;
-          if (!current()) return;
-          if (result.collection.id !== collection.id || manifest.groupId !== group.id || manifest.versionId !== version.id || manifest.language !== team.language) throw new Error('The collection does not match the selected group and team.');
-          files.push(...(manifest.files || [])); cursor = result.nextCursor || '';
-        } while (cursor);
-        const archive = manifest.assets.find(asset => asset.role === 'source').descriptor;
-        const blob = await this._cloud.request('/v1/content-groups/' + encodeURIComponent(group.id) + '/assets/source/original', { responseType: 'blob' });
-        const baseline = await root.ManagedCollectionExports.parseOriginal(blob, archive, team.language, root.JSZip, { current });
-        const output = await root.ManagedCollectionExports.generate({ ...manifest, files }, baseline, root.JSZip, { current });
-        if (current()) {root.saveAs(output, `${version.name}_${team.language}_StatDescriptions.zip`);return true;}
+      managedBeginExport(label, { manager = true, current: extra, operation, show = true } = {}) {
+        if (this._ctExportRun || this.ctBusy || this.managedVersionBusy && (!operation || operation !== this._managedOperation)) return null;
+        const signature = () => JSON.stringify([this.managedCatalogScope, this._ctEpoch || 0, this.sourceIdentity, this.lang,
+          this.selectedManagedVersionId, this.activeContentGroup?.id || '', this.cloudProfileId, this.cloudUser?.id,
+          this.gameVersion, this.branchId, manager ? this.managedManagerAccess : true]);
+        const scope = signature();
+        let owner = operation;
+        const run = this.ctBeginExport(label, { contentMode: 'statdescription', show, managedOperation: operation, current: () => signature() === scope
+          && (!owner || owner === this._managedOperation) && (!manager || this.managedManagerAccess) && (!extra || extra()) });
+        if (run) owner = run.managedOperation = operation || this.managedBeginOperation();
+        return run;
+      },
+      managedFinishExport(run, completed) {
+        const ownsBusy = this._managedOperation === run.managedOperation;
+        if (completed && !run.signal.aborted && run.current()) run.phase('Final resource cleanup');
+        this.ctFinishExport(run, run.signal.aborted || !run.current() ? 'aborted' : completed ? 'done' : 'failed');
+        if (ownsBusy) this.ctBusy = false;
+        this.managedFinishOperation(run.managedOperation);
+      },
+      managedExportOptions(run) {
+        const current = () => !run.signal.aborted && run.current() && this._ctExportRun === run;
+        return { current, phase: label => run.phase(label), cacheOriginalZip: root.SDBaselineFiles?.createResolver ? async (blob, archive) => {
+          run.phase('Original ZIP worker verification / cache');
+          // Give this export its own existing verifier; Abort must not kill a shared lookup worker.
+          const resolver = run.worker ||= root.SDBaselineFiles.createResolver();
+          await run.wait(resolver.cacheOriginalZip(blob, archive, { current, signal: run.signal })); run.check();
+        } : undefined };
+      },
+      async managedDownloadStatGroupCollection(version, group, team, collection, operation) {
+        if (group.legacyVersionId) return this.managedExportCollection(collection, version, team.language, null, operation);
+        const groupId = group.id, versionId = version.id, language = team.language, collectionId = collection.id;
+        const errorKey = 'collection:' + JSON.stringify([versionId, groupId, language]);
+        const run = operation || this.managedBeginExport('Download StatDescription collection', {
+          current: () => group.id === groupId && version.id === versionId && team.language === language });
+        if (!run) return false;
+        let completed = false;
+        try {
+          if (!operation) run.accepted();
+          const client = this._cloud, files = [], options = this.managedExportOptions(run); let cursor = '', manifest, page = 0;
+          do {
+            run.phase('Manifest page ' + (++page) + ' (network + server)');
+            const result = await run.wait(client.request('/v1/content-collections/' + encodeURIComponent(collectionId) + '/manifest' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''), { signal: run.signal }));
+            run.check(); manifest = result.manifest;
+            if (result.collection?.id !== collectionId || manifest?.groupId !== groupId || manifest.versionId !== versionId || manifest.language !== language) throw new Error('The collection does not match the selected group and team.');
+            files.push(...(manifest.files || [])); cursor = result.nextCursor || '';
+          } while (cursor);
+          const archive = manifest.assets.find(asset => asset.role === 'source').descriptor;
+          run.phase('Baseline download (network + server)');
+          // Preserve the existing full-original path. Cache/sparse extraction optimization is separate work.
+          const blob = await run.wait(client.request('/v1/content-groups/' + encodeURIComponent(groupId) + '/assets/source/original', { responseType: 'blob', signal: run.signal })); run.check();
+          const baseline = await run.wait(root.ManagedCollectionExports.parseOriginal(blob, archive, language, root.JSZip, options)); run.check();
+          const output = await run.wait(root.ManagedCollectionExports.generate({ ...manifest, files }, baseline, root.JSZip, options)); run.check();
+          run.phase('Download initiation'); root.saveAs(output, `${version.name}_${language}_StatDescriptions.zip`); run.state.downloadStarted = true;
+          if (!operation) this.managedSetOperationError(errorKey, '');
+          completed = true; return true;
+        } catch (error) {
+          if (!operation && run.current() && !run.signal.aborted && !error.stale) this.managedSetOperationError(errorKey, error);
+          if (operation) throw error;
+          return false;
+        } finally { if (!operation) this.managedFinishExport(run, completed); }
+      },
+      async managedCollectStatGroup(version, group, team, end = true) {
+        const groupId = group.id, versionId = version.id, language = team.language;
+        const errorKey = 'collection:' + JSON.stringify([versionId, groupId, language]);
+        const run = this.managedBeginExport(end ? 'Download and end StatDescription' : 'Download accepted StatDescription work', {
+          current: () => group.id === groupId && version.id === versionId && team.language === language });
+        if (!run) return false;
+        const store = this._ctStore, client = this._cloud, requestKey = 'collection:' + JSON.stringify([groupId, language, end]);
+        let completed = false;
+        try {
+          run.phase('Request checkpoint');
+          const scope = this.ctRequestScope(); let journal = await run.wait(store.getRequest(scope, requestKey)); run.check();
+          if (!journal) {
+            await store.putRequest(scope, requestKey, { kind: 'collection', groupId, language, endWindow: end, idempotencyKey: id() }); run.check();
+            journal = await run.wait(store.getRequest(scope, requestKey)); run.check();
+          }
+          let collection = journal.payload.collection;
+          if (!collection) {
+            run.phase('Server snapshot acceptance (network + server)'); run.state.collection = 'uncertain'; run.tick();
+            const result = await client.request('/v1/content-groups/' + encodeURIComponent(groupId) + '/teams/' + encodeURIComponent(language) + '/collections',
+              { method: 'POST', body: { idempotencyKey: journal.payload.idempotencyKey, endWindow: end }, signal: run.signal });
+            collection = result.collection;
+            if (!collection?.id) throw new Error('Collection response has no identity. Retry the retained request.');
+            run.accepted(); if (!run.signal.aborted && run.current()) run.phase('Collection receipt checkpoint');
+            await store.putRequest(scope, requestKey, { ...journal.payload, collection });
+          } else run.accepted();
+          run.check();
+          completed = await this.managedDownloadStatGroupCollection(version, group, team, collection, run); run.check();
+          if (completed) { run.phase('Final receipt cleanup'); await store.deleteRequest(scope, requestKey); run.check(); this.managedSetOperationError(errorKey, ''); }
+          return completed;
+        } catch (error) {
+          completed = false;
+          if (run.current() && !run.signal.aborted && !error.stale) this.managedSetOperationError(errorKey, error);
+          return false;
+        } finally {
+          const reconcile = run.current();
+          this.managedFinishExport(run, completed);
+          if (reconcile) this.managedReadDetails?.(versionId, false)?.catch(() => {});
+        }
       },
       managedDetailsForVersion(version) {
         if (!this.managedCatalogAccess) return null;
@@ -925,11 +1008,19 @@
         })().finally(() => { this._managedWarnPending = null; });
         return this._managedWarnPending;
       },
-      async managedDownload(path, name, isCurrent) {
+      async managedDownload(path, name, isCurrent, run) {
         if (!this.managedOnlineAvailable) return false;
         const key = this.managedCatalogScope;
         const current = () => this.managedCatalogAccess && key === this.managedCatalogScope && (!isCurrent || isCurrent());
-        try { const blob = await this._cloud.request(path, { responseType: 'blob', timeout: 120000 }); if (current()) { root.saveAs(blob, name); this.managedSetOperationError(path, ''); return true; } }
+        try {
+          const request = this._cloud.request(path, { responseType: 'blob', timeout: 120000, ...(run ? { signal: run.signal } : {}) });
+          const blob = run ? await run.wait(request) : await request;
+          if (current()) {
+            if (run) { run.check(); run.phase('Download initiation'); }
+            root.saveAs(blob, name); if (run) run.state.downloadStarted = true;
+            this.managedSetOperationError(path, ''); return true;
+          }
+        }
         catch (error) { if (!error.stale && current()) this.managedSetOperationError(path, error); }
         return false;
       },
@@ -939,105 +1030,123 @@
         return () => this.managedManagerAccess && catalog === this.managedCatalogScope && source === this.sourceIdentity
           && language === this.lang && this.selectedManagedVersionId === version.id && operation === this._managedOperation;
       },
-      async managedExportCollection(collection, version, language, isCurrent) {
+      async managedExportCollection(collection, version, language, isCurrent, operation) {
         if (!this.managedManagerAccess || !this.managedOnlineAvailable || !collection?.id || !version
           || version.game !== this.gameVersion || (version.branchId || DEFAULT_BRANCH) !== this.branchId) return false;
-        if (!isCurrent && this.managedVersionBusy) return false;
+        const run = operation || this.managedBeginExport('Download StatDescription collection', { current: isCurrent });
+        if (!run) return false;
         version = copy(version); collection = copy(collection);
-        const operation = isCurrent ? null : this.managedBeginOperation({ key: 'collection', label: 'Preparing translated ZIP' });
-        const current = isCurrent || this.managedCollectionCurrent(version, operation);
         const errorKey = '/v1/collections/' + encodeURIComponent(collection.id) + '/archive';
         const name = filename(version.name) + '_Translated_' + filename(language) + '.zip';
+        let completed = false;
         try {
-          if (!current()) return false;
-          // Old collections keep their durable archive endpoint and older APIs
-          // may return archive collections even when manifest format is requested.
-          if (collection.format !== 'manifest') return await this.managedDownload(errorKey, name, current);
-          const response = await this._cloud.request('/v1/collections/' + encodeURIComponent(collection.id) + '/manifest', { timeout: 120000 });
-          if (!current()) return false;
-          const exporter = root.ManagedCollectionExports;
-          const manifest = await exporter.validateManifest(response, { collectionId: collection.id, versionId: version.id,
-            game: version.game, branchId: version.branchId || DEFAULT_BRANCH, sourceHash: version.sourceHash,
-            zipHash: version.zipHash, language }, { current });
-          if (!current()) return false;
-          let baseline = this.importBaseline?.archive?.baselineId === manifest.archive.baselineId ? this.importBaseline : null;
-          if (!baseline) baseline = await root.OfflineStore.getImportedBaseline?.(manifest.archive.baselineId, version.game);
-          if (!current()) return false;
-          let files;
-          if (baseline) {
-            try { files = await exporter.cachedBaseline(baseline, manifest.archive, { current }); }
-            catch (error) { if (error.stale) throw error; /* Rebuild an invalid cache from the verified ZIP. */ }
+          if (!operation) run.accepted(); run.check();
+          const options = this.managedExportOptions(run), client = this._cloud, exporter = root.ManagedCollectionExports;
+          let blob;
+          if (collection.format !== 'manifest') {
+            run.phase('Legacy archive download (network + server)');
+            completed = await this.managedDownload(errorKey, name, options.current, run);
+            return completed;
+          } else {
+            run.phase('Manifest page 1 (network + server)');
+            const response = await run.wait(client.request('/v1/collections/' + encodeURIComponent(collection.id) + '/manifest', { timeout: 120000, signal: run.signal })); run.check();
+            run.phase('Manifest verification');
+            const manifest = await run.wait(exporter.validateManifest(response, { collectionId: collection.id, versionId: version.id,
+              game: version.game, branchId: version.branchId || DEFAULT_BRANCH, sourceHash: version.sourceHash, zipHash: version.zipHash, language }, options)); run.check();
+            run.phase('Baseline lookup / reuse');
+            let baseline = this.importBaseline?.archive?.baselineId === manifest.archive.baselineId ? this.importBaseline : null;
+            if (!baseline) baseline = await run.wait(root.OfflineStore.getImportedBaseline?.(manifest.archive.baselineId, version.game)); run.check();
+            let files;
+            if (baseline) {
+              run.phase('Cached baseline verification');
+              try { files = await run.wait(exporter.cachedBaseline(baseline, manifest.archive, options)); }
+              catch (error) { if (error.stale || run.signal.aborted) throw error; /* Rebuild the same invalid cache from its verified ZIP. */ }
+            }
+            run.check();
+            if (!files) {
+              run.phase('Baseline download (network + server)');
+              const original = await run.wait(client.request('/v1/versions/' + encodeURIComponent(version.id) + '/original', { responseType: 'blob', timeout: 120000, signal: run.signal })); run.check();
+              files = await run.wait(exporter.parseOriginal(original, manifest.archive, language, root.JSZip, options)); run.check();
+            }
+            blob = await run.wait(exporter.generate(manifest, files, root.JSZip, options)); run.check();
           }
-          if (!current()) return false;
-          if (!files) {
-            const blob = await this._cloud.request('/v1/versions/' + encodeURIComponent(version.id) + '/original', { responseType: 'blob', timeout: 120000 });
-            if (!current()) return false;
-            files = await exporter.parseOriginal(blob, manifest.archive, language, root.JSZip, { current });
-          }
-          if (!current()) return false;
-          const blob = await exporter.generate(manifest, files, root.JSZip, { current });
-          if (!current()) return false;
-          root.saveAs(blob, name);
-          this.managedSetOperationError(errorKey, '');
-          return true;
-        } catch (error) { if (!error.stale && current()) this.managedSetOperationError(errorKey, error); return false; }
-        finally { if (operation) this.managedFinishOperation(operation); }
+          run.phase('Download initiation'); root.saveAs(blob, name); run.state.downloadStarted = true;
+          this.managedSetOperationError(errorKey, ''); completed = true; return true;
+        } catch (error) {
+          if (!error.stale && !run.signal.aborted && run.current()) this.managedSetOperationError(errorKey, error);
+          return false;
+        } finally { if (!operation) this.managedFinishExport(run, completed); }
       },
       async managedCollect(team, endWindow = true) {
         const version = copy(this.managedSelectedVersion);
-        if (!version || this.managedVersionBusy || !this.managedManagerAccess) return;
+        if (!version || this.managedVersionBusy || this.ctBusy || this._ctExportRun || !this.managedManagerAccess) return false;
         team = copy(team);
         const action = endWindow ? (team.counts.saved ? 'Download and end' : 'Mark ended — no saved files') : 'Download';
-        const errorKey = endWindow ? 'collect' : 'downloadOnly';
-        const operation = this.managedBeginOperation();
+        const errorKey = endWindow ? 'collect' : 'downloadOnly', operation = this.managedBeginOperation();
         const current = this.managedCollectionCurrent(version, operation);
+        let run, completed = false;
         try {
-          if (endWindow && !await this.appConfirm(`Download ${team.language} for ${version.name}? Only server-accepted Saved work is included. Unsaved drafts and pending offline uploads are outside this snapshot.${team.presence?.length ? '\n\nTranslators are currently online in this version.' : ''}`, { title: action, confirmLabel: action, danger: false })) return;
-          if (!current()) return;
-          this.setBrowserWork?.('versions', { key: 'collection', label: 'Preparing translated ZIP', active: true, immediate: true });
-          this._managedCollectionIds ||= new Map();
+          if (endWindow && !await this.appConfirm(`Download ${team.language} for ${version.name}? Only server-accepted Saved work is included. Unsaved drafts and pending offline uploads are outside this snapshot.${team.presence?.length ? '\n\nTranslators are currently online in this version.' : ''}`, { title: action, confirmLabel: action, danger: false })) return false;
+          if (!current()) return false;
+          run = this.managedBeginExport(endWindow ? 'Collect and end StatDescription' : 'Download accepted StatDescription work', { operation, current });
+          if (!run) return false;
+          run.phase('Request checkpoint');
+          this._managedCollectionIds ||= new Map(); this._managedCollectionReceipts ||= new Map();
           const requestScope = this.managedWorkspaceScope('');
           const requestKey = JSON.stringify([requestScope.accountId, requestScope.game, requestScope.branchId, version.id, team.language, endWindow]);
-          const requestId = this._managedCollectionIds.get(requestKey) || await root.OfflineStore.getVersionCollectionRequest?.(requestScope, version.id, team.language, endWindow) || id();
-          if (!current()) return;
+          const requestId = this._managedCollectionIds.get(requestKey) || await run.wait(root.OfflineStore.getVersionCollectionRequest?.(requestScope, version.id, team.language, endWindow)) || id(); run.check();
           this._managedCollectionIds.set(requestKey, requestId);
-          await root.OfflineStore.setVersionCollectionRequest?.(requestScope, version.id, team.language, requestId, endWindow);
-          if (!current()) return;
+          let receipt = this._managedCollectionReceipts.get(requestKey) || await run.wait(root.OfflineStore.getVersionCollectionReceipt?.(requestScope, version.id, team.language, endWindow)); run.check();
+          if (receipt?.requestId !== requestId) receipt = null;
+          if (!receipt) { await root.OfflineStore.setVersionCollectionRequest?.(requestScope, version.id, team.language, requestId, endWindow); run.check(); }
           const path = '/v1/versions/' + encodeURIComponent(version.id) + '/teams/' + encodeURIComponent(team.language) + (endWindow ? '/collections' : '/downloads');
           const body = { idempotencyKey: requestId, format: 'manifest', ...(!endWindow ? { endWindow: false } : {}) };
-          let result;
-          try { result = await this._cloud.request(path, { method: 'POST', body, timeout: 120000 }); }
-          catch (error) {
-            if (!current()) return;
-            // Old durable requests used this same ID without a format field.
-            // Explicit rejection means no new collection was captured; replay
-            // the old contract to recover its cutoff or use an older API.
-            if (error.code !== 'IDEMPOTENCY_REUSED' && !(error.status === 400 && error.code === 'INVALID_REQUEST'
-              && /unsupported fields/i.test(error.message))) throw error;
-            const { format, ...legacyBody } = body;
-            result = await this._cloud.request(path, { method: 'POST', body: legacyBody, timeout: 120000 });
-          }
-          if (!current()) return;
-          let collection = result.collection || result;
+          let collection = receipt?.collection?.status === 'failed' ? null : receipt?.collection;
+          if (!collection) {
+            run.phase('Server snapshot acceptance (network + server)'); run.state.collection = 'uncertain'; run.tick();
+            let result;
+            try { result = await this._cloud.request(path, { method: 'POST', body, timeout: 120000, signal: run.signal }); }
+            catch (error) {
+              run.check();
+              // The same explicit compatibility rejection permits replay of the exact old request ID/body.
+              if (error.code !== 'IDEMPOTENCY_REUSED' && !(error.status === 400 && error.code === 'INVALID_REQUEST' && /unsupported fields/i.test(error.message))) throw error;
+              const { format, ...legacyBody } = body;
+              result = await this._cloud.request(path, { method: 'POST', body: legacyBody, timeout: 120000, signal: run.signal });
+            }
+            collection = result.collection || result;
+            if (!collection?.id) throw new Error('Collection response has no identity. Retry the retained request.');
+            run.accepted(); receipt = { requestId, collection: copy(collection) }; this._managedCollectionReceipts.set(requestKey, receipt);
+            if (!run.signal.aborted && run.current()) run.phase('Collection receipt checkpoint');
+            await root.OfflineStore.setVersionCollectionReceipt?.(requestScope, version.id, team.language, requestId, collection, endWindow);
+          } else run.accepted();
+          run.check();
           while (['preparing', 'pending', 'building'].includes(collection.status)) {
-            await new Promise(resolve => setTimeout(resolve, 500)); if (!current()) return;
-            result = await this._cloud.request('/v1/collections/' + encodeURIComponent(collection.id)); collection = result.collection || result;
-            if (!current()) return;
+            run.phase('Server collection preparation (network + server wall time)');
+            await run.delay(500); run.check();
+            const result = await run.wait(this._cloud.request('/v1/collections/' + encodeURIComponent(collection.id), { signal: run.signal })); run.check(); collection = result.collection || result;
           }
-          if (collection.status === 'failed') throw new Error(collection.error?.message || 'Could not prepare the collection. Retry the same request.');
-          if (!current()) return;
+          if (collection.status === 'failed') {
+            // Retain the observed failure so a reload retries preparation with the same request ID.
+            receipt = { requestId, collection: copy(collection) }; this._managedCollectionReceipts.set(requestKey, receipt);
+            await root.OfflineStore.setVersionCollectionReceipt?.(requestScope, version.id, team.language, requestId, collection, endWindow); run.check();
+            throw new Error(collection.error?.message || 'Could not prepare the collection. Retry the same request.');
+          }
           if (collection.downloadReady !== false && (collection.fileCount ?? team.counts.saved) > 0) {
-            const downloaded = await this.managedExportCollection(collection, version, team.language, current);
-            if (downloaded === false) return;
+            if (!await this.managedExportCollection(collection, version, team.language, current, run)) return false;
           }
-          if (!current()) return;
-          this._managedCollectionIds.delete(requestKey);
-          await root.OfflineStore.setVersionCollectionRequest?.(requestScope, version.id, team.language, null, endWindow);
-          if (!current()) return;
-          this.managedSetOperationError(errorKey, '');
-          await this.managedReadDetails(version.id, false); await this.refreshManagedVersions();
-        } catch (error) { if (!error.stale && current()) this.managedSetOperationError(errorKey, error); }
-        finally { this.managedFinishOperation(operation); }
+          run.check(); run.phase('Final receipt cleanup');
+          await root.OfflineStore.setVersionCollectionRequest?.(requestScope, version.id, team.language, null, endWindow); run.check();
+          this._managedCollectionIds.delete(requestKey); this._managedCollectionReceipts.delete(requestKey);
+          this.managedSetOperationError(errorKey, ''); completed = true; return true;
+        } catch (error) {
+          completed = false;
+          if (!error.stale && !run?.signal.aborted && current()) this.managedSetOperationError(errorKey, error);
+          return false;
+        } finally {
+          const reconcile = run?.current();
+          if (run) this.managedFinishExport(run, completed); else this.managedFinishOperation(operation);
+          if (completed && reconcile) { this.managedReadDetails(version.id, false).catch(() => {}); this.refreshManagedVersions().catch(() => {}); }
+        }
       },
       managedDownloadCollection(team) { if (this.managedManagerAccess && this.managedSelectedVersion && team.latestCollection?.id) return this.managedExportCollection(team.latestCollection, this.managedSelectedVersion, team.language); },
       managedDownloadPrevious(team, event) {

@@ -60,14 +60,16 @@
     if (JSON.stringify(descriptor) !== JSON.stringify(archive)) return null;
     return verifyBaseline(baseline.source, archive, options);
   }
-  async function parseOriginal(blob, archive, language, JSZip, { current } = {}) {
+  async function parseOriginal(blob, archive, language, JSZip, { current, phase, cacheOriginalZip } = {}) {
     checkpoint(current);
+    phase?.('Original ZIP verification');
     const bytes = blob?.arrayBuffer ? await blob.arrayBuffer() : blob;
     checkpoint(current);
     if ((bytes?.byteLength ?? bytes?.length) !== archive.zipSize || await protocol.zipHash(bytes) !== archive.zipHash) {
       throw new Error('The downloaded original ZIP does not match this collection.');
     }
     checkpoint(current);
+    phase?.('ZIP directory / path checks');
     const zip = await JSZip.loadAsync(bytes);
     checkpoint(current);
     const entries = Object.values(zip.files).filter(entry => !entry.dir);
@@ -79,8 +81,12 @@
       expanded += size;
       if (size > 2 * 1024 * 1024 || expanded > 256 * 1024 * 1024) throw new Error('The original ZIP exceeds the extracted-size limit.');
     }
-    const rawSource = [];
+    phase?.('Extraction / parsing');
+    const rawSource = []; let processed = 0;
     for (const entry of entries.filter(entry => /\.txt$/i.test(entry.name))) {
+      checkpoint(current);
+      // Keep the existing full parse. Yield only so Abort can be delivered.
+      if (current && ++processed % 64 === 0) { await new Promise(resolve => setTimeout(resolve, 0)); checkpoint(current); }
       const data = await entry.async('uint8array');
       checkpoint(current);
       expanded += data.byteLength - (entry._data?.uncompressedSize || 0);
@@ -88,20 +94,28 @@
       const desc = codec.parseText(entry.name, codec.decodeUTF16(data), language, { strict: true });
       if (desc) rawSource.push(desc);
     }
+    phase?.('Applying duplicate decisions');
     const source = await codec.applyDuplicateSelections(rawSource, archive.decisions, { language });
     checkpoint(current);
-    if (typeof window === 'object' && window.SDBaselineFiles) await window.SDBaselineFiles.cacheOriginalZip(blob, archive, { current });
+    if (cacheOriginalZip) await cacheOriginalZip(blob, archive);
+    else if (typeof window === 'object' && window.SDBaselineFiles) await window.SDBaselineFiles.cacheOriginalZip(blob, archive, { current });
+    phase?.('Baseline verification');
     return verifyBaseline(source, archive, { current });
   }
-  async function generate(manifest, baseline, JSZip, { current, type = 'blob', progress } = {}) {
+  async function generate(manifest, baseline, JSZip, { current, type = 'blob', progress, phase } = {}) {
     checkpoint(current);
+    phase?.('Encoding');
     const source = new Map(baseline.map(file => [file.filepath, file])), zip = new JSZip();
+    let processed = 0;
     for (const saved of manifest.files) {
+      checkpoint(current);
+      if (current && ++processed % 64 === 0) { await new Promise(resolve => setTimeout(resolve, 0)); checkpoint(current); }
       const original = source.get(saved.filepath);
       if (!original) throw new Error('A Saved collection file is absent from its original ZIP: ' + saved.filepath);
       const desc = { ...original, translations: { ...original.translations, [manifest.language]: [...saved.translations] } };
       zip.file(saved.filepath, codec.descEncode(desc), { date: new Date('2000-01-01T00:00:00Z'), createFolders: false });
     }
+    phase?.('Compression');
     const blob = await zip.generateAsync({ type, compression: 'DEFLATE', compressionOptions: { level: 5 } }, metadata => {
       checkpoint(current); progress?.(metadata);
     });

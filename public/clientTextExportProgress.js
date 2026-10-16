@@ -7,7 +7,7 @@
     'use strict';
     const now = () => root.performance?.now?.() ?? Date.now();
     const duration = ms => (Math.max(0, ms) / 1000).toFixed(2) + ' s';
-    const aborted = () => Object.assign(new Error('ClientText export stopped.'), { name: 'AbortError' });
+    const aborted = () => Object.assign(new Error('Export stopped.'), { name: 'AbortError', stale: true });
     const collectionText = state => state === 'accepted'
         ? 'Collection accepted by the server. Local Abort cannot undo collection or ending. An interrupted download can retry using the retained receipt.'
         : state === 'uncertain' ? 'Collection outcome unknown: the server may have accepted it or ended the team. Retry uses the same retained request ID.'
@@ -21,6 +21,7 @@
         get signal() { return this.controller.signal; }
         check() { if (this.signal.aborted || !this.current()) throw aborted(); }
         tick() {
+            if (this.state.status === 'running' && !this.signal.aborted && !this.current()) { this.abort(); return; }
             this.state.elapsed = now() - this.state.startedAt;
             const row = this.state.rows.at(-1);
             if (row?.status === 'running') row.elapsed = now() - row.startedAt;
@@ -36,6 +37,13 @@
             if (row?.status === 'running') { row.elapsed = now() - row.startedAt; row.status = status; }
         }
         async step(label, callback) { this.phase(label); const result = await this.wait(callback()); this.check(); return result; }
+        async delay(ms) {
+            let timer;
+            const cancel = () => clearTimeout(timer);
+            this.signal.addEventListener('abort', cancel, { once: true });
+            try { await this.wait(new Promise(resolve => { timer = setTimeout(resolve, ms); })); }
+            finally { clearTimeout(timer); this.signal.removeEventListener('abort', cancel); }
+        }
         // Storage reads may finish after Abort. Ignore their results and remove the listener in either outcome.
         wait(promise) {
             if (this.signal.aborted || !this.current()) { Promise.resolve(promise).catch(() => {}); return Promise.reject(aborted()); }
@@ -61,7 +69,7 @@
             ctExportLogText() {
                 const state = this.ctExportTiming;
                 if (!state) return '';
-                return ['ClientText export timing', state.label, 'Status: ' + state.status, 'Total elapsed: ' + duration(state.elapsed),
+                return [(state.contentMode === 'statdescription' ? 'StatDescription' : 'ClientText') + ' export timing', state.label, 'Status: ' + state.status, 'Total elapsed: ' + duration(state.elapsed),
                     collectionText(state.collection), state.downloadStarted ? 'Browser download initiated; completion is not observable.' : 'Download not initiated.',
                     'Request durations include network and server wall time; they are not server CPU measurements.',
                     ...state.rows.map(row => `${row.label}: ${duration(row.elapsed)} (${row.status})`)].join('\n');
@@ -69,10 +77,10 @@
         },
         methods: {
             ctExportDuration: duration,
-            ctBeginExport(label) {
-                if (this._ctExportRun || this.ctBusy) return null;
+            ctBeginExport(label, { contentMode = 'clienttext', current: guard, show = true, managedOperation } = {}) {
+                if (this._ctExportRun || this.ctBusy || this.managedVersionBusy && (!managedOperation || managedOperation !== this._managedOperation)) return null;
                 const key = this.managedCatalogScope, epoch = this._ctEpoch || 0, client = this._cloud;
-                const current = () => key === this.managedCatalogScope && epoch === (this._ctEpoch || 0) && client === this._cloud;
+                const current = () => key === this.managedCatalogScope && epoch === (this._ctEpoch || 0) && client === this._cloud && (!guard || guard());
                 const run = new Run(state => {
                     if (this._ctExportRun !== run) return;
                     const log = this.$refs?.ctExportPhases, added = state.rows.length !== this.ctExportTiming?.rows.length;
@@ -80,9 +88,10 @@
                     this.ctExportTiming = state;
                     if (added && follow) this.$nextTick?.(() => { if (log) log.scrollTop = log.scrollHeight; });
                 }, current, label);
+                run.state.contentMode = contentMode;
                 this._ctExportRun = this._ctExportReportId = run; this.ctBusy = true; this.ctError = '';
                 this.ctExportCopyMessage = ''; this.ctExportCopyBusy = false; this._ctExportCopyRequest = null; run.tick();
-                this.ctShowExport(); return run;
+                if (show) this.ctShowExport(); return run;
             },
             ctShowExport() {
                 const show = () => { const dialog = this.$refs?.ctExportDialog; if (this.ctExportTiming && dialog && !dialog.open) dialog.showModal(); };

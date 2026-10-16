@@ -135,10 +135,14 @@ function appHarness(data, { cache = data.baseline, request, JSZipOverride, stora
       throw new Error('Unexpected route: ' + route);
     } },
   };
+  const progress = require('../public/clientTextExportProgress.js').mixin;
+  Object.assign(app, progress.data());
+  for (const [name, method] of Object.entries(progress.methods)) app[name] = method.bind(app);
+  for (const [name, getter] of Object.entries(progress.computed)) Object.defineProperty(app, name, { get: () => getter.call(app) });
   for (const [name, method] of Object.entries(api.mixin.methods)) if (!Object.hasOwn(app, name)) app[name] = method.bind(app);
   for (const [name, method] of Object.entries(api.mixin.computed)) Object.defineProperty(app, name, { get: () => method.call(app) });
   app.managedVersions = [copy(data.version)]; app.selectedManagedVersionId = data.version.id;
-  return { app, downloads, writes, requests };
+  return { app, window, downloads, writes, requests };
 }
 
 test('managed manifest download uses only immutable cache and leaves workspace, drafts and settings untouched', async () => {
@@ -215,7 +219,7 @@ test('interrupted manifest exports keep the durable cutoff request and retry for
   assert.equal(downloads.length, 0); assert.equal(app._managedCollectionIds.size, 1);
   assert.equal(receipts.at(-1).requestId, cutoffs[0].idempotencyKey);
   // A reloaded page recovers the durable request rather than making a new cutoff.
-  app._managedCollectionIds = new Map();
+  app._managedCollectionIds = new Map(); app._managedCollectionReceipts = new Map();
   assert.match(app.managedVisibleError, /Original download interrupted/);
   failOriginal = false;
   await app.managedCollect({ language: 'Thai', counts: { saved: 1 }, presence: [] }, false);
@@ -224,4 +228,119 @@ test('interrupted manifest exports keep the durable cutoff request and retry for
   assert.equal(app._managedCollectionIds.size, 0); assert.equal(downloads.length, 1);
   assert.equal(receipts.at(-1).requestId, null);
   assert.deepEqual(writes, []); assert.equal(app.managedVisibleError, '');
+});
+
+// Synthetic progress/cancellation fixtures. The production path still parses the entire original ZIP.
+const turn = () => new Promise(resolve => setImmediate(resolve));
+async function modernHarness() {
+  const data = await fixture(), journals = new Map(), workers = [];
+  data.response.manifest.files[0].translations = ['Frozen first', 'Frozen second'];
+  const group = { id: 'group-one', versionId: data.version.id, contentMode: 'statdescription' }, team = { language: 'Thai' };
+  let pages = 0, originalReads = 0, posts = 0;
+  const h = appHarness(data, { request: async (route, options) => {
+    if (route.endsWith('/collections')) { posts++; return { collection: data.collection }; }
+    if (route.includes('/manifest')) { pages++; return { collection: data.collection, manifest: { ...copy(data.response.manifest), groupId: group.id, language: team.language,
+      assets: [{role:'source',descriptor:data.baseline.archive}], files: route.includes('?') ? [] : copy(data.response.manifest.files) }, nextCursor: route.includes('?') ? '' : 'second' }; }
+    if (route.endsWith('/original')) { originalReads++; return data.bytes; }
+    throw Error('Unexpected local fixture route');
+  }});
+  h.app.ctRequestScope = () => ({accountId:h.app.cloudProfileId,game:h.app.gameVersion,branchId:h.app.branchId});
+  h.app._ctStore = { async getRequest(s,k) {return journals.get(k);}, async putRequest(s,k,payload){journals.set(k,{payload:copy(payload)});}, async deleteRequest(s,k){journals.delete(k);} };
+  h.app.managedReadDetails=async()=>{}; h.app.refreshManagedVersions=async()=>{};
+  h.window.SDBaselineFiles={createResolver(){const worker={disposed:0,async cacheOriginalZip(){},dispose(){this.disposed++;}};workers.push(worker);return worker;}};
+  return {...h,data,group,team,journals,workers,counts:()=>({pages,originalReads,posts}),collect:()=>h.app.managedCollectStatGroup(data.version,group,team,true),download:()=>h.app.managedDownloadStatGroupCollection(data.version,group,team,data.collection)};
+}
+test('modern SD timing covers pages and existing full baseline work with byte-identical output across languages',async()=>{
+  const h=await modernHarness();
+  for(const language of ['Thai','German','Thai']){
+    h.team.language=h.app.lang=language;assert.equal(await h.collect(),true);
+    const original=await Exports.parseOriginal(h.data.bytes,h.data.baseline.archive,language,JSZip);
+    const expected=await Exports.generate({...h.data.response.manifest,language},original,JSZip);
+    assert.deepEqual(Buffer.from(await h.downloads.at(-1).blob.arrayBuffer()),Buffer.from(await expected.arrayBuffer()));
+    for(const label of ['Request checkpoint','Server snapshot acceptance (network + server)','Manifest page 1 (network + server)','Manifest page 2 (network + server)','Baseline download (network + server)','Original ZIP verification','ZIP directory / path checks','Extraction / parsing','Applying duplicate decisions','Original ZIP worker verification / cache','Baseline verification','Encoding','Compression','Download initiation','Final receipt cleanup'])assert(h.app.ctExportTiming.rows.some(row=>row.label===label),label);
+    const report=h.app.ctExportLogText;assert.match(report,/StatDescription export timing/);assert(!report.includes('Frozen'));assert(!report.includes(h.data.version.name));assert(!report.includes(language));
+    assert.equal(h.app.ctBusy,false);assert.equal(h.app.managedVersionBusy,false);assert.equal(h.journals.size,0);
+  }
+  assert.deepEqual(h.counts(),{pages:6,originalReads:3,posts:3},'instrumentation does not add original reuse or sparse extraction');assert(h.workers.every(worker=>worker.disposed===1));
+});
+for(const boundary of ['manifest','original','worker'])test('modern SD Abort during '+boundary+' preserves accepted receipt and suppresses late download',async()=>{
+  const h=await modernHarness(),gate=deferred(),normal=h.app._cloud.request;let entered=false,signal;
+  if(boundary==='worker')h.window.SDBaselineFiles.createResolver=()=>{const worker={async cacheOriginalZip(){entered=true;return gate.promise;},dispose(){worker.disposed=true;}};h.workers.push(worker);return worker;};
+  else h.app._cloud.request=async(route,options)=>{if(route.includes(boundary==='manifest'?'/manifest':'/original')){entered=true;signal=options.signal;return gate.promise;}return normal(route,options);};
+  const pending=h.collect();for(let i=0;i<100 && !entered;i++)await turn();assert(entered);
+  const run=h.app._ctExportRun;h.app.ctAbortExport();assert.equal(await pending,false);assert.equal(h.app.ctExportTiming.collection,'accepted');assert.equal(h.app.ctExportTiming.status,'aborted');assert.equal(h.app.managedVersionBusy,false);assert.equal(h.app.ctBusy,false);assert.equal(run.timer,null);assert.equal(h.journals.size,1);assert.equal(h.downloads.length,0);
+  gate.resolve(h.data.bytes);await turn();assert.equal(h.downloads.length,0);if(signal)assert.equal(signal.aborted,true);assert(h.workers.every(worker=>worker.disposed));
+});
+test('modern SD aborted collection POST keeps exact ID; receipt retry after acceptance never sends a new end',async()=>{
+  const h=await modernHarness(),normal=h.app._cloud.request,gate=deferred();let first=true,postIds=[];
+  h.app._cloud.request=async(route,options)=>{if(route.endsWith('/collections')){postIds.push(options.body.idempotencyKey);if(first){first=false;options.signal.addEventListener('abort',()=>gate.resolve(null),{once:true});await gate.promise;throw Object.assign(Error('Cancelled'),{name:'AbortError'});}}return normal(route,options);};
+  const firstRun=h.collect();for(let i=0;i<100 && !postIds.length;i++)await turn();h.app.ctAbortExport();assert.equal(await firstRun,false);assert.equal(h.app.ctExportTiming.collection,'uncertain');
+  let fail=true;h.app.managedDownloadStatGroupCollection=async()=>{if(fail)throw Error('Synthetic encoding failure');return true;};
+  assert.equal(await h.collect(),false);assert.equal(postIds[0],postIds[1]);assert.equal(h.journals.size,1);
+  fail=false;assert.equal(await h.collect(),true);assert.equal(postIds.length,2);assert.equal(h.journals.size,0);
+});
+test('modern SD abort after response persists observed receipt before releasing lock and never starts export',async()=>{
+  const h=await modernHarness(),gate=deferred(),put=h.app._ctStore.putRequest;let writes=0;
+  h.app._ctStore.putRequest=async(...args)=>{if(++writes===2)await gate.promise;return put(...args);};
+  const pending=h.collect();for(let i=0;i<100 && writes<2;i++)await turn();assert.equal(h.app.ctExportTiming.collection,'accepted');h.app.ctAbortExport();assert.equal(await h.download(),false);gate.resolve();assert.equal(await pending,false);
+  assert.equal([...h.journals.values()][0].payload.collection.id,h.data.collection.id);assert.equal(h.downloads.length,0);
+});
+for(const change of ['account','version','group','language','active-group','access'])test('modern SD '+change+' scope change aborts pending fetch and cannot publish into replacement scope',async()=>{
+  const h=await modernHarness(),gate=deferred();let requested=false;
+  h.app._cloud.request=async(route,options)=>{requested=true;options.signal.addEventListener('abort',()=>gate.resolve(null),{once:true});await gate.promise;throw Object.assign(Error('Cancelled'),{name:'AbortError'});};
+  const pending=h.download();while(!requested)await turn();
+  if(change==='account')h.app.cloudProfileId='other';if(change==='version')h.app.selectedManagedVersionId='other';if(change==='group')h.group.id='other';if(change==='language')h.team.language='German';if(change==='active-group')h.app.activeContentGroup={id:'other'};if(change==='access')h.app.cloudCanAccessAllLanguages=false;
+  assert.equal(await pending,false);assert.equal(h.downloads.length,0);assert.equal(h.app.ctExportTiming.status,'aborted');assert.equal(h.app.managedVersionBusy,false);assert.equal(h.app.ctBusy,false);
+});
+test('modern SD cleanup failure after initiation reports failure and keeps receipt and request for safe retry',async()=>{
+  const h=await modernHarness();h.app._ctStore.deleteRequest=async()=>{throw Error('Synthetic cleanup failure');};
+  assert.equal(await h.collect(),false);assert.equal(h.app.ctExportTiming.status,'failed');assert.equal(h.app.ctExportTiming.downloadStarted,true);assert.equal(h.journals.size,1);assert.equal(h.downloads.length,1);assert.equal(h.app.managedVersionBusy,false);
+  h.app._ctStore.deleteRequest=async()=>h.journals.clear();assert.equal(await h.collect(),true);assert.equal(h.counts().posts,1);
+});
+test('modern SD operation lock covers direct snapshots and other languages through asynchronous fetch',async()=>{
+  const h=await modernHarness(),gate=deferred(),normal=h.app._cloud.request;
+  h.app._cloud.request=async(...args)=>{await gate.promise;return normal(...args);};
+  const pending=h.download();assert.equal(await h.collect(),false);assert.equal(await h.app.managedDownloadStatGroupCollection(h.data.version,h.group,{language:'German'},h.data.collection),false);
+  h.app.ctAbortExport();assert.equal(await pending,false);gate.resolve();
+});
+test('legacy accepted receipt survives reload and cleanup failure; retry uses immutable cutoff without POST',async()=>{
+  const data=await fixture();let requestId,receipt,failCleanup=true,posts=0;
+  const storage={async getVersionCollectionRequest(){return requestId;},async setVersionCollectionRequest(s,v,l,value){if(value===null && failCleanup)throw Error('Synthetic cleanup failed');requestId=value;if(!value)receipt=null;},async getVersionCollectionReceipt(){return receipt;},async setVersionCollectionReceipt(s,v,l,id,collection){receipt={requestId:id,collection:copy(collection)};}};
+  const request=async(route)=>{if(route.endsWith('/collections')){posts++;return{collection:data.collection};}if(route.endsWith('/manifest'))return copy(data.response);throw Error('Unexpected synthetic route');};
+  let h=appHarness(data,{storage,request});h.app.appConfirm=async()=>true;h.app.managedReadDetails=h.app.refreshManagedVersions=async()=>{};
+  assert.equal(await h.app.managedCollect({language:'Thai',counts:{saved:1}}),false);assert.equal(h.app.ctExportTiming.downloadStarted,true);assert.equal(h.app.ctExportTiming.status,'failed');assert(requestId);assert(receipt);
+  h=appHarness(data,{storage,request});h.app.appConfirm=async()=>true;h.app.managedReadDetails=h.app.refreshManagedVersions=async()=>{};failCleanup=false;
+  assert.equal(await h.app.managedCollect({language:'Thai',counts:{saved:1}}),true);assert.equal(posts,1);assert.equal(requestId,null);assert.equal(receipt,null);
+});
+test('legacy archive fetch Abort cancels request and suppresses saveAs',async()=>{
+  const data=await fixture(),gate=deferred();let options;
+  const h=appHarness(data,{request:(route,opts)=>{options=opts;return gate.promise;}});
+  const pending=h.app.managedExportCollection({...data.collection,format:'archive'},data.version,'Thai');await turn();h.app.ctAbortExport();assert.equal(await pending,false);assert(options.signal.aborted);gate.resolve(new Blob(['late archive']));await turn();assert.equal(h.downloads.length,0);assert.equal(h.app.ctBusy,false);assert.equal(h.app.managedVersionBusy,false);
+});
+test('legacy server preparation polling stops immediately on Abort while retaining accepted ID and receipt',async()=>{
+  const data=await fixture();let requestId,receipt;
+  const h=appHarness(data,{storage:{async setVersionCollectionRequest(s,v,l,id){requestId=id;},async setVersionCollectionReceipt(s,v,l,id,collection){receipt={id,collection};}},request:async()=>({collection:{...data.collection,status:'building'}})});
+  h.app.appConfirm=async()=>true;const pending=h.app.managedCollect({language:'Thai',counts:{saved:1}});
+  while(!h.app.ctExportTiming?.rows.some(row=>row.label.startsWith('Server collection preparation')))await turn();
+  h.app.ctAbortExport();assert.equal(await pending,false);assert.equal(h.app.ctExportTiming.status,'aborted');assert(requestId);assert(receipt);assert.equal(h.app.managedVersionBusy,false);assert.equal(h.requests.length,1);
+});
+test('empty legacy ending collection finishes honestly without claiming download initiation',async()=>{
+  const data=await fixture(),h=appHarness(data,{request:async()=>({collection:{...data.collection,fileCount:0,downloadReady:false}})});
+  h.app.appConfirm=async()=>true;h.app.managedReadDetails=h.app.refreshManagedVersions=async()=>{};
+  assert.equal(await h.app.managedCollect({language:'Thai',counts:{saved:0}}),true);assert.equal(h.app.ctExportTiming.status,'done');assert.equal(h.app.ctExportTiming.downloadStarted,false);assert.equal(h.downloads.length,0);
+});
+
+test('legacy preparation failure survives reload and retries the same retained request instead of polling forever',async()=>{
+  const data=await fixture();let requestId,receipt,posts=0;
+  const storage={async getVersionCollectionRequest(){return requestId;},async setVersionCollectionRequest(s,v,l,value){requestId=value;if(value===null)receipt=null;},async getVersionCollectionReceipt(){return receipt;},async setVersionCollectionReceipt(s,v,l,id,collection){receipt={requestId:id,collection:copy(collection)};}};
+  const request=async(route)=>{
+    if(route.endsWith('/collections')){posts++;return{collection:{...data.collection,status:posts===1?'building':'ready'}};}
+    if(route==='/v1/collections/'+data.collection.id)return{collection:{...data.collection,status:'failed',error:{message:'Synthetic preparation failed'}}};
+    if(route.endsWith('/manifest'))return copy(data.response);
+    throw Error('Unexpected synthetic route');
+  };
+  const prepare=()=>{const h=appHarness(data,{storage,request});h.app.appConfirm=async()=>true;h.app.managedReadDetails=h.app.refreshManagedVersions=async()=>{};return h;};
+  let h=prepare();assert.equal(await h.app.managedCollect({language:'Thai',counts:{saved:1}}),false);const retainedId=requestId;assert(retainedId);assert.equal(posts,1);
+  h=prepare();assert.equal(await h.app.managedCollect({language:'Thai',counts:{saved:1}}),true);
+  assert.equal(posts,2);assert.equal(h.requests[0].options.body.idempotencyKey,retainedId);assert.equal(requestId,null);assert.equal(receipt,null);assert.equal(h.downloads.length,1);
 });

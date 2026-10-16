@@ -2727,20 +2727,7 @@
             async ctCollect(version, group, team, end = true) {
                 if (this.ctBusy || this._ctExportRun) return false;
                 if (mode(group) === 'clienttext') return this.ctCollectClientText(version, group, team, end);
-                const key = this.managedCatalogScope,epoch=this._ctEpoch || 0,client=this._cloud,current=()=>key===this.managedCatalogScope && epoch===(this._ctEpoch || 0); this.ctBusy = true;
-                try {
-                    const requestKey='collection:'+JSON.stringify([group.id,team.language,end]),requestScope=this.ctRequestScope();
-                    let journal=await this._ctStore.getRequest(requestScope,requestKey);
-                    if(!journal){await this._ctStore.putRequest(requestScope,requestKey,{kind:'collection',groupId:group.id,language:team.language,endWindow:end,idempotencyKey:uuid()});journal=await this._ctStore.getRequest(requestScope,requestKey);}
-                    if(!current())return;
-                    const response = journal.payload.collection ? {collection:journal.payload.collection} : await client.request('/v1/content-groups/' + encodeURIComponent(group.id) + '/teams/' + encodeURIComponent(team.language) + '/collections', { method: 'POST', body: { idempotencyKey: journal.payload.idempotencyKey, endWindow: end } });
-                    await this._ctStore.putRequest(requestScope,requestKey,{...journal.payload,collection:response.collection});
-                    if (!current()) return;
-                    await this.managedReadDetails(version.id, false); this.ctBusy = false;
-                    const downloaded=mode(group) === 'clienttext' ? await this.ctDownload(response.collection, group, team.language, version) : await this.managedDownloadStatGroupCollection(version, group, team, response.collection);
-                    if(key===this.managedCatalogScope && downloaded)await this._ctStore.deleteRequest(requestScope,requestKey);
-                } catch (error) { if (current()) this.ctError = error.message; }
-                finally { if (current()) this.ctBusy = false; }
+                return this.managedCollectStatGroup(version, group, team, end);
             },
             async ctReopen(version, group, team) {
                 const key=this.managedCatalogScope,epoch=this._ctEpoch || 0,client=this._cloud,current=()=>key===this.managedCatalogScope && epoch===(this._ctEpoch || 0),scope=this.ctRequestScope(),requestKey='reopen:'+JSON.stringify([group.id,team.language]);

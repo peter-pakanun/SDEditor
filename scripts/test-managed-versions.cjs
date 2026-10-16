@@ -67,6 +67,10 @@ function harness(options = {}) {
     if (route === '/v1/versions/weekly-1') return { version: version(), teams: [team()] };
     throw new Error('Unexpected request: ' + route);
   } };
+  const progress = require('../public/clientTextExportProgress.js').mixin;
+  Object.assign(app, progress.data());
+  for (const [name, method] of Object.entries(progress.methods)) app[name] = method.bind(app);
+  for (const [name, getter] of Object.entries(progress.computed)) Object.defineProperty(app, name, { get: () => getter.call(app) });
   for (const [name, method] of Object.entries(api.mixin.methods)) app[name] = method.bind(app);
   for (const [name, method] of Object.entries(api.mixin.computed)) Object.defineProperty(app, name,
     { configurable: true, get: () => method.call(app) });
@@ -1841,7 +1845,7 @@ test('a failed collected ZIP download retains the request ID so retry downloads 
   await app.managedCollect(team()); assert.equal(writes.includes(null), false);
   app.managedDownload = async () => true;
   await app.managedCollect(team());
-  assert.equal(requests[0].options.body.idempotencyKey, requests[1].options.body.idempotencyKey);
+  assert.equal(requests.length, 1, 'Accepted receipt retry downloads the same collection without another POST');
   assert.equal(writes.at(-1), null);
 });
 

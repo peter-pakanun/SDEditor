@@ -11,6 +11,8 @@ function harness() {
     setTimeout, clearTimeout, performance: require('node:perf_hooks').performance,
     CollaborationProtocol: require('../public/collaborationProtocol.js'),
     OfflineStore: { async saveWorkspaceWithRevisions(workspace, revisions, game) { writes.push(structuredClone({ workspace, revisions, game })); } } };
+  window.ClientTextExportProgress = require('../public/clientTextExportProgress.js');
+  window.ClientTextUI = { mixin: window.ClientTextExportProgress.mixin };
   const context = vm.createContext({ window, URLSearchParams, console, setTimeout, clearTimeout, crypto: require('node:crypto').webcrypto,
     alert: () => assert.fail('Native alerts must not be used'), confirm: () => assert.fail('Native confirmations must not be used'),
     document: { activeElement: null, body: {}, querySelector: () => null,
@@ -32,6 +34,8 @@ function harness() {
     appAlert: async message => { alerts.push(message); }, appConfirm: async () => true,
     saveSettings() {}, closeHlPopup() {}, restoreFileTableFocusAfterEditor() {},
   });
+  const managed = require('../public/managedVersions.js').mixin.methods;
+  for (const name of ['managedBeginExport','managedFinishExport','managedBeginOperation','managedFinishOperation','managedSetOperationError']) editor[name] = managed[name];
   const computed = Object.assign({}, ...config.mixins.map(mixin => mixin.computed || {}), config.computed);
   for (const [name, getter] of Object.entries(computed)) Object.defineProperty(editor, name, { get: () => getter.call(editor) });
   return { editor, window, writes, alerts, context, config };
@@ -3656,4 +3660,30 @@ test('a local receipt replay adopts a later staged deletion instead of restoring
   assert.deepEqual(Array.from(desc.translations.Thai), baseline.translations.Thai);
   assert.equal(e.localDescs.status[desc.filepath].languageStatus.Thai.lastEditedAt, 12345);
   assert.equal(e.pendingLocalSaves, 0); e._pendingSaves.dispose();
+});
+
+test('local SD export Abort during pending checkpoint suppresses packaging and releases its shared operation lock',async()=>{
+  const h=harness(),e=h.editor;let resolveCheckpoint,entered=false;
+  const checkpoint=new Promise(resolve=>{resolveCheckpoint=resolve;});e.flushEditorDraft=async()=>true;e._pendingSaves={snapshot:()=>({jobs:[{}]})};e.waitForPendingSaves=()=>{entered=true;return checkpoint;};
+  const pending=e.exportZip(false);for(let attempts=0;attempts<1000 && !entered;attempts++)await new Promise(resolve=>setImmediate(resolve));assert(entered,e.ctError || JSON.stringify(e.managedOperationErrors));assert.equal(await e.exportZip(false),false);
+  e.ctAbortExport();assert.equal(await pending,false);resolveCheckpoint(true);await Promise.resolve();
+  assert.equal(e.ctExportTiming.status,'aborted');assert.equal(e.ctBusy,false);assert.equal(e.managedVersionBusy,false);assert.equal(e.ctExportTiming.downloadStarted,false);
+});
+test('local SD compression Abort retains saved work and ignores late package completion',async()=>{
+  const h=harness(),e=h.editor;let release,entered=false,downloads=0;
+  const gate=new Promise(resolve=>{release=resolve;});
+  e.flushEditorDraft=async()=>true;e.descs=[description('synthetic',['Saved first','Saved second'])];e.committedTranslationIssues=()=>({languageBlockPresent:true,valid:true});
+  h.context.JSZip=class{file(){}async generateAsync(options,progress){entered=true;await gate;progress({percent:100});return new Blob(['late']);}};
+  h.context.saveAs=()=>downloads++;h.context.descEncode=h.window.StatDescCodec.descEncode;
+  const before=structuredClone(e.descs),pending=e.exportZip(false);for(let attempts=0;attempts<1000 && !entered;attempts++)await new Promise(resolve=>setImmediate(resolve));assert(entered,e.ctError || JSON.stringify(e.managedOperationErrors));e.ctAbortExport();assert.equal(await pending,false);release();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(downloads,0);assert.deepEqual(e.descs,before);assert.equal(e.ctBusy,false);assert.equal(e.managedVersionBusy,false);
+});
+
+test('cooperative local export freezes committed encoder inputs before receiving later saves',async()=>{
+  const h=harness(),e=h.editor,files=[];e.flushEditorDraft=async()=>true;e.descs=Array.from({length:130},(_,i)=>description('synthetic-'+i,['Saved first','Saved second']));
+  e.committedTranslationIssues=()=>({languageBlockPresent:true,valid:true});h.context.descEncode=h.window.StatDescCodec.descEncode;h.context.saveAs=()=>{};
+  h.context.JSZip=class{file(path,bytes){files.push({path,text:new TextDecoder('utf-16le').decode(bytes)});}async generateAsync(){return {};}};
+  const pending=e.exportZip(false),run=e._ctExportRun,delay=run.delay.bind(run);let changed=false;
+  run.delay=async ms=>{if(!changed){changed=true;e.descs[100].translations.Thai[0]='Incoming later save';e.descs[100].stats[0]='incoming_metadata';}return delay(ms);};
+  assert.equal(await pending,true);assert(changed);assert.match(files[100].text,/Saved first/);assert.doesNotMatch(files[100].text,/Incoming later save|incoming_metadata/);assert.equal(e.descs[100].translations.Thai[0],'Incoming later save');
 });

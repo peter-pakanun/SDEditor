@@ -317,3 +317,12 @@ test('a partial Dropped read keeps translated values visible while exact-source 
   assert.match(app.sdDroppedSourceError, /Import the missing original ZIP/);
   assert.deepEqual(candidate, before); assert.deepEqual(candidate.snapshot.translations, ['Last authored translation']);
 });
+
+test('disposing an export verifier stops its pending worker and never falls back or publishes late results',async()=>{
+  let fallback=0,instance;
+  class Worker {constructor(){instance=this;queueMicrotask(()=>this.onmessage({data:{type:'ready'}}));}postMessage(message){this.message=message;}terminate(){this.terminated=true;}}
+  const client=B.createWorkerClient({Worker,engine:{async verifyZip(){fallback++;return{};}}});
+  const pending=client.verify(new Blob(['synthetic']),{});await next();client.dispose();await assert.rejects(pending,{name:'AbortError'});
+  assert.equal(instance.terminated,true);assert.equal(fallback,0);instance.onmessage({data:{id:instance.message.id,type:'result',result:'late'}});
+  await assert.rejects(client.verify(new Blob(['synthetic']),{}),{name:'AbortError'});assert.equal(fallback,0);
+});

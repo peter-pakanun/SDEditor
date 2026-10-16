@@ -957,3 +957,18 @@ test('legacy game-slot placeholders disclose no owner or files and do not migrat
   assert.deepEqual(copy(await loaded.store.listLocalVersions({ ...scope, branchId: 'release' }, { metadataOnly: true })), []);
   assert.deepEqual(fixture.snapshot(), before); assertMetadataOnlyReads(fixture);
 });
+
+test('legacy collection receipts retain exact scoped IDs across reload and clear atomically with request IDs',async()=>{
+  const fixture=versionedStorage(7),loaded=loadStore(fixture),scope=localScope('','manager'),collection={id:'synthetic-snapshot',status:'ready',format:'manifest'};
+  await loaded.store.setVersionCollectionRequest(scope,'synthetic-version','Thai','stable-end-id');
+  await loaded.store.setVersionCollectionReceipt(scope,'synthetic-version','Thai','stable-end-id',collection);
+  collection.status='changed-after-write';
+  const reloaded=loadStore(fixture),receipt=await reloaded.store.getVersionCollectionReceipt(scope,'synthetic-version','Thai');
+  assert.equal(receipt.requestId,'stable-end-id');assert.equal(receipt.collection.status,'ready');
+  assert.equal(await reloaded.store.getVersionCollectionReceipt(localScope('','other'),'synthetic-version','Thai'),undefined);
+  assert.equal(await reloaded.store.getVersionCollectionReceipt(scope,'synthetic-version','German'),undefined);
+  assert.equal(await reloaded.store.getVersionCollectionReceipt(scope,'synthetic-version','Thai',false),undefined);
+  await reloaded.store.setVersionCollectionRequest(scope,'synthetic-version','Thai',null);
+  assert.equal(await loaded.store.getVersionCollectionRequest(scope,'synthetic-version','Thai'),undefined);
+  assert.equal(await loaded.store.getVersionCollectionReceipt(scope,'synthetic-version','Thai'),undefined);
+});

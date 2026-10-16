@@ -7913,55 +7913,81 @@ const config = Vue.defineComponent({
       this.saveSettings();
     },
     async exportZip(doFullExport) {
-      if (this.inlineActive && this.finishInlineSession && !await this.finishInlineSession({ promote: true })) return;
-      if (this.flushEditorDraft && !await this.flushEditorDraft()) return;
-      if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
-      if (doFullExport && !await this.appConfirm("Are you sure you want to do a full export?\nNote: This may take a couple minutes", {
-        title: 'Export full translation set?', confirmLabel: 'Export all', danger: false,
-      })) return;
-      if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return;
-      const descsToExport = (this.descs || []).filter(desc => {
-        const baseline = this.localDescs?.stagedVersion >= 1 ? this.workspaceSourceFile?.(desc.filepath) : null;
-        const state = baseline ? window.WorkspaceState.workspaceFile(this.localDescs, baseline, this.lang) : desc;
-        // An unresolved copy never replaces current ZIP/staged text. Keep valid
-        // current translations exportable even while their older copy is dropped.
-        return doFullExport ? !(state.isDropped && state.isMissing && !state.hasChanges) : !!state.hasChanges;
-      });
-      if (!descsToExport.length) {
-        this.appAlert(`There're no files to be export!`);
-        return;
-      }
-      const invalidFiles = descsToExport.filter(desc => {
-        const issues = this.committedTranslationIssues(desc, this.lang);
-        return issues.languageBlockPresent && !issues.valid;
-      });
-      if (invalidFiles.length) {
-        await this.appAlert('Export blocked: ' + invalidFiles.length + ' files have incomplete StatDescription translations. '
-          + 'Complete every entry before exporting.\n\n' + invalidFiles.slice(0, 12).map(desc => desc.filepath).join('\n'));
-        return;
-      }
+      const run = this.managedBeginExport(doFullExport ? 'Export all StatDescription files' : 'Export saved StatDescription work', { manager: false, show: false });
+      if (!run) return false;
+      let completed = false;
+      try {
+        run.phase('Checkpoint / preparation');
+        if (this.inlineActive && this.finishInlineSession && !await this.finishInlineSession({ promote: true })) return false;
+        run.check();
+        if (this.flushEditorDraft && !await this.flushEditorDraft()) return false;
+        run.check();
+        if (!doFullExport) this.ctShowExport();
+        if (this._pendingSaves?.snapshot().jobs.length && !await run.wait(this.waitForPendingSaves())) return false;
+        run.check();
+        if (doFullExport) {
+          run.phase('Full export confirmation');
+          if (!await this.appConfirm("Are you sure you want to do a full export?\nNote: This may take a couple minutes", {
+            title: 'Export full translation set?', confirmLabel: 'Export all', danger: false,
+          })) { run.abort(); return false; }
+          run.check();
+        }
+        this.ctShowExport(); run.phase('Checkpoint / preparation');
+        if (this._pendingSaves?.snapshot().jobs.length && !await run.wait(this.waitForPendingSaves())) return false;
+        run.check();
+        const descsToExport = (this.descs || []).filter(desc => {
+          const baseline = this.localDescs?.stagedVersion >= 1 ? this.workspaceSourceFile?.(desc.filepath) : null;
+          const state = baseline ? window.WorkspaceState.workspaceFile(this.localDescs, baseline, this.lang) : desc;
+          // An unresolved copy never replaces current ZIP/staged text. Keep valid
+          // current translations exportable even while their older copy is dropped.
+          return doFullExport ? !(state.isDropped && state.isMissing && !state.hasChanges) : !!state.hasChanges;
+        });
+        if (!descsToExport.length) {
+          throw new Error('There are no saved files to export.');
+        }
+        const invalidFiles = descsToExport.filter(desc => {
+          const issues = this.committedTranslationIssues(desc, this.lang);
+          return issues.languageBlockPresent && !issues.valid;
+        });
+        if (invalidFiles.length) {
+          throw new Error('Export blocked: ' + invalidFiles.length + ' files have incomplete StatDescription translations. Complete every entry before exporting.');
+        }
 
-      this.loadingProgress = 0.001;
-      let vueThis = this;
-      let zip = new JSZip();
-      for (const desc of descsToExport) {
-        const translations = { ...desc.translations };
-        const baseline = this.workspaceSourceFile?.(desc.filepath);
-        const committed = this.localDescs?.stagedVersion >= 1 && baseline
-          && window.WorkspaceState.workspaceFile(this.localDescs, baseline, this.lang);
-        if (baseline) translations.English = [...baseline.translations.English];
-        // The editor displays placeholders for an absent original block. A full
-        // export must retain that absence instead of creating blank game text.
-        if (!this.committedTranslationIssues(desc, this.lang).languageBlockPresent) delete translations[this.lang];
-        else if (committed) translations[this.lang] = [...committed.translations];
-        let buffer = descEncode({ ...(baseline || desc), translations });
-        zip.file(desc.filepath, buffer);
+        run.phase('Encoding');
+        // Freeze the same committed encoder inputs before yielding for Abort.
+        // Incoming saves during a cooperative pause must not change this export.
+        const exportInputs = descsToExport.map(desc => {
+          const translations = { ...desc.translations };
+          const baseline = this.workspaceSourceFile?.(desc.filepath);
+          const committed = this.localDescs?.stagedVersion >= 1 && baseline
+            && window.WorkspaceState.workspaceFile(this.localDescs, baseline, this.lang);
+          if (baseline) translations.English = [...baseline.translations.English];
+          // A full export retains an absent original block without making blank text.
+          if (!this.committedTranslationIssues(desc, this.lang).languageBlockPresent) delete translations[this.lang];
+          else if (committed) translations[this.lang] = [...committed.translations];
+          const original = baseline || desc;
+          return { ...original, stats: [...original.stats], variables: [...original.variables], remarks: [...original.remarks],
+            translations: Object.fromEntries(Object.entries(translations).map(([language, lines]) => [language, [...lines]])) };
+        });
+        const zip = new JSZip(); let processed = 0;
+        for (const desc of exportInputs) {
+          run.check();
+          if (++processed % 64 === 0) { await run.delay(0); run.check(); }
+          zip.file(desc.filepath, descEncode(desc));
+        }
+        run.check(); run.phase('Compression');
+        const zippedBuffer = await run.wait(zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 5 } }, () => run.check()));
+        run.check(); run.phase('Download initiation');
+        saveAs(zippedBuffer, "StatDescriptions_Translated.zip"); run.state.downloadStarted = true; completed = true;
+        this.managedSetOperationError('export', ''); return true;
+      } catch (error) {
+        if (run.current() && !run.signal.aborted && !error.stale) this.managedSetOperationError('export', error);
+        return false;
+      } finally {
+        const show = run.current() && !run.signal.aborted;
+        this.managedFinishExport(run, completed);
+        if (show) this.ctShowExport();
       }
-      let zippedBuffer = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 5 } }, function (metadata) {
-        vueThis.loadingProgress = 0.001 + (metadata.percent * 0.999);
-      });
-      this.loadingProgress = 100;
-      saveAs(zippedBuffer, "StatDescriptions_Translated.zip");
     },
     
     // Multi-instance detection methods
