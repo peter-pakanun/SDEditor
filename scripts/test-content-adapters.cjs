@@ -3,6 +3,17 @@ const A=require('../public/contentAdapters.js'),S=require('../public/clientTextS
 const {unit,fieldId}=require('./clienttext-storage-fixture.cjs');
 
 const plainEntry=(name,value)=>({name,value,parts:[{text:value}]});
+test('class form controls bridge exact short IDs and canonical Character paths through one catalog',()=>{
+    const identities=require('../public/clientTextIdentities.js'),catalog=require('../public/clientTextPortraitCatalog.js').games.poe2.characters;
+    for(const [path,[,label]]of Object.entries(catalog)){
+        const form=path.split('/').at(-1);
+        assert.equal(identities.characterForm(form,'poe2').label,label);
+        assert.deepEqual(identities.characterForm(path,'poe2'),identities.reference(path,'poe2'));
+        assert.equal(identities.reference(form,'poe2'),null,'bare form IDs stay scoped to class controls');
+    }
+    for(const id of ['IntFourFuture','intfour','Metadata/Characters/Dex/IntFour','constructor'])assert.equal(identities.characterForm(id,'poe2'),null);
+    assert.equal(identities.characterForm('IntFour','poe1'),null);
+});
 const character=(recordId,source,role='normal',sourceCell='B10')=>({
     id:JSON.stringify([role,'Characters',recordId]),role,sheet:'Characters',recordId,metadata:{},
     fields:[{id:JSON.stringify(['Name',null]),name:'Name',kind:'text',source,target:'Translated label',sourceCell,targetCell:'C10'}]

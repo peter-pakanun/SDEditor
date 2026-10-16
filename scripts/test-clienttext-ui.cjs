@@ -10,6 +10,7 @@ function harness(changes={}){
     const window={ClientTextState:S,ClientTextStore:Store,TranslationDiagnostics:require('../public/translationDiagnostics.js'),
         ClientTextNpcIndex:require('../public/clientTextNpcIndex.js'),
         ClientTextConvoIndex:require('../public/clientTextConvoIndex.js'),
+        ClientTextIdentities:require('../public/clientTextIdentities.js'),
         ContentAdapters:require('../public/contentAdapters.js'),
         TerminologyDiagnostics:require('../public/terminologyDiagnostics.js'),Vue:{markRaw:value=>value},crypto:{randomUUID:()=> 'save-'+(++nextId)}};
     const context=vm.createContext({window,console,setTimeout,clearTimeout,setInterval,clearInterval,AbortController,Blob,File,TextEncoder});
@@ -2004,6 +2005,31 @@ test('class variant names default to English Characters Name source and preserve
     assert.equal(app.ctSelectedVariant(group),dexb,'mapped names never coalesce Four and Fourb worksheet fields');
 });
 
+test('partial workbook class controls share exact Character labels without changing raw forms or filter artwork',()=>{
+    const original=classVariantUnit(),{app,window}=keyboardHarness(original),catalog=require('../public/clientTextPortraitCatalog.js').games.poe2;
+    original.metadata={'Character Filter':'Metadata/Characters/Int/IntFour, Metadata/Characters/Int/IntFourb'};
+    const before=clone({original,values:app.ctValues});
+    for(const [path,[,name]]of Object.entries(catalog.characters)){
+        const form=path.split('/').at(-1),field=original.fields.find(field=>field.form===form);
+        assert.equal(app.ctClassVariantName(field),name);assert.equal(app.ctClassVariantLabel(field),name+' ('+form+')');
+        assert.equal(window.ClientTextIdentities.characterForm(form,'poe2').label,window.ClientTextIdentities.reference(path,'poe2').label);
+    }
+    assert.match(app.ctReferenceMetadata()[0].display,/Witch, Sorceress/);
+    assert.deepEqual(require('../public/clientTextPortraits.js').createResolver({game:'poe2'})(original),[],'class filters do not add portraits');
+    app.ctUnits=[original,characterNameUnit('IntFourb','Workbook Sorceress')];
+    assert.equal(app.ctClassVariantName(original.fields.find(field=>field.form==='IntFourb')),'Workbook Sorceress','immutable workbook name stays primary over the static short-ID fallback');
+    app.ctWorkspace={scope:{...scope,game:'poe1'}};
+    assert.equal(app.ctClassVariantName(original.fields.find(field=>field.form==='IntFour')),'IntFour','no cross-game class fallback');
+    assert.equal(app.ctClassVariantName({kind:'form',form:'IntFourFuture'}),'IntFourFuture');
+    assert.equal(app.ctClassVariantName({kind:'form',form:'Metadata/Characters/Int/IntFour'}),'Metadata/Characters/Int/IntFour','unknown worksheet form identities stay raw');
+    const identities=window.ClientTextIdentities;window.ClientTextIdentities={reference:identities.reference};app.ctUnits=[original];app.ctWorkspace={scope};
+    assert.equal(app.ctClassVariantName(original.fields.find(field=>field.form==='IntFourb')),'IntFourb','an unavailable new helper retains the existing raw label');
+    window.ClientTextIdentities=identities;
+    app.ctWorkspace={scope};app.mapClientTextClassNames=false;
+    assert.equal(app.ctClassVariantName(original.fields.find(field=>field.form==='IntFourb')),'IntFourb');
+    assert.deepEqual(clone({original,values:app.ctValues}),before);
+});
+
 test('class name display setting toggles without changing immutable originals, saved values, drafts, diagnostics or selection',()=>{
     const original=classVariantUnit(),ranger=characterNameUnit('DexFour','Ranger'),units=[original,ranger],snapshot=clone(units),
         {app,inputFor}=keyboardHarness(original,{ctUnits:units,mapClientTextClassNames:true});app.ctInitializeVariants();
@@ -2031,15 +2057,15 @@ test('class name mapping safely falls back for unavailable, blank and unrelated 
         otherSheet=characterNameUnit('DexFour','Wrong sheet',{sheet:'CharacterNames'}),
         otherPath=characterNameUnit('DexFour','Wrong metadata',{recordId:'Metadata/Other/DexFour'}),
         {app}=keyboardHarness(original,{ctUnits:[original,blank,otherSheet,otherPath]});
-    assert.equal(app.ctClassVariantName(dex),'DexFour');assert.equal(app.ctClassVariantLabel(dex),'DexFour');
+    assert.equal(app.ctClassVariantName(dex),'Ranger');assert.equal(app.ctClassVariantLabel(dex),'Ranger (DexFour)');
     const wrongField=characterNameUnit('DexFour','Wrong field');wrongField.fields[0].name='Description';
-    app.ctUnits=[original,otherSheet,otherPath,wrongField];assert.equal(app.ctClassVariantName(dex),'DexFour');
+    app.ctUnits=[original,otherSheet,otherPath,wrongField];assert.equal(app.ctClassVariantName(dex),'Ranger');
     app.ctUnits=[original,characterNameUnit('DexFour','Wrong attribute',{recordId:'Metadata/Characters/Int/DexFour'})];
-    assert.equal(app.ctClassVariantName(dex),'DexFour');
-    app.ctUnits=[original,characterNameUnit('DexFour','NONEXISTENT')];assert.equal(app.ctClassVariantName(dex),'DexFour');
+    assert.equal(app.ctClassVariantName(dex),'Ranger');
+    app.ctUnits=[original,characterNameUnit('DexFour','NONEXISTENT')];assert.equal(app.ctClassVariantName(dex),'Ranger');
     const duplicate=characterNameUnit('DexFour','Duplicate field');duplicate.fields.push({...duplicate.fields[0],source:'Other class'});
-    app.ctUnits=[original,duplicate];assert.equal(app.ctClassVariantName(dex),'DexFour');
-    app.ctUnits=[original];assert.equal(app.ctClassVariantName(dex),'DexFour');
+    app.ctUnits=[original,duplicate];assert.equal(app.ctClassVariantName(dex),'Ranger');
+    app.ctUnits=[original];assert.equal(app.ctClassVariantName(dex),'Ranger');
     assert.equal(app.ctClassVariantName(original.fields[0]),'MS','ordinary gender forms keep their raw label');
 });
 
@@ -2048,15 +2074,15 @@ test('class name mapping prefers normal Characters names and can use an explicit
         gender=characterNameUnit('DexFour','Gender Ranger',{role:'gender'}),{app}=keyboardHarness(original,{ctUnits:[original,gender,normal]});
     assert.equal(app.ctClassVariantName(dex),'Ranger');app.ctUnits=[original,gender];assert.equal(app.ctClassVariantName(dex),'Gender Ranger');
     app.ctUnits=[original,characterNameUnit('DexFour',''),gender];
-    assert.equal(app.ctClassVariantName(dex),'DexFour','a present normal Characters row with no name cannot borrow the gender fallback');
+    assert.equal(app.ctClassVariantName(dex),'Ranger','a present normal Characters row with no name cannot borrow the gender fallback');
     const feminine=characterNameUnit('DexFour','Feminine only',{role:'gender'});feminine.fields[0].form='FS';
-    app.ctUnits=[original,feminine];assert.equal(app.ctClassVariantName(dex),'DexFour','there is no inferred class name without Name MS');
+    app.ctUnits=[original,feminine];assert.equal(app.ctClassVariantName(dex),'Ranger','static fallback does not borrow an unsupported gender form');
 });
 
 test('class name mapping rejects conflicting Characters names and rebuilds for replacement units and workspace scope',()=>{
     const original=classVariantUnit(),dex=original.fields.find(field=>field.form==='DexFour'),ranger=characterNameUnit('DexFour','Ranger'),
         conflict=characterNameUnit('DexFour','Conflicting class'),{app}=keyboardHarness(original,{ctUnits:[original,ranger,conflict]});
-    assert.equal(app.ctClassVariantName(dex),'DexFour','an ambiguous class name retains the raw code');
+    assert.equal(app.ctClassVariantName(dex),'Ranger','an ambiguous workbook label uses the verified static fallback');
     app.ctUnits=[original,ranger];assert.equal(app.ctClassVariantName(dex),'Ranger');
     const units=app.ctUnits;units[1]=characterNameUnit('DexFour','Next source class');
     app.ctWorkspace={scope:{...scope,versionId:'next-version'}};
@@ -2121,9 +2147,9 @@ test('hidden blank variants expose committed workload, missing/outdated facts an
         missing=group.fields.find(field=>field.form==='IntFourb'),optional=group.fields.find(field=>field.form==='IntFour'),
         outdated=group.fields.find(field=>field.form==='StrFourb');
     app.ctDiagnostics={[app.ctSelection]:[{fieldId:optional.id,severity:'warning',message:'Preserved manual finding'}]};
-    assert.equal(app.ctVariantLabel(missing),'IntFourb (blank) · Missing');
-    assert.equal(app.ctVariantLabel(optional),'IntFour (blank) · Warning');assert.equal(app.ctVariantFacts(optional).missing,false);
-    assert.equal(app.ctVariantLabel(outdated),'StrFourb · Outdated');
+    assert.equal(app.ctVariantLabel(missing),'Sorceress (IntFourb) (blank) · Missing');
+    assert.equal(app.ctVariantLabel(optional),'Witch (IntFour) (blank) · Warning');assert.equal(app.ctVariantFacts(optional).missing,false);
+    assert.equal(app.ctVariantLabel(outdated),'Warrior (StrFourb) · Outdated');
     assert.equal(app.ctVariantSummary(app.ctClassFields(group)),'2 Workload · 1 Missing · 1 Outdated · 1 Warning');
     const diagnostics=app.ctDiagnostics;app.ctSelectVariant(group,optional.id,{focus:false});
     assert.equal(app.ctDiagnostics,diagnostics,'display changes do not rerun or clear completed diagnostics');
@@ -2136,7 +2162,7 @@ test('hidden blank variants expose committed workload, missing/outdated facts an
 test('class-field translation choices identify the exact form instead of repeating only the English heading',()=>{
     const {app,window}=keyboardHarness(classVariantUnit()),group=app.ctFieldGroups[0],str=group.fields.find(field=>field.form==='StrFourb'),
         dex=group.fields.find(field=>field.form==='DexFourb');
-    assert.equal(app.ctHistoryFieldLabel(str),'Text · StrFourb');assert.equal(app.ctHistoryFieldLabel(dex),'Text · DexFourb');
+    assert.equal(app.ctHistoryFieldLabel(str),'Text · Warrior (StrFourb)');assert.equal(app.ctHistoryFieldLabel(dex),'Text · Huntress (DexFourb)');
     assert.match(window.ClientTextUI.fieldsComponent.template,/Translation choice · \{\{ host\.ctHistoryFieldLabel\(/);
 });
 

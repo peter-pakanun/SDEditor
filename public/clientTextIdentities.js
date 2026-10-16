@@ -26,5 +26,11 @@
         if(includeVariants && own(variants,game) && own(variants[game],id))return {label:variants[game][id],kind:'class variant'};
         return null;
     }
-    return {reference};
+    function characterForm(id,game){
+        const entries=characters(game);
+        if(own(entries,id))return {label:entries[id][1],kind:'Character'};
+        for(const [path,entry]of Object.entries(entries || {}))if(path.split('/').at(-1)===id)return {label:entry[1],kind:'Character'};
+        return null;
+    }
+    return {reference,characterForm};
 });

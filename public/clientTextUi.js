@@ -1394,7 +1394,8 @@
                     }
                     cache=this._ctClassNameCache={units,workspace,names};
                 }
-                return cache.names.get(field.form) || field.form;
+                return cache.names.get(field.form)
+                    || root.ClientTextIdentities?.characterForm?.(field.form,workspace?.scope?.game || this.gameVersion)?.label || field.form;
             },
             ctClassVariantLabel(field) {
                 const name=this.ctClassVariantName(field);
