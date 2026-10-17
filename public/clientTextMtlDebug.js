@@ -20,6 +20,27 @@
             /^(?:authorization|proxy-authorization|cookie|set-cookie|password|secret|credentials?|(?:access|refresh|id)[_-]?token|api[_-]?key|session(?:id|token)?)$/i.test(key) ? '[redacted]' : redact(item, depth + 1)]));
         return value === null || ['boolean', 'number'].includes(typeof value) ? value : null;
     }
+    function streamDetails(summary) {
+        if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return undefined;
+        const kinds = ['missing', 'null', 'array', 'object', 'string', 'number', 'boolean', 'other'];
+        const events = ['response.created', 'response.queued', 'response.in_progress', 'response.completed', 'response.failed', 'response.incomplete', 'error',
+            'response.output_item.added', 'response.output_item.done', 'response.content_part.added', 'response.content_part.done',
+            'response.output_text.delta', 'response.output_text.done', 'response.refusal.delta', 'response.refusal.done',
+            'response.reasoning_text.delta', 'response.reasoning_text.done', 'response.reasoning_summary_text.delta', 'response.reasoning_summary_text.done',
+            'response.reasoning_summary_part.added', 'response.reasoning_summary_part.done'];
+        const known = (value, allowed) => typeof value === 'string' && [...allowed, 'missing', 'null', 'other'].includes(value) ? value : 'other';
+        const result = {};
+        for (const field of ['events', 'outputItems', 'outputTextCharacters'])
+            result[field] = Number.isSafeInteger(summary[field]) && summary[field] >= 0 && summary[field] <= 2 * 1024 * 1024 ? summary[field] : null;
+        for (const field of ['completedEventSeen', 'outputItemsTruncated', 'contentPartsTruncated']) result[field] = summary[field] === true;
+        for (const [field, allowed] of Object.entries({ eventKind: kinds, eventType: events, eventTypeKind: kinds, sseEventType: events,
+            responseKind: kinds, responseStatus: ['completed', 'failed', 'in_progress', 'cancelled', 'queued', 'incomplete'], outputKind: kinds }))
+            result[field] = known(summary[field], allowed);
+        for (const [field, allowed] of Object.entries({ outputItemTypes: ['message', 'reasoning', 'function_call', 'custom_tool_call'],
+            contentTypes: ['output_text', 'refusal', 'not-array'], textValueTypes: kinds }))
+            result[field] = Array.isArray(summary[field]) ? summary[field].slice(0, 16).map(value => known(value, allowed)) : [];
+        return result;
+    }
     // A labeled selection of actual fields, not a raw transport dump. Preserve
     // quoted prompt/workbook/response text; omit connection configuration.
     function present(record) {
@@ -39,7 +60,8 @@
             ...(request ? { prompt: { instructions: request.instructions, messages: request.input } } : {}),
             ...(server && Object.hasOwn(server, 'response') ? { response: server.response ? { translation: server.response.translation } : null } : {}), lookup: server?.lookup,
             validation: server?.validation, failureReason: server?.failureReason, failureStage: server?.failureStage,
-            validationReason: server?.validationReason, upstreamStatus: server?.upstreamStatus, upstreamResponse, apiStatus: server?.apiStatus,
+            validationReason: server?.validationReason, protocolCheck: server?.protocolCheck, protocolExplanation: server?.protocolExplanation,
+            upstreamStatus: server?.upstreamStatus, upstreamResponse, streamSummary: streamDetails(server?.streamSummary), apiStatus: server?.apiStatus,
             startedAt: server?.startedAt ?? record.submittedAt, sentAt: server?.sentAt, finishedAt: server?.finishedAt,
             elapsedMs: server?.elapsedMs ?? record.elapsedMs, error: server?.error || record.error };
         return redact(Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)));

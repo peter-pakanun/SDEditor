@@ -112,6 +112,25 @@ test('debug displays selected prompt/context/response without connection configu
     assert.match(Debug.Dialog.template,/Prompt and context/);assert.match(Debug.Dialog.template,/Selected fields from the executed request/);
 });
 
+test('selected debug presentation includes only bounded structural stream summary and precise protocol check',()=>{
+    const record={requestId:'synthetic-stream',status:'failed',server:{status:'failed',response:null,failureReason:'response_shape',
+        protocolCheck:'completion_output',protocolExplanation:'The completed response did not contain an output array.',
+        streamSummary:{events:4,completedEventSeen:true,eventKind:'object',eventType:'response.completed',eventTypeKind:'string',sseEventType:'response.completed',
+            responseKind:'object',responseStatus:'missing',outputKind:'missing',outputItems:0,outputItemTypes:['message','synthetic private type'],
+            contentTypes:['output_text'],textValueTypes:['string'],outputTextCharacters:22,outputItemsTruncated:false,contentPartsTruncated:false,
+            text:'synthetic raw output',delta:'synthetic partial translation',reasoning:'synthetic hidden reasoning',model:'synthetic-model',provider:'synthetic-provider',
+            response:{output:'synthetic raw response'},headers:{Authorization:'synthetic secret'},url:'synthetic private endpoint'}}};
+    const shown=JSON.parse(Debug.Dialog.computed.details.call({item:{record}}));
+    assert.equal(shown.protocolCheck,'completion_output');assert.equal(shown.protocolExplanation,record.server.protocolExplanation);
+    assert.equal(shown.streamSummary.events,4);assert.equal(shown.streamSummary.completedEventSeen,true);
+    assert.equal(shown.streamSummary.responseStatus,'missing');assert.equal(shown.streamSummary.outputKind,'missing');
+    assert.equal(shown.streamSummary.outputTextCharacters,22);assert.deepEqual(shown.streamSummary.outputItemTypes,['message','other']);
+    assert.deepEqual(shown.streamSummary.contentTypes,['output_text']);assert.deepEqual(shown.streamSummary.textValueTypes,['string']);
+    assert.doesNotMatch(JSON.stringify(shown),/synthetic raw|synthetic partial|synthetic hidden|synthetic-model|synthetic-provider|synthetic secret|synthetic private/);
+    const oversized=Debug.present({...record,server:{...record.server,streamSummary:{...record.server.streamSummary,events:Infinity,outputItemTypes:Array(30).fill('message')}}});
+    assert.equal(oversized.streamSummary.events,null);assert.equal(oversized.streamSummary.outputItemTypes.length,16);
+});
+
 test('a proxy-masked generation failure reads the original job once and presents its validation failure without another POST',async()=>{
     const h=harness(),calls=[];let requestId;
     h.app._cloud.request=async(path,options={})=>{calls.push({path,method:options.method||'GET'});
