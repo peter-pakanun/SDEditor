@@ -200,6 +200,7 @@ function formatPageRange(total, page, pageSize) {
       settingsTabs: [
         { id: 'general', label: 'General' },
         { id: 'editor', label: 'Editor & shortcuts' },
+        { id: 'mtl', label: 'MTL' },
         { id: 'cloud', label: 'Cloud backup' },
         { id: 'data', label: 'Data' },
         { id: 'logs', label: 'Logs' },

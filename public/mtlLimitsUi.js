@@ -55,7 +55,7 @@
         computed:{
             mtlLimitsAllowed(){return allowed(this);},
             mtlLimitsAccessKey(){return access(this);},
-            mtlLimitsOpen(){return allowed(this)&&this.mtlLimitsExpanded&&!!this.settingsDialogVisible&&this.settingsTab==='editor';},
+            mtlLimitsOpen(){return allowed(this)&&this.mtlLimitsExpanded&&!!this.settingsDialogVisible&&this.settingsTab==='mtl';},
             mtlLimitsRows(){return rows;},
             mtlLimitsDirty(){return !!this.mtlLimitsState&&!equal(this.mtlLimitsDraft,this.mtlLimitsState.limits);},
             mtlLimitsValidation(){

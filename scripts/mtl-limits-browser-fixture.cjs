@@ -14,7 +14,7 @@ async function run(){
     const styles=[...html.matchAll(/<link\b[^>]*rel="stylesheet"[^>]*href="([^"/:]+\.css)"[^>]*>/g)].map(match=>match[0].replace('href="','href="/')).join('\n');
     const fixture=String.raw`(()=>{
 const seed=${JSON.stringify(quota())};
-const app=Vue.createApp({mixins:[MtlLimitsUI.mixin],data(){return{settingsDialogVisible:true,settingsTab:'editor',cloudSignedIn:true,cloudProfileId:'synthetic-admin',
+const app=Vue.createApp({mixins:[MtlLimitsUI.mixin],data(){return{settingsDialogVisible:true,settingsTab:'mtl',cloudSignedIn:true,cloudProfileId:'synthetic-admin',
  cloudUser:{id:'synthetic-admin',role:'admin',isAdmin:true,assignmentVersion:1},privateMediaEpoch:1};},methods:{
  async configure(mode='normal',role='admin'){
   this.mtlLimitsReset();this.mtlLimitsExpanded=false;this.$el.querySelector('details')?.removeAttribute('open');

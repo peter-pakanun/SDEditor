@@ -4,7 +4,7 @@ const UI=require('../public/mtlLimitsUi.js'),{quota}=require('./mtl-limits-fixtu
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};};
 function harness(changes={}){
     const requests=[],app={...UI.mixin.data(),cloudSignedIn:true,cloudProfileId:'synthetic-admin',cloudUser:{id:'synthetic-admin',role:'admin',isAdmin:true,assignmentVersion:1},
-        settingsDialogVisible:false,settingsTab:'editor',privateMediaEpoch:1,_cloud:{epoch:1,request:async(path,options={})=>{
+        settingsDialogVisible:false,settingsTab:'mtl',privateMediaEpoch:1,_cloud:{epoch:1,request:async(path,options={})=>{
             requests.push({path,options});return{quota:quota('synthetic-admin',options.method==='PUT'?{revision:1,limits:options.body.limits,mutationId:options.body.mutationId,appliedRevision:1}:{})};}},...changes};
     for(const[name,method]of Object.entries(UI.mixin.methods))app[name]=method.bind(app);
     for(const[name,getter]of Object.entries(UI.mixin.computed))Object.defineProperty(app,name,{get:()=>getter.call(app)});
@@ -17,6 +17,17 @@ test('limits load is read-only and current server counters remain independent of
     h.app.mtlLimitsDraft.userDay=75;assert.equal(h.app.mtlLimitsDirty,true);await h.app.mtlLimitsLoad();
     assert.equal(h.app.mtlLimitsDraft.userDay,75);assert.equal(h.app.mtlLimitsState.usage.user.day.limit,50);assert.equal(h.app.mtlLimitsState.usage.user.day.used,12);
     assert.equal(h.requests.every(value=>!value.options.body),true);
+});
+
+test('quota polling follows the expanded MTL section and stopping it preserves the dirty form',async()=>{
+    const h=harness();await h.app.mtlLimitsLoad();h.app.mtlLimitsDraft.userDay=75;
+    h.app.settingsDialogVisible=true;h.app.mtlLimitsExpanded=true;assert.equal(h.app.mtlLimitsOpen,true);
+    h.app.mtlLimitsSchedule();assert.ok(h.app._mtlLimitsTimer);
+    h.app.settingsTab='editor';assert.equal(h.app.mtlLimitsOpen,false);UI.mixin.watch.mtlLimitsOpen.call(h.app,false);
+    assert.equal(h.app._mtlLimitsTimer,null);assert.equal(h.app.mtlLimitsDraft.userDay,75);assert.equal(h.app.mtlLimitsDraftRevision,0);
+    h.app.settingsTab='mtl';assert.equal(h.app.mtlLimitsOpen,true);
+    h.app.settingsDialogVisible=false;assert.equal(h.app.mtlLimitsOpen,false);
+    assert.equal(h.app.mtlLimitsDraft.userDay,75);h.app.mtlLimitsReset();
 });
 test('sanitization selects quota metadata only and rejects another account, malformed counters or limits',()=>{
     const input=quota();Object.defineProperty(input,'credentials',{enumerable:true,get(){throw Error('Do not read credentials');}});

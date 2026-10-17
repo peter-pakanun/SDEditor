@@ -277,7 +277,7 @@ test('preview redacts embedded credential-like values and diagnostic template us
 
 test('all MTL settings use neutral wording and retain an honest accessible data-sharing disclosure',()=>{
     const html=require('node:fs').readFileSync(require('node:path').join(__dirname,'../public/index.html'),'utf8');
-    const settings=html.split('<h3 class="settingsSubheading">MTL</h3>')[1].split('id="autocompleteShortcut"')[0];
+    const settings=html.split('<section id="settings-panel-mtl"')[1].split('</section>')[0];
     assert.doesNotMatch(settings.replace(/<[^>]*>/g,''),/OpenAI|ChatGPT|gpt-6|\bmodels?\b|\bAI\b/i);
     assert.match(settings,/<summary>MTL data sharing and privacy<\/summary>[\s\S]*bounded relevant workbook context[\s\S]*external translation service/);
     assert.match(settings,/human review and Save before they replace the prior saved or original translation/);

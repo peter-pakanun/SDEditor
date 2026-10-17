@@ -16,14 +16,14 @@ if(!executablePath||!existsSync(vueScriptPath))throw new Error('Use an installed
 async function run(){
     mkdirSync(outDir,{recursive:true});
     const html=readFileSync(join(publicDir,'index.html'),'utf8');
-    const matches=[...html.matchAll(/<h3 class="settingsSubheading">MTL<\/h3>[\s\S]*?(?=<h3 class="settingsSubheading">Keyboard shortcuts<\/h3>)/g)];
+    const matches=[...html.matchAll(/<section id="settings-panel-mtl"[\s\S]*?<\/section>/g)];
     assert.equal(matches.length,1,'Extract the integrated product MTL settings block exactly once.');
     const mtlBlock=matches[0][0],styles=[...html.matchAll(/<link\b[^>]*rel="stylesheet"[^>]*href="([^"/:]+\.css)"[^>]*>/g)]
         .map(match=>match[0].replace('href="','href="/')).join('\n');
     const template='<div class="settingPage settingsBackdrop"><section class="settingsDialog" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" tabindex="-1">'
         +'<header class="settingsHeader"><div><p class="settingsEyebrow">WORKSPACE PREFERENCES</p><h2 id="settingsTitle">Settings</h2></div><button class="settingsClose">Close <kbd>Esc</kbd></button></header>'
-        +'<nav class="settingsTabs" role="tablist" aria-label="Settings sections"><button role="tab">General</button><button role="tab" aria-selected="true">Editor</button><button role="tab">Cloud backup</button></nav>'
-        +'<div class="settingsBody"><section class="settingsPanel" role="tabpanel" aria-label="Editor settings">'+mtlBlock+'</section></div></section></div>';
+        +'<nav class="settingsTabs" role="tablist" aria-label="Settings sections"><button role="tab">General</button><button role="tab">Editor</button><button role="tab" aria-selected="true">MTL</button><button role="tab">Cloud backup</button></nav>'
+        +'<div class="settingsBody">'+mtlBlock+'</div></section></div>';
     const fixture=String.raw`(()=>{
 const connection=(changes={})=>({enabled:true,state:'connected',revision:4,connected:true,expiresAt:1800000000000,connectedAt:1700000000000,
  updatedAt:1750000000000,requiresReauthorization:false,remoteRevocationConfirmed:false,hostedConnectAvailable:false,bootstrap:'local-sign-in-import',canDisconnect:true,canRevoke:true,...changes});
@@ -34,7 +34,7 @@ const metadata={connected:connection(),'generation-disabled':connection({enabled
 const app=Vue.createApp({
  mixins:[MtlConnectionUI.mixin],
  data(){return{cloudSignedIn:true,cloudProfileId:'synthetic-admin',cloudUser:{id:'synthetic-admin',role:'admin',isAdmin:true,assignmentVersion:1},
- privateMediaEpoch:1,ctMtlCapabilities:{enabled:true},mtlConsentVersion:'',mtlLimitsAllowed:false};},
+ privateMediaEpoch:1,ctMtlCapabilities:{enabled:true},mtlConsentVersion:'',mtlShortcut:'disabled',mtlLimitsAllowed:false,settingsTab:'mtl'};},
  methods:{
   fixtureConfigure(mode='connected'){
    this.mtlConnectionReset();this.cloudSignedIn=true;this.cloudProfileId='synthetic-admin';

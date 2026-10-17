@@ -51,6 +51,26 @@ test('clipboard defaults hidden and its visibility and text survive save, export
   assert.equal(e.editorClipboard, 'Keep this clipboard text');
 });
 
+test('the MTL section preserves existing preferences and legacy Settings navigation targets', async () => {
+  const { e, config, writes, downloads } = harness();
+  assert.equal(e.mtlConsentVersion, '');assert.equal(e.mtlShortcut, 'disabled');
+  e.mtlConsentVersion='mtl-v1';e.mtlShortcut='ctrl-alt-f8';
+  const draft={userDay:75};e.mtlLimitsDraft=draft;
+  for(const id of ['mtl','general','editor','cloud','data','logs','mtl']){
+    e.openSettings(id);assert.equal(e.settingsTab,id);assert.equal(e.mtlLimitsDraft,draft);
+    assert.equal(e.mtlConsentVersion,'mtl-v1');assert.equal(e.mtlShortcut,'ctrl-alt-f8');
+  }
+  let focused=0;e.$refs={settingsDialog:{querySelector(){return{focus(){focused++;}};}}};e.$nextTick=async callback=>callback?.();
+  let prevented=0;e.handleSettingsTabKeydown({key:'ArrowRight',preventDefault(){prevented++;}},e.settingsTabs.findIndex(tab=>tab.id==='editor'));
+  assert.equal(e.settingsTab,'mtl');assert.equal(prevented,1);assert.equal(focused,1);
+  for(const mtlConsentVersion of ['','mtl-v1','mtl-v2']){
+    e.mtlConsentVersion=mtlConsentVersion;await config.watch.mtlConsentVersion.call(e);await e.flushScheduledSettingsSave();
+    assert.equal(writes.at(-1).mtlConsentVersion,mtlConsentVersion);assert.equal(writes.at(-1).mtlShortcut,'ctrl-alt-f8');
+    e.exportSettingsClicked();const imported=JSON.parse(await downloads.at(-1).blob.text()),restored=harness().e;
+    restored.importSettings(imported);assert.equal(restored.mtlConsentVersion,mtlConsentVersion);assert.equal(restored.mtlShortcut,'ctrl-alt-f8');
+  }
+});
+
 test('ClientText class-name display defaults on and survives local save, export, and import', async () => {
   const { e, writes, downloads, config } = harness();
   assert.equal(e.mapClientTextClassNames, true);
