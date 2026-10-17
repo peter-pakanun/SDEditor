@@ -301,6 +301,10 @@ test('one shared tool surface and common preview and popup replace both mode tem
   assert.match(window.EditorComponents.WorkspaceShell.template, /<header class="workspaceHeader">/);
   assert.match(window.EditorComponents.FullEditorShell.template, /class="fixed clipboard"/);
   assert.match(Autocomplete.template, /role="listbox"/); assert.match(Autocomplete.template, /role="option" :aria-selected/);
-  assert.ok(html.indexOf('src="editorReferenceCatalog.js"') < html.indexOf('src="editorLookup.js"'));
-  assert.ok(html.indexOf('src="editorSession.js"') < html.indexOf('src="index.js"'));
+  for (const [dependency, consumer] of [['editorReferenceCatalog.js', 'editorLookup.js'], ['editorSession.js', 'index.js']]) {
+    const dependencyAt = html.indexOf('src="' + dependency + '"'), consumerAt = html.indexOf('src="' + consumer + '"');
+    assert.ok(dependencyAt >= 0, dependency + ' is loaded');
+    assert.ok(consumerAt >= 0, consumer + ' is loaded');
+    assert.ok(dependencyAt < consumerAt, dependency + ' loads before ' + consumer);
+  }
 });

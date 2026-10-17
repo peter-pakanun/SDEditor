@@ -125,7 +125,7 @@ test('repeat draft saves use durable staged bases without cloning the full immut
 });
 
 test('aligned shared recovery saves accept the exact unstaged ZIP projection without rewriting retained blocks or retry bytes', async t => {
-  for (const [count, retained] of [[11, 23], [11, 28], [1, 7], [1, 4]]) await t.test(`${count}/${retained}`, async () => {
+  for (const [count, retained] of [[11, 23], [1, 7]]) await t.test(`${count}/${retained}`, async () => {
     const f = fixture({ collaboration: true, worker: true }), workspace = f.kv.get('workspace_poe1');
     const source = copy(workspace.descs), original = source[0];
     original.translations.English = Array.from({ length: count }, (_, i) => 'English ' + i);

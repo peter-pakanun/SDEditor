@@ -61,7 +61,10 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
                 const script = document.createElement('script'); script.src = '/offlineStore.js'; script.onload = resolve; script.onerror = reject; document.head.append(script);
             });
             await OfflineStore.getSettings();
-            const current = await request(indexedDB.open('sdeditor', 22));
+            const current = await request(indexedDB.open('sdeditor'));
+            let oldWriterError;
+            try { (await request(indexedDB.open('sdeditor', 19))).close(); }
+            catch (error) { oldWriterError = error.name; }
             const snapshot = async () => {
                 const tx = current.transaction(Object.keys(rows), 'readonly'), ready = completed(tx);
                 const result = Object.fromEntries(await Promise.all(Object.keys(rows).map(async name => [name, await request(tx.objectStore(name).getAll())])));
@@ -73,9 +76,9 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
             await OfflineStore.getSettings();
             const again = await snapshot();
             current.close();
-            return { before: rows, after, again, closed, version: current.version, archives, otherGame };
+            return { before: rows, after, again, closed, version: current.version, oldWriterError, archives, otherGame };
         });
-        assert.equal(result.version, 22); assert.equal(result.closed, true);
+        assert.ok(result.version > 19); assert.equal(result.closed, true); assert.equal(result.oldWriterError, 'VersionError');
         const expected = structuredClone(result.before);
         for (const row of expected.baseline_assets) { delete row.value.tree; delete row.value.baselineTree; }
         for (const row of expected.kv) if (row.key.startsWith('import_baseline_')) { delete row.value.tree; delete row.value.baselineTree; }
@@ -84,7 +87,7 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
         assert.deepEqual(sorted(result.again), sorted(expected));
         assert.deepEqual(result.archives, [expected.baseline_assets[0].value.archive]);
         assert.deepEqual(result.otherGame, []);
-        console.log('PASS: native v19→v22 cleanup removes proof trees, preserves legacy IDs, originals, pending bodies, receipts and recovery, and fences old writers.');
+        console.log('PASS: native v19 to v' + result.version + ' cleanup removes proof trees, preserves legacy IDs, originals, pending bodies, receipts and recovery, and fences old writers.');
     } finally {
         await browser?.close(); await new Promise(resolve => server.close(resolve));
     }

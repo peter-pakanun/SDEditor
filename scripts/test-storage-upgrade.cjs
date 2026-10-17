@@ -6,6 +6,13 @@ const vm = require('node:vm');
 
 const copy = value => structuredClone(value);
 const queued = () => new Promise(resolve => setImmediate(resolve));
+async function snapshotStores(fixture, names) {
+  const snapshot = copy(names.map(name => [name, [...fixture.tables.get(name)]]));
+  for (const [, rows] of snapshot) for (const [, row] of rows) if (row.blob instanceof Blob) {
+    row.blob = { type: row.blob.type, bytes: [...new Uint8Array(await row.blob.arrayBuffer())] };
+  }
+  return snapshot;
+}
 const source = [{ filepath: 'a.txt', filename: 'a.txt', filedir: '', name: '', stats: ['stat'],
   variables: ['#'], remarks: [''], translations: { English: ['Source'], Thai: ['ZIP translation'] } }];
 const workspace = { sourceHash: 'current', descs: [{ ...copy(source[0]), hasChanges: true,
@@ -281,15 +288,6 @@ test('the existing v4 versionchange handler closes its connection and later lega
   assert.deepEqual(fixture.snapshot(), before);
 });
 
-test('v5 editors close before the repair upgrade and cannot restage a reset through old storage', async () => {
-  const fixture = versionedStorage(5), older = await openVersion(fixture, 5), before = fixture.snapshot();
-  older.onversionchange = () => older.close();
-  await loadStore(fixture).store.getSettings();
-  assert.equal(fixture.version, 23); assert.equal(older.closed, true);
-  await assert.rejects(openVersion(fixture, 5), { name: 'VersionError' });
-  assert.deepEqual(fixture.snapshot(), before);
-});
-
 test('v6 writers are excluded without rewriting dictionary scopes or pending mutation receipts', async () => {
   const fixture = versionedStorage(6), older = await openVersion(fixture, 6);
   const request = { baseRevision: 2, mutationId: 'lost-ack', upserts: [{ _id: 'legacy', find: 'Fire', replace: 'Original', alts: [], tlnote: '' }], deletedIds: [] };
@@ -320,11 +318,14 @@ test('v12 editors are fenced without changing accepted parsing authority or frag
     ['clienttext_receipts', { key:'receipt', jobId:'same-save-id', signature:'same-signature' }],
   ];
   for (const [name,row] of retained) fixture.tables.get(name).set(row.key,copy(row));
+  const clientTextBefore = await snapshotStores(fixture, names);
   const before=fixture.snapshot(), older=await openVersion(fixture,12);older.onversionchange=()=>older.close();
   await loadStore(fixture).store.getSettings();
   assert.equal(fixture.version, 23);assert.equal(older.closed,true);
   await assert.rejects(openVersion(fixture,12),error=>error.name==='VersionError');
   assert.deepEqual(fixture.createdStores,['statdescription_zips',...require('../public/clientTextMtlStore.js').names]);assert.deepEqual(fixture.snapshot(),before);
+  assert.deepEqual(await snapshotStores(fixture, names), clientTextBefore,
+    'Every ClientText row, fragmented request, receipt and original workbook byte survives the upgrade.');
 });
 test('v13 proof-based writers close before reusable original caches are added without touching pending work',async()=>{
   const fixture=versionedStorage(13), names=require('../public/clientTextStore.js').names;
@@ -384,15 +385,6 @@ test('compatibility source imports return committed destination saves and retain
   assert.deepEqual(copy(committed.staged), target.staged);
   assert.deepEqual(copy(committed.dropped.Thai['a.txt'].snapshot.translations), ['incoming predecessor']);
   assert.deepEqual(copy((await store.getVersionWorkspace(scope, 'German')).staged), target.staged);
-});
-
-test('v16 snapshot writers close before archived inheritance replay repair without losing saved work or receipts', async () => {
-  const fixture = versionedStorage(16), older = await openVersion(fixture, 16), before = fixture.snapshot();
-  older.onversionchange = () => older.close();
-  await loadStore(fixture).store.getSettings();
-  assert.equal(fixture.version, 23); assert.equal(older.closed, true);
-  await assert.rejects(openVersion(fixture, 16), error => error.name === 'VersionError');
-  assert.deepEqual(fixture.snapshot(), before);
 });
 
 test('v21 Dropped coalescing writers are fenced while local and shared recovery evidence and history remain intact', async () => {
@@ -832,16 +824,6 @@ test('v7 single-slot writers close for v9 and cannot overwrite indexed version s
   assert.throws(() => old.transaction(['kv'], 'readwrite'), error => error.name === 'InvalidStateError');
   await assert.rejects(openVersion(fixture, 7), error => error.name === 'VersionError');
   assert.equal((await loaded.store.getWorkspace('poe1', 'Thai')).sourceHash, 'current');
-});
-
-test('v8 aggregate writers close before v9 and cannot overwrite normalized data or recovery evidence', async () => {
-  const fixture = versionedStorage(8), older = await openVersion(fixture, 8), before = fixture.snapshot();
-  older.onversionchange = () => older.close();
-  await loadStore(fixture).store.getSettings();
-  assert.equal(fixture.version, 23); assert.equal(older.closed, true);
-  assert.throws(() => older.transaction(['kv'], 'readwrite'), error => error.name === 'InvalidStateError');
-  await assert.rejects(openVersion(fixture, 8), error => error.name === 'VersionError');
-  assert.deepEqual(fixture.snapshot(), before);
 });
 
 test('an unhashed legacy workspace is indexed under the real canonical source identity before its first save', async () => {

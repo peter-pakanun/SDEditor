@@ -1244,10 +1244,11 @@ test('explicit dictionary search, page, tab and editor navigation release held e
 });
 
 test('Dictionary creation paints and focuses its row before preparing matches, keeping translation fields editable', async () => {
-  const { editor, document, calls } = loadEditor({ dictionary: dictionary(20000) });
-  editor.descs = [description('keyword', '[FreshTerm] Term 19999')];
+  // The dedicated large-dictionary test owns 20,000-entry scaling coverage.
+  const { editor, document, calls } = loadEditor({ dictionary: dictionary(512) });
+  editor.descs = [description('keyword', '[FreshTerm] Term 511')];
   await editor.editFile(editor.descs[0].filepath);
-  assert.equal(editor.filteredDictionary[0]._id, 'word-19999');
+  assert.equal(editor.filteredDictionary[0]._id, 'word-511');
   const generation = editor.ensureDictionaryWorker().readyGeneration;
   document.querySelector = () => ({ querySelector() { return { focus() { calls.focused++; }, select() { calls.selected++; } }; } });
   const prior = { sync: calls.syncIndexes, async: calls.asyncIndexes, focus: calls.focused };
@@ -1560,10 +1561,10 @@ test('imported duplicate IDs are repaired without losing either Find or overwrit
 });
 
 test('autocomplete reuses matched snapshot metadata without scans and pins TL notes through publication', async () => {
-  const entries = dictionary(20000);
-  entries[19999].tlnote = 'Snapshot selected note';
+  const entries = dictionary(512), last = entries.length - 1;
+  entries[last].tlnote = 'Snapshot selected note';
   const { editor, calls, config } = loadEditor({ dictionary: entries, cacheDictionaryScope: true });
-  const english = 'Term 19999 Term 19998';
+  const english = `Term ${last} Term ${last - 1}`;
   const matches = (await prepareHighlights(editor, english))[0];
   editor.editorVisible = true;
   editor.editorBlocks = [{ english, translation: '', HLs: matches.HLs }];
@@ -1576,18 +1577,16 @@ test('autocomplete reuses matched snapshot metadata without scans and pins TL no
   editor.hlPopup.filtered = editor.buildHlPopupItems(0);
   editor.hlPopup.items = editor.hlPopup.filtered;
   assert.equal(editor.hlPopup.filtered.length, 2);
-  entries[19999].tlnote = 'Changed note';
-  const started = performance.now();
+  entries[last].tlnote = 'Changed note';
   for (let index = 0; index < 200; index++) {
     editor.moveHlPopupSelection(1);
     const item = editor.hlPopupSelectedItem;
-    assert.equal(editor.getDictionaryEntryById(item.dictEntryId), entries[19999 - editor.hlPopup.selectedIndex]);
+    assert.equal(editor.getDictionaryEntryById(item.dictEntryId), entries[last - editor.hlPopup.selectedIndex]);
     const liveEntry = editor.getDictionaryEntryById(item.dictEntryId);
     assert.equal(editor.findActiveDictionaryKeywordEntry(liveEntry.find), liveEntry);
     assert.equal(editor.canCreateDictionaryEntryFromHlPopupItem(item), false);
-    assert.equal(editor.hlPopupTlnote, item.dictEntryId === 'word-19999' ? 'Snapshot selected note' : '');
+    assert.equal(editor.hlPopupTlnote, item.dictEntryId === 'word-' + last ? 'Snapshot selected note' : '');
   }
-  console.log(`20,000-entry Dictionary: 200 cached autocomplete selections in ${Math.round(performance.now() - started)} ms (VM fixture).`);
   config.watch.dictionary.handler.call(editor);
   await client.waitReady({ generation: generation + 1 });
   editor.hlPopup.selectedIndex = 0;
@@ -1768,28 +1767,28 @@ test('autocomplete Dictionary page lookup reuses positions and refreshes on orde
 });
 
 test('Dictionary scope, matches-first ordering and filtering scan raw entries while visible edits stay reactive', async () => {
-  const fixture = trackedDictionary(dictionary(20000));
+  const fixture = trackedDictionary(dictionary(512)), last = fixture.entries.length - 1;
   const { editor } = loadEditor({ dictionary: fixture.dictionary, toRaw: fixture.toRaw, cacheDictionaryScope: true });
   editor.editorVisible = true;
-  const english = 'Term 19999 Term 19998';
+  const english = `Term ${last} Term ${last - 1}`;
   const matches = (await prepareHighlights(editor, english))[0];
   editor.editorBlocks = [{ english, translation: '', HLs: matches.HLs }];
   fixture.counts.reads = fixture.counts.writes = 0;
   const view = editor.dictionaryScopeView;
   assert.equal(editor.getActiveDictionaryEntries()[0], fixture.entries[0]);
-  assert.equal(editor.activeDictionaryIds.has('word-19999'), true);
-  assert.equal(editor.orderedDictionary[0], fixture.entries[19998]);
-  editor.dictionaryFilter = 'Term 19999';
-  assert.equal(editor.filteredDictionary[0], fixture.entries[19999]);
+  assert.equal(editor.activeDictionaryIds.has('word-' + last), true);
+  assert.equal(editor.orderedDictionary[0], fixture.entries[last - 1]);
+  editor.dictionaryFilter = 'Term ' + last;
+  assert.equal(editor.filteredDictionary[0], fixture.entries[last]);
   const visible = editor.visibleDictionary[0];
-  assert.equal(visible, fixture.dictionary[19999]);
-  assert.notEqual(visible, fixture.entries[19999], 'Only the visible row is resolved through the reactive array.');
+  assert.equal(visible, fixture.dictionary[last]);
+  assert.notEqual(visible, fixture.entries[last], 'Only the visible row is resolved through the reactive array.');
   visible.replace = 'Edited through v-model';
   visible.alts.push({ find: 'New alternate', replace: 'Live alternate' });
-  assert.equal(fixture.entries[19999].replace, 'Edited through v-model');
-  assert.equal(fixture.entries[19999].alts[0].replace, 'Live alternate');
+  assert.equal(fixture.entries[last].replace, 'Edited through v-model');
+  assert.equal(fixture.entries[last].alts[0].replace, 'Live alternate');
   assert.ok(fixture.counts.writes >= 2);
-  assert.ok(fixture.counts.reads < 200, `Ordering/filtering must not traverse 20,000 proxies (${fixture.counts.reads} reads).`);
+  assert.ok(fixture.counts.reads < 200, `Ordering/filtering must not traverse all ${fixture.entries.length} proxies (${fixture.counts.reads} reads).`);
   assert.equal(editor.dictionaryScopeView, view);
 });
 

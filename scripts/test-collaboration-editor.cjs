@@ -181,6 +181,7 @@ function diagnosticSaveFixture() {
 function enablePending(h) {
   const { editor: e, window, context } = h;
   const calls = [], downloads = [], listeners = new Map(), submissions = new Map(), journals = [];
+  const workerStarted = Promise.withResolvers();
   window.OfflineStore.putSaveSubmission = async batch => {
     const record = { batch: structuredClone(batch), state: 'pending', createdAt: Date.now() };
     submissions.set(batch.jobId, record); journals.push(record); return structuredClone(record);
@@ -196,7 +197,7 @@ function enablePending(h) {
   context.saveAs = (blob, filename) => downloads.push({ blob, filename });
   window.PendingSaves = require('../public/pendingSaves.js');
   window.SaveWorkerClient = { create: () => ({
-    save: batch => new Promise((resolve, reject) => calls.push({ batch, resolve, reject })),
+    save: batch => new Promise((resolve, reject) => { calls.push({ batch, resolve, reject }); workerStarted.resolve(); }),
   }) };
   window.addEventListener = (name, handler) => {
     if (!listeners.has(name)) listeners.set(name, new Set());
@@ -216,7 +217,7 @@ function enablePending(h) {
     for (const listener of listeners.get('beforeunload') || []) listener(event);
     return prevented;
   }
-  return { ...h, calls, downloads, acknowledge, warnsBeforeUnload, submissions, journals };
+  return { ...h, calls, downloads, acknowledge, warnsBeforeUnload, submissions, journals, workerStarted: workerStarted.promise };
 }
 const pendingTick = () => new Promise(resolve => setTimeout(resolve, 5));
 
@@ -304,19 +305,26 @@ async function pendingDraftFixture() {
 }
 
 async function assertSaveReleased(h, action) {
+  const paint = h.editor.yieldEditorPaint;
+  // Paint ordering has dedicated gated tests below. Here a completed task turn
+  // drains the immediate navigation work while the durable reply stays held.
+  h.editor.yieldEditorPaint = async () => {};
   let finished = false;
-  const saving = action().then(result => { finished = true; return result; });
-  await pendingTick();
-  if (!finished) {
-    // Finish the held request before failing so a regression leaves no hanging test queue.
-    const released = new Set();
-    for (let attempt = 0; attempt < 4 && !finished; attempt++) {
-      for (const call of h.calls) if (!released.has(call)) { released.add(call); h.acknowledge(call); }
-      await pendingTick();
+  try {
+    const saving = action().then(result => { finished = true; return result; });
+    await new Promise(resolve => setImmediate(resolve));
+    if (!finished) {
+      // Release held writes only for failure cleanup, never to satisfy the check.
+      const released = new Set();
+      for (let attempt = 0; attempt < 4 && !finished; attempt++) {
+        for (const call of h.calls) if (!released.has(call)) { released.add(call); h.acknowledge(call); }
+        await pendingTick();
+      }
+      assert.fail('Editor navigation waited for the held durable save.');
     }
-    assert.fail('Editor navigation waited for the held durable save.');
-  }
-  assert.equal(await saving, true);
+    assert.equal(await saving, true);
+    if (h.editor.pendingLocalSaves && !h.calls.length) await h.workerStarted;
+  } finally { h.editor.yieldEditorPaint = paint; }
 }
 
 function pendingStagedDeletionFixture() {

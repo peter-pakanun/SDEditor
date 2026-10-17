@@ -1,9 +1,11 @@
 // Disposable loopback acceptance fixture. It never runs in the production server.
 // Two editor origins isolate browser storage; both connect to the real API and WS server.
+// --check-sd-validation runs the current save/recovery checks headlessly and exits.
+const assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
-const { resolve } = require('node:path');
+const { resolve, join, sep } = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { readFileSync } = require('node:fs');
+const { readFileSync, existsSync, mkdtempSync, rmSync } = require('node:fs');
 const { randomUUID } = require('node:crypto');
 const { createServer } = require('node:http');
 
@@ -21,7 +23,7 @@ function browserControls(account, secret, settings) {
   const button = (label, action) => {
     const control = document.createElement('button'); control.textContent = label;
     control.style.cssText = 'color:#222;background:#fff;border:1px solid #996d12;padding:6px;border-radius:4px;font:12px system-ui';
-    control.onclick = async () => { control.disabled = true; try { await action(); } catch (error) { status.textContent = error.message; } finally { control.disabled = false; } };
+    control.onclick = async () => { control.disabled = true; try { await action(); } catch (error) { panel.dataset.error = error.message; status.textContent = error.message; } finally { control.disabled = false; } };
     actions.append(control); return control;
   };
   const getApp = () => window.__collaborationFixtureApp || document.querySelector('#app').__vue_app__?._instance?.proxy;
@@ -32,6 +34,13 @@ function browserControls(account, secret, settings) {
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     throw new Error('Editor initialization did not finish. Inspect visible storage or script errors.');
+  };
+  const openFixtureSource = async (vm, scope) => {
+    await vm.activateGameVersion(scope.game, { checkMigration: false });
+    await OfflineStore.activateVersion(scope);
+    await vm.loadVersionedStorage();
+    vm.gameVersionSelected = true; vm.versionChooserVisible = false;
+    await vm.$nextTick(); await vm.initializeCollaboration();
   };
   let offline = false;
   let originalFetcher;
@@ -106,14 +115,13 @@ function browserControls(account, secret, settings) {
     const archive = await CollaborationProtocol.finalizeArchive({ version: 2, zipHash: await CollaborationProtocol.zipHash(bytes),
       zipSize: bytes.byteLength, fileCount: source.length, descriptionCount: source.length, parserVersion: 1, decisions: [] });
     const baseline = { archive, source, rawSource: JSON.parse(JSON.stringify(source)) };
-    const workspace = { descs: JSON.parse(JSON.stringify(seed)), status: {}, lastModified: 0, size: bytes.byteLength,
+    const scope = { accountId: String(vm.cloudUser.id), game: 'poe1', branchId: 'default', sourceHash: archive.baselineId };
+    const workspace = { ...scope, descs: JSON.parse(JSON.stringify(seed)), status: {}, lastModified: 0, size: bytes.byteLength,
       sourceHash: archive.baselineId, importArchive: archive };
-    await OfflineStore.saveSourceWorkspaceWithRevisions(source, workspace, [], 'poe1', baseline);
+    await OfflineStore.saveSourceWorkspaceWithRevisions(source, workspace, [], scope, baseline);
     await OfflineStore.setMigratedFromSingleVersion(true);
     vm.showSetting = false; vm.needsInitialSettings = false;
-    await vm.activateGameVersion('poe1', { checkMigration: false });
-    await vm.$nextTick();
-    await vm.initializeCollaboration();
+    await openFixtureSource(vm, scope);
     if (settings.dictionaryCount) {
       vm.dictionary = Array.from({ length: settings.dictionaryCount }, (_, index) => ({ _id: 'fixture-dictionary-' + index, find: 'Fixture term ' + index, replace: 'คำทดสอบ ' + index }));
       await vm.saveSettings();
@@ -235,36 +243,33 @@ function browserControls(account, secret, settings) {
       typingDuringUpload: didTypeDuringUpload(), elapsedMs: Math.round(performance.now() - start) }, null, 2);
     status.textContent = 'Dictionary measurement completed. Requests contain no credentials or dictionary text.';
   });
-  const savedRepairKey = 'sdeditor-fixture-saved-status-repair';
+  const savedRepairKey = 'sdeditor-fixture-sd-validation-v2';
   const assertRepair = (condition, message) => { if (!condition) throw new Error('FAIL: ' + message); };
   const settleRepair = async (vm, expectedSaved, filepath) => {
     for (let index = 0; index < 160; index++) {
       if (vm._collaboration?.room()) await vm._collaboration.retry();
-      const client = vm._collaboration;
-      if (client?.room()?.initialized && client.snapshot({ includeFiles: false }).pending === 0
+      if (vm._collaboration?.room()?.initialized && vm._collaboration.snapshot({ includeFiles: false }).pending === 0
         && vm.descs.some(desc => desc.filepath === filepath)) {
         vm.filterDesc(); await vm.$nextTick();
         if (vm.statistic.hasChanges === expectedSaved) return;
       }
       await new Promise(resolve => setTimeout(resolve, 50));
     }
-    throw new Error('FAIL: expected Saved ' + expectedSaved + ', found ' + vm.statistic.hasChanges
-      + '; pending ' + (vm._collaboration?.snapshot({ includeFiles: false }).pending ?? 'unavailable'));
+    throw new Error('FAIL: expected Saved ' + expectedSaved + ', found ' + vm.statistic.hasChanges);
   };
-  button('Check saved status repair', async () => {
+  button('Check SD save validation', async () => {
     const vm = await ready();
-    assertRepair(vm.cloudSignedIn && vm.cloudUser?.id, 'Bootstrap this translator before checking repair.');
+    assertRepair(vm.cloudSignedIn && vm.cloudUser?.id, 'Bootstrap this translator before checking validation.');
     assertRepair(['127.0.0.1', 'localhost'].includes(new URL(vm._cloud.apiBase).hostname), 'Fixture API must use loopback.');
     assertRepair(!offline, 'Restore the fixture connection first.');
     if (vm._pendingSaves?.snapshot().jobs.length) assertRepair(await vm.waitForPendingSaves(), 'Existing local saves must finish.');
-    const details = [], slug = crypto.randomUUID(), prefix = 'fixture_repair_' + slug;
-    status.textContent = 'Recreating the old Saved placeholder bug in real browser storage…';
-    timing.textContent = 'Running Saved status repair checks…';
+    const details = [], slug = crypto.randomUUID(), prefix = 'fixture_validation_' + slug;
+    status.textContent = 'Checking retained invalid stages and rejected new blank saves...';
     vm.resetVersionedState(); clearTimeout(vm._collabStartTimer);
-    const source = ['ordinary', 'dnt', 'complete'].map((kind, index) => ({
+    const source = ['ordinary', 'dnt', 'complete'].map(kind => ({
       filepath: prefix + '/' + kind + '.txt', filedir: prefix, filename: kind + '.txt', name: '', stats: [prefix + '_' + kind],
-      variables: ['#'], remarks: [''], translations: { English: [(kind === 'dnt' ? '[DNT] ' : '') + 'Fixture repair ' + kind + ' ' + slug],
-        ...(kind === 'complete' ? { Thai: ['คำแปลทดสอบ'] } : {}) }, isDNT: kind === 'dnt',
+      variables: ['#'], remarks: [''], translations: { English: [(kind === 'dnt' ? '[DNT] ' : '') + 'Fixture validation ' + kind + ' ' + slug],
+        ...(kind === 'complete' ? { Thai: ['Fixture original translation'] } : {}) }, isDNT: kind === 'dnt',
     }));
     const zip = new JSZip();
     for (const desc of source) zip.file(desc.filepath, descEncode(desc), { date: new Date('2026-10-05T00:00:00Z'), createFolders: false });
@@ -274,76 +279,82 @@ function browserControls(account, secret, settings) {
     const baseline = { archive, source, rawSource: JSON.parse(JSON.stringify(source)) };
     await vm._cloud.request('/v1/collaboration/archives/resolve', { method: 'POST', body: { game: 'poe1', archive } });
     const joined = await vm._cloud.request('/v1/collaboration/join', { method: 'POST', body: { game: 'poe1', language: 'Thai', sourceHash: archive.baselineId, archive } });
-    const ghostFiles = source.slice(0, 2).map(desc => ({ filepath: desc.filepath, baseRevision: 0, translations: [''],
+    const invalidFiles = source.slice(0, 2).map(desc => ({ filepath: desc.filepath, baseRevision: 0, translations: [''],
       trackedForExport: true, needsReview: false, baseline: CollaborationProtocol.witness(desc) }));
-    const accepted = await vm._cloud.request('/v1/collaboration/rooms/' + encodeURIComponent(joined.roomId) + '/mutations',
-      { method: 'POST', body: { mutationId: crypto.randomUUID(), origin: 'merge', files: ghostFiles } });
-    assertRepair(accepted.files.length === 2 && accepted.files.every(file => file.revision === 1 && file.trackedForExport), 'Both accidental first merges must be acknowledged.');
-    const workspace = { stagedVersion: 1, statusMetadataVersion: 1, languageStatusVersion: 1, game: 'poe1', sourceHash: archive.baselineId,
-      sourceBaseline: { sourceHash: archive.baselineId }, importArchive: archive, collaborationAccountId: String(vm.cloudUser.id),
-      descs: source.map(desc => ({ ...JSON.parse(JSON.stringify(desc)), translations: { ...JSON.parse(JSON.stringify(desc.translations)),
-        Thai: desc.translations.Thai || [''] } })), status: {}, staged: { Thai: {} } };
-    for (const file of ghostFiles) workspace.staged.Thai[file.filepath] = { sourceHash: archive.baselineId, translations: [''], before: [], savedAt: Date.now() };
-    const identity = { accountId: String(vm.cloudUser.id), game: 'poe1', sourceHash: archive.baselineId, language: 'Thai' };
-    const shared = Object.fromEntries(accepted.files.map(file => [file.filepath, JSON.parse(JSON.stringify(file))]));
-    const recovery = ghostFiles.map(file => ({ id: crypto.randomUUID(), at: Date.now(), reason: 'Local edited translation before joining',
-      files: [{ filepath: file.filepath, translations: [''], needsReview: false, trackedForExport: true }] }));
-    const room = { mode: 'sparse', identity, archive, manifest: { version: 2, files: source.map(desc => ({ filepath: desc.filepath, entryCount: 1 })) },
-      roomId: joined.roomId, sequence: accepted.sequence, shared, local: JSON.parse(JSON.stringify(shared)), outbox: [], conflicts: [], recovery,
-      carries: {}, carryRevisions: {}, initialized: true };
-    await OfflineStore.saveSourceWorkspaceWithRevisions(source, workspace, [], 'poe1', baseline);
-    await OfflineStore.updateCollaborationState(state => {
-      state ||= { version: 1, rooms: {} }; state.rooms[CollaborationProtocol.scopeKey(identity)] = room; return state;
-    }, { version: 'poe1' });
+    const mixedBatch = [{ filepath: source[2].filepath, baseRevision: 0, translations: ['Complete proposed text'],
+      trackedForExport: true, needsReview: false, baseline: CollaborationProtocol.witness(source[2]) }, invalidFiles[0]];
+    let apiError;
+    try { await vm._cloud.request('/v1/collaboration/rooms/' + encodeURIComponent(joined.roomId) + '/mutations',
+      { method: 'POST', body: { mutationId: crypto.randomUUID(), origin: 'save', files: mixedBatch } }); } catch (error) { apiError = error; }
+    assertRepair(apiError?.code === 'SD_TRANSLATION_INVALID', 'The real API must reject new incomplete SD mutations.');
+    const rejectedSnapshot = await vm._cloud.request('/v1/collaboration/rooms/' + encodeURIComponent(joined.roomId) + '/snapshot');
+    assertRepair(rejectedSnapshot.files.length === 0, 'The rejected batch must not partially stage either file.');
+    details.push('PASS: real API rejects the whole mixed complete/blank batch without staged files.');
+    const scope = { accountId: String(vm.cloudUser.id), game: 'poe1', branchId: 'default', sourceHash: archive.baselineId };
+    const workspace = { ...scope, stagedVersion: 1, statusMetadataVersion: 1, languageStatusVersion: 1,
+      sourceBaseline: { sourceHash: archive.baselineId }, importArchive: archive, collaborationAccountId: scope.accountId,
+      descs: JSON.parse(JSON.stringify(source)), status: {}, staged: { Thai: {} } };
+    // Synthetic pre-policy evidence only; normal authored saves must reject it.
+    for (const file of invalidFiles) workspace.staged.Thai[file.filepath] = {
+      sourceHash: archive.baselineId, translations: [''], before: [], savedAt: Date.now(), saveOrigin: 'save',
+    };
+    const revisions = invalidFiles.map(file => ({ filepath: file.filepath, lang: 'Thai', sourceHash: archive.baselineId,
+      translations: [''], savedAt: Date.now(), note: 'Historical pre-policy blank save' }));
+    await OfflineStore.saveSourceWorkspaceWithRevisions(source, workspace, revisions, scope, baseline);
     await OfflineStore.setMigratedFromSingleVersion(true);
-    assertRepair(source.slice(0, 2).every(desc => WorkspaceState.workspaceFile(workspace, desc, 'Thai').hasChanges), 'The seeded v1 workspace reproduces two false Saved records.');
-    details.push('PASS: old v1 workspace and real API contain 2 accidental Saved blanks.');
     vm.hideDNT = false; vm.searchText = ''; vm.showSetting = false; vm.needsInitialSettings = false;
-    await vm.activateGameVersion('poe1', { checkMigration: false }); await vm.initializeCollaboration();
+    await openFixtureSource(vm, scope);
     await settleRepair(vm, 0, source[0].filepath);
-    const durable = await OfflineStore.getWorkspace('poe1', 'Thai');
-    const snapshot = await vm._cloud.request('/v1/collaboration/rooms/' + encodeURIComponent(joined.roomId) + '/snapshot');
-    assertRepair(source.slice(0, 2).every(desc => !WorkspaceState.workspaceFile(durable, desc, 'Thai').hasChanges), 'Durable placeholder staging must be removed.');
-    assertRepair(snapshot.files.filter(file => ghostFiles.some(ghost => ghost.filepath === file.filepath))
-      .every(file => file.revision === 2 && file.stagingReset && !file.trackedForExport), 'The API must publish revision-checked resets.');
-    assertRepair(Object.values(durable.placeholderRepairArchive || {}).filter(record => record.status === 'repaired').length === 2, 'Both recovery archives must be retained.');
-    details.push('PASS: normal app load repairs local staging and real API records.');
-    details.push('Counters after repair: Saved ' + vm.statistic.hasChanges + ', Revised ' + vm.statistic.isRevised + ', Missing ' + vm.statistic.isMissing + '.');
+    const durable = await OfflineStore.getVersionWorkspace(scope, 'Thai'), recovery = Object.values(durable.invalidTranslationArchive || {});
+    assertRepair(invalidFiles.every(file => !durable.staged.Thai?.[file.filepath]), 'Incomplete retained stages cannot remain Saved work.');
+    assertRepair(invalidFiles.every(file => recovery.some(record => record.filepath === file.filepath && record.stage.translations[0] === '')),
+      'Both exact pre-policy stages must remain recoverable.');
+    const history = await OfflineStore.listRevisions(source[0].filepath, 'Thai', 50, scope);
+    assertRepair(history.some(row => row.note === revisions[0].note && row.translations[0] === ''), 'Immutable historical blank text remains retained.');
+    details.push('PASS: invalid stages are quarantined; exact recovery and history remain.');
     const ordinary = vm.descs.find(desc => desc.filepath === source[0].filepath);
-    await vm.persistTranslationBatch([{ desc: ordinary, lines: [''] }], 'save');
-    assertRepair(await vm.waitForPendingSaves(), 'The deliberate blank must reach durable storage.');
-    await settleRepair(vm, 1, source[0].filepath);
-    const blank = await OfflineStore.getWorkspace('poe1', 'Thai');
-    assertRepair(WorkspaceState.workspaceFile(blank, source[0], 'Thai').hasChanges, 'An intentional blank save must remain Saved.');
-    assertRepair(blank.staged.Thai[source[0].filepath].saveOrigin === 'save', 'Authored provenance must persist.');
-    details.push('PASS: deliberate blank through the normal Save pipeline is Saved.');
-    sessionStorage.setItem(savedRepairKey, JSON.stringify({ phase: 'reload', details, filepath: source[0].filepath, dntPath: source[1].filepath, sourceHash: archive.baselineId }));
-    status.textContent = 'Local/API checks passed. Reloading to verify the deliberate blank and repaired DNT file…';
-    timing.textContent = details.join('\n');
-    location.reload();
+    let blankError;
+    try { await vm.persistTranslationBatch([{ desc: ordinary, lines: [''] }], 'save'); } catch (error) { blankError = error; }
+    assertRepair(blankError?.code === 'SD_TRANSLATION_INVALID', 'The real browser save command must reject a new blank.');
+    assertRepair(JSON.stringify(await OfflineStore.listRevisions(ordinary.filepath, 'Thai', 50, scope)) === JSON.stringify(history), 'Rejected Save cannot append history.');
+    assertRepair(vm.pendingLocalSaves === 0 && !WorkspaceState.workspaceFile(await OfflineStore.getVersionWorkspace(scope, 'Thai'), source[0], 'Thai').hasChanges,
+      'Rejected Save cannot stage text or queue an upload.');
+    details.push('PASS: browser blank Save leaves staging, history and pending uploads unchanged.');
+    const target = 'Complete authored fixture translation';
+    await vm.persistTranslationBatch([{ desc: ordinary, lines: [target] }], 'save');
+    assertRepair(await vm.waitForPendingSaves(), 'The complete correction must reach durable storage.');
+    await settleRepair(vm, 1, ordinary.filepath);
+    const accepted = await vm._cloud.request('/v1/collaboration/rooms/' + encodeURIComponent(joined.roomId) + '/snapshot');
+    assertRepair(accepted.files.length === 1 && accepted.files[0].translations[0] === target, 'Only the complete correction reaches the real API.');
+    details.push('PASS: complete correction is Saved locally and shared.');
+    sessionStorage.setItem(savedRepairKey, JSON.stringify({ details, filepath: ordinary.filepath, dntPath: source[1].filepath,
+      sourceHash: archive.baselineId, scope, target, recoveryId: recovery.find(record => record.filepath === source[1].filepath).id }));
+    status.textContent = 'Reloading to verify Saved work and retained invalid evidence...'; location.reload();
   });
   document.body.append(panel);
   const pendingRepairCheck = sessionStorage.getItem(savedRepairKey);
   if (pendingRepairCheck) {
     (async () => {
-      const check = JSON.parse(pendingRepairCheck);
-      sessionStorage.removeItem(savedRepairKey);
-      if (check.phase !== 'reload') return;
+      const check = JSON.parse(pendingRepairCheck); sessionStorage.removeItem(savedRepairKey);
       const vm = await ready(); vm.hideDNT = false;
-      await vm.activateGameVersion('poe1', { checkMigration: false }); await vm.initializeCollaboration();
+      await openFixtureSource(vm, check.scope);
       await settleRepair(vm, 1, check.filepath);
-      const durable = await OfflineStore.getWorkspace('poe1', 'Thai');
+      const durable = await OfflineStore.getVersionWorkspace(check.scope, 'Thai');
       assertRepair(vm.sourceIdentity === check.sourceHash, 'Reload must retain the accepted source identity.');
-      assertRepair(!!durable.staged.Thai?.[check.filepath] && !durable.staged.Thai?.[check.dntPath], 'Reload must keep the intentional blank and exclude the repaired DNT placeholder.');
-      check.details.push('PASS: full browser reload retains Saved 1; repaired DNT remains unsaved.');
-      check.details.push('Final counters: Saved ' + vm.statistic.hasChanges + ', Revised ' + vm.statistic.isRevised + ', Missing ' + vm.statistic.isMissing + '.');
-      timing.textContent = check.details.join('\n');
-      status.textContent = 'PASS · saved status repair, intentional blank Save, and reload verified with real IndexedDB + API.';
-    })().catch(error => { status.textContent = error.message; timing.textContent += '\nFAIL: ' + error.message; });
+      assertRepair(durable.staged.Thai?.[check.filepath]?.translations[0] === check.target && !durable.staged.Thai?.[check.dntPath],
+        'Reload keeps the complete Save and excludes the invalid DNT stage.');
+      assertRepair(durable.invalidTranslationArchive[check.recoveryId].stage.translations[0] === '', 'Reload preserves the exact invalid recovery copy.');
+      check.details.push('PASS: reload retains the complete Save, source identity and quarantined recovery.');
+      timing.textContent = check.details.join('\n'); panel.dataset.validation = 'passed';
+      status.textContent = 'PASS: SD save validation and recovery verified with real IndexedDB and API.';
+    })().catch(error => { panel.dataset.validation = 'failed'; status.textContent = error.message; timing.textContent += '\nFAIL: ' + error.message; });
   }
 }
 
 (async () => {
+  const checking = process.argv.includes('--check-sd-validation');
+  const vuePath = process.env.FIXTURE_VUE_PATH || resolve(__dirname, '../temp/clienttext-fixture-vue.min.js');
+  if (checking) assert.ok(existsSync(vuePath), 'Set FIXTURE_VUE_PATH to a cached Vue 3 browser build.');
   const apiRoot = resolve(__dirname, '../../SDEditor-API');
   const fromApi = createRequire(resolve(apiRoot, 'package.json'));
   const express = fromApi('express');
@@ -351,15 +362,23 @@ function browserControls(account, secret, settings) {
   const { loadConfig } = await load('config.js');
   const { openDatabase, CloudStore } = await load('database.js');
   const { createApp } = await load('app.js');
-  const ports = [Number(process.env.FIXTURE_A_PORT || 34201), Number(process.env.FIXTURE_B_PORT || 34202)];
-  const apiPort = Number(process.env.FIXTURE_API_PORT || 34203);
+  let ports = [Number(process.env.FIXTURE_A_PORT || 34201), Number(process.env.FIXTURE_B_PORT || 34202)];
+  let apiPort = Number(process.env.FIXTURE_API_PORT || 34203);
+  if (checking) {
+    const reservations = Array.from({ length: 3 }, () => createServer());
+    await Promise.all(reservations.map(server => new Promise(done => server.listen(0, '127.0.0.1', done))));
+    [ports[0], ports[1], apiPort] = reservations.map(server => server.address().port);
+    await Promise.all(reservations.map(server => new Promise(done => server.close(done))));
+  }
   const boundedNumber = (name, fallback, max) => Math.min(max, Math.max(1, Number(process.env[name]) || fallback));
   const fixtureSettings = { fileCount: boundedNumber('FIXTURE_FILE_COUNT', 25, 10000),
     entriesPerFile: boundedNumber('FIXTURE_ENTRIES_PER_FILE', 2, 100),
     dictionaryCount: Math.min(10000, Math.max(0, Number(process.env.FIXTURE_DICTIONARY_COUNT) || 0)) };
   const origins = ports.map(port => `http://127.0.0.1:${port}`);
   const apiOrigin = `http://127.0.0.1:${apiPort}`;
-  const config = loadConfig({ FRONTEND_ORIGIN: origins[0], ALLOWED_ORIGINS: origins[1], API_PUBLIC_URL: apiOrigin, ADMIN_EMAIL: 'admin@example.test', DATABASE_PATH: ':memory:' });
+  const directory = mkdtempSync(resolve(__dirname, '../temp/sdeditor-collaboration-'));
+  const config = loadConfig({ FRONTEND_ORIGIN: origins[0], ALLOWED_ORIGINS: origins[1], API_PUBLIC_URL: apiOrigin,
+    ADMIN_EMAIL: 'admin@example.test', DATABASE_PATH: ':memory:', DATA_DIR: directory });
   const database = openDatabase(':memory:');
   const store = new CloudStore(database, config);
   store.registerIdentity({ sub: 'fixture-admin', email: 'admin@example.test', name: 'Fixture Administrator' });
@@ -377,12 +396,19 @@ function browserControls(account, secret, settings) {
       res.set({ 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       next();
     });
+    if (checking) {
+      frontend.get('/fixture/vue.js', (_req, res) => res.type('js').send(readFileSync(vuePath)));
+      frontend.get('/fixture/jszip.js', (_req, res) => res.type('js').send(readFileSync(fromApi.resolve('jszip/dist/jszip.min.js'))));
+    }
     frontend.post('/fixture/session', (req, res) => {
       if (req.get('X-Fixture-Key') !== secret || req.get('Origin') !== origins[index]) return res.status(403).json({ error: 'Fixture request refused' });
       res.json(store.createSession('fixture-' + account));
     });
     frontend.get('/', (req, res) => {
-      const html = readFileSync(resolve(__dirname, '../public/index.html'), 'utf8');
+      let html = readFileSync(resolve(__dirname, '../public/index.html'), 'utf8');
+      if (checking) html = html.replace('https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js', '/fixture/vue.js')
+        .replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.js')
+        .replace(/<script src="https:\/\/cdnjs.cloudflare.com\/ajax\/libs\/jsdiff\/[^\"]+"><\/script>/, '<!-- Optional diff rendering is outside the SD validation fixture. -->');
       const script = '<script>(' + browserControls.toString() + ')(' + JSON.stringify(account) + ',' + JSON.stringify(secret) + ',' + JSON.stringify(fixtureSettings) + ');</script>';
       res.type('html').send(html.replace('</body>', script + '</body>'));
     });
@@ -395,15 +421,61 @@ function browserControls(account, secret, settings) {
   }
   const listen = (server, port) => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
   await Promise.all([listen(apiServer, apiPort), ...frontendServers.map((server, index) => listen(server, ports[index]))]);
-  console.log('Translator A: ' + origins[0] + '/?cloudApi=' + encodeURIComponent(apiOrigin));
-  console.log('Translator B: ' + origins[1] + '/?cloudApi=' + encodeURIComponent(apiOrigin));
-  console.log('Click each visible Bootstrap translator button. Isolated browser storage; disposable in-memory API.');
+  if (!checking) {
+    console.log('Translator A: ' + origins[0] + '/?cloudApi=' + encodeURIComponent(apiOrigin));
+    console.log('Translator B: ' + origins[1] + '/?cloudApi=' + encodeURIComponent(apiOrigin));
+    console.log('Click each visible Bootstrap translator button. Isolated browser storage; disposable in-memory API.');
+  }
   let stopping = false;
   const stop = async () => {
     if (stopping) return; stopping = true;
     await api.locals.collaborationRealtime.close();
     await Promise.all([...frontendServers, apiServer].map(server => new Promise(resolve => server.close(resolve))));
     database.close();
+    const tempRoot = resolve(__dirname, '../temp');
+    assert.ok(directory.startsWith(tempRoot + sep) && directory !== tempRoot);
+    rmSync(directory, { recursive: true, force: true });
   };
   process.once('SIGINT', stop); process.once('SIGTERM', stop);
+  if (checking) {
+    let browser;
+    try {
+      const modules = 'C:/Users/lpeac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules';
+      const { chromium } = require(process.env.PLAYWRIGHT_MODULE_PATH || require.resolve('playwright', { paths: [modules] }));
+      const executablePath = process.env.FIXTURE_BROWSER_PATH || ['C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+        'C:/Program Files/Google/Chrome/Application/chrome.exe'].find(existsSync);
+      assert.ok(executablePath, 'Set FIXTURE_BROWSER_PATH to an installed Edge or Chrome browser.');
+      browser = await chromium.launch({ headless: true, executablePath });
+      const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } }), errors = [];
+      page.on('pageerror', error => errors.push(error.message));
+      await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
+      await page.goto(origins[0] + '/?cloudApi=' + encodeURIComponent(apiOrigin));
+      await page.getByRole('button', { name: 'Bootstrap translator A', exact: true }).click();
+      await page.waitForFunction(() => document.querySelector('#collaboration-fixture-controls [role="status"]')?.textContent.startsWith('Translator A ready')
+        || document.querySelector('#collaboration-fixture-controls')?.dataset.error);
+      assert.equal(await page.locator('#collaboration-fixture-controls').getAttribute('data-error'), null);
+      const rendered = await page.evaluate(async () => {
+        const vm = window.__collaborationFixtureApp;
+        vm.collabReceiveState({ ...vm.collaborationState, connected: true,
+          peers: [{ userId: 'render-only-peer', sessionId: 'render-only-session', name: 'Fixture peer', color: '#123456', away: true }] });
+        await vm.$nextTick();
+        const wrapper = document.querySelector('.collaborationAvatars'), pagination = document.querySelector('[aria-label="File pagination"]'),
+          avatar = wrapper?.querySelector('.collaborationAvatar');
+        return { catalog: !!window.EditorReferenceCatalog, session: !!window.EditorSession,
+          wrapper: !!wrapper, pagination: !!pagination, precedes: !!(wrapper?.compareDocumentPosition(pagination) & Node.DOCUMENT_POSITION_FOLLOWING),
+          label: avatar?.getAttribute('aria-label'), border: avatar && getComputedStyle(avatar).borderColor,
+          filter: avatar && getComputedStyle(avatar.querySelector('.collaborationAvatarFace')).filter };
+      });
+      assert.equal(rendered.catalog, true); assert.equal(rendered.session, true);
+      assert.equal(rendered.wrapper, true, JSON.stringify(rendered)); assert.equal(rendered.pagination, true); assert.equal(rendered.precedes, true);
+      assert.match(rendered.label, /Fixture peer.*Away/); assert.equal(rendered.border, 'rgb(18, 52, 86)'); assert.match(rendered.filter, /grayscale\(1\)/);
+      await page.getByRole('button', { name: 'Check SD save validation', exact: true }).click();
+      await page.waitForFunction(() => ['passed', 'failed'].includes(document.querySelector('#collaboration-fixture-controls')?.dataset.validation)
+        || document.querySelector('#collaboration-fixture-controls')?.dataset.error, null, { timeout: 45000 });
+      const result = await page.locator('#collaboration-fixture-controls').evaluate(panel => ({ state: panel.dataset.validation,
+        error: panel.dataset.error, status: panel.querySelector('[role="status"]').textContent, details: panel.querySelector('pre').textContent }));
+      assert.equal(result.state, 'passed', JSON.stringify(result)); assert.deepEqual(errors, []);
+      console.log(JSON.stringify({ pass: true, rendered, ...result }));
+    } finally { await browser?.close(); await stop(); }
+  }
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });

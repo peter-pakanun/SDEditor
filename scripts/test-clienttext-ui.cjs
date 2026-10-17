@@ -3004,79 +3004,6 @@ test('history restore preserves text typed while an earlier draft checkpoint is 
     app.ctValues[fieldId]='Newly typed text';held.resolve(true);
     assert.equal(await restoring,false);assert.equal(app.ctValues[fieldId],'Newly typed text');
 });
-test('the read-only history dialog blocks save shortcuts and Escape restores focus',async()=>{
-    const {app,window}=harness();let focused=0,saved=0,prevented=0;
-    const button={isConnected:true,focus(){focused++;}};window.document={activeElement:button,getElementById(){return{focus(){}};}};
-    app.$nextTick=callback=>callback?.();app.ctSave=async()=>saved++;
-    app.ctOpenHistoryViewer();assert.equal(app.ctHistoryViewer,true);
-    for(const event of [{key:'F2'},{key:'s',ctrlKey:true},{key:'s',metaKey:true}])await app.ctKey({...event,preventDefault(){prevented++;}});
-    assert.equal(saved,0);assert.equal(prevented,3);
-    await app.ctKey({key:'Escape',preventDefault(){prevented++;}});
-    assert.equal(app.ctHistoryViewer,false);assert.equal(focused,1);assert.equal(prevented,4);
-});
-test('explicit previous-version comparison uses verified old English and the accepted remote base rather than pending text',async()=>{
-    const {app,original}=enableHistory(harness()),previous=clone(original),oldScope={...scope,versionId:'v0',groupId:'previous-group'};
-    original.fields[0].source='New English';previous.fields[0].source='Previous English';previous.developerNotes='Previous developer note';
-    previous.fields.push({id:'removed-field',name:'Removed',kind:'text',source:'Removed English',target:'Removed original'});
-    app.ctValues={[fieldId]:'New draft'};
-    app.ctSaved={[original.id]:{provenance:{groupId:oldScope.groupId,unitId:original.id,revision:2}}};
-    let activations=0;app.ctOpenGroup=async()=>activations++;
-    app._ctStore={async listWorkspaces(){return[{...oldScope,state:'ready'}];},async getUnit(captured,id){assert.deepEqual(clone(captured),oldScope);assert.equal(id,previous.id);return previous;},
-        async listHistory(){return[{after:{values:{[fieldId]:'Unaccepted pending correction'},remoteBase:{revision:2,values:{[fieldId]:'Accepted previous', 'removed-field':'Kept old'},reviewed:{}}}}];}};
-    assert.equal(await app.ctLoadPreviousHistory(),true);assert.equal(activations,0);
-    assert.equal(app.ctWorkspace.scope.groupId,scope.groupId);assert.equal(app.ctValues[fieldId],'New draft');
-    const comparison=app.ctHistoryComparison;
-    assert.equal(comparison.rows[0].beforeSource,'Previous English');assert.equal(comparison.rows[0].afterSource,'New English');
-    assert.equal(comparison.rows[0].beforeTarget,'Accepted previous');assert.equal(comparison.rows[0].afterTarget,'New draft');
-    assert.equal(comparison.rows.find(row=>row.id==='removed-field').removed,true);
-    assert.ok(comparison.notes.some(part=>part.value==='Previous developer note'&&part.removed));
-});
-test('uncached previous-version comparison verifies the prior group without activation and pages to its exact frozen revision',async()=>{
-    const {app,original}=enableHistory(harness()),previous=clone(original),requests=[],opens=[];
-    const group={id:'previous-group',versionId:'v0',contentMode:'clienttext',language:'Thai'},version={id:'v0',game:'poe2',branchId:'default'};
-    previous.fields[0].source='Old source';app.ctSaved={[original.id]:{provenance:{groupId:group.id,unitId:original.id,revision:2}}};
-    app.managedOnlineAvailable=true;app.cloudCanAccessAllLanguages=true;
-    app._ctStore={async listWorkspaces(){return[];},async getUnit(){return previous;},async listHistory(){return[];}};
-    app.ctOpenGroup=async(...args)=>{opens.push(args);return{version,group};};
-    app._cloud={async request(route){requests.push(route);if(!route.includes('/history?'))return{group:{...group,version}};
-        return route.endsWith('&cursor=9')?{history:[{after:{id:original.id,revision:2,values:{[fieldId]:'Captured accepted target'}}}],nextCursor:null}
-            :{history:[{after:{id:original.id,revision:3,values:{[fieldId]:'Newer target must not be used'}}}],nextCursor:'9'};}};
-    assert.equal(await app.ctLoadPreviousHistory(),true);assert.equal(opens.length,1);assert.equal(opens[0][3],false);
-    assert.equal(requests.length,3);assert.match(requests[2],/&cursor=9$/);
-    assert.equal(app.ctHistoryComparison.rows[0].beforeSource,'Old source');
-    assert.equal(app.ctHistoryComparison.rows[0].beforeTarget,'Captured accepted target');
-    assert.equal(app.ctWorkspace.scope.groupId,scope.groupId);
-});
-test('previous-version comparison fences late account, group and unit replies before caching or showing source',async()=>{
-    for(const changed of ['account','group','unit']){
-        const {app,original}=enableHistory(harness()),held=deferred(),reached=deferred();let reads=0;
-        app.ctSaved={[original.id]:{provenance:{groupId:'previous-group',unitId:original.id,revision:0}}};
-        app._ctStore={async listWorkspaces(){reached.resolve();return held.promise;},async getUnit(){reads++;return original;}};
-        const comparing=app.ctLoadPreviousHistory();await reached.promise;
-        if(changed==='unit')app.ctSelection='other-unit';else app.ctWorkspace={scope:{...scope,[changed==='account'?'accountId':'groupId']:'other'}};
-        held.resolve([{...scope,versionId:'v0',groupId:'previous-group',state:'ready'}]);
-        assert.equal(await comparing,false);assert.equal(reads,0);assert.equal(app.ctHistoryViewer,false);
-        assert.equal(app.ctHistory.length,0);
-    }
-});
-test('an unavailable previous saved revision is labelled and uses only its verified original translation',async()=>{
-    const {app,original}=enableHistory(harness()),previous=clone(original);
-    previous.fields[0].source='Verified earlier English';previous.fields[0].target='Verified workbook target';
-    app.ctSaved={[original.id]:{provenance:{groupId:'previous-group',revision:7}}};
-    app._ctStore={async listWorkspaces(){return[{...scope,versionId:'v0',groupId:'previous-group',state:'ready'}];},async getUnit(){return previous;},async listHistory(){return[];}};
-    assert.equal(await app.ctLoadPreviousHistory(),true);
-    assert.equal(app.ctHistoryComparison.rows[0].beforeTarget,'Verified workbook target');
-    assert.match(app.ctHistoryError,/Saved revision 7 is unavailable/);
-    assert.match(app.ctHistory[0].action,/saved revision 7 unavailable/);
-});
-test('a foreign predecessor group is rejected before its workbook is cached',async()=>{
-    const {app,original}=enableHistory(harness());let opens=0;
-    app.ctSaved={[original.id]:{provenance:{groupId:'previous-group',revision:1}}};
-    app.managedOnlineAvailable=true;app.cloudCanAccessAllLanguages=true;app._ctStore={async listWorkspaces(){return[];}};
-    app._cloud={async request(){return{group:{id:'previous-group',versionId:'v0',contentMode:'clienttext',language:'Thai'},version:{id:'v0',game:'poe1',branchId:'default'}};}};
-    app.ctOpenGroup=async()=>opens++;
-    assert.equal(await app.ctLoadPreviousHistory(),false);assert.equal(opens,0);assert.match(app.ctHistoryError,/does not match/);
-});
 test('uncertain saves replay the exact receipt command and retain subsequently typed text',async()=>{
     const f=fixture();await f.store.import(scope,{units:[unit()],assets:[asset]});const {app,original}=harness();
     const commands=[];let fail=true;app._ctStore={...f.store,async save(captured,id,command){commands.push(clone(command));const result=await f.store.save(captured,id,command);if(fail){fail=false;throw new Error('Uncertain completion');}return result;}};
@@ -4230,7 +4157,7 @@ test('offline importer markup separates current and optional history selectors w
     assert.match(html,/ctUploadHistoryFiles/);assert.match(html,/ctSetHistoryComparison/);
 });
 
-test('offline Outdated import history loads actual old English and removed fields through the regular diff viewer without durable or cloud access',async()=>{
+test('offline Outdated import history exposes old English and removed fields through the field toolbar without durable or cloud access',async()=>{
     const Memory=require('../public/clientTextMemoryStore.js'),store=Memory.create(),previous=unit('Previous English','Previous translation'),current=unit('Current English','Current translation'),
         testScope={...scope,versionId:'local:test:v2',groupId:'local:test:g2'},previousScope={...scope,versionId:'local:test:v1',groupId:'local:test:g1'};
     previous.developerNotes='Old developer note';previous.fields.push({id:'removed',name:'Removed field',source:'Old removed English',target:'Old removed translation',kind:'text'});
@@ -4242,10 +4169,13 @@ test('offline Outdated import history loads actual old English and removed field
     app._cloud={request(){assert.fail('A test comparison must never reach the API');}};
     assert.equal(app.ctStatus(current).outdated,true);assert.equal(app.ctStatus(current).saved,false);
     assert.equal(await app.ctLoadHistory(),true);assert.equal(app.ctHistory.length,1);assert.equal(app.ctHistory[0].action,'version_import');
-    assert.equal(await app.ctLoadPreviousHistory(),true);assert.equal(app.ctHistoryViewer,true);assert.equal(app.ctHistoryError,'');
-    const diff=app.ctHistoryComparison;assert.equal(diff.rows[0].beforeSource,'Previous English');assert.equal(diff.rows[0].afterSource,'Current English');
-    assert.equal(diff.rows[0].beforeTarget,'Previous translation');assert.equal(diff.rows[0].afterTarget,'Current translation');
-    assert.equal(diff.rows.find(field=>field.id==='removed').removed,true);assert.equal(diff.hasNotes,true);
+    assert.equal(await app.ctPrepareComparisons(app.ctContext(),current.id,true),true);assert.equal(app.ctComparisonError,'');
+    const toolbar=app.ctFieldToolbar(current.fields[0],'translation'),reference=toolbar.entries.find(entry=>entry.origin==='reference' && entry.previousScope.groupId===previousScope.groupId);
+    assert.ok(reference);toolbar.details(reference,'after');
+    const rows=toolbar.detailRows,oldText=parts=>parts.filter(part=>!part.added).map(part=>part.value).join(''),newText=parts=>parts.filter(part=>!part.removed).map(part=>part.value).join('');
+    assert.equal(oldText(rows[0].source),'Previous English');assert.equal(newText(rows[0].source),'Current English');
+    assert.equal(oldText(rows[0].target),'Previous translation');assert.equal(newText(rows[0].target),'Current translation');
+    assert.equal(rows.find(field=>field.id==='removed').removed,true);assert.equal(oldText(toolbar.detailNotes),'Old developer note');
     assert.equal(app.ctWorkspace.scope.groupId,testScope.groupId);assert.equal(app.ctValues[fieldId],'Current translation');
     app.ctFence();assert.equal(app._ctTestStores.size,0);await assert.rejects(store.getUnit(previousScope,previous.id),{code:'LOCAL_TEST_DISPOSED'});
 });

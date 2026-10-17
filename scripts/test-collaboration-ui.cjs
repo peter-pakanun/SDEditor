@@ -8,6 +8,23 @@ const copy = value => JSON.parse(JSON.stringify(value));
 const state = (translations, revision = 1) => ({ filepath: 'stat.txt', translations, needsReview: false, trackedForExport: true, revision });
 const conflict = (fields = {}) => ({ id: 'conflict-1', filepath: 'stat.txt', kind: 'edit', base: state(['before', 'unchanged', 'old remote']), yours: state(['mine', 'my independent change', 'old remote']), shared: state(['theirs', 'unchanged', 'remote independent change'], 2), indexes: [0], ...fields });
 const event = (fields = {}) => ({ id: 12, revision: 2, currentRevision: 4, actor: { id: 'alice', name: 'Alice' }, createdAt: '2026-10-01T00:00:00.000Z', origin: 'save', before: state(['before']), after: state(['after']), current: state(['latest'], 4), canRestoreBefore: true, canRestoreAfter: true, ...fields });
+const mutationWindow = { StatDescCodec: require('../public/statDescCodec.js') };
+vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/collaborationIntegration.js'), 'utf8'), { window: mutationWindow });
+function useSDMutations(app) {
+  const methods = mutationWindow.CollaborationIntegration.mixin.methods;
+  for (const name of ['collabResolve', 'collabRestoreHistory', 'persistTranslationBatch']) app[name] = methods[name].bind(app);
+  app.captureCollaborationContext = () => app.collaborationState.identity;
+  app.collaborationContextCurrent = context => context === app.collaborationState.identity;
+  app.getDescByFilepath = filepath => app.descs.find(desc => desc.filepath === filepath);
+  app.descs[0].translations.English = ['English'];
+  app._collaboration = {
+    snapshot: () => ({ conflicts: app.collaborationState.conflicts }),
+    historyEntry: async () => app.collaborationHistoryEvent,
+    fileBase: () => app.collaborationHistoryEvent.current,
+    resolve() { assert.fail('An invalid SD resolution must not reach the transport.'); },
+    save() { assert.fail('An invalid SD restore must not reach the transport.'); },
+  };
+}
 function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -293,7 +310,11 @@ test('footer avatars precede pagination and away shading preserves the collabora
   const html = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf8');
   const start = html.lastIndexOf('<template #footer>');
   const footer = html.slice(start, html.indexOf('</template>', start));
-  assert.ok(footer.indexOf('class="collaborationAvatars"') < footer.indexOf('aria-label="File pagination"'));
+  assert.ok(start >= 0, 'The file footer exists.');
+  const avatarsAt = footer.indexOf('class="collaborationAvatars"'), paginationAt = footer.indexOf('aria-label="File pagination"');
+  assert.ok(avatarsAt >= 0, 'The avatar wrapper exists.');
+  assert.ok(paginationAt >= 0, 'File pagination exists.');
+  assert.ok(avatarsAt < paginationAt);
   assert.match(footer, /:aria-label="collaborationParticipantLabel\(participant\)"/);
   assert.match(footer, /v-tooltip="collaborationParticipantLabel\(participant\)"/);
   assert.match(footer, /collaborationPeerColor\(participant\)/);
@@ -433,9 +454,8 @@ test('conflict choice preserves independent entries and serializes whole multili
   assert.deepEqual(calls, [['conflict-1', state(['first\\nsecond@column', 'my independent change', 'remote independent change'], 2), { sharedRevision: 2 }]]);
 });
 
-test('empty translation is an explicit valid resolution, including a first join without base', async () => {
-  let submitted;
-  const { app } = editor({ collabResolve: async (_id, result) => { submitted = copy(result.translations); } });
+test('a legacy empty first-join choice remains visible but the real SD resolution boundary rejects it', async () => {
+  const { app } = editor(); useSDMutations(app);
   app.collaborationState.conflicts = [conflict({ kind: 'join', base: null, yours: state(['']), shared: state(['shared']), indexes: [0] })];
   await app.collaborationOpenConflicts();
   assert.equal(app.collaborationConflictText(0, 'base'), 'No shared base yet');
@@ -443,7 +463,10 @@ test('empty translation is an explicit valid resolution, including a first join 
   app.collaborationChooseConflict(0, 'yours');
   assert.equal(app.collaborationConflictReady, true);
   await app.collaborationSubmitConflict();
-  assert.deepEqual(submitted, ['']);
+  assert.match(app.collaborationConflictError, /blank|complete.*entr/i);
+  assert.equal(app.collaborationConflictVisible, true);
+  assert.deepEqual(Array.from(app.collaborationConflictDraft), ['']);
+  assert.equal(app.collaborationConflictNotice, '');
 });
 
 test('remote revision change invalidates confirmation but preserves manually proposed text for re-review', async () => {
@@ -593,17 +616,18 @@ test('a late history detail cannot replace the more recently selected event', as
   assert.equal(app.collaborationHistoryEvent.id, 15);
 });
 
-test('seed baseline has no restorable before while empty saved translations remain restorable', async () => {
-  const calls = [];
-  const { app } = editor({ collabRestoreHistory: async (...args) => { calls.push(args); return { status: 'pending' }; } });
+test('legacy empty history stays inspectable but the real restore command rejects a new blank SD save', async () => {
+  const { app } = editor(); useSDMutations(app);
   app.collaborationHistoryVisible = true;
   app.collaborationHistoryEvent = event({ before: null, canRestoreBefore: false, after: state(['']) });
   assert.equal(app.collaborationHistoryCanRestore('before'), false);
   assert.equal(app.collaborationHistoryCanRestore('after'), true);
   app.collaborationPrepareRestore('after');
   await app.collaborationConfirmRestore();
-  assert.deepEqual(calls, [[12, 'after', 4]], 'Restore uses the currently shared revision, not the historical revision.');
-  assert.match(app.collaborationHistoryNotice, /queued for sync/);
+  assert.match(app.collaborationHistoryError, /blank|complete.*entr/i);
+  assert.equal(app.collaborationHistoryNotice, '');
+  assert.equal(app.collaborationHistoryEvent.id, 12);
+  assert.deepEqual(app.collaborationHistoryEvent.after.translations, ['']);
 });
 
 test('stale restore requires a fresh preview and does not show a successful restore', async () => {
