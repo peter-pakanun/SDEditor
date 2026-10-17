@@ -25,7 +25,7 @@
       if (!Object.hasOwn(value, key)) continue;
       if (typeof DEFAULT_SETTINGS[key] === 'boolean') assert(typeof value[key] === 'boolean', key + ' must be boolean.');
     }
-    const enums = { mtlShortcut:['disabled','f8','ctrl-alt-f8'], mtlConsentVersion:['','mtl-v1'], theme: ['light', 'grey', 'dark', 'modern-dark'], autocompleteShortcut: ['ctrl-space', 'ctrl-i', 'disabled'], dictionaryDefaultGameScope: ['all', 'poe1', 'poe2'], uiDensity: ['compact', 'spacious'], gamePreviewFrame: ['s', 'm', 'l'] };
+    const enums = { mtlShortcut:['disabled','f8','ctrl-alt-f8'], mtlConsentVersion:['','mtl-v1','mtl-v2'], theme: ['light', 'grey', 'dark', 'modern-dark'], autocompleteShortcut: ['ctrl-space', 'ctrl-i', 'disabled'], dictionaryDefaultGameScope: ['all', 'poe1', 'poe2'], uiDensity: ['compact', 'spacious'], gamePreviewFrame: ['s', 'm', 'l'] };
     for (const [key, allowed] of Object.entries(enums)) if (Object.hasOwn(value, key)) assert(allowed.includes(value[key]), key + ' is invalid.');
     if (value.gamePreviewFonts != null) assert(object(value.gamePreviewFonts) && Object.entries(value.gamePreviewFonts).every(([lang, font]) => LANGUAGES.includes(lang) && string(font)), 'preview fonts must map languages to strings.');
     if (Object.hasOwn(value, 'fullEditorPreviewHeight')) assert(value.fullEditorPreviewHeight === null

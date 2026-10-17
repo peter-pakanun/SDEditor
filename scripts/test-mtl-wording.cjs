@@ -27,6 +27,6 @@ test('remaining API literals are internal wire/configuration identifiers, not re
 
 test('disabled consent points to the MTL data-sharing choice using neutral wording',()=>{
     const ui=readFileSync(join(root,'public/clientTextMtlUi.js'),'utf8');
-    assert.match(ui,/Review and enable the MTL data-sharing choice in MTL settings first\./);
+    assert.match(ui,/Review and enable the updated MTL data-sharing and private review-retention choice in MTL settings first\./);
     assert.doesNotMatch(ui,/provider data-transmission choice/);
 });

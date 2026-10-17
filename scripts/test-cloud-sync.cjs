@@ -21,9 +21,9 @@ test('MTL preferences start without transmission consent or a hotkey and validat
   assert.equal(Cloud.completeSettings({}).mtlConsentVersion, '');
   assert.equal(Cloud.completeSettings({}).mtlShortcut, 'disabled');
   for(const mtlShortcut of ['disabled','f8','ctrl-alt-f8']) assert.doesNotThrow(()=>Cloud.validateImport({mtlShortcut}));
-  for(const mtlConsentVersion of ['', 'mtl-v1']) assert.doesNotThrow(()=>Cloud.validateImport({mtlConsentVersion}));
+  for(const mtlConsentVersion of ['', 'mtl-v1','mtl-v2']) assert.doesNotThrow(()=>Cloud.validateImport({mtlConsentVersion}));
   for(const mtlShortcut of ['ctrl-s','f9',null,true]) assert.throws(()=>Cloud.validateImport({mtlShortcut}),/mtlShortcut is invalid/);
-  for(const mtlConsentVersion of ['true','mtl-v2',true]) assert.throws(()=>Cloud.validateImport({mtlConsentVersion}),/mtlConsentVersion is invalid/);
+  for(const mtlConsentVersion of ['true','mtl-v3',true]) assert.throws(()=>Cloud.validateImport({mtlConsentVersion}),/mtlConsentVersion is invalid/);
   assert.deepEqual(Cloud.preferences({mtlConsentVersion:'mtl-v1',mtlShortcut:'f8',credential:'never copy'}),{mtlShortcut:'f8',mtlConsentVersion:'mtl-v1'});
 });
 

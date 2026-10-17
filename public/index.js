@@ -7777,7 +7777,7 @@ function formatPageRange(total, page, pageSize) {
       if (typeof settings.inlineEditor !== 'undefined') this.inlineEditor = !!settings.inlineEditor;
       if (typeof settings.highlightDict !== 'undefined') this.highlightDict = !!settings.highlightDict;
       this.mtlShortcut=['disabled','f8','ctrl-alt-f8'].includes(settings.mtlShortcut)?settings.mtlShortcut:'disabled';
-      this.mtlConsentVersion=settings.mtlConsentVersion==='mtl-v1'?'mtl-v1':'';
+      this.mtlConsentVersion=['mtl-v1','mtl-v2'].includes(settings.mtlConsentVersion)?settings.mtlConsentVersion:'';
       if (typeof settings.shiftEnterSave !== 'undefined') this.shiftEnterSave = !!settings.shiftEnterSave;
       if (typeof settings.autoOpenNextFile !== 'undefined') this.autoOpenNextFile = !!settings.autoOpenNextFile;
       if (typeof settings.filterShortcutCtrlD !== 'undefined') this.filterShortcutCtrlD = !!settings.filterShortcutCtrlD;

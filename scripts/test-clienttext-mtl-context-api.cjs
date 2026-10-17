@@ -110,3 +110,59 @@ test('API accepts priority keyword translations and durable omission counts unde
     assert.equal(accepted.context.omitted.keywordTranslations,0);assert.equal(accepted.context.keywords[0].fields[0].translation,'Saved priority title');
     assert.ok(accepted.context.surrounding.omitted.contextBudget>0);assert.equal(accepted.context.evidenceRules.length,2);
 });
+
+test('API accepts optional role hints and sourced profiles with unchanged context and request limits',options,async()=>{
+    const validation=await api(),a='Metadata/Characters/Int/IntFour',b='Metadata/Characters/Str/StrFour',
+        selected=unit('NPCTalkDialogueTextAudio','SyntheticSelected',[field('Text','Use [Spark|spark].','Approved selected')]),
+        hero=unit('Characters',a,[field('Name','Synthetic Mage','Approved name'),field('Description','A'.repeat(1800),'\u0e01'.repeat(1400))]),
+        listener=unit('Characters',b,[field('Name','Synthetic Warrior','Approved name'),field('Description','B'.repeat(1600),'\u0e02'.repeat(1500))]),
+        keyword=unit('KeywordPopups','Spark',[field('Info Content','Synthetic keyword source.','Approved keyword.')]);
+    selected.metadata={Speaker:a,Listener:b};
+    const context=Context.build({unit:selected,field:selected.fields[0],units:[selected,hero,listener,keyword],scope:{game:'poe2'}}),body=request(selected,context,validation);
+    assert.equal(context.roleHints.speaker.confidence,'explicit'); assert.equal(context.roleHints.listener.confidence,'explicit');
+    assert.equal(context.toneContext.characters,1200); assert.equal(context.toneContext.profiles.length,2);
+    assert.deepEqual(context.toneContext.profiles.map(item=>item.roles),[['speaker'],['listener']]);
+    assert.equal(context.keywords[0].fields[0].translation,'Approved keyword.');
+    for(const local of [false,true]) {
+        const input=local?{...body,language:'Thai',game:'poe2',branchId:'default'}:body;
+        assert.deepEqual(validation.mtlRequestInput(input,{local}).context,context); bounds(context,input);
+    }
+    const legacy=structuredClone(context); delete legacy.roleHints; delete legacy.toneContext;
+    for(const name of ['roleHints','toneProfiles','voiceExamples','toneUnavailable'])delete legacy.omitted[name];
+    assert.deepEqual(validation.mtlRequestInput({...body,context:legacy}).context,legacy);
+});
+
+test('API preserves bounded role/tone omission provenance under a large surrounding workload',options,async()=>{
+    const validation=await api(),path='Metadata/Characters/Int/IntFour',
+        selected=unit('NPCTalkDialogueTextAudio','Selected',[field('Text','Synthetic dialogue.','Approved selected')]),
+        actor=unit('Characters',path,[field('Name','Synthetic Mage','Approved name'),field('Description','A'.repeat(2000),'\u0e01'.repeat(3000))]),
+        rows=Array.from({length:70},(_,i)=>{
+            const value=unit(selected.sheet,'Neighbor'+i,[field('Text','Nearby synthetic '+i+' '+'x'.repeat(1000),'Approved neighbor '+i)]);
+            value.fields[0].sourceCell='B'+(i+10);value.fields[0].targetCell='C'+(i+10);return value;
+        });
+    selected.metadata={Speaker:path};
+    const convoIndex={memberships:new Map([selected,...rows].map(value=>[value.id,{familyKey:'Synthetic'}]))},
+        context=Context.build({unit:selected,field:selected.fields[0],units:[selected,actor,...rows],convoIndex,scope:{game:'poe2'}}),body=request(selected,context,validation);
+    assert.equal(context.omitted.roleHints,0); assert.equal(context.omitted.toneProfiles,0);
+    assert.equal(context.toneContext.profiles[0].sourceTruncated,true); assert.equal(context.toneContext.profiles[0].translationTruncated,true);
+    assert.ok(context.surrounding.omitted.contextBudget>0); assert.equal(context.surrounding.omitted.entryLimit,20);
+    assert.deepEqual(validation.mtlRequestInput(body).context,context);bounds(context,body);
+});
+
+test('API retains distinct same-name NPC identities without importing another path as speaker voice',options,async()=>{
+    const validation=await api(),N=require('../public/clientTextNpcIndex.js'),a='Metadata/NPC/Synthetic/FirstGuard',b='Metadata/NPC/Synthetic/SecondGuard',
+        selected=unit('NPCTalkDialogueTextAudio','Selected',[field('Text','Synthetic selected dialogue.','Approved selected')]),
+        first=unit('NPCs',a,[field('Name','Synthetic Guard','Approved name')]),second=unit('NPCs',b,[field('Name','Synthetic Guard','Approved name')]),
+        own=unit(selected.sheet,'Own',[field('Text','Verified first guard voice.','Approved first guard voice.')]),
+        other=unit(selected.sheet,'Other',[field('Text','WRONG SECOND GUARD VOICE','Approved second guard voice.')]);
+    selected.metadata={Speaker:a,Listener:b};own.metadata={Speaker:a};other.metadata={Speaker:b};
+    const units=[selected,first,second,own,other],npcIndex=await N.buildNpcIndex(units,{yield:async()=>{}}),
+        context=Context.build({unit:selected,field:selected.fields[0],units,npcIndex,scope:{game:'poe2'}}),body=request(selected,context,validation);
+    assert.equal(context.roleHints.speaker.identityKey,'npc:'+a);assert.equal(context.roleHints.listener.identityKey,'npc:'+b);
+    assert.deepEqual(context.toneContext.voiceExamples.map(value=>value.provenance.recordId),['Own']);
+    assert.deepEqual(validation.mtlRequestInput(body).context,context);bounds(context,body);
+    selected.metadata={Speaker:a,'Speaking Character':b};
+    const conflict=Context.build({unit:selected,field:selected.fields[0],units,npcIndex,scope:{game:'poe2'}});
+    assert.equal(conflict.roleHints.speaker.status,'conflict');assert.equal(conflict.toneContext.voiceExamples.length,0);
+    validation.mtlRequestInput(request(selected,conflict,validation));
+});

@@ -15,7 +15,7 @@
         function capture(rawScope, options, create = true) {
             if (disposed) throw new Error('This local MTL session was disposed.');
             C.guard(options); const id = scopeKey(rawScope);
-            if (!scopes.has(id) && create) scopes.set(id, { candidates: new Map(), reviews: new Map(), receipts: new Map(), generations: new Map(), sequence: 0 });
+            if (!scopes.has(id) && create) scopes.set(id, { candidates: new Map(), reviews: new Map(), receipts: new Map(), generations: new Map(),outbox:new Map(), sequence: 0 });
             return scopes.get(id);
         }
         function list(rawScope, options = {}) {
@@ -84,15 +84,17 @@
         function dismiss(rawScope, input, options = {}) {
             const store = capture(rawScope, options), candidate = M.normalizeCandidate(input), mutationId = options.mutationId;
             if (typeof mutationId !== 'string' || !mutationId || mutationId.length > 256) throw new TypeError('MTL dismissal requires a stable mutation ID.');
-            const signature = S.hash({ candidateId: candidate.id, body: { mutationId, candidateRevision: candidate.revision } }), previous = store.receipts.get(mutationId);
+            const {body,signature}=C.dismissalInput(candidate,options,options.archiveRequired===true),previous = store.receipts.get(mutationId);
             if (previous) {
                 if (previous.signature !== signature) throw Object.assign(new Error('MTL mutation ID was reused.'), { code: 'MTL_RECEIPT_MISMATCH' });
                 return { ...S.copy(previous), replayed: true };
             }
             const current = store.candidates.get(candidate.id);
             if (!current || current.status !== 'pending' || current.revision !== candidate.revision || M.immutable(current) !== M.immutable(candidate)) throw M.changed();
-            const next = { ...current, status: 'dismissed', revision: current.revision + 1, resolvedAt: Date.now() };
-            const receipt = { mutationId, signature, candidateId: current.id, createdAt: Date.now(), acknowledged: true };
+            const queued=options.archiveRequired===true,next = { ...current, status: 'dismissed',revision:queued?current.revision:current.revision+1,...(queued?{localDisposition:true}:{}),resolvedAt: Date.now() };
+            const receipt = { mutationId, signature, candidateId: current.id, createdAt: Date.now(), acknowledged: !queued };
+            if(queued)store.outbox.set(mutationId,{mutationId,signature,candidateId:current.id,unitId:current.unitId,fieldId:current.fieldId,requestId:current.requestId,
+                requestBody:body,archiveRequired:true,state:'pending',createdAt:receipt.createdAt,candidate:next});
             store.candidates.set(next.id, next); store.receipts.set(mutationId, receipt); return { ...S.copy(receipt), replayed: false };
         }
         // These two methods deliberately stay synchronous. The owning memory
@@ -112,10 +114,25 @@
                     reviewedTextHash: claim.reviewedTextHash, acceptanceJobId: options.jobId || '', resolvedAt: now });
             }
         }
-        function getOutbox(rawScope, options) { capture(rawScope, options); return []; }
+        function getOutbox(rawScope, options) { return [...capture(rawScope, options).outbox.values()].sort((a,b)=>a.createdAt-b.createdAt||a.mutationId.localeCompare(b.mutationId)).map(S.copy); }
+        function markSending(rawScope,mutationId,state,options){
+            if(!['pending','sending','uncertain','conflict','archive-pending'].includes(state))throw new TypeError('Invalid MTL upload state.');
+            const store=capture(rawScope,options),current=store.outbox.get(mutationId);if(!current)return null;
+            const next={...current,state};store.outbox.set(mutationId,next);return S.copy(next);
+        }
+        function acknowledge(rawScope,operation,response,options){
+            const store=capture(rawScope,options),current=store.outbox.get(operation.mutationId),receipt=store.receipts.get(operation.mutationId),dismissal=response?.dismissal,
+                archive=C.archiveReceipt(response?.archive,true);
+            if(!receipt||receipt.signature!==operation.signature||current&&current.signature!==operation.signature
+                ||dismissal?.candidateId!==operation.candidateId||dismissal.requestId!==operation.requestId||dismissal.status!=='dismissed'
+                ||!Number.isSafeInteger(dismissal.revision)||dismissal.revision<=operation.requestBody.candidateRevision)
+                throw Object.assign(new Error('MTL acknowledgement identifies another operation.'),{code:'MTL_RECEIPT_MISMATCH'});
+            const candidate=store.candidates.get(operation.candidateId),next=M.mergeCandidate(candidate,{...operation.candidate,status:'dismissed',revision:dismissal.revision,localDisposition:false});
+            store.candidates.set(next.id,next);store.outbox.delete(operation.mutationId);store.receipts.set(operation.mutationId,{...receipt,acknowledged:true,candidateRevision:next.revision,archive});return S.copy(next);
+        }
         function dispose() { disposed = true; scopes.clear(); }
         return { list, getCandidate, putCandidate, getReview, listReviews, putReview, archiveReview, getMetadata, getGeneration, getGenerations, putGeneration, deleteGeneration, applyRemote, dismiss,
-            validateAcceptances, resolveAcceptances, getOutbox, normalizeScope, scopeKey, dispose };
+            validateAcceptances, resolveAcceptances, getOutbox,markSending,acknowledge, normalizeScope, scopeKey, dispose };
     }
     return { normalizeScope, scopeKey, create };
 });

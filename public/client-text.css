@@ -199,6 +199,9 @@
 .ctMtlReview {display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;padding:5px 0;}
 .ctMtlReview small {flex-basis:100%;color:var(--ui-muted);}
 .ctMtlReview button {font-size:12px;padding:2px 7px;}
+.ctMtlDismissal {padding:8px 10px;margin-top:6px;border:1px solid var(--ui-border);border-radius:4px;background:var(--color-element);color:var(--color-font);line-height:1.5;}
+.ctMtlDismissal > span {flex:1 1 320px;}
+.ctMtlDismissal small {font-size:12px;}
 .ctMtlRowIndicator {display:inline-flex;gap:4px;align-items:center;margin-right:6px;font-size:11px;}
 .statusPill.mtl,.filterChip.mtl {border-color:#67D4F1;}
 @media (prefers-reduced-motion:reduce) {.ctMtlButton .ctAudioSpinner {animation:none;}}

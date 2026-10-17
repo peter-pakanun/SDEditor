@@ -33,6 +33,8 @@ async function run(){
     const described=await State.buildDescriptors(parsed.units,[{role:'normal',hash:parsed.artifactHash,parserVersion:parsed.parserVersion}]);
     const seed=JSON.stringify({bytes:Array.from(bytes),parsed,descriptors:described.descriptors});
     const html=readFileSync(join(publicDir,'index.html'),'utf8');
+    const consentHtml=html.match(/<label class="settingsToggle"><input type="checkbox" v-model="mtlConsentVersion"[\s\S]*?<\/details>/)?.[0];
+    assert.ok(consentHtml,'Actual Settings consent and privacy details are available');
     const styles=[...html.matchAll(/<link\b[^>]*rel="stylesheet"[^>]*href="([^"/:]+\.css)"[^>]*>/g)].map(match=>match[0].replace('href="','href="/')).join('\n');
     const scripts=['workspaceState.js','dictionaryScope.js','regexEngine.js','translationDiagnostics.js','translationMemory.js',
         'normalizedStore.js','normalizedRooms.js','offlineStore.js','clientTextState.js','contentAdapters.js','clientTextStore.js',
@@ -43,15 +45,15 @@ async function run(){
 const seed=${seed},ct=ClientTextUI.mixin,mtl=ClientTextMtlUI.mixin,debug=ClientTextMtlDebug.mixin;
 let app;
 const options={
- data(){return{...ct.data(),...mtl.data(),...debug.data(),fixtureMode:'memory',lang:'Thai',gameVersion:'poe2',branchId:'default',cloudSignedIn:true,
+ data(){return{...ct.data(),...mtl.data(),...debug.data(),fixtureConsent:false,fixtureMode:'memory',lang:'Thai',gameVersion:'poe2',branchId:'default',cloudSignedIn:true,
  cloudProfileId:'synthetic-tester',cloudUser:{id:'synthetic-tester',role:'translator',language:'Thai',assignmentVersion:1},cloudCanAccessAllLanguages:false,
- managedCatalogScope:'synthetic-scope',mtlConsentVersion:'mtl-v1',mtlShortcut:'f8',ctMtlCapabilities:{enabled:true},inlineEditor:true,
+ managedCatalogScope:'synthetic-scope',mtlConsentVersion:'mtl-v2',mtlShortcut:'f8',ctMtlCapabilities:{enabled:true,reviewArchive:true,consentVersion:'mtl-v2'},inlineEditor:true,
  translationEditorBcp47:'th',dictionary:[],mapClientTextClassNames:true,autocompleteShortcut:'ctrl-space',ctEditor:false};},
  computed:{...ct.computed,...mtl.computed,...debug.computed},watch:{...mtl.watch,...debug.watch},
  methods:{...ct.methods,...mtl.methods,...debug.methods,
   ctKeyboardOverlayOpen(){return false;},ctInlineUnitVisible(){return this.ctActive&&!this.ctEditor&&!this.ctInlineClosed;},ctCloseCompletion(){this.ctCompletion=null;},
   scheduleClientTextDictionaryMatches(){},ctRefreshDiagnostics(){},ctRefreshDraftSummaries(){},ctLoadHistory(){},ctPresence(){},
-  ctRefreshLayout(){},ctFocusRow(){},ctSync(){},ctMtlSync(){},ctClearDraftStageFailure(){},ctRememberDraftStageFailure(){},
+  ctRefreshLayout(){},ctFocusRow(){},ctSync(){},ctClearDraftStageFailure(){},ctRememberDraftStageFailure(){},
   ctDictionaryTarget(id=this.ctFocusedField){return [...document.querySelectorAll('[data-ct-target]')].find(input=>input.dataset.ctTarget===id);},
   ctEditorElement(){return document.querySelector('#fixture-editor');},appConfirm:async()=>true,
   fixtureExplicitActions(){
@@ -83,11 +85,22 @@ const options={
    const units=await this._fixtureStore.getUnits(scope);
    this.ctWorkspace={scope,metadata:{descriptors:seed.descriptors}};this.ctUnits=Vue.markRaw(units);this._ctUnitIndex=Vue.markRaw(new Map(units.map(unit=>[unit.id,unit])));
    this.ctSelection=units[0].id;this.ctValues=ClientTextState.valuesFor(units[0]);this.ctFocusedField=units[0].fields[0].id;
-   this.ctActive=true;this.ctEditor=false;this.ctMtlCapabilities={enabled:true};this._ctMtlDescriptors=Vue.markRaw(seed.descriptors);
+   this.ctActive=true;this.ctEditor=false;this.ctMtlCapabilities={enabled:true,reviewArchive:true,consentVersion:'mtl-v2'};this._ctMtlDescriptors=Vue.markRaw(seed.descriptors);
    this._fixtureJobs=new Map();this._fixtureReleases=[];this._fixtureDefer=false;this._fixtureAsync=false;this._fixtureStarts=0;this._fixtureCancels=0;this._fixturePollErrors=0;
    this._fixtureCancelDefer=false;this._fixtureCancelReleases=[];this._fixtureCancelFailures=0;
+   this._fixtureDismissals=[];this._fixtureArchiveFailures=0;this._fixtureArchiveLostAcks=0;this._fixtureArchiveDefer=false;this._fixtureArchiveReleases=[];
    this._cloud=Vue.markRaw({request:async(path,init={})=>{
-    if(path==='/v1/mtl/capabilities')return{enabled:true};
+    if(path==='/v1/mtl/capabilities')return{enabled:true,reviewArchive:true,consentVersion:'mtl-v2'};
+    if(path.includes('/dismissals')){
+     const body=structuredClone(init.body);this._fixtureDismissals.push({path,body});
+     if(body.consentVersion!=='mtl-v2')throw Object.assign(new Error('Updated private-retention consent is required.'),{status:403,code:'MTL_REVIEW_CONSENT_REQUIRED'});
+     if(this._fixtureArchiveDefer)await new Promise(resolve=>this._fixtureArchiveReleases.push(resolve));
+     if(this._fixtureArchiveFailures>0){this._fixtureArchiveFailures--;throw Object.assign(new Error('Dismissed on server; private review file is pending.'),{status:503,code:'MTL_REVIEW_ARCHIVE_PENDING'});}
+     if(this._fixtureArchiveLostAcks>0){this._fixtureArchiveLostAcks--;throw new TypeError('Synthetic lost acknowledgement');}
+     const candidate=(await this._fixtureStore.mtl.list(scope)).find(value=>value.id===(body.candidateId||decodeURIComponent(path.split('/').at(-2))));
+     const archive={id:'mtl-review_'+'a'.repeat(64),format:'sdeditor-mtl-dismissal-v1',status:'saved'};
+     return mode==='memory'?{dismissal:{candidateId:candidate.id,requestId:candidate.requestId,status:'dismissed',revision:2},archive}:{candidate:{...candidate,localDisposition:false,status:'dismissed',revision:2},archive};
+    }
     if(path.startsWith('/v1/admin/mtl/requests/'))return{diagnostics:{providerRequest:{model:'synthetic-connection-config',instructions:'Synthetic executed prompt <img src=x onerror="window.__debugXss=true">',input:[{role:'user',content:'Synthetic context'}]},context:{accessToken:'synthetic-secret'},upstreamResponse:{contentType:'text/event-stream; charset=utf-8',hasBody:true,readableBody:true,bodyUsed:false,bodyLocked:false,redirected:false,responseType:'cors'},lookup:{enabled:false,rounds:[]},validation:'passed',elapsedMs:12}};
     if(this._fixtureAsync){
      const snapshot=()=>({requestId:this._fixtureLive.body.requestId,status:this._fixtureLive.status,scope:{...scope,local:mode==='memory'},pollAfterMs:250,
@@ -125,7 +138,7 @@ const options={
     candidates:this.ctMtlCount,accepted:this.ctMtlAccepted(field),error:this.ctError||this.ctMtlError};},
   async memoryCount(){return (await this._fixtureStore.getMemory(this.ctWorkspace.scope))?.units?.length||0;}
  },
- template:'<div class="appRoot" data-density="compact"><main class="ctWorkspace" style="margin:24px;width:min(1200px,calc(100vw - 48px))"><h1>Synthetic MTL fixture</h1><button id="fixture-mode" @click="ctEditor=!ctEditor">Toggle full editor</button><button id="fixture-save" data-inline-focus-surface @click="ctSave()">Save</button><span v-if="ctMtlCount" class="ctMtlCount"><span class="ctMtlDot"></span>MTL {{ctMtlCount}}</span><table><tbody><tr :data-unit-id="ctSelection" @click="ctRowClick(ctCurrentUnit,$event)" @focusout="ctInlineFocusOut"><td><section id="fixture-editor" :class="ctEditor ? \'ctFull ctFullEditor\' : \'inlineEditor\'"><ct-fields v-if="ctCurrentUnit && !ctInlineClosed" :host="$root" :side="ctEditor ? \'both\' : \'translation\'"></ct-fields></section></td></tr></tbody></table><p class="fixture-error">{{ctError||ctMtlError}}</p></main><ct-mtl-debug-dialog v-if="ctMtlDebugAllowed && ctMtlDebugWindow" :host="$root"></ct-mtl-debug-dialog></div>'
+ template:'<div class="appRoot" data-density="compact"><main class="ctWorkspace" style="margin:24px;width:min(1200px,calc(100vw - 48px))"><h1>Synthetic MTL fixture</h1><button id="fixture-mode" @click="ctEditor=!ctEditor">Toggle full editor</button><button id="fixture-save" data-inline-focus-surface @click="ctSave()">Save</button><span v-if="ctMtlCount" class="ctMtlCount"><span class="ctMtlDot"></span>MTL {{ctMtlCount}}</span><table><tbody><tr :data-unit-id="ctSelection" @click="ctRowClick(ctCurrentUnit,$event)" @focusout="ctInlineFocusOut"><td><section id="fixture-editor" :class="ctEditor ? \'ctFull ctFullEditor\' : \'inlineEditor\'"><ct-fields v-if="ctCurrentUnit && !ctInlineClosed" :host="$root" :side="ctEditor ? \'both\' : \'translation\'"></ct-fields></section></td></tr></tbody></table><p class="fixture-error">{{ctError||ctMtlError}}</p></main><fixture-mtl-consent v-if="fixtureConsent"></fixture-mtl-consent><ct-mtl-debug-dialog v-if="ctMtlDebugAllowed && ctMtlDebugWindow" :host="$root"></ct-mtl-debug-dialog></div>'
 };
 const vue=Vue.createApp(options);vue.directive('tooltip',{});
 vue.component('ct-fields',ClientTextUI.fieldsComponent);vue.component('ct-target',ClientTextUI.targetComponent);
@@ -133,6 +146,7 @@ vue.component('editor-native-field',EditorComponents.NativeField);vue.component(
 vue.component('editor-diagnostic-meta',EditorComponents.DiagnosticMeta);vue.component('app-notice',EditorComponents.Notice);
 vue.component('ct-mtl-debug-dialog',ClientTextMtlDebug.Dialog);
 vue.component('ct-mtl-progress',ClientTextMtlProgress.Overlay);
+vue.component('fixture-mtl-consent',{template:${JSON.stringify('<section data-inline-focus-surface>'+consentHtml.replace('v-model="mtlConsentVersion"','v-model="$root.mtlConsentVersion"')+'</section>')}});
 app=vue.mount('#app');window.__mtlApp=app;
 document.addEventListener('keydown',event=>app.ctKey(event));await app.configure('memory');window.__mtlReady=true;
 })().catch(error=>{window.__mtlError=String(error.stack||error);console.error(error);});`;
@@ -152,6 +166,28 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
         await page.goto('http://127.0.0.1:'+server.address().port);await page.waitForFunction(()=>window.__mtlReady||window.__mtlError);
         assert.equal(await page.evaluate(()=>window.__mtlError),undefined,'Synthetic fixture initializes');
         const target=()=>page.locator('textarea[data-ct-target]').first(),snapshot=()=>page.evaluate(()=>window.__mtlApp.snapshot());
+        await page.evaluate(()=>{const app=window.__mtlApp;app.fixtureConsent=true;app.mtlConsentVersion='mtl-v1';});
+        const consent=page.getByRole('checkbox',{name:/Allow MTL requests and private review retention/});
+        assert.equal(await consent.isChecked(),false,'Historical v1 consent is never silently promoted');
+        assert.equal(await page.evaluate(()=>window.__mtlApp.mtlConsentVersion),'mtl-v1');
+        assert.match(await consent.locator('..').textContent(),/source, prompt and context.*including for local workbooks/);
+        await consent.check();assert.equal(await page.evaluate(()=>window.__mtlApp.mtlConsentVersion),'mtl-v2');
+        assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureJobs.size),0,'Consent itself never invokes translation');
+        await page.locator('.ctMtlButton').click();await page.waitForFunction(()=>window.__mtlApp.snapshot().visible==='Generated {0}');
+        await target().fill('Rejected edited legacy text {0}');
+        for(const version of ['mtl-v1','']){
+            await page.evaluate(version=>{window.__mtlApp.mtlConsentVersion=version;},version);
+            await page.getByRole('button',{name:'Dismiss',exact:true}).click();
+            assert.match((await snapshot()).error,/updated.*private review-retention/);
+            assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureDismissals.length),0,'Unapproved rejection never uploads');
+            assert.equal((await snapshot()).candidates,1);assert.equal(await page.evaluate(()=>window.__mtlApp.mtlConsentVersion),version);
+        }
+        await consent.check();await page.getByRole('button',{name:'Dismiss',exact:true}).click();
+        await page.waitForFunction(()=>window.__mtlApp._fixtureDismissals.length===1&&!window.__mtlApp.ctMtlDismissals.length);
+        assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureDismissals[0].body.consentVersion),'mtl-v2');
+        assert.equal((await snapshot()).underlying,'Confirmed {0}');
+        await page.evaluate(()=>window.__mtlApp.configure('memory'));
+        await page.evaluate(()=>{window.__mtlApp.fixtureConsent=false;});
         const auditCopy=async()=>{
             const copy=await page.locator('body').evaluate(node=>[node.innerText,...[...node.querySelectorAll('[title],[aria-label],[placeholder]')]
                 .filter(item=>item.getClientRects().length).flatMap(item=>['title','aria-label','placeholder'].map(key=>item.getAttribute(key)||''))].join('\n'));
@@ -290,7 +326,52 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             assert.equal(await page.evaluate(()=>window.__mtlApp.ctInlineClosed),false,'Dismiss preserves inline editor');
             assert.equal((await snapshot()).underlying,'Unconfirmed ordinary {0}');assert.equal(await target().evaluate(node=>node===document.activeElement),true,'Dismiss returns focus to the stable field');
             for(const full of [false,true]){
-                await page.evaluate(async ({mode,full})=>{const app=window.__mtlApp;await app.configure(mode);app.ctEditor=full;app._fixtureAsync=true;app.ctMtlCapabilities={enabled:true,delivery:'poll-v1'};},{mode,full});
+                await page.evaluate(async({mode,full})=>{const app=window.__mtlApp;await app.configure(mode);app.ctEditor=full;},{mode,full});
+                await target().fill('Archive underlying draft {0}');
+                const reviewedBeforeArchive=await page.evaluate(()=>JSON.stringify(window.__mtlApp.ctReviewed));
+                await page.locator('.ctMtlButton').click();await page.waitForFunction(()=>window.__mtlApp.snapshot().visible==='Generated {0}');
+                await target().fill('Rejected edited translation {0}');
+                await page.evaluate(()=>{window.__mtlApp._fixtureArchiveFailures=1;window.__mtlApp._fixtureArchiveDefer=true;});
+                await page.getByRole('button',{name:'Dismiss',exact:true}).click();
+                await page.waitForFunction(()=>window.__mtlApp._fixtureArchiveReleases.length===1);
+                assert.equal(await page.evaluate(()=>window.__mtlApp.ctMtlDismiss(window.__mtlApp.ctCurrentUnit.fields[0])),false,'Repeated Dismiss cannot stage a second archive');
+                await page.evaluate(()=>{const app=window.__mtlApp;app._fixtureArchiveDefer=false;app._fixtureArchiveReleases.shift()();});
+                await page.waitForFunction(()=>window.__mtlApp.ctMtlDismissals[0]?.state==='archive-pending');
+                assert.match(await page.locator('.ctMtlDismissal').textContent(),/file is still pending/);
+                assert.equal((await snapshot()).underlying,'Archive underlying draft {0}');
+                assert.equal(await page.evaluate(()=>JSON.stringify(window.__mtlApp.ctReviewed)),reviewedBeforeArchive);
+                assert.equal(await page.evaluate(()=>window.__mtlApp.exportTarget()),'Confirmed {0}','Rejected text and pending archive never export');
+                assert.equal(await page.locator('.ctMtlButton').isDisabled(),true,'Pending archive cannot be replaced by generation');
+                assert.equal((await page.locator('.ctMtlDismissal').textContent()).includes('closing or reloading loses'),mode==='memory');
+                const firstDismissal=await page.evaluate(()=>JSON.stringify(window.__mtlApp._fixtureDismissals[0]));
+                const firstBody=JSON.parse(firstDismissal).body;assert.equal(firstBody.reviewedText,'Rejected edited translation {0}');
+                if(mode==='memory')assert.equal(firstBody.generatedText,'Generated {0}');else assert.equal(firstBody.generatedText,undefined);
+                for(const theme of ['light','grey','dark','modern-dark']){
+                    await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
+                    await page.screenshot({path:join(outDir,mode+'-'+(full?'full':'inline')+'-archive-pending-'+theme+'.png'),fullPage:true});
+                }
+                await page.evaluate(()=>{window.__mtlApp._fixtureArchiveLostAcks=1;});
+                await page.getByRole('button',{name:'Retry dismissal upload',exact:true}).focus();await page.keyboard.press('Enter');
+                await page.waitForFunction(()=>window.__mtlApp.ctMtlDismissals[0]?.state==='uncertain');
+                assert.equal(await target().evaluate(node=>node===document.activeElement),true,'Retry preserves field focus');
+                await page.getByRole('button',{name:'Retry dismissal upload',exact:true}).click();await page.waitForFunction(()=>!window.__mtlApp.ctMtlDismissals.length);
+                assert.equal(await page.locator('.ctMtlDismissal').count(),0);assert.equal(await page.locator('.ctMtlButton').isDisabled(),false);
+                const requests=await page.evaluate(()=>window.__mtlApp._fixtureDismissals.map(value=>JSON.stringify(value)));
+                assert.deepEqual(requests,[firstDismissal,firstDismissal,firstDismissal],'503, lost acknowledgement and success reuse the exact command');
+                assert.equal(await page.evaluate(()=>window.__mtlApp.ctInlineClosed),false);assert.equal((await snapshot()).error,'');
+                if(mode==='memory'){
+                    await page.evaluate(async()=>{await window.__mtlApp.configure('memory');});await page.locator('.ctMtlButton').click();
+                    await page.waitForFunction(()=>window.__mtlApp.snapshot().visible==='Generated {0}');
+                    await page.context().setOffline(true);await page.getByRole('button',{name:'Dismiss',exact:true}).click();
+                    await page.waitForFunction(()=>window.__mtlApp.ctMtlDismissals.length===1);
+                    assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureDismissals.length),0,'Offline local dismissal performs no network request');
+                    assert.match(await page.locator('.ctMtlDismissal').textContent(),/closing or reloading loses/);
+                    await page.context().setOffline(false);await page.waitForFunction(()=>!window.__mtlApp.ctMtlDismissals.length);
+                    assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureDismissals.length),1,'Reconnect sends the single original local dismissal');
+                }
+            }
+            for(const full of [false,true]){
+                await page.evaluate(async ({mode,full})=>{const app=window.__mtlApp;await app.configure(mode);app.ctEditor=full;app._fixtureAsync=true;app.ctMtlCapabilities={enabled:true,reviewArchive:true,consentVersion:'mtl-v2',delivery:'poll-v1'};},{mode,full});
                 const memoryBeforeProgress=await page.evaluate(()=>window.__mtlApp.memoryCount());
                 await target().fill('Original draft {0}');await target().focus();await page.locator('.ctMtlButton').click();
                 await page.waitForSelector('.ctMtlSkeleton');await page.waitForFunction(()=>Object.values(window.__mtlApp.ctMtlLive).some(value=>value.canCancel));assert.equal(await target().getAttribute('readonly'),'');
@@ -379,7 +460,7 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
                 await page.locator('.ctMtlButton').click();await page.waitForSelector('.ctMtlSkeleton');await page.waitForFunction(()=>Object.values(window.__mtlApp.ctMtlLive).some(value=>value.canCancel));
                 await page.evaluate(()=>{window.__mtlApp.cloudSignedIn=false;});await page.waitForFunction(()=>!Object.keys(window.__mtlApp.ctMtlRequests).length);
                 assert.equal(await page.locator('.ctMtlInlineOverlay').count(),0);assert.equal(await target().getAttribute('readonly'),null);assert.equal(await target().inputValue(),'Original draft {0}');
-                results.push({mode,editor:full?'full':'inline',themes:4,stream:['skeleton','read-only','escaped text','reduced motion','reconnect same request','keyboard spinner cancellation','repeated cancellation','cancel failure/retry','draft restored','validated completion','invalid completion','choice/review/restore guards','pending confirmation guard','completed-during-confirmation guard','Saved/history/outbox unchanged','logout clears'],exports:'original until Accept and Save'});
+                results.push({mode,editor:full?'full':'inline',themes:4,archive:['original and edited rejection separate','one dismissal command','503 file pending','lost acknowledgement exact retry','keyboard retry focus','pending upload blocks generation','private archive receipt',...(mode==='memory'?['offline memory queue','online same command']:[])],stream:['skeleton','read-only','escaped text','reduced motion','reconnect same request','keyboard spinner cancellation','repeated cancellation','cancel failure/retry','draft restored','validated completion','invalid completion','choice/review/restore guards','pending confirmation guard','completed-during-confirmation guard','Saved/history/outbox unchanged','logout clears'],exports:'original until Accept and Save'});
             }
         }
         assert.deepEqual(external,[],'No external request is made');assert.deepEqual(errors,[],'Real native controls render without page errors');

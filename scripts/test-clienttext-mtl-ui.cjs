@@ -14,7 +14,7 @@ function harness(changes={}){
     const app={...UI.mixin.data(),ctActive:true,ctBusy:false,ctHistoryViewer:false,ctWorkspace:{scope},ctSelection:original.id,
         ctValues:S.valuesFor(original),ctReviewed:{},ctDraftDirty:false,ctSaved:{},ctUnits:[original],_ctUnitIndex:new Map([[original.id,original]]),
         cloudSignedIn:true,cloudProfileId:scope.accountId,cloudUser:{id:scope.accountId,role:'translator',language:scope.language,assignmentVersion:1},
-        cloudCanAccessAllLanguages:false,mtlConsentVersion:'mtl-v1',mtlShortcut:'disabled',ctMtlCapabilities:{enabled:true},
+        cloudCanAccessAllLanguages:false,mtlConsentVersion:'mtl-v2',mtlShortcut:'disabled',ctMtlCapabilities:{enabled:true,reviewArchive:true,consentVersion:'mtl-v2'},
         ctContext:()=>({scope:structuredClone(scope),epoch}),ctCurrent:ctx=>ctx.epoch===epoch&&JSON.stringify(ctx.scope)===JSON.stringify(scope),
         ctStorage:()=>normal,ctCloseCompletion(){},
         ctEdited(field){if(this.ctMtlCandidate(field))return;this.ctMtlUnderlyingEdited(field);this.ctReviewed[field.id]=S.sourceHash(field.source);this.ctDraftDirty=true;ordinaryEdits++;},
@@ -81,7 +81,7 @@ test('copy completion is fenced after account/context changes and repeated copy 
     }finally{h.dialog.resetCopy();if(original)Object.defineProperty(global,'navigator',original);else delete global.navigator;}
 });
 function pollingHarness(){
-    const h=harness();h.app.ctMtlCapabilities={enabled:true,delivery:'poll-v1'};
+    const h=harness();h.app.ctMtlCapabilities={enabled:true,reviewArchive:true,consentVersion:'mtl-v2',delivery:'poll-v1'};
     h.app.ctMtlRequestWait=async()=>{};
     h.status=(body,changes={})=>({requestId:body.requestId,status:'running',scope:{...h.scope,local:String(h.scope.groupId).startsWith('local:')},
         progress:{revision:1,phase:'generating',translation:'Working {0}',provisional:true},pollAfterMs:250,...changes});
@@ -417,6 +417,138 @@ test('Dismiss restores underlying draft and never marks Source reviewed',async()
     assert.equal(h.app.ctInputValues[h.field.id],'Unconfirmed draft {0}');assert.equal(h.app.ctMtlCount,0);
     assert.deepEqual(h.app.ctReviewed,{});assert.equal(h.ordinaryEdits(),0);
 });
+
+test('explicit dismissal captures the original output and edited rejection once, preserving the ordinary draft',async()=>{
+    const h=harness();h.scope.groupId='local:test:dismiss';h.app.ctValues[h.field.id]='Underlying draft {0}';const c=await h.put();
+    await h.app.ctMtlShow(h.field);h.app.ctInputValues[h.field.id]='Rejected edit {0}';await h.reviews();
+    const wait=deferred(),dismiss=h.mtl.dismiss;let staged=0;
+    h.mtl.dismiss=async(...args)=>{staged++;await wait.promise;return dismiss(...args);};
+    const first=h.app.ctMtlDismiss(h.field);assert.equal(h.app.ctMtlDismissBusyFor(h.field),true);
+    assert.equal(await h.app.ctMtlDismiss(h.field),false);assert.equal(await h.app.ctMtlGenerate(h.field),false);
+    assert.equal(await h.app.ctMtlAccept(h.field),false);assert.equal(await h.app.ctMtlShow(h.field),false);
+    wait.resolve();assert.equal(await first,true);assert.equal(staged,1);assert.equal(h.app.ctMtlDismissBusyFor(h.field),false);
+    const op=h.mtl.getOutbox(h.scope)[0];assert.equal(op.candidateId,c.id);assert.equal(op.requestBody.generatedText,c.generatedText);
+    assert.equal(op.requestBody.reviewedText,'Rejected edit {0}');assert.equal(h.app.ctMtlPendingDismissal(h.field).mutationId,op.mutationId);
+    assert.equal(h.app.ctMtlFieldValue(h.field),'Underlying draft {0}');assert.deepEqual(h.app.ctReviewed,{});assert.equal(h.app.ctDraftDirty,false);
+    assert.equal(h.app.ctMtlCanGenerate(h.field),false);assert.match(h.app.ctMtlHint(h.field),/pending dismissal/);
+});
+
+test('legacy candidates require explicit v2 retention consent before a new dismissal can stage edited rejection text',async()=>{
+    for(const consent of ['', 'mtl-v1','mtl-v2']){
+        const h=harness();h.scope.groupId='local:test:legacy-consent';h.app.mtlConsentVersion=consent;
+        const c=await h.put(candidate(h.original,'legacy-v1-request'));await h.app.ctMtlShow(h.field);
+        h.app.ctInputValues[h.field.id]='Legacy edited rejection {0}';await h.reviews();
+        const before=structuredClone(h.app.ctMtlReviews),dismiss=h.mtl.dismiss;let staged=0;
+        h.mtl.dismiss=(...args)=>{staged++;return dismiss(...args);};
+        assert.equal(await h.app.ctMtlDismiss(h.field),consent==='mtl-v2');
+        assert.equal(staged,consent==='mtl-v2'?1:0);assert.equal(h.app.mtlConsentVersion,consent,'no implicit consent promotion');
+        const operations=h.mtl.getOutbox(h.scope);
+        if(consent==='mtl-v2'){
+            assert.equal(operations.length,1);assert.equal(operations[0].requestBody.generatedText,c.generatedText);
+            assert.equal(operations[0].requestBody.reviewedText,'Legacy edited rejection {0}');
+        }else{
+            assert.deepEqual(operations,[]);assert.equal(h.mtl.getCandidate(h.scope,c.id).status,'pending');
+            assert.deepEqual(h.app.ctMtlReviews,before);assert.match(h.app.ctMtlError,/updated.*private review-retention/);
+        }
+        assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');assert.deepEqual(h.app.ctReviewed,{});
+    }
+});
+
+test('revoking retention consent before the async dismissal storage guard prevents staging',async()=>{
+    for(const consent of ['', 'mtl-v1']){
+        const h=harness(),wait=deferred();h.scope.groupId='local:test:consent-guard';const c=await h.put(candidate(h.original,'legacy-v1-request'));
+        await h.app.ctMtlShow(h.field);h.app.ctInputValues[h.field.id]='Private edited rejection {0}';await h.reviews();
+        const before=structuredClone(h.app.ctMtlReviews),dismiss=h.mtl.dismiss;
+        h.mtl.dismiss=async(...args)=>{await wait.promise;return dismiss(...args);};
+        const pending=h.app.ctMtlDismiss(h.field);assert.equal(h.app.ctMtlDismissBusyFor(h.field),true);
+        h.app.mtlConsentVersion=consent;wait.resolve();assert.equal(await pending,false);
+        assert.deepEqual(h.mtl.getOutbox(h.scope),[]);assert.equal(h.mtl.getCandidate(h.scope,c.id).status,'pending');
+        assert.deepEqual(h.app.ctMtlReviews,before);assert.equal(h.app.ctMtlDismissBusyFor(h.field),false);
+    }
+});
+
+test('previously consented pending dismissal retries retain their exact command after consent is withdrawn',async t=>{
+    const previous=globalThis.ClientTextMtlSync;globalThis.ClientTextMtlSync=require('../public/clientTextMtlSync.js');t.after(()=>{globalThis.ClientTextMtlSync=previous;});
+    for(const consent of ['', 'mtl-v1']){
+        const h=harness();h.scope.groupId='local:test:consent-retry';const c=await h.put(candidate(h.original,'legacy-v1-request'));
+        await h.app.ctMtlShow(h.field);h.app.ctInputValues[h.field.id]='Authorized edited rejection {0}';await h.reviews();
+        let fail=true;const calls=[];h.app._cloud.request=async(path,options)=>{calls.push({path,body:structuredClone(options.body)});
+            if(fail)throw Object.assign(new Error('Private file pending'),{status:503,code:'MTL_REVIEW_ARCHIVE_PENDING'});
+            return{dismissal:{candidateId:c.id,requestId:c.requestId,status:'dismissed',revision:2},archive:{id:'mtl-review_'+'a'.repeat(64),format:'sdeditor-mtl-dismissal-v1',status:'saved'}};
+        };
+        try{
+            assert.equal(await h.app.ctMtlDismiss(h.field),true);await h.app.ctMtlSync();
+            const original=structuredClone(h.mtl.getOutbox(h.scope)[0].requestBody);assert.equal(original.reviewedText,'Authorized edited rejection {0}');
+            h.app.mtlConsentVersion=consent;UI.mixin.watch.ctMtlRequestScopeKey.handler.call(h.app);await settle();fail=false;
+            assert.equal(await h.app.ctMtlRetryDismissals(),true);assert.deepEqual(h.mtl.getOutbox(h.scope),[]);
+            assert.equal(h.app.mtlConsentVersion,consent);assert.ok(calls.every(value=>JSON.stringify(value.body)===JSON.stringify(original)));
+            assert.ok(calls.length>=2);assert.ok(calls.every(value=>value.path.endsWith('/dismissals')),'retry never invokes generation');
+        }finally{h.app.ctMtlReset();}
+    }
+});
+
+test('new translation requires explicit v2 retention consent and an archive-capable server; v1 recovery remains GET-only',async()=>{
+    const h=harness();let requests=0;h.app._cloud.request=async()=>{requests++;throw new Error('No generation expected');};
+    h.app.mtlConsentVersion='mtl-v1';assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.match(h.app.ctMtlError,/updated.*retention/);
+    h.app.mtlConsentVersion='mtl-v2';h.app.ctMtlCapabilities={enabled:true,consentVersion:'mtl-v1'};
+    assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.match(h.app.ctMtlError,/upgrade/);
+    await h.put();assert.equal(await h.app.ctMtlDismiss(h.field),false);assert.equal(h.mtl.getOutbox(h.scope).length,0);assert.equal(requests,0);
+    h.app.ctMtlGenerations=[h.mtl.putGeneration(h.scope,{requestId:'old-v1',unitId:h.original.id,fieldId:h.field.id,status:'uncertain',
+        sourceHash:S.sourceHash(h.field.source),rawSourceHash:M.rawSourceHash(h.field.source),assetHash:descriptor.assetHash,parserVersion:descriptor.parserVersion,
+        baseTargetHash:S.hash(h.field.target),createdAt:1,requestBodyHash:'a'.repeat(64)})];
+    h.app.mtlConsentVersion='mtl-v1';h.app._cloud.request=async(path,options={})=>{requests++;assert.equal(options.method,undefined);assert.equal(path,'/v1/mtl/requests/old-v1');return{candidate:candidate(h.original,'old-v1')};};
+    assert.equal(await h.app.ctMtlGenerate(h.field),true);assert.equal(requests,1);
+});
+
+test('archive-pending stays visible until its own receipt and account changes fence retries and late acknowledgements',async t=>{
+    const previous=globalThis.ClientTextMtlSync;globalThis.ClientTextMtlSync=require('../public/clientTextMtlSync.js');t.after(()=>{globalThis.ClientTextMtlSync=previous;});
+    const h=harness();h.scope.groupId='local:test:archive-ui';await h.put();const calls=[];let fail=true,wait;
+    h.app._cloud.request=async(path,options={})=>{calls.push({path,body:structuredClone(options.body)});
+        if(fail)throw Object.assign(new Error('Dismissed on server; private review file is pending.'),{status:503,code:'MTL_REVIEW_ARCHIVE_PENDING'});
+        if(wait)await wait.promise;
+        return{dismissal:{candidateId:options.body.candidateId,requestId:path.split('/').at(-2),status:'dismissed',revision:2},archive:{id:'mtl-review_'+'a'.repeat(64),format:'sdeditor-mtl-dismissal-v1',status:'saved'}};
+    };
+    t.after(()=>h.app.ctMtlReset());assert.equal(await h.app.ctMtlDismiss(h.field),true);await h.app.ctMtlSync();
+    assert.equal(h.app.ctMtlDismissals[0].state,'archive-pending');assert.match(h.app.ctMtlDismissalText(h.app.ctMtlDismissals[0]),/file is still pending/);
+    assert.match(h.app.ctMtlError,/private review file/);h.app.ctMtlClearOperationError();assert.match(h.app.ctMtlError,/private review file/);
+    fail=false;wait=deferred();const retry=h.app.ctMtlRetryDismissals();await settle();assert.ok(calls.length>=2);
+    const before=calls.length;h.app.cloudSignedIn=false;UI.mixin.watch.ctMtlRequestScopeKey.handler.call(h.app);wait.resolve();await retry;await settle();
+    assert.equal(h.mtl.getOutbox(h.scope).length,1);assert.deepEqual(h.app.ctMtlDismissals,[]);assert.equal(h.app._ctMtlSync,null);
+    assert.equal(await h.app.ctMtlRetryDismissals(),false);assert.equal(calls.length,before);
+    h.app.cloudSignedIn=true;wait=null;UI.mixin.watch.ctMtlRequestScopeKey.handler.call(h.app);await settle();await h.app.ctMtlRetryDismissals();
+    assert.equal(h.app.ctMtlDismissals.length,0);assert.equal(h.app.ctMtlError,'');
+    assert.ok(calls.every(value=>JSON.stringify(value)===JSON.stringify(calls[0])),'every retry has the original path and body');
+});
+
+test('access or source changes while dismissal is checkpointing cannot stage a new archive command',async()=>{
+    for(const change of [h=>{h.app.cloudSignedIn=false;},h=>{h.original.fields[0]={...h.field,source:'Changed {0}'};}]){
+        const h=harness();h.scope.groupId='local:test:fenced';await h.put();const wait=deferred(),dismiss=h.mtl.dismiss;
+        h.mtl.dismiss=async(...args)=>{await wait.promise;return dismiss(...args);};
+        const pending=h.app.ctMtlDismiss(h.field);change(h);wait.resolve();assert.equal(await pending,false);assert.deepEqual(h.mtl.getOutbox(h.scope),[]);
+    }
+});
+
+test('late queue reads cannot restore stale pending notices after newer reads or logout',async()=>{
+    for(const logout of [false,true]){
+        const h=harness(),wait=deferred();h.scope.groupId='local:test:read-guard';await h.put();await h.app.ctMtlDismiss(h.field);
+        const operations=h.mtl.getOutbox(h.scope),read=h.mtl.getOutbox;
+        h.mtl.getOutbox=()=>wait.promise;const pending=h.app.ctMtlRefreshDismissals();
+        if(logout){h.app.cloudSignedIn=false;UI.mixin.watch.ctMtlRequestScopeKey.handler.call(h.app);}
+        else{h.mtl.getOutbox=()=>[];await h.app.ctMtlRefreshDismissals();}
+        wait.resolve(operations);assert.equal(await pending,false);assert.deepEqual(h.app.ctMtlDismissals,[]);h.mtl.getOutbox=read;
+    }
+});
+
+test('workspace-level explicit retry can resend a conflict from another selected field without changing its body',async t=>{
+    const previous=globalThis.ClientTextMtlSync;globalThis.ClientTextMtlSync=require('../public/clientTextMtlSync.js');t.after(()=>{globalThis.ClientTextMtlSync=previous;});
+    const h=harness();h.scope.groupId='local:test:conflict';const c=await h.put();
+    h.mtl.dismiss(h.scope,c,{mutationId:'exact-conflict',reviewedText:'Rejected',archiveRequired:true,consentVersion:'mtl-v2'});
+    h.mtl.markSending(h.scope,'exact-conflict','conflict');await h.app.ctMtlRefreshDismissals();const original=h.mtl.getOutbox(h.scope)[0].requestBody;
+    const calls=[];h.app._cloud.request=async(path,options)=>{calls.push({path,body:options.body});return{dismissal:{candidateId:c.id,requestId:c.requestId,status:'dismissed',revision:2},
+        archive:{id:'mtl-review_'+'a'.repeat(64),format:'sdeditor-mtl-dismissal-v1',status:'saved'}};};
+    t.after(()=>h.app.ctMtlReset());assert.equal(await h.app.ctMtlRetryDismissals(),true);assert.equal(calls.length,1);assert.deepEqual(calls[0].body,original);
+    assert.deepEqual(h.app.ctMtlDismissals,[]);
+});
 test('source changes hide exact-bound candidates silently, including normalized audio markers',async()=>{
     const h=harness();await h.put();h.original.fields[0]={...h.field,source:'[NOAUDIO] '+h.field.source};
     const field=h.original.fields[0];assert.equal(S.sourceHash(h.field.source),S.sourceHash(field.source));
@@ -617,7 +749,7 @@ test('starting MTL moves focus off editor action buttons before disabling them, 
 test('only own selected language and Manager/Admin can generate; consent and provider stay gated',async()=>{
     const h=harness();h.app.cloudUser.language='German';assert.equal(h.app.ctMtlCanGenerate(h.field),false);
     h.app.cloudUser.role='manager';assert.equal(h.app.ctMtlCanGenerate(h.field),true);
-    h.app.mtlConsentVersion='';assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.equal(h.app.ctMtlError,'Review and enable the MTL data-sharing choice in MTL settings first.');
+    h.app.mtlConsentVersion='';assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.match(h.app.ctMtlError,/updated MTL data-sharing and private review-retention/);
     h.app.mtlConsentVersion='mtl-v1';h.app.ctMtlCapabilities={enabled:false};assert.equal(await h.app.ctMtlGenerate(h.field),false);
     assert.equal(h.app.ctMtlCandidates.length,0);
 });

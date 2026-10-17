@@ -14,6 +14,7 @@ function candidate(original=unit(),overrides={}){const field=original.fields[0];
 function prepared(){const f=fixture();for(const name of Store.names)if(!f.tables.has(name))f.tables.set(name,new Map());
     return {...f,mtl:Store.create({openDb:async()=>f.db})};}
 const review=c=>({candidateId:c.id,candidateRevision:c.revision,rawSourceHash:c.rawSourceHash,text:'Edited MTL draft'});
+const archive={id:'mtl-review_'+'a'.repeat(64),format:'sdeditor-mtl-dismissal-v1',status:'saved'};
 async function tx(f,names,action){const transaction=f.db.transaction(names,'readwrite'),done=new Promise((resolve,reject)=>{
     transaction.oncomplete=resolve;transaction.onabort=transaction.onerror=()=>reject(transaction.error||new Error('Aborted'));});
     try{const result=await action(transaction);await done;return result;}catch(error){transaction.abort();await done.catch(()=>{});throw error;}}
@@ -87,6 +88,99 @@ test('MTL dismissal commits candidate, exact outbox body and receipt atomically 
     await f.mtl.acknowledge(scope,operation,{candidate:{...c,status:'dismissed',revision:2}});
     assert.equal((await f.mtl.getOutbox(scope)).length,0);assert.equal((await f.mtl.getCandidate(scope,c.id)).revision,2);
     await assert.rejects(f.mtl.dismiss(scope,{...c,revision:2},{mutationId:'dismiss'}),error=>error.code==='MTL_RECEIPT_MISMATCH');
+});
+
+test('shared archive dismissal retains original output and the exact optional edited rejection until a valid receipt',async()=>{
+    for(const reviewedText of [undefined,'Edited rejection','']){
+        const f=prepared(),c=candidate();await f.mtl.putCandidate(scope,c);
+        const options={mutationId:'archive-dismiss',archiveRequired:true,consentVersion:'mtl-v2',...(reviewedText===undefined?{}:{reviewedText})};
+        await f.mtl.dismiss(scope,c,options);assert.equal((await f.mtl.dismiss(scope,c,options)).replayed,true);
+        const op=(await f.mtl.getOutbox(scope))[0];
+        assert.deepEqual(op.requestBody,{mutationId:options.mutationId,candidateRevision:1,consentVersion:'mtl-v2',...(reviewedText===undefined?{}:{reviewedText})});
+        assert.equal(op.candidate.generatedText,c.generatedText);assert.equal(op.archiveRequired,true);
+        for(const bad of [undefined,{...archive,status:'pending'},{...archive,format:'other'},{...archive,id:'untrusted-id'}]){
+            await assert.rejects(f.mtl.acknowledge(scope,op,{candidate:{...c,status:'dismissed',revision:2},archive:bad}),e=>e.code==='MTL_REVIEW_ARCHIVE_UNCONFIRMED');
+            assert.equal((await f.mtl.getOutbox(scope)).length,1);
+        }
+        await f.mtl.acknowledge(scope,op,{candidate:{...c,status:'dismissed',revision:2},archive});
+        assert.deepEqual(await f.mtl.getOutbox(scope),[]);assert.equal((await f.mtl.getCandidate(scope,c.id)).generatedText,c.generatedText);
+        for(const name of [CT.stores.saved,CT.stores.drafts,CT.stores.history,CT.stores.memory,CT.stores.outbox])assert.equal(f.tables.get(name).size,0,name);
+    }
+});
+
+test('new archive commands cannot persist without explicit v2 consent at either storage boundary',async()=>{
+    for(const local of [false,true])for(const consentVersion of [undefined,'','mtl-v1']){
+        const f=prepared(),store=local?Memory.create():f.mtl,c=candidate(),selected=local?{...scope,groupId:'local:test:consent'}:scope;
+        await store.putCandidate(selected,c);
+        await assert.rejects(async()=>store.dismiss(selected,c,{mutationId:'unapproved',archiveRequired:true,reviewedText:'Private rejected text',
+            ...(consentVersion===undefined?{}:{consentVersion})}),e=>e.code==='MTL_REVIEW_CONSENT_REQUIRED');
+        assert.deepEqual(await store.getOutbox(selected),[]);assert.equal((await store.getCandidate(selected,c.id)).status,'pending');
+    }
+});
+
+test('durable dismissal rechecks consent after opening storage and rolls back an unapproved command',async()=>{
+    const f=prepared(),c=candidate();await f.mtl.putCandidate(scope,c);let release,consent='mtl-v2';
+    const waiting=new Promise(resolve=>{release=resolve;}),store=Store.create({openDb:async()=>{await waiting;return f.db;}});
+    const pending=store.dismiss(scope,c,{mutationId:'revoked',archiveRequired:true,consentVersion:'mtl-v2',reviewedText:'Private rejected text',guard:()=>consent==='mtl-v2'});
+    consent='';release();await assert.rejects(pending,e=>e.stale===true);
+    assert.deepEqual(await f.mtl.getOutbox(scope),[]);assert.equal((await f.mtl.getCandidate(scope,c.id)).status,'pending');
+});
+
+test('archive-pending and lost acknowledgement replay the identical dismissal after a restart with no generation',async()=>{
+    for(const local of [false,true]){
+        const f=prepared(),selected=local?{...scope,groupId:'local:test:archive'}:scope,c=candidate(),calls=[];
+        const store=local?Memory.create():f.mtl;await store.putCandidate(selected,c);
+        await store.dismiss(selected,c,{mutationId:'retained-command',reviewedText:'Rejected edited text',archiveRequired:true,consentVersion:'mtl-v2'});
+        let attempt=0;
+        const options={scope:selected,local,store,request:async(path,init)=>{
+            calls.push({path,body:structuredClone(init.body)});assert.equal(init.method,'POST');assert.match(path,/\/dismissals\??/);
+            if(++attempt===1)throw Object.assign(new Error('Private file pending'),{status:503,code:'MTL_REVIEW_ARCHIVE_PENDING'});
+            if(attempt===2)throw new TypeError('Lost acknowledgement');
+            return local?{dismissal:{candidateId:c.id,requestId:c.requestId,status:'dismissed',revision:2},archive}:{candidate:{...c,status:'dismissed',revision:2},archive};
+        }};
+        let sync=Sync.create(options);await assert.rejects(sync.flush(),e=>e.code==='MTL_REVIEW_ARCHIVE_PENDING');
+        assert.equal((await store.getOutbox(selected))[0].state,'archive-pending');sync.stop();
+        // A fresh client/server connection uses the committed operation, even if
+        // a shared event already reports that the candidate was dismissed.
+        if(!local)await store.applyRemote(selected,{candidates:[{...c,status:'dismissed',revision:2}],sequence:2});
+        sync=Sync.create({...options,store:local?store:Store.create({openDb:async()=>f.db})});
+        await assert.rejects(sync.flush(),/Lost acknowledgement/);assert.equal((await store.getOutbox(selected))[0].state,'uncertain');
+        assert.equal((await sync.flush()).uploaded,1);assert.deepEqual(calls[0],calls[1]);assert.deepEqual(calls[1],calls[2]);
+        assert.deepEqual(await store.getOutbox(selected),[]);assert.equal((await store.getCandidate(selected,c.id)).generatedText,c.generatedText);
+        if(local){assert.deepEqual(calls[0].body,{mutationId:'retained-command',candidateId:c.id,candidateRevision:1,generatedText:c.generatedText,consentVersion:'mtl-v2',reviewedText:'Rejected edited text'});
+            assert.equal(calls[0].path,'/v1/mtl/local/requests/'+c.requestId+'/dismissals');}
+        else assert.deepEqual(calls[0].body,{mutationId:'retained-command',candidateRevision:1,consentVersion:'mtl-v2',reviewedText:'Rejected edited text'});
+        sync.stop();
+    }
+});
+
+test('local offline dismissal is memory-only, guarded on reconnect, and cannot acknowledge another request',async()=>{
+    const store=Memory.create(),selected={...scope,groupId:'local:test:offline'},c=candidate(),calls=[];
+    store.putCandidate(selected,c);store.dismiss(selected,c,{mutationId:'offline',archiveRequired:true,consentVersion:'mtl-v2',reviewedText:''});
+    let offline=true,current=true;
+    const sync=Sync.create({scope:selected,local:true,store,isCurrent:()=>current,offline:()=>offline,request:async(path,init)=>{
+        calls.push({path,body:structuredClone(init.body)});return{dismissal:{candidateId:c.id,requestId:c.requestId,status:'dismissed',revision:2},archive};
+    }});
+    assert.equal((await sync.flush()).pending,1);await sync.pull();assert.deepEqual(calls,[]);
+    const operation=store.getOutbox(selected)[0];
+    assert.throws(()=>store.acknowledge(selected,operation,{dismissal:{candidateId:c.id,requestId:'another',status:'dismissed',revision:2},archive}),e=>e.code==='MTL_RECEIPT_MISMATCH');
+    assert.deepEqual(store.getOutbox({...selected,accountId:'other'}),[]);
+    offline=false;current=false;await assert.rejects(sync.flush(),e=>e.stale);assert.deepEqual(calls,[]);
+    current=true;assert.equal((await sync.flush()).uploaded,1);sync.stop();
+    const second=Memory.create();second.putCandidate(selected,c);second.dismiss(selected,c,{mutationId:'unsent',archiveRequired:true,consentVersion:'mtl-v2'});
+    second.dispose();assert.throws(()=>second.getOutbox(selected),/disposed/);assert.deepEqual(Memory.create().getOutbox(selected),[]);
+});
+
+test('local late archive acknowledgement is fenced after access changes; acceptance never queues an archive',async()=>{
+    const store=Memory.create(),selected={...scope,groupId:'local:test:late'},c=candidate();store.putCandidate(selected,c);
+    store.dismiss(selected,c,{mutationId:'late',archiveRequired:true,consentVersion:'mtl-v2'});let current=true,release;
+    const response=new Promise(resolve=>{release=resolve;});
+    const sync=Sync.create({scope:selected,local:true,store,isCurrent:()=>current,request:()=>response});
+    const running=sync.flush();await new Promise(resolve=>setImmediate(resolve));current=false;
+    release({dismissal:{candidateId:c.id,requestId:c.requestId,status:'dismissed',revision:2},archive});
+    await assert.rejects(running,e=>e.stale);assert.equal(store.getOutbox(selected).length,1);sync.stop();
+    const accepted=Memory.create();accepted.putCandidate(selected,c);accepted.resolveAcceptances(selected,[M.acceptance(c,c.generatedText)],{jobId:'save'});
+    assert.deepEqual(accepted.getOutbox(selected),[]);
 });
 test('acceptance validation and resolution can share the owning Save transaction and rollback together',async()=>{
     const f=prepared(),c=candidate(),original=unit(),claim=M.acceptance(c,c.generatedText),values={[fieldId]:c.generatedText};await f.mtl.putCandidate(scope,c);
@@ -214,6 +308,7 @@ test('silent event sync captures scope and preserves exact uncertain dismissal b
     await sync.pull();assert.match(sync.snapshot().flushError,/Offline/,'unrelated replay cannot clear upload failure');
     assert.equal((await sync.flush()).uploaded,1);assert.equal(sync.snapshot().error,'');
     const posts=calls.filter(call=>call.init.method==='POST');assert.deepEqual(posts[0],posts[1]);
+    assert.deepEqual(posts[0].init.body,{mutationId:'retry',candidateRevision:1},'historical outbox bodies are never rewritten to add new consent');
     current=false;await assert.rejects(sync.pull(),error=>error.stale===true);sync.stop();
 });
 

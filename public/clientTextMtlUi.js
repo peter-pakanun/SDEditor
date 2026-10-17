@@ -32,7 +32,7 @@
             host.cloudUser?.language, host.cloudUser?.assignmentVersion, host.cloudUser?.isAdmin, host.cloudCanAccessAllLanguages]);
     }
     const mixin = {
-        data() { return { ctMtlCandidates: raw([]), ctMtlReviews: {}, ctMtlRecoveries:raw([]), ctMtlCapabilities: null, ctMtlError: '', ctMtlRequests: {}, ctMtlLive: {}, ctMtlGenerations: raw([]), ctMtlRevision: 0 }; },
+        data() { return { ctMtlCandidates: raw([]), ctMtlReviews: {}, ctMtlRecoveries:raw([]), ctMtlCapabilities: null, ctMtlError: '', ctMtlRequests: {}, ctMtlLive: {}, ctMtlGenerations: raw([]), ctMtlDismissals:raw([]),ctMtlDismissBusy:{},ctMtlRevision: 0 }; },
         computed: {
             ctMtlRequestScopeKey() { return JSON.stringify([this.ctActive, this.ctWorkspace?.scope, this.lang, this.gameVersion, this.branchId, access(this), this._cloud?.epoch, this.mtlConsentVersion]); },
             ctInputValues() {
@@ -74,7 +74,10 @@
                 return fields.size;
             }
         },
-        watch: { ctMtlRequestScopeKey: { flush: 'sync', handler() { this.ctMtlAbortRequests(); } } },
+        watch: { ctMtlRequestScopeKey: { flush: 'sync', handler() {
+            this.ctMtlAbortRequests();this._ctMtlSync?.stop?.();this._ctMtlSync=null;this._ctMtlDismissalRead=null;this.ctMtlDismissals=raw([]);this.ctMtlDismissBusy={};
+            const ctx=this.ctContext();Promise.resolve().then(()=>{if(this.ctActive&&this.ctCurrent(ctx)&&permissions(this,ctx)){this.ctMtlEnsureSync(ctx);return this.ctMtlRefreshDismissals(ctx);}}).catch(()=>{});
+        } } },
         beforeUnmount() { this.ctMtlReset(); },
         methods: {
             ctMtlUnitRequestVersion(unit=this.ctCurrentUnit) { return this._ctMtlUnitRequestVersions?.get(unit?.id)||0; },
@@ -194,8 +197,8 @@
                 this._ctMtlUnitRequestVersions=raw(new Map());
                 this._ctMtlStoredReviews=raw(new Map());this._ctMtlRecoveryRun=null;
                 this._ctMtlDescriptors = raw([]); this._ctMtlSuppressed = raw(new Set()); this._ctMtlAcceptanceClaims = {};
-                this._ctMtlSyncError='';this._ctMtlSyncRun=null;
-                this.ctMtlCandidates = raw([]); this.ctMtlReviews = {}; this.ctMtlRecoveries=raw([]); this.ctMtlRequests = {}; this.ctMtlGenerations = raw([]); this.ctMtlError = ''; this.ctMtlRevision++;
+                this._ctMtlSyncError='';this._ctMtlSyncRun=null;this._ctMtlDismissalRead=null;
+                this.ctMtlCandidates = raw([]); this.ctMtlReviews = {}; this.ctMtlRecoveries=raw([]); this.ctMtlRequests = {}; this.ctMtlGenerations = raw([]);this.ctMtlDismissals=raw([]);this.ctMtlDismissBusy={}; this.ctMtlError = ''; this.ctMtlRevision++;
             },
             ctMtlStorage(ctx = this.ctContext()) {
                 const normal = this.ctStorage(ctx.scope);
@@ -204,6 +207,38 @@
                 return this._ctMtlStore ||= raw(root.ClientTextMtlStore.create());
             },
             ctMtlClearOperationError() { this.ctMtlError = this._ctMtlSyncError || ''; },
+            ctMtlArchiveSupported() { return this.ctMtlCapabilities?.reviewArchive===true&&this.ctMtlCapabilities?.consentVersion==='mtl-v2'; },
+            ctMtlDismissBusyFor(field) { return !!this.ctMtlDismissBusy[key(this.ctSelection,field?.id)]; },
+            ctMtlPendingDismissal(field,unit=this.ctCurrentUnit) { return this.ctMtlDismissals.find(value=>value.unitId===unit?.id&&(value.fieldId||value.candidate?.fieldId)===field?.id)||null; },
+            ctMtlDismissalText(operation) {
+                if(operation?.state==='archive-pending')return 'Dismissed on the server; its private review file is still pending. The same dismissal will be retried.';
+                if(operation?.state==='conflict')return 'Dismissal needs attention. Its original request is retained; retry it after reviewing the error.';
+                return 'Private review upload is pending. The same dismissal will be retried.';
+            },
+            async ctMtlRefreshDismissals(ctx=this.ctContext(),guard=()=>this.ctCurrent(ctx)&&permissions(this,ctx)) {
+                const client=this._cloud,capturedAccess=access(this),run=this._ctMtlDismissalRead={},
+                    current=()=>this.ctActive&&this.ctCurrent(ctx)&&client===this._cloud&&capturedAccess===access(this)&&permissions(this,ctx)&&guard();
+                const operations=await this.ctMtlStorage(ctx).getOutbox(ctx.scope,{guard:current});
+                if(!current()||this._ctMtlDismissalRead!==run)return false;this.ctMtlDismissals=raw(operations);this.ctMtlRevision++;return true;
+            },
+            ctMtlEnsureSync(ctx=this.ctContext()) {
+                if(!this.ctActive||!permissions(this,ctx)||!this.ctMtlCapabilities||!root.ClientTextMtlSync)return null;
+                const local=String(ctx.scope.groupId).startsWith('local:');
+                if(local&&!this.ctMtlArchiveSupported()||this.ctMtlCapabilities?.unsupported)return null;
+                if(this._ctMtlSync)return this._ctMtlSync;
+                const client=this._cloud,capturedAccess=access(this),current=()=>this.ctActive&&this.ctCurrent(ctx)&&client===this._cloud&&capturedAccess===access(this)&&permissions(this,ctx);
+                const refresh=()=>{if(current())this.ctMtlRefreshDismissals(ctx,current).catch(()=>{});};
+                const sync=raw(root.ClientTextMtlSync.create({scope:ctx.scope,local,immediate:false,store:this.ctMtlStorage(ctx),
+                    request:(path,options)=>client.request(path,options),isCurrent:current,offline:()=>root.navigator?.onLine===false,
+                    onChange:()=>{refresh();if(current())this.ctMtlRefreshCandidates(ctx,current).catch(()=>{});},
+                    onError:state=>{if(!current())return;refresh();const old=this._ctMtlSyncError||'';this._ctMtlSyncError=state.error;
+                        if(state.error||this.ctMtlError===old)this.ctMtlError=state.error;}}));
+                this._ctMtlSync=sync;sync.start();return sync;
+            },
+            async ctMtlRefreshCandidates(ctx,guard) {
+                const store=this.ctMtlStorage(ctx),candidates=await store.list(ctx.scope,{guard});if(!guard())return;
+                if(JSON.stringify(candidates)!==JSON.stringify(this.ctMtlCandidates)){this.ctMtlCandidates=raw(candidates);this.ctMtlRevision++;}
+            },
             async ctMtlLoadCapabilities() {
                 const client = this._cloud, captured = access(this);
                 if (!client || !this.cloudSignedIn) { this.ctMtlCapabilities = null; return null; }
@@ -229,17 +264,14 @@
                     this._ctMtlDescriptors = raw(copy(metadata?.descriptors || this.ctWorkspace?.metadata?.descriptors
                         || this.activeContentGroup?.assets?.map(asset => ({ ...asset, ...asset.descriptor })) || []));
                     this.ctMtlCandidates = raw(candidates); this.ctMtlGenerations = raw(generations); this.ctMtlRevision++;
+                    if(permissions(this,ctx))await this.ctMtlRefreshDismissals(ctx,current);
                     await this.ctMtlLoadReviews(this.ctCurrentUnit, ctx); if (!current()) return false;
                     if (!String(ctx.scope.groupId).startsWith('local:')) {
                         const capabilities = await this.ctMtlLoadCapabilities();
                         if (!current()) return false;
                         if (capabilities?.unsupported) return true;
                     }
-                    if (!String(ctx.scope.groupId).startsWith('local:') && permissions(this, ctx) && root.ClientTextMtlSync) {
-                        const client = this._cloud, capturedAccess = access(this);
-                        this._ctMtlSync = raw(root.ClientTextMtlSync.create({ scope: ctx.scope, store,
-                            request: (path, options) => client.request(path, options),
-                            isCurrent: () => current() && client === this._cloud && capturedAccess === access(this) }));
+                    if (this.ctMtlEnsureSync(ctx)) {
                         await this.ctMtlSync(ctx);
                     }
                     return current();
@@ -262,9 +294,11 @@
                         const generations = await store.getGenerations(ctx.scope);
                         if (!this.ctCurrent(ctx) || this._ctMtlSync !== sync) return;
                         this.ctMtlGenerations = raw(generations);
-                        if (this.ctMtlError === this._ctMtlSyncError) this.ctMtlError = '';
-                        this._ctMtlSyncError = '';
+                        const state=sync.snapshot();
+                        if (this.ctMtlError === this._ctMtlSyncError) this.ctMtlError = state.error;
+                        this._ctMtlSyncError = state.error;
                     } catch (error) { if (this.ctCurrent(ctx) && this._ctMtlSync === sync && !error.stale) this.ctMtlError = this._ctMtlSyncError = error.message; }
+                    finally {if(this.ctCurrent(ctx)&&this._ctMtlSync===sync)await this.ctMtlRefreshDismissals(ctx).catch(()=>{});}
                 })();
                 const run = this._ctMtlSyncRun = { sync, promise: operation };
                 try { await operation; } finally { if (this._ctMtlSyncRun === run) this._ctMtlSyncRun = null; }
@@ -329,17 +363,19 @@
             },
             ctMtlHint(field) {
                 if (this.ctMtlBusy(field)) return 'Generating MTL for this field';
+                if(this.ctMtlDismissBusyFor(field)||this.ctMtlPendingDismissal(field))return 'Finish the pending dismissal upload before requesting another translation.';
                 if (this.ctMtlPendingGeneration(field)) return 'Check the pending MTL request';
                 if (this.ctMtlAccepted(field)) return 'Save the accepted translation before generating another MTL.';
                 if (!M.eligible(field)) return 'MTL is available for nonblank text and grammatical-form fields.';
                 if (!this.ctMtlCapabilities?.enabled) return 'MTL is not connected. Review MTL settings.';
+                if(!this.ctMtlArchiveSupported())return 'The server needs an MTL review-archive upgrade before new translations can be requested.';
                 if (!permissions(this, this.ctContext())) return 'MTL requires access to this language.';
                 return 'MTL · Translate this field' + (this.mtlShortcut === 'f8' ? ' (F8)' : this.mtlShortcut === 'ctrl-alt-f8' ? ' (Ctrl+Alt+F8)' : '');
             },
             ctMtlCanGenerate(field) {
                 return this.ctActive && !this.ctBusy && !this.ctHistoryViewer && this.ctCurrentUnit?.fields.includes(field)
                     && M.eligible(field) && !this.ctMtlBusy(field) && permissions(this, this.ctContext())
-                    && !this.ctMtlAccepted(field)
+                    && !this.ctMtlAccepted(field)&&!this.ctMtlDismissBusyFor(field)&&!this.ctMtlPendingDismissal(field)
                     && (this.ctMtlCapabilities === null || this.ctMtlCapabilities?.enabled === true || !!this.ctMtlPendingGeneration(field));
             },
             ctMtlUnderlyingEdited(field) {
@@ -460,7 +496,7 @@
                 this.ctMtlReviews = reviews; this.ctMtlRevision++;
             },
             async ctMtlShow(field) {
-                const candidate = this.ctMtlPendingCandidate(field); if (!candidate || this.ctBusy||this.ctHistoryViewer||this.ctMtlBusy(field)) return false;
+                const candidate = this.ctMtlPendingCandidate(field); if (!candidate || this.ctBusy||this.ctHistoryViewer||this.ctMtlBusy(field)||this.ctMtlDismissBusyFor(field)) return false;
                 const ctx = this.ctContext(), name = key(this.ctSelection, field.id), before = this.ctMtlReviews[name];
                 if (this.ctMtlAccepted(field)) return false;
                 // An edited older generation remains recoverable. Opening a new generation is an explicit action.
@@ -472,7 +508,7 @@
                 await this.ctMtlPersistReview(ctx, this.ctSelection, field.id, review); return true;
             },
             async ctMtlAccept(field) {
-                const candidate = this.ctMtlCandidate(field); if (!candidate || this.ctBusy||this.ctHistoryViewer || this.ctMtlBusy(field) || !permissions(this, this.ctContext())) return false;
+                const candidate = this.ctMtlCandidate(field); if (!candidate || this.ctBusy||this.ctHistoryViewer || this.ctMtlBusy(field)||this.ctMtlDismissBusyFor(field) || !permissions(this, this.ctContext())) return false;
                 const ctx = this.ctContext(), unit = this.ctCurrentUnit, name = key(unit.id, field.id), text = this.ctMtlFieldValue(field), check = M.validate(field, text);
                 if (!check.valid) { this.ctMtlError = check.errors[0]?.message || 'Review the MTL translation before accepting it.'; return false; }
                 const old = this.ctMtlReviews[name], previous = String(this.ctValues[field.id] ?? ''), mutation = this._ctMtlEditMutations?.get(name) || 0,
@@ -482,7 +518,7 @@
                     previousDraft: old?.previousDraft || { values: copy(this.ctValues), reviewed: copy(this.ctReviewed), dirty: !!this.ctDraftDirty } };
                 try {
                     await this.ctMtlPersistReview(ctx, unit.id, field.id, review);
-                    if (!this.ctCurrent(ctx) || this.ctCurrentUnit !== unit || this.ctMtlBusy(field) || this.ctMtlCandidate(field)?.id !== candidate.id
+                    if (!this.ctCurrent(ctx) || this.ctCurrentUnit !== unit || this.ctMtlBusy(field)||this.ctMtlDismissBusyFor(field) || this.ctMtlCandidate(field)?.id !== candidate.id
                         || this.ctMtlFieldValue(field) !== text || String(this.ctValues[field.id] ?? '') !== previous
                         || (this._ctMtlEditMutations?.get(name) || 0) !== mutation || capturedAccess !== access(this) || !permissions(this, ctx)) return false;
                     this.ctMtlReviews = { ...this.ctMtlReviews, [name]: review }; this.ctMtlRevision++;
@@ -548,16 +584,34 @@
             },
             async ctMtlDismiss(field) {
                 const candidate = this.ctMtlPendingCandidate(field), ctx = this.ctContext();
-                if (!candidate || this.ctBusy||this.ctHistoryViewer || this.ctMtlBusy(field) || !permissions(this, ctx)) return false;
+                if (!candidate || this.ctBusy||this.ctHistoryViewer || this.ctMtlBusy(field)||this.ctMtlDismissBusyFor(field)||this.ctMtlPendingDismissal(field) || !permissions(this, ctx)) return false;
                 if (this.ctMtlAccepted(field)) return false;
+                if(!this.ctMtlArchiveSupported()){this.ctMtlError='The server needs an MTL review-archive upgrade before this suggestion can be dismissed.';return false;}
+                if(this.mtlConsentVersion!=='mtl-v2'){this.ctMtlError='Review and enable the updated MTL data-sharing and private review-retention choice in MTL settings first.';return false;}
+                const name=key(candidate.unitId,field.id),mutationId=id(),client=this._cloud,capturedAccess=access(this),unit=this.ctCurrentUnit,
+                    current=()=>this.ctCurrent(ctx)&&this.ctActive&&client===this._cloud&&capturedAccess===access(this)&&permissions(this,ctx)&&this.mtlConsentVersion==='mtl-v2',
+                    review=this.ctMtlReviews[name],options={mutationId,archiveRequired:true,consentVersion:'mtl-v2',guard:()=>current()&&this.ctMtlApplicable(candidate,field,unit)&&!this.ctMtlBusy(field)};
+                if(review?.candidateId===candidate.id&&review.text!==candidate.generatedText)options.reviewedText=review.text;
+                this.ctMtlDismissBusy={...this.ctMtlDismissBusy,[name]:mutationId};
                 try {
-                    await this.ctMtlStorage(ctx).dismiss(ctx.scope, candidate, { mutationId: id() });
-                    if (!this.ctCurrent(ctx) || this.ctMtlBusy(field)) return false;
-                    this.ctMtlCandidates = raw(await this.ctMtlStorage(ctx).list(ctx.scope)); if (!this.ctCurrent(ctx)) return false;
-                    const name = key(candidate.unitId, field.id), reviews = { ...this.ctMtlReviews }; delete reviews[name]; this.ctMtlReviews = reviews;
+                    await this.ctMtlStorage(ctx).dismiss(ctx.scope, candidate, options);
+                    if (!current()) return false;
+                    await this.ctMtlRefreshDismissals(ctx,current);await this.ctMtlRefreshCandidates(ctx,current);if(!current())return false;
+                    const reviews = { ...this.ctMtlReviews }; delete reviews[name]; this.ctMtlReviews = reviews;
                     if (this._ctMtlAcceptanceClaims?.[candidate.unitId]) this._ctMtlAcceptanceClaims[candidate.unitId] = this._ctMtlAcceptanceClaims[candidate.unitId].filter(claim => claim.fieldId !== field.id);
-                    this.ctMtlRevision++; this.ctMtlClearOperationError(); this.ctMtlSync(ctx); return true;
-                } catch (error) { if (this.ctCurrent(ctx)) this.ctMtlError = error.message; return false; }
+                    this.ctMtlRevision++; this.ctMtlClearOperationError();this.ctMtlEnsureSync(ctx);this.ctMtlSync(ctx);return true;
+                } catch (error) { if (current()&&!error.stale) this.ctMtlError = error.message; return false; }
+                finally {if(this.ctMtlDismissBusy[name]===mutationId){const busy={...this.ctMtlDismissBusy};delete busy[name];this.ctMtlDismissBusy=busy;}}
+            },
+            async ctMtlRetryDismissals(operation) {
+                const ctx=this.ctContext();if(!permissions(this,ctx)||!this.ctActive||this.ctBusy)return false;
+                const sync=this.ctMtlEnsureSync(ctx);if(!sync)return false;
+                const client=this._cloud,capturedAccess=access(this),current=()=>this.ctCurrent(ctx)&&permissions(this,ctx)&&client===this._cloud&&capturedAccess===access(this)&&this._ctMtlSync===sync;
+                try {
+                    for(const value of operation?[operation]:this.ctMtlDismissals)if(value.state==='conflict')
+                        await this.ctMtlStorage(ctx).markSending(ctx.scope,value.mutationId,'pending',{guard:current});
+                    if(!current())return false;await this.ctMtlSync(ctx);return current();
+                }catch(error){if(this.ctCurrent(ctx)&&!error.stale)this.ctMtlError=error.message;return false;}
             },
             ctMtlCommittedGlossary(ctx = this.ctContext()) {
                 const state = this._cloud?.state, profile = state?.profiles?.[state.activeProfile];
@@ -653,7 +707,8 @@
                 }
                 if (!this.ctMtlCanGenerate(field)) { this.ctMtlError = this.ctMtlCapabilities?.enabled ? 'MTL is unavailable for this field or language.' : 'MTL is not connected. Review MTL settings.'; return false; }
                 const pending = this.ctMtlPendingGeneration(field); if (pending) return this.ctMtlRecover(field,pending);
-                if (this.mtlConsentVersion !== 'mtl-v1') { this.ctMtlError = 'Review and enable the MTL data-sharing choice in MTL settings first.'; return false; }
+                if(!this.ctMtlArchiveSupported()){this.ctMtlError='The server needs an MTL review-archive upgrade before new translations can be requested. Existing work is unchanged.';return false;}
+                if (this.mtlConsentVersion !== 'mtl-v2') { this.ctMtlError = 'Review and enable the updated MTL data-sharing and private review-retention choice in MTL settings first.'; return false; }
                 const unit = this.ctCurrentUnit, client = this._cloud, capturedAccess = access(this), descriptor = this.ctMtlDescriptor(unit);
                 if (!descriptor) { this.ctMtlError = 'The original workbook identity is unavailable. Reopen this workspace.'; return false; }
                 const name = key(unit.id, field.id), mutations = this._ctMtlEditMutations ||= raw(new Map()), mutation = mutations.get(name) || 0,
@@ -665,7 +720,7 @@
                 let sent = false, generation, confirmedFailure = false;
                 this.ctMtlRequests = { ...this.ctMtlRequests, [name]: requestId };
                 const current = () => jobs.get(name) === job && !controller.signal.aborted && this.ctCurrent(ctx) && this.ctActive
-                    && client === this._cloud && capturedAccess === access(this) && permissions(this, ctx) && this.mtlConsentVersion === 'mtl-v1'
+                    && client === this._cloud && capturedAccess === access(this) && permissions(this, ctx) && this.mtlConsentVersion === 'mtl-v2'
                     && this._ctUnitIndex?.get(unit.id) === unit && unit.fields.includes(field) && M.rawSourceHash(field.source) === capturedSource;
                 job.current = current;
                 this.ctMtlProgressUpdate(job, { phase:'waiting', text:'' });
@@ -674,7 +729,7 @@
                     const body = { requestId, unitId: unit.id, fieldId: field.id, role: unit.role, assetHash: descriptor.assetHash || descriptor.hash,
                         parserVersion: descriptor.parserVersion, source: field.source, sourceHash: S.sourceHash(field.source), rawSourceHash: capturedSource,
                         baseTargetHash: S.hash(previous), baseRevision: this.ctSaved[unit.id]?.serverRevision || 0, clientFacts: S.clientFacts(unit),
-                        context: context.initial, consentVersion: 'mtl-v1', ...(String(ctx.scope.groupId).startsWith('local:')
+                        context: context.initial, consentVersion: 'mtl-v2', ...(String(ctx.scope.groupId).startsWith('local:')
                             ? { language: ctx.scope.language, game:ctx.scope.game, branchId:ctx.scope.branchId || 'default' } : {}) };
                     if (new TextEncoder().encode(JSON.stringify(body)).length > Context.LIMITS.bytes) throw new Error('This MTL source and context exceed the request size limit.');
                     let path = String(ctx.scope.groupId).startsWith('local:') ? '/v1/mtl/local/requests'

@@ -1,0 +1,366 @@
+/* Synthetic workbook evidence only: no private text, network or inference. */
+const {test} = require('node:test');
+const assert = require('node:assert/strict');
+const {readFileSync} = require('node:fs');
+const vm = require('node:vm');
+const Context = require('../public/clientTextMtlContext.js');
+const S = require('../public/clientTextState.js');
+const N = require('../public/clientTextNpcIndex.js');
+const Catalog = require('../public/clientTextPortraitCatalog.js');
+const DictionaryScope = require('../public/dictionaryScope.js');
+const UI = require('../public/clientTextMtlUi.js');
+const A = 'Metadata/Characters/Int/IntFour', B = 'Metadata/Characters/Str/StrFour';
+const P = 'Metadata/NPC/Synthetic/Scout', Q = 'Metadata/NPC/Synthetic/Guard';
+let nextRow = 2;
+function field(name, source, target = '', row = nextRow++, extra = {}) {
+    return {id:JSON.stringify([name,null]), name, kind:'text', source, target, sourceCell:'B'+row, targetCell:'C'+row, ...extra};
+}
+function unit(sheet,recordId,fields,metadata={}) {
+    return S.normalizeUnit({role:'normal',sheet,recordId,fields,metadata});
+}
+const npc = (path,name) => unit('NPCs',path,[field('Name',name)]);
+const character = (path,name,source='Synthetic authored introduction.',target='Approved introduction.') =>
+    unit('Characters',path,[field('Name',name),field('Description',source,target),field('Traits Description','DNT-UNUSED gameplay trait','UNUSED TARGET')]);
+const line = (id='Selected',metadata={},row=30,source='Synthetic selected dialogue.') =>
+    unit('NPCTalkDialogueTextAudio',id,[field('Text',source,'',row)],metadata);
+async function build(selected,units,extra={}) {
+    const npcIndex = await N.buildNpcIndex(units,{yield:async()=>{}});
+    return Context.build({unit:selected,field:selected.fields[0],units,npcIndex,scope:{game:'poe2'},...extra});
+}
+const key = (result,role) => result.roleHints[role].identityKey;
+const profile = (result,id) => result.toneContext.profiles.find(item=>item.identityKey==='character:'+id);
+const textSize = value => (value.source||'').length+(value.translation||'').length;
+function bounds(result) {
+    const json=JSON.stringify(result), count=value=>1+(Array.isArray(value)?value.reduce((sum,item)=>sum+count(item),0)
+        :value&&typeof value==='object'?Object.values(value).reduce((sum,item)=>sum+count(item),0):0);
+    assert.ok(json.length<=Context.LIMITS.context); assert.ok(Buffer.byteLength(json)<=Context.LIMITS.contextBytes);
+    assert.ok(count(result)<=Context.LIMITS.contextEntries);
+    assert.equal(result.toneContext.characters,[...result.toneContext.profiles,...result.toneContext.voiceExamples].reduce((sum,item)=>sum+textSize(item),0));
+    assert.ok(result.toneContext.characters<=1200);
+}
+
+test('explicit resolved speaker and listener metadata win over conflicting portrait order and suffix',async()=>{
+    const selected=line('Selected=StrFour',{Character:A,NPC:P,Speaker:P,Addressee:A}),actor=npc(P,'Synthetic Scout'),hero=character(A,'Synthetic Mage');
+    const result=await build(selected,[selected,actor,hero]);
+    assert.equal(result.roleHints.identities.find(item=>item.key===key(result,'speaker')).references[0],P); assert.equal(result.roleHints.speaker.priority,3);
+    assert.equal(result.roleHints.speaker.confidence,'explicit'); assert.equal(result.roleHints.listener.confidence,'explicit');
+    assert.ok(result.roleHints.conflicts.some(item=>item.reason==='suffix-disagrees-with-explicit-role'));
+    assert.ok(result.roleHints.conflicts.some(item=>item.reason==='portrait-convention-disagrees-with-stronger-role'));
+    assert.ok(profile(result,A)); assert.equal(result.roleHints.listener.status,'resolved'); bounds(result);
+});
+
+test('explicit NPC names resolve only against unique loaded identity evidence',async()=>{
+    const selected=line('Selected',{Speaker:'Synthetic Scout'}),actor=npc(P,'Synthetic Scout');
+    const result=await build(selected,[selected,actor]);
+    assert.equal(result.roleHints.speaker.status,'resolved'); assert.equal(result.roleHints.speaker.confidence,'explicit');
+    assert.equal(result.roleHints.identities.find(item=>item.key===key(result,'speaker')).references[0],P);
+    const missing=await build(selected,[selected]);
+    assert.equal(missing.roleHints.speaker.status,'unknown'); assert.equal(key(missing,'speaker'),undefined);
+});
+
+test('conflicting or unresolved authoritative role columns block weaker role guesses',async()=>{
+    const actor=npc(P,'Synthetic Scout'),hero=character(A,'Synthetic Mage');
+    for(const metadata of [{NPC:P,Speaker:'Player'}, {NPC:P,Speaker:''}, {NPC:P,Speaker:P,'Speaking Character':A}]) {
+        const selected=line('Selected',metadata),result=await build(selected,[selected,actor,hero]);
+        assert.notEqual(result.roleHints.speaker.status,'suggested'); assert.equal(key(result,'speaker'),undefined);
+        assert.equal(key(result,'listener'),undefined);
+    }
+});
+
+test('exact known suffix identity is a listener convention with raw provenance, never a speaker',async()=>{
+    const selected=line('Selected=IntFour',{NPC:P}),actor=npc(P,'Synthetic Scout'),hero=character(A,'Synthetic Mage');
+    const result=await build(selected,[selected,actor,hero]);
+    assert.equal(key(result,'listener'),'character:'+A); assert.equal(result.roleHints.listener.priority,2);
+    assert.equal(result.roleHints.listener.confidence,'convention'); assert.equal(result.roleHints.idSuffix.raw,'IntFour');
+    assert.equal(result.roleHints.idSuffix.status,'resolved'); assert.equal(result.roleHints.speaker.confidence,'heuristic');
+    assert.ok(profile(result,A));
+});
+
+test('lore flags remain conditions, and arbitrary or compound suffixes never become listener identities',async()=>{
+    const actor=npc(P,'Synthetic Scout'),hero=character(A,'Synthetic Mage');
+    for(const suffix of ['HasLore','NoLore','Met_d_a1','IntFour=HasLore','StrDex4b','']) {
+        const selected=line('Selected='+suffix,{NPC:P}),result=await build(selected,[selected,actor,hero]);
+        assert.equal(key(result,'listener'),undefined,suffix);
+        assert.equal(result.roleHints.idSuffix.raw,suffix);
+        if(['HasLore','NoLore'].includes(suffix)) {
+            assert.equal(result.roleHints.idSuffix.status,'condition'); assert.equal(result.roleHints.speaker.confidence,'heuristic');
+        } else { assert.equal(result.roleHints.idSuffix.status,'unresolved'); assert.equal(key(result,'speaker'),undefined); }
+    }
+    const selected=line('Selected='+'x'.repeat(300),{NPC:P}),result=await build(selected,[selected,actor]);
+    assert.equal(result.roleHints.idSuffix.truncated,true); assert.equal(result.roleHints.idSuffix.originalCharacters,300);
+    assert.equal(result.roleHints.idSuffix.raw.length,256); assert.equal(key(result,'listener'),undefined);
+});
+
+test('a listener suffix cannot assign an explicit speaker to the listener role by convention',async()=>{
+    const hero=character(A,'Synthetic Mage'),selected=line('Selected=IntFour',{Speaker:A}),result=await build(selected,[selected,hero]);
+    assert.equal(result.roleHints.speaker.status,'resolved'); assert.equal(key(result,'speaker'),'character:'+A);
+    assert.equal(result.roleHints.listener.status,'conflict'); assert.equal(key(result,'listener'),undefined);
+    assert.ok(result.roleHints.conflicts.some(item=>item.reason==='suffix-would-duplicate-explicit-speaker'));
+});
+
+test('two reliable semantic participants suggest first listener and second speaker before art projection',async()=>{
+    const selected=line('Selected',{Character:A,NPC:P}),actor=npc(P,'Synthetic Scout'),hero=character(A,'Synthetic Mage');
+    const result=await build(selected,[selected,actor,hero]);
+    assert.equal(result.roleHints.order.status,'reliable');
+    assert.equal(key(result,'listener'),result.roleHints.order.participantKeys[0]);
+    assert.equal(key(result,'speaker'),'character:'+A); assert.equal(result.roleHints.speaker.confidence,'heuristic');
+    assert.equal(result.roleHints.speaker.evidence[0].rule,'first-listens-second-speaks');
+});
+
+test('a single participant suggests only a speaker and never manufactures a listener',async()=>{
+    const selected=line('Selected',{Character:A}),hero=character(A,'Synthetic Mage'),result=await build(selected,[selected,hero]);
+    assert.equal(key(result,'speaker'),'character:'+A); assert.equal(result.roleHints.listener.status,'unknown');
+    assert.equal(result.roleHints.speaker.evidence[0].rule,'single-participant-speaks');
+});
+
+test('sorted multiple NPC memberships and ambiguous conversations suppress portrait conventions',async()=>{
+    const one=npc(P,'Synthetic Scout'),two=npc(Q,'Synthetic Guard');
+    for(const metadata of [{NPC:P+','+Q},{NPC:P}]) {
+        const selected=line('Selected',metadata),extra=metadata.NPC===P?{convoIndex:{memberships:new Map([[selected.id,{familyKey:'F',ambiguous:true}]])}}:{};
+        const result=await build(selected,[selected,one,two],extra);
+        assert.equal(result.roleHints.order.status,'suppressed'); assert.equal(key(result,'speaker'),undefined); assert.equal(key(result,'listener'),undefined);
+    }
+});
+
+test('distinct semantic identities merged by portrait art or NPC grouping suppress conventions',async()=>{
+    const paths=['Metadata/NPC/League/Chayula/ChayulaFarmerHub','Metadata/NPC/League/Chayula/ChayulaFarmerNearDreamer'];
+    const one=npc(paths[0],'Synthetic First'),two=npc(paths[1],'Synthetic Second'),selected=line('Selected',{NPC:paths[1]});
+    const npcIndex=await N.buildNpcIndex([selected,one,two],{yield:async()=>{}}),parentKey=[...npcIndex.groupByKey.keys()].find(k=>npcIndex.groupByKey.get(k).npcUnits.includes(one));
+    const result=await build(selected,[selected,one,two],{npcIndex,convoIndex:{memberships:new Map([[selected.id,{familyKey:'F',parentKey}]])}});
+    assert.equal(result.roleHints.order.reason,'merged-portrait-identities'); assert.equal(key(result,'speaker'),undefined);
+    const aliases=[npc(P,'Same Synthetic Name'),npc(Q,'Same Synthetic Name')],merged=line('Selected',{NPC:P+','+Q});
+    const mergedResult=await build(merged,[merged,...aliases]);
+    assert.equal(mergedResult.roleHints.order.reason,'ambiguous-npc-group-identity'); assert.equal(key(mergedResult,'speaker'),undefined);
+});
+
+test('unresolved participant references suppress guesses while explicit resolved roles survive',async()=>{
+    const actor=npc(P,'Synthetic Scout'),selected=line('Selected',{NPC:P,Character:'Metadata/Characters/Unknown',Speaker:P});
+    const result=await build(selected,[selected,actor]);
+    assert.equal(result.roleHints.order.status,'suppressed'); assert.equal(result.roleHints.speaker.status,'resolved');
+    assert.equal(result.roleHints.listener.status,'unknown'); assert.ok(result.roleHints.unresolved.some(item=>item.role==='participant'));
+});
+
+test('Character Filter is only a listener constraint, including prohibited and conflicting forms',async()=>{
+    const actor=npc(P,'Synthetic Scout'),hero=character(A,'Synthetic Mage'),other=character(B,'Synthetic Warrior');
+    const only=line('Only',{'Character Filter':A}),constraint=await build(only,[only,hero]);
+    assert.equal(key(constraint,'speaker'),undefined); assert.equal(key(constraint,'listener'),undefined);
+    assert.equal(constraint.roleHints.constraints[0].kind,'listener-constraint');
+    for(const metadata of [{NPC:P,'Character Filter':B},{NPC:P,'Prohibited Character Filter':A}]) {
+        const selected=line('Selected=IntFour',metadata),result=await build(selected,[selected,actor,hero,other]);
+        assert.equal(result.roleHints.listener.status,'conflict'); assert.equal(key(result,'listener'),undefined);
+        assert.equal(key(result,'speaker'),undefined); assert.ok(result.roleHints.conflicts.some(item=>item.reason==='listener-constraint-mismatch'));
+    }
+    const explicit=line('Explicit',{Speaker:P,Listener:A,'Character Filter':B}),result=await build(explicit,[explicit,actor,hero,other]);
+    assert.equal(result.roleHints.listener.status,'resolved'); assert.equal(key(result,'listener'),'character:'+A);
+    assert.ok(result.roleHints.conflicts.some(item=>item.reason==='listener-constraint-mismatch'));
+    const paths=Object.keys(Catalog.games.poe2.characters).slice(0,5),longFilter=line('LongFilter',{Speaker:P,Listener:paths[4],'Character Filter':paths.join(',')});
+    const longResult=await build(longFilter,[longFilter,actor]);
+    assert.equal(longResult.roleHints.constraints[0].complete,false);
+    assert.ok(!longResult.roleHints.conflicts.some(item=>item.reason==='listener-constraint-mismatch'));
+});
+
+test('two sourced introductions share a 1200-character budget with at most 600 per participant',async()=>{
+    const one=character(A,'Synthetic Mage','S'.repeat(900),'\u0e01'.repeat(1000)),two=character(B,'Synthetic Warrior','T'.repeat(1500),'\u0e02'.repeat(800)),
+        selected=line('Selected',{Speaker:A,Listener:B}),original=JSON.stringify([selected,one,two]),result=await build(selected,[selected,one,two]);
+    assert.equal(result.toneContext.profiles.length,2); assert.equal(result.toneContext.characters,1200);
+    for(const item of result.toneContext.profiles) {
+        assert.equal(textSize(item),600); assert.equal(item.kind,'authored-character-introduction');
+        assert.equal(item.sourceTruncated,true); assert.equal(item.translationTruncated,true);
+        const source=[one,two].find(value=>value.id===item.provenance.unitId),description=source.fields.find(value=>value.name==='Description');
+        assert.equal(item.provenance.fieldId,description.id); assert.equal(item.provenance.sourceCell,description.sourceCell);
+        assert.equal(item.provenance.targetCell,description.targetCell); assert.equal(item.sourceCharacters,description.source.length);
+        assert.equal(item.translationOrigin,'original-workbook');
+    }
+    assert.ok(result.references.every(item=>item.fields.every(value=>!['Description','Traits Description'].includes(value.name))));
+    assert.ok(!JSON.stringify(result).includes('DNT-UNUSED gameplay trait')); assert.equal(JSON.stringify([selected,one,two]),original); bounds(result);
+});
+
+test('introduction truncation preserves complete surrogate pairs and reports exact source lengths',async()=>{
+    const hero=character(A,'Synthetic Mage','😀'.repeat(400),'😀'.repeat(400)),selected=line('Selected',{Speaker:A});
+    const item=profile(await build(selected,[selected,hero]),A);
+    assert.ok(textSize(item)<=600); assert.equal(item.sourceCharacters,800); assert.equal(item.translationCharacters,800);
+    assert.ok(!/[\uD800-\uDBFF]$/.test(item.source)); assert.ok(!/[\uD800-\uDBFF]$/.test(item.translation));
+});
+
+test('profile translations use scoped Saved or immutable targets and reject stale, conflicted and unreviewed overlays',async()=>{
+    const hero=character(A,'Synthetic Mage'),selected=line('Selected',{Speaker:A}),description=hero.fields.find(value=>value.name==='Description');
+    const saved={[hero.id]:{saved:true,values:{[description.id]:'Approved saved tone.'}}};
+    const result=await build(selected,[selected,hero],{saved,drafts:{[hero.id]:{[description.id]:'UNTRUSTED DRAFT'}},candidates:[{translation:'UNTRUSTED MTL'}]});
+    assert.equal(profile(result,A).translation,'Approved saved tone.'); assert.equal(profile(result,A).translationOrigin,'saved');
+    for(const record of [{saved:true,values:{[description.id]:'STALE'},outdated:[description.id]},
+        {saved:true,values:{[description.id]:'CONFLICT'},conflicts:[{fieldId:description.id}]},
+        {saved:true,values:{[description.id]:'   '}}]) {
+        const value=profile(await build(selected,[selected,hero],{saved:{[hero.id]:record}}),A); assert.equal(value.translation,undefined);
+    }
+    saved[hero.id].outdated=[description.id]; saved[hero.id].reviewed={[description.id]:S.sourceHash(description.source)};
+    assert.equal(profile(await build(selected,[selected,hero],{saved}),A).translation,'Approved saved tone.');
+    saved[hero.id]={saved:false,values:{[description.id]:'UNTRUSTED UNSAVED'}};
+    assert.equal(profile(await build(selected,[selected,hero],{saved}),A).translation,description.target);
+    assert.ok(!JSON.stringify(result).includes('UNTRUSTED'));
+});
+
+test('partial workbooks, unused fields and ambiguous character rows report unavailable tone without invented biographies',async()=>{
+    const selected=line('Selected',{Speaker:A}),partial=await build(selected,[selected]);
+    assert.equal(partial.roleHints.speaker.status,'resolved'); assert.equal(partial.toneContext.profiles.length,0);
+    assert.ok(partial.toneContext.unavailable.some(item=>item.reason==='characters-sheet-not-loaded'));
+    const hero=character(A,'Synthetic Mage','DNT-UNUSED legacy source');
+    const unused=await build(selected,[selected,hero]); assert.ok(unused.toneContext.unavailable.some(item=>item.reason==='unused-description'));
+    const other=character(A,'Synthetic Mage');other.id='other-explicit-unit';
+    const ambiguous=await build(selected,[selected,hero,other]); assert.ok(ambiguous.toneContext.unavailable.some(item=>item.reason==='ambiguous-character-profile'));
+    const actor=npc(P,'Synthetic Scout'),spoken=line('Spoken',{Speaker:P}),npcResult=await build(spoken,[spoken,actor]);
+    assert.ok(npcResult.toneContext.unavailable.some(item=>item.reason==='npc-biography-not-in-workbook'));
+    assert.equal(npcResult.toneContext.profiles.length,0);
+});
+
+test('matching class introduction forms retain exact field provenance and ambiguous translations stay source-only',async()=>{
+    const selected=line('Selected',{Speaker:A}),hero=character(A,'Synthetic Mage');
+    hero.fields=hero.fields.filter(value=>value.name!=='Description');
+    for(const form of ['IntFour','StrFour'])hero.fields.push(field('Description','Shared synthetic introduction.','Approved '+form,9,{id:'description-'+form,kind:'form',form}));
+    const result=await build(selected,[selected,hero]); assert.equal(profile(result,A).source,'Shared synthetic introduction.'); assert.equal(profile(result,A).translation,undefined);
+    selected.fields[0].kind='form';selected.fields[0].form='StrFour';
+    const matching=await build(selected,[selected,hero]); assert.equal(profile(matching,A).translation,'Approved StrFour');
+    assert.equal(profile(matching,A).provenance.fieldId,'description-StrFour');
+});
+
+test('NPC voice examples require exact explicit speaker evidence and exclude listener-only, player and other NPC turns',async()=>{
+    const actor=npc(P,'Synthetic Scout'),other=npc(Q,'Synthetic Guard'),selected=line('Selected',{Speaker:P,NPC:P},30),
+        good=line('Good',{Speaker:P},29,'Verified speaker voice.'),duplicate=line('Duplicate',{Speaker:P},28,'Verified speaker voice.'),
+        second=line('Second',{Speaker:P},31,'Second verified voice.'),third=line('Third',{Speaker:P},33,'Third verified voice.'),
+        listener=line('ListenerOnly',{Listener:P},27,'LISTENER LINE'),associated=line('RelatedOnly',{NPC:P},26,'ASSOCIATED LINE'),
+        player=line('Player',{Speaker:A,NPC:P},25,'PLAYER LINE'),wrong=line('Wrong',{Speaker:Q},24,'OTHER NPC LINE');
+    good.fields[0].target='Approved voice.'; duplicate.fields[0].target='Approved voice.';
+    const result=await build(selected,[selected,actor,other,good,duplicate,second,third,listener,associated,player,wrong]);
+    assert.deepEqual(result.toneContext.voiceExamples.map(item=>item.provenance.recordId),['Good','Second']);
+    assert.equal(result.toneContext.selection.eligibleVoiceExamples,3);
+    assert.deepEqual(result.toneContext.selection.omittedVoiceExamples,{duplicate:1,entryLimit:1,contextBudget:0});
+    assert.ok(result.toneContext.voiceExamples.every(item=>item.speakerEvidence==='explicit-metadata'&&item.role==='speaker'&&textSize(item)<=200));
+    assert.equal(result.toneContext.voiceExamples[0].translation,'Approved voice.');
+    assert.ok(!result.toneContext.voiceExamples.some(item=>item.source.includes('LINE'))); bounds(result);
+    const listening=line('Listening',{Speaker:A,Listener:P}),listenerResult=await build(listening,[listening,actor,good]);
+    assert.equal(listenerResult.toneContext.voiceExamples.length,0);
+});
+
+test('tone evidence is retained before optional surrounding rows and keeps omission diagnostics under budget pressure',async()=>{
+    const selected=line('Selected',{Speaker:A},50),hero=character(A,'Synthetic Mage','A'.repeat(1000),'B'.repeat(1000)),
+        neighbors=Array.from({length:70},(_,i)=>line('Nearby'+i,{},i+100,'C'.repeat(1200))),units=[selected,hero,...neighbors],
+        convoIndex={memberships:new Map([selected,...neighbors].map(value=>[value.id,{familyKey:'F'}]))};
+    const result=await build(selected,units,{convoIndex}); assert.ok(profile(result,A));
+    assert.ok(result.surrounding.omitted.contextBudget>0); assert.equal(result.omitted.roleHints,0); assert.equal(result.omitted.toneProfiles,0); bounds(result);
+    const tight=await build(selected,[selected,hero],{contextLimit:1500});
+    assert.equal(tight.roleHints,undefined); assert.equal(tight.omitted.roleHints,1); assert.equal(tight.omitted.toneProfiles,1); bounds(tight);
+});
+
+test('full and inline UI filters, pagination, variant selection and view rows cannot change roles or sourced tone',async()=>{
+    const selected=line('Selected',{Speaker:A,Listener:P}),hero=character(A,'Synthetic Mage'),actor=npc(P,'Synthetic Scout'),units=[selected,hero,actor],
+        npcIndex=await N.buildNpcIndex(units,{yield:async()=>{}}),host={ctContext:()=>({scope:{game:'poe2'}}),ctCurrentUnit:selected,ctUnits:units,
+            _ctNpcIndex:npcIndex,ctSaved:{},ctMtlCommittedGlossary:()=>[]};
+    for(const name of ['ctRows','ctPageRows','ctDisplayedFields'])Object.defineProperty(host,name,{get(){throw new Error('view projection accessed');}});
+    const create=()=>UI.mixin.methods.ctMtlBuildContext.call(host,selected.fields[0]),initial=create();
+    for(const state of [{ctEditor:'full',ctSearch:'hidden'}, {ctEditor:'inline',ctPage:99}, {ctNpcKey:'another-npc',ctConvoKey:'another-family'},
+        {ctStatusFilter:'missing',ctSort:'descending'}, {ctVariant:'StrFour',ctSelectedForm:'IntFour'}]) {
+        Object.assign(host,state); const result=create(); assert.deepEqual(result.initial,initial.initial); assert.equal(result.contextHash,initial.contextHash);
+    }
+    assert.ok(initial.initial.roleHints); assert.ok(profile(initial.initial,A));
+});
+
+test('browser factory uses the existing loaded public catalog without a Node require or API workbook parse',()=>{
+    const sandbox={ClientTextState:S,DictionaryScope,ClientTextPortraitCatalog:Catalog,TextEncoder}; vm.createContext(sandbox);
+    vm.runInContext(readFileSync(require.resolve('../public/clientTextMtlContext.js'),'utf8'),sandbox);
+    const selected=line('Selected',{Speaker:A}),hero=character(A,'Synthetic Mage'),result=sandbox.ClientTextMtlContext.build({unit:selected,field:selected.fields[0],units:[selected,hero],scope:{game:'poe2'}});
+    assert.equal(result.roleHints.speaker.status,'resolved'); assert.equal(result.toneContext.profiles.length,1);
+});
+
+test('row-specific merged artwork suppresses participant conventions before portrait deduplication',async()=>{
+    const selected=line('OverrideLine',{NPC:Q});selected.sheet='NPCTextAudio';
+    const first=npc(P,'Synthetic First'),second=npc(Q,'Synthetic Second'),units=[selected,first,second],
+        npcIndex=await N.buildNpcIndex(units,{yield:async()=>{}}),parentKey=[...npcIndex.groupByKey.keys()].find(k=>npcIndex.groupByKey.get(k).npcUnits.includes(first)),
+        convoIndex={memberships:new Map([[selected.id,{familyKey:'Synthetic',parentKey}]])},
+        sandbox={ClientTextState:S,DictionaryScope,TextEncoder,ClientTextPortraitCatalog:{games:{poe2:{characters:{},npcs:{[P]:['one','Synthetic First'],[Q]:['two','Synthetic Second']},
+            overrides:{OverrideLine:{id:'one',npcs:[Q]}}}}}};
+    vm.createContext(sandbox);vm.runInContext(readFileSync(require.resolve('../public/clientTextMtlContext.js'),'utf8'),sandbox);
+    const result=sandbox.ClientTextMtlContext.build({unit:selected,field:selected.fields[0],units,npcIndex,convoIndex,scope:{game:'poe2'}});
+    assert.equal(result.roleHints.order.reason,'merged-portrait-identities');assert.equal(key(result,'speaker'),undefined);
+});
+
+test('same-name NPC paths remain distinct role identities and conflicting explicit paths cannot resolve',async()=>{
+    const first=npc(P,'Synthetic Guard'),second=npc(Q,'Synthetic Guard'),selected=line('Selected',{Speaker:P,'Speaking Character':Q}),
+        result=await build(selected,[selected,first,second]);
+    assert.equal(result.roleHints.speaker.status,'conflict'); assert.equal(result.roleHints.speaker.reason,'conflicting-explicit-roles');
+    assert.equal(key(result,'speaker'),undefined); assert.equal(result.toneContext.voiceExamples.length,0);
+    assert.deepEqual(result.roleHints.speaker.evidence.map(value=>value.raw),[P,Q]);
+    selected.metadata={Speaker:P,Listener:Q};
+    const separate=await build(selected,[selected,first,second]);
+    assert.equal(key(separate,'speaker'),'npc:'+P); assert.equal(key(separate,'listener'),'npc:'+Q);
+    assert.notEqual(key(separate,'speaker'),key(separate,'listener'));
+    assert.deepEqual(separate.roleHints.identities.map(value=>value.references),[[P],[Q]]);
+});
+
+test('shared NPC names are ambiguous while unique loaded short-name aliases retain exact identity',async()=>{
+    const first=npc(P,'Synthetic Guard'),second=npc(Q,'Synthetic Guard');
+    first.fields.push(field('Short Name','First Guard'));second.fields.push(field('Short Name','Second Guard'));
+    for(const name of ['Synthetic Guard','  SYNTHETIC   GUARD  ']) {
+        const selected=line('Selected',{Speaker:name}),result=await build(selected,[selected,first,second]);
+        assert.equal(result.roleHints.speaker.status,'unknown'); assert.equal(key(result,'speaker'),undefined);
+        assert.ok(result.roleHints.unresolved.some(value=>value.reason==='ambiguous-identity'));
+    }
+    const selected=line('Selected',{Speaker:' first guard ',Listener:'Second Guard'}),result=await build(selected,[selected,first,second]);
+    assert.equal(key(result,'speaker'),'npc:'+P); assert.equal(key(result,'listener'),'npc:'+Q);
+    assert.equal(result.roleHints.speaker.confidence,'explicit');
+});
+
+test('paired workbook rows sharing one exact NPC path do not make its verified aliases ambiguous',async()=>{
+    const first=npc(P,'Synthetic Guard'); first.fields.push(field('Short Name','Guard Alias'));
+    const paired=S.normalizeUnit({...structuredClone(first),role:'hint',id:undefined});
+    const selected=line('Selected',{Speaker:'Guard Alias','Speaking Character':P}),before=JSON.stringify([selected,first,paired]),
+        result=await build(selected,[selected,first,paired]);
+    assert.equal(result.roleHints.speaker.status,'resolved'); assert.equal(key(result,'speaker'),'npc:'+P);
+    assert.deepEqual(result.roleHints.identities.find(value=>value.key===key(result,'speaker')).references,[P]);
+    assert.equal(JSON.stringify([selected,first,paired]),before);
+});
+
+test('same-name NPC dialogue cannot contaminate verified speaker examples through a browsing group',async()=>{
+    const first=npc(P,'Synthetic Guard'),second=npc(Q,'Synthetic Guard');first.fields.push(field('Short Name','First Guard'));
+    const selected=line('Selected',{Speaker:P},30),own=line('Own',{Speaker:P},29,'Verified own voice.'),
+        alias=line('Alias',{Speaker:'First Guard'},31,'Verified alias voice.'),other=line('Other',{Speaker:Q},28,'WRONG NPC VOICE'),
+        ambiguous=line('Ambiguous',{Speaker:'Synthetic Guard'},27,'AMBIGUOUS NAME VOICE'),
+        conflict=line('Conflict',{Speaker:P,'Speaking Character':Q},26,'CONFLICTING SPEAKER VOICE'),
+        result=await build(selected,[selected,first,second,own,alias,other,ambiguous,conflict]);
+    assert.equal(key(result,'speaker'),'npc:'+P);
+    assert.deepEqual(result.toneContext.voiceExamples.map(value=>value.provenance.recordId),['Alias','Own']);
+    assert.ok(result.toneContext.voiceExamples.every(value=>value.identityKey==='npc:'+P));
+    assert.equal(result.toneContext.selection.eligibleVoiceExamples,2);
+});
+
+test('same portrait artwork and same display name never prove cross-path NPC voice equivalence',async()=>{
+    const paths=['Metadata/NPC/League/Chayula/ChayulaFarmerHub','Metadata/NPC/League/Chayula/ChayulaFarmerNearDreamer'],
+        first=npc(paths[0],'Synthetic Guard'),second=npc(paths[1],'Synthetic Guard'),selected=line('Selected',{Speaker:paths[0]}),
+        own=line('Own',{Speaker:paths[0]},29,'Same exact path voice.'),other=line('Other',{Speaker:paths[1]},28,'OTHER PATH SAME ART'),
+        result=await build(selected,[selected,first,second,own,other]);
+    assert.equal(Catalog.games.poe2.npcs[paths[0]][0],Catalog.games.poe2.npcs[paths[1]][0]);
+    assert.deepEqual(result.toneContext.voiceExamples.map(value=>value.provenance.recordId),['Own']);
+    assert.equal(result.toneContext.voiceExamples[0].identityKey,'npc:'+paths[0]);
+});
+
+test('ambiguous browsing-group participants need exact family reference evidence before role suggestions',async()=>{
+    const first=npc(P,'Synthetic Guard'),second=npc(Q,'Synthetic Guard'),hero=character(A,'Synthetic Mage'),selected=line('Selected',{Character:A}),
+        units=[selected,first,second,hero],npcIndex=await N.buildNpcIndex(units,{yield:async()=>{}}),parentKey=[...npcIndex.groupByKey.keys()][0],
+        family={familyKey:'Synthetic',parentKey},convoIndex={memberships:new Map([[selected.id,family]])},
+        unknown=await build(selected,units,{npcIndex,convoIndex});
+    assert.equal(unknown.roleHints.order.reason,'ambiguous-npc-group-identity');assert.equal(key(unknown,'speaker'),undefined);
+    family.npcEvidence={participants:[{key:parentKey,references:[P]}]};
+    const verified=await build(selected,units,{npcIndex,convoIndex});
+    assert.equal(verified.roleHints.order.status,'reliable');assert.equal(key(verified,'listener'),'npc:'+P);
+    assert.equal(key(verified,'speaker'),'character:'+A);
+});
+
+test('singleton conversation fallback matches exact NPC identity rather than its shared-name browsing group',async()=>{
+    const first=npc(P,'Synthetic Guard'),second=npc(Q,'Synthetic Guard');first.fields.push(field('Short Name','First Guard'));
+    const selected=line('Selected',{Speaker:P},30),own=line('Own',{Speaker:'First Guard'},29),other=line('Other',{Speaker:Q},31),
+        units=[selected,first,second,own,other],convoIndex={memberships:new Map([[selected.id,{familyKey:'Singleton'}]])},
+        result=await build(selected,units,{convoIndex});
+    assert.equal(result.surrounding.mode,'same-explicit-npc'); assert.equal(result.surrounding.npc.identityKey,'npc:'+P);
+    assert.deepEqual(result.surrounding.entries.map(value=>value.recordId),['Own']);
+    selected.metadata={Speaker:'Synthetic Guard'};
+    const ambiguous=await build(selected,units,{convoIndex});
+    assert.equal(ambiguous.surrounding.reason,'singleton-without-verified-npc');assert.equal(ambiguous.surrounding.entries.length,0);
+});

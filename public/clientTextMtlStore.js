@@ -20,6 +20,25 @@
     const reviewId = (unitId, fieldId) => key(unitId, fieldId);
     const archivedReviewId = (unitId, fieldId, candidateId) => key('archive', unitId, fieldId, candidateId);
     const recoveryReviewId = (unitId, fieldId, recoveryId) => key('recovery', unitId, fieldId, recoveryId);
+    function dismissalInput(candidate, options={}, local=false){
+        const mutationId=options.mutationId;
+        if(typeof mutationId!=='string'||!mutationId||mutationId.length>256)throw new TypeError('MTL dismissal requires a stable mutation ID.');
+        if(options.archiveRequired&&options.consentVersion!=='mtl-v2'||own(options,'consentVersion')&&options.consentVersion!=='mtl-v2')
+            throw Object.assign(new Error('Review and enable the updated MTL data-sharing and private review-retention choice in MTL settings first.'),{code:'MTL_REVIEW_CONSENT_REQUIRED'});
+        const body={mutationId,...(local?{candidateId:candidate.id}:{}),candidateRevision:candidate.revision,...(local?{generatedText:candidate.generatedText}:{})};
+        if(own(options,'consentVersion'))body.consentVersion=options.consentVersion;
+        if(own(options,'reviewedText')){
+            if(typeof options.reviewedText!=='string'||options.reviewedText.length>M.MAX_TEXT)throw new TypeError('The rejected MTL review exceeds the 32768-character limit.');
+            body.reviewedText=options.reviewedText;
+        }
+        return{body,signature:S.hash({candidateId:candidate.id,body})};
+    }
+    function archiveReceipt(input,required=false){
+        if(!input&&!required)return undefined;
+        if(!input||typeof input.id!=='string'||!/^mtl-review_[a-f0-9]{64}$/.test(input.id)
+            ||input.format!=='sdeditor-mtl-dismissal-v1'||input.status!=='saved')throw Object.assign(new Error('The dismissal archive could not be confirmed. Its exact request is retained for retry.'),{code:'MTL_REVIEW_ARCHIVE_UNCONFIRMED'});
+        return{id:input.id,format:input.format,status:input.status};
+    }
     function upgrade(db, tx) {
         for (const name of names) {
             const store = db.objectStoreNames.contains(name) ? tx.objectStore(name) : db.createObjectStore(name, { keyPath: 'key' });
@@ -220,7 +239,7 @@
         async function dismiss(rawScope, candidate, options = {}) {
             const { id } = capture(rawScope, options), detached = M.normalizeCandidate(candidate), mutationId = options.mutationId;
             if (typeof mutationId !== 'string' || !mutationId || mutationId.length > 256) throw new TypeError('MTL dismissal requires a stable mutation ID.');
-            const body = { mutationId, candidateRevision: detached.revision }, signature = S.hash({ candidateId: detached.id, body });
+            const {body,signature}=dismissalInput(detached,options);
             return transaction([stores.candidates, stores.outbox, stores.receipts], 'readwrite', async tx => {
                 const receipt = await get(tx, stores.receipts, id, mutationId);
                 if (receipt) {
@@ -231,7 +250,7 @@
                 if (!current || current.status !== 'pending' || current.revision !== detached.revision || M.immutable(current) !== M.immutable(detached)) throw M.changed();
                 const value = { ...current, status: 'dismissed', localDisposition: true, resolvedAt: Date.now() };
                 const operation = { mutationId, candidateId: current.id, unitId: current.unitId, signature, requestBody: body,
-                    state: 'pending', createdAt: Date.now(), candidate: value };
+                    fieldId:current.fieldId,requestId:current.requestId,...(options.archiveRequired?{archiveRequired:true}:{}),state: 'pending', createdAt: Date.now(), candidate: value };
                 const accepted = { mutationId, signature, candidateId: current.id, createdAt: operation.createdAt, acknowledged: false };
                 put(tx, stores.candidates, id, current.id, value); put(tx, stores.outbox, id, mutationId, operation);
                 put(tx, stores.receipts, id, mutationId, accepted); return { ...accepted, replayed: false };
@@ -243,14 +262,14 @@
         }
         async function markSending(rawScope, mutationId, state, options) {
             const { id } = capture(rawScope, options);
-            if (!['sending', 'uncertain', 'conflict', 'pending'].includes(state)) throw new TypeError('Invalid MTL upload state.');
+            if (!['sending', 'uncertain', 'conflict', 'pending','archive-pending'].includes(state)) throw new TypeError('Invalid MTL upload state.');
             return transaction([stores.outbox], 'readwrite', async tx => {
                 const current = await get(tx, stores.outbox, id, mutationId); if (!current) return null;
                 const next = { ...current, state }; put(tx, stores.outbox, id, mutationId, next); return next;
             }, options);
         }
         async function acknowledge(rawScope, operation, response, options) {
-            const { id } = capture(rawScope, options), candidate = M.normalizeCandidate(response?.candidate || response);
+            const { id } = capture(rawScope, options), candidate = M.normalizeCandidate(response?.candidate || response),archive=archiveReceipt(response?.archive,operation.archiveRequired===true);
             return transaction([stores.candidates, stores.outbox, stores.receipts], 'readwrite', async tx => {
                 const current = await get(tx, stores.outbox, id, operation.mutationId), receipt = await get(tx, stores.receipts, id, operation.mutationId);
                 if (candidate.id !== operation.candidateId || !receipt || receipt.signature !== operation.signature
@@ -258,12 +277,12 @@
                 const previous = await get(tx, stores.candidates, id, candidate.id), next = M.mergeCandidate(previous, candidate);
                 if (candidate.status !== 'dismissed' || candidate.revision <= operation.requestBody.candidateRevision) throw new Error('MTL dismissal acknowledgement is invalid.');
                 put(tx, stores.candidates, id, next.id, next); del(tx, stores.outbox, id, operation.mutationId);
-                put(tx, stores.receipts, id, operation.mutationId, { ...receipt, acknowledged: true, candidateRevision: candidate.revision });
+                put(tx, stores.receipts, id, operation.mutationId, { ...receipt, acknowledged: true, candidateRevision: candidate.revision,...(archive?{archive}:{}) });
                 return next;
             }, options);
         }
         return { list, getCandidate, putCandidate, getReview, listReviews, putReview, archiveReview, getMetadata, getGeneration, getGenerations, putGeneration, deleteGeneration, applyRemote, dismiss,
             getOutbox, markSending, acknowledge, normalizeScope, scopeKey };
     }
-    return { stores, names, upgrade, normalizeScope, scopeKey, normalizeReview, normalizeReviewRecovery, normalizeGeneration, guard, create, validateAcceptancesTx, resolveAcceptancesTx };
+    return { stores, names, upgrade, normalizeScope, scopeKey, normalizeReview, normalizeReviewRecovery, normalizeGeneration,dismissalInput,archiveReceipt, guard, create, validateAcceptancesTx, resolveAcceptancesTx };
 });

@@ -15,7 +15,7 @@
         const guard = () => { if (!current()) throw Object.assign(new Error('MTL sync context changed.'), { stale: true }); };
         const notify = (name, value) => { try { options[name]?.(value); } catch (_) {} };
         function snapshot() { return { scope, stopped, error: errors.flush?.message || errors.pull?.message || '',
-            pullError: errors.pull?.message || '', flushError: errors.flush?.message || '' }; }
+            pullError: errors.pull?.message || '', flushError: errors.flush?.message || '',flushCode:errors.flush?.code||'' }; }
         async function request(path, init) {
             guard(); const response = await options.request(path, init); guard();
             if (response && typeof response.json === 'function') {
@@ -29,13 +29,15 @@
         function serialized(kind, action) {
             const result = queue.catch(() => {}).then(async () => {
                 guard();
-                try { const value = await action(); if (!value?.conflicts) errors[kind] = null; notify('onError', snapshot()); return value; }
+                try { const value = await action(); if (!value?.conflicts&&!value?.pending) errors[kind] = null; notify('onError', snapshot()); return value; }
                 catch (error) { if (!error.stale) { errors[kind] = error; notify('onError', snapshot()); } throw error; }
             });
             queue = result; return result;
         }
         function pull() {
             return serialized('pull', async () => {
+                if(options.local)return{changed:[],sequence:0};
+                if(options.offline?.())return{changed:[],offline:true,pending:true};
                 const metadata = await store.getMetadata(scope, { guard: current }); guard();
                 let cursor = metadata?.sequence || 0, changed = [];
                 for (let page = 0; page < 10000; page++) {
@@ -63,19 +65,21 @@
                 let uploaded = 0;
                 for (let round = 0; round < 10000; round++) {
                     const operations = await store.getOutbox(scope, { guard: current }); guard();
+                    if(options.offline?.())return{uploaded,pending:operations.length,offline:true};
                     const operation = operations.find(value => value.state !== 'conflict');
                     if (!operation) return { uploaded, conflicts: operations.filter(value => value.state === 'conflict').length };
                     const claimed = await store.markSending(scope, operation.mutationId, 'sending', { guard: current }); guard();
                     if (!claimed) continue;
                     try {
-                        const data = await request(base + '/' + encodeURIComponent(claimed.candidateId) + '/dismissals?' + language,
+                        const path=options.local?'/v1/mtl/local/requests/'+encodeURIComponent(claimed.requestId)+'/dismissals':base + '/' + encodeURIComponent(claimed.candidateId) + '/dismissals?' + language;
+                        const data = await request(path,
                             { method: 'POST', body: claimed.requestBody });
                         await store.acknowledge(scope, claimed, data, { guard: current }); guard(); uploaded++;
                         notify('onChange', { changed: [claimed.unitId], scope });
                     } catch (error) {
                         if (error.stale) throw error;
                         const conflict = error.status === 409 || error.statusCode === 409 || String(error.code || '').includes('CONFLICT');
-                        await store.markSending(scope, claimed.mutationId, conflict ? 'conflict' : 'uncertain', { guard: current });
+                        await store.markSending(scope, claimed.mutationId,error.code==='MTL_REVIEW_ARCHIVE_PENDING'?'archive-pending':conflict?'conflict':'uncertain', { guard: current });
                         throw error;
                     }
                 }
@@ -86,7 +90,7 @@
         function start(interval = 20000) {
             if (timer || stopped) return;
             timer = setInterval(tick, Math.max(1000, interval)); timer?.unref?.();
-            root.addEventListener?.('online', tick); root.document?.addEventListener?.('visibilitychange', tick); tick();
+            root.addEventListener?.('online', tick); root.document?.addEventListener?.('visibilitychange', tick); if(options.immediate!==false)tick();
         }
         function stop() {
             stopped = true; if (timer) clearInterval(timer); timer = null;
