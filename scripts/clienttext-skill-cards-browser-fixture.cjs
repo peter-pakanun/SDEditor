@@ -6,6 +6,7 @@ const {join,resolve}=require('node:path');
 const {createServer}=require('node:http');
 const express=require('express');
 const State=require('../public/clientTextState.js');
+const {checkRelatedSkillFooter}=require('./related-skill-footer-browser-check.cjs');
 const modules='C:/Users/lpeac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules';
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE_PATH || require.resolve('playwright',{paths:[modules]}));
 const executablePath=process.env.FIXTURE_BROWSER_PATH || ['C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Google/Chrome/Application/chrome.exe'].find(existsSync);
@@ -182,6 +183,7 @@ async function jump(page,locator,sheet,field,alt=false){
     assert.equal(await page.locator('.ctSkillRelatedChoice select').inputValue(),'example','shared tag retains the explicit originating skill');
     await page.waitForFunction(()=>fixtureApp.ctSkillPreviewModel?.target.description.text.includes('Unsaved navigation'));
     assert.match(await target.locator('.ctSkillCardDescription').innerText(),/Unsaved navigation draft/,'related-row preview preserves checkpointed unsaved draft');
+    await checkRelatedSkillFooter(page,folder);
     await page.locator('.ctSkillRelatedChoice select').selectOption('second-example');await page.waitForFunction(()=>fixtureApp.ctSkillPreviewModel?.skillId==='second-example');assert.match(await target.locator('h3').innerText(),/Second ability/);
     assert.equal(await page.locator('.ctSkillShortCard').count(),0,'an absent short field hides the compact card in both languages');
     const otherMode=target.getByRole('tab',{name:'Target Other mode'}),beforeTab=await navigationState(page);await otherMode.click();assert.equal(await otherMode.getAttribute('aria-selected'),'true');assert.deepEqual(await navigationState(page),beforeTab,'plain tabs select mode without changing workbook row');
@@ -189,6 +191,8 @@ async function jump(page,locator,sheet,field,alt=false){
     await jump(page,plainText(target.locator('.ctSkillCardDescription')),'ActiveSkills','Description');assert.equal(await page.evaluate(()=>fixtureApp.ctCurrentUnit.recordId),'second_skill');
     await page.evaluate(async()=>{const host=fixtureApp,unit=host.ctUnits.find(u=>u.sheet==='ActiveSkills' && u.recordId==='example_skill');await host.ctSelect(unit,true,{focus:false});host.ctTool='preview';await host.$nextTick();});await page.waitForFunction(()=>fixtureApp.ctSkillPreviewModel?.skillId==='example');
     assert.match(await page.locator('textarea[data-ct-target="Description"]:visible').inputValue(),/Unsaved navigation/,'returning restores the same durable unsaved draft');
+    assert.equal(await page.locator('.ctSkillRelatedChoice').count(),0,'a row without multiple related skills has no footer');
+    assert.equal(await page.locator('.relatedSkillPreviewActive').count(),0,'single-skill rows do not enable the footer scrolling layout');
     const layout=[];
     for(const theme of ['light','grey','dark','modern-dark']){
         await page.evaluate(theme=>{document.documentElement.dataset.theme=theme;for(const pane of document.querySelectorAll('.gamePreviewSourcePane,.gamePreviewTargetPane'))pane.scrollTop=0;},theme);await page.mouse.move(0,0);await settle(page);
@@ -208,6 +212,9 @@ async function jump(page,locator,sheet,field,alt=false){
     await shortTarget.screenshot({path:join(folder,'short-card-wide.png')});
     await page.evaluate(async()=>{fixtureApp.hideSourceInPreviewPanel=false;await fixtureApp.$nextTick();});await settle(page);
     await page.evaluate(async()=>{fixtureApp.ctEditor=false;fixtureApp.ctInlineClosed=false;await fixtureApp.$nextTick();});await settle(page);assert.equal(await page.locator('#inlineEditorPreviewHost .ctSkillCard').count(),4);
+    assert.equal(await page.locator('.ctSkillRelatedChoice,.relatedSkillPreviewActive').count(),0);
+    assert.equal(await page.locator('.sharedEditorSidebar').evaluate(node=>getComputedStyle(node).overflowY),'auto','without the selector the inline sidebar keeps its ordinary scroll owner');
+    assert.equal(await page.locator('.gamePreviewMainRow').evaluate(node=>getComputedStyle(node).overflowY),'visible','without the selector preview content does not gain a nested scroll trap');
     await jump(page,source.locator('.ctSkillCardType .gamePreviewKw'),'GemTags','Display Name',true);assert.equal(await page.evaluate(()=>fixtureApp.ctEditor),false);
     await jump(page,plainText(target.locator('.ctSkillCardDescription')),'ActiveSkills','Description');assert.match(await page.locator('textarea[data-ct-target="Description"]:visible').inputValue(),/Unsaved navigation/);
     await page.evaluate(async()=>{fixtureApp.ctEditor=true;await fixtureApp.$nextTick();});await settle(page);

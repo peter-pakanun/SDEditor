@@ -56,6 +56,14 @@
 .inlinePreviewHost .gamePreviewWindow { box-sizing: border-box; flex: 1; min-width: 0; width: 100%; max-width: none; }
 .inlinePreviewHost .gamePreviewVarsColumn { flex: none; height: auto; width: 100%; min-width: 0; max-width: none; }
 .inlinePreviewHost .gamePreviewVarsPanel { max-height: none; }
+/* Related-skill controls stay below the scrolling inline preview, as in the full editor. */
+.inlineEditorSidebar .sharedEditorSidebar.relatedSkillPreviewActive { overflow: hidden; }
+.relatedSkillPreviewActive > .inlinePreviewHost { display: flex; flex: 1; min-height: 0; }
+.relatedSkillPreviewActive .gamePreviewStrip { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+.relatedSkillPreviewActive .gamePreviewMainRow { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.relatedSkillPreviewActive .gamePreviewFrameWrap { flex: none; }
+.relatedSkillPreviewActive .gamePreviewVarsColumn { box-sizing: border-box; }
+.relatedSkillPreviewActive .ctSkillRelatedChoice select { padding: 4px; }
 .inlineEditorSidebar .lookupResult { display: block; box-sizing: border-box; width: 100%; margin: 0 0 6px; padding: 9px 10px; text-align: left; border: 1px solid var(--ui-border); border-radius: 6px; line-height: 1.5; }
 .inlineEditorSidebar .lookupReference h3 { margin: 0 0 5px; font: 600 13px/1.5 system-ui, sans-serif; overflow-wrap: anywhere; }
 .draftRecoveryDialog { width: min(1080px, calc(100vw - 48px)); max-height: calc(100dvh - 48px); padding: 0; border: 1px solid var(--ui-border); border-radius: 12px; background: var(--color-element); color: var(--color-font); }

@@ -551,7 +551,7 @@
             </div>
           </div>
         </div>`);
-  const Tools = sharedSurface('EditorTools', String.raw`<div class="side sharedEditorSidebar" ref="editorSide" data-inline-focus-surface @focusout="inlineRowFocusOut" :inert="!editorReady" :class="{ ctTools: historyClientText, commentsActive: sideTab === 'comments', lookupActive: sideTab === 'lookup' }">
+  const Tools = sharedSurface('EditorTools', String.raw`<div class="side sharedEditorSidebar" ref="editorSide" data-inline-focus-surface @focusout="inlineRowFocusOut" :inert="!editorReady" :class="{ ctTools: historyClientText, commentsActive: sideTab === 'comments', lookupActive: sideTab === 'lookup', relatedSkillPreviewActive: !editorVisible && sideTab === 'preview' && ctActive && ctSkillChoices?.length > 1 }">
         <div class="sideHeader">
           <div class="sideTabs">
             <button class="tabBtn" :class="{ active: sideTab === 'dictionary' }" @click="sideTab = 'dictionary'">📚 Dictionary</button>
@@ -599,7 +599,6 @@
             </div>
           </div>
           <div class="gamePreviewMainRow">
-            <label v-if="ctActive && ctSkillChoices?.length > 1" class="ctSkillRelatedChoice">Related skill <select :value="ctSkillSelectedId" @change="ctSkillRelatedId=$event.target.value"><option value="">Choose a related skill</option><option v-for="card in ctSkillChoices" :key="card.id" :value="card.id">{{card.title.source}} · {{card.itemTitle.source}}</option></select></label>
             <div class="gamePreviewFrameWrap">
               <div class="gamePreviewFramesColumn">
                 <div v-if="!hideSourceInPreviewPanel" class="gamePreviewSourcePane" :tabindex="gamePreviewFullEditor ? 0 : undefined" :role="gamePreviewFullEditor ? 'region' : undefined" :aria-label="gamePreviewFullEditor ? 'English preview' : undefined">
@@ -705,6 +704,7 @@
               </div>
             </div>
           </div>
+          <label v-if="ctActive && ctSkillChoices?.length > 1" class="ctSkillRelatedChoice"><span>Related skill</span><select :value="ctSkillSelectedId" @change="ctSkillRelatedId=$event.target.value"><option value="">Choose a related skill</option><option v-for="card in ctSkillChoices" :key="card.id" :value="card.id">{{card.title.source}} · {{card.itemTitle.source}}</option></select></label>
         </div>`, true);
   SharedPreview.components = { 'editor-preview-audio': PreviewAudio };
   const Autocomplete = sharedSurface('EditorAutocomplete', String.raw`<div v-if="hlPopup.visible" class="hlPopupBackdrop" data-inline-focus-surface @focusout="inlineRowFocusOut" @mousedown="closeHlPopup">
