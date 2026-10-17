@@ -1,8 +1,8 @@
 /* Admin request inspection is read-only and session-local. No inference on open. */
 (function (root, factory) {
-    const api = factory(root);
+    const api = factory(root, typeof module === 'object' && module.exports ? require('./clientTextMtlTiming.js') : root.ClientTextMtlTiming);
     if (typeof module === 'object' && module.exports) module.exports = api; else root.ClientTextMtlDebug = api;
-})(typeof window !== 'undefined' ? window : globalThis, function (root) {
+})(typeof window !== 'undefined' ? window : globalThis, function (root, Timing) {
     'use strict';
     const raw = value => root.Vue?.markRaw ? root.Vue.markRaw(value) : value;
     const allowed = host => host.cloudSignedIn === true && host.cloudUser?.isAdmin === true && host.cloudUser.role === 'admin'
@@ -84,11 +84,45 @@
         watch: { ctMtlDebugOrigin() { this.ctMtlDebugReset(); } },
         beforeUnmount() { this.ctMtlDebugReset(); },
         methods: {
-            ctMtlDebugReset() { this._ctMtlDebugLoad?.abort(); this._ctMtlDebugLoad = null; this.ctMtlDebugWindow = null; this.ctMtlDebugRecords = raw({}); },
+            ctMtlDebugReset() { for(const info of this._ctMtlTimingRuns?.values()||[])for(const frame of info.frames||[])root.cancelAnimationFrame?.(frame); this._ctMtlTimingRuns?.clear(); this._ctMtlDebugLoad?.abort(); this._ctMtlDebugLoad = null; this.ctMtlDebugWindow = null; this.ctMtlDebugRecords = raw({}); },
             ctMtlDebugClose() {
                 const anchor = this.ctMtlDebugWindow?.anchor;
                 this._ctMtlDebugLoad?.abort(); this.ctMtlDebugWindow = null;
                 if (anchor?.isConnected) anchor.focus({ preventScroll: true });
+            },
+            ctMtlDebugTimingStart(field) {
+                if(!allowed(this)||!this.ctActive||!this.ctCurrentUnit?.fields.includes(field)||this.ctMtlBusy?.(field))return null;
+                const runs=this._ctMtlTimingRuns ||=new Map(),origin=this.ctMtlDebugOrigin,unit=this.ctCurrentUnit;
+                const previous=runs.get(field.id);if(previous?.timing.snapshot().outcome==='running')return null;
+                if(previous)for(const frame of previous.frames)root.cancelAnimationFrame?.(frame);
+                runs.delete(field.id);
+                while(runs.size>=32){const oldest=runs.keys().next().value,info=runs.get(oldest);for(const frame of info.frames)root.cancelAnimationFrame?.(frame);runs.delete(oldest);
+                    const records={...this.ctMtlDebugRecords};delete records[oldest];this.ctMtlDebugRecords=raw(records);}
+                let info;
+                const current=()=>allowed(this)&&origin===this.ctMtlDebugOrigin&&runs.get(field.id)===info;
+                const publish=()=>{if(!info||!current())return;const before=this.ctMtlDebugRecords[field.id];if(!before||before.origin!==origin)return;
+                    const record={...before,browserTiming:info.timing.snapshot()};this.ctMtlDebugRecords=raw({...this.ctMtlDebugRecords,[field.id]:record});
+                    if(this.ctMtlDebugWindow?.fieldId===field.id)this.ctMtlDebugWindow={...this.ctMtlDebugWindow,record};};
+                const timing=Timing?.create({...(this._ctMtlTimingNow?{now:this._ctMtlTimingNow}:{}),onChange:publish});if(!timing)return null;
+                info={timing,origin,unit,frames:new Set(),scheduled:new Set(),current};runs.set(field.id,info);
+                this.ctMtlDebugRecords=raw({...this.ctMtlDebugRecords,[field.id]:{origin,status:'preparing',submittedAt:Date.now(),snapshot:this.ctMtlDebugSnapshot(field),browserTiming:timing.snapshot()}});
+                publish();return timing;
+            },
+            ctMtlDebugTimingBind(timing,field,requestId){
+                const info=this._ctMtlTimingRuns?.get(field.id);if(!timing||info?.timing!==timing||!info.current())return;
+                const record={...this.ctMtlDebugRecords[field.id],requestId};this.ctMtlDebugRecords=raw({...this.ctMtlDebugRecords,[field.id]:record});
+                if(this.ctMtlDebugWindow?.fieldId===field.id)this.ctMtlDebugWindow={...this.ctMtlDebugWindow,record};
+            },
+            ctMtlDebugTimingFrame(timing,name,fieldId,requireText=false){
+                const info=this._ctMtlTimingRuns?.get(fieldId);if(!timing||info?.timing!==timing||!info.current()||info.scheduled.has(name)||timing.snapshot().milestonesMs[name]!==null||!root.requestAnimationFrame)return;
+                info.scheduled.add(name);
+                this.$nextTick?.(()=>{if(!info.current()||root.document?.hidden){info.scheduled.delete(name);return;}
+                    const frame=root.requestAnimationFrame(()=>{info.frames.delete(frame);info.scheduled.delete(name);if(!info.current()||root.document?.hidden)return;
+                        const element=this.ctDictionaryTarget?.(fieldId),container=element?.closest?.('.ctTarget');
+                        if(!element?.getClientRects?.().length||requireText&&!container?.querySelector('.ctMtlStreamText')?.textContent)return;
+                        timing.mark(name);
+                    });info.frames.add(frame);
+                });
             },
             ctMtlDebugSnapshot(field, context) {
                 const unit = this.ctCurrentUnit;
@@ -96,10 +130,11 @@
                     field: { id: field.id, name: field.name, kind: field.kind, form: field.form || null }, source: field.source,
                     language: this.ctWorkspace.scope.language, context });
             },
-            ctMtlDebugBegin(field, body) {
+            ctMtlDebugBegin(field, body, timing) {
                 if (!allowed(this)) return;
                 const record = { requestId: body.requestId, origin: this.ctMtlDebugOrigin, submittedAt: Date.now(),
-                    snapshot: this.ctMtlDebugSnapshot(field, body.context), status: 'submitted', server: null };
+                    snapshot: this.ctMtlDebugSnapshot(field, body.context), status: 'submitted', server: null,
+                    ...(timing ? {browserTiming:timing.snapshot()} : {}) };
                 this.ctMtlDebugRecords = raw({ ...this.ctMtlDebugRecords, [field.id]: record });
                 if (this.ctMtlDebugWindow?.fieldId === field.id) this.ctMtlDebugWindow = { ...this.ctMtlDebugWindow, record };
             },
@@ -149,6 +184,8 @@
         props: ['host'], data: () => ({ x: 24, y: 24, dragging: false,copyBusy:{},copyMessage:{},copyError:{} }),
         computed: { item() { return this.host.ctMtlDebugWindow; },
             promptText(){return sectionText(this.item.record,'prompt');},contextText(){return sectionText(this.item.record,'context');},
+            timingGroups(){return Timing?.groups(this.item.record)||[];},
+            timingState(){return Timing?.states(this.item.record)||{};},
             details() { const value=present(this.item.record);delete value.prompt;delete value.context;return JSON.stringify(value,null,2); } },
         watch:{item(){this.resetCopy();}},
         mounted() {
@@ -158,6 +195,7 @@
         },
         beforeUnmount() { this.resetCopy();this.finishDrag(); window.removeEventListener('resize', this._resize); this._observer.disconnect(); },
         methods: {
+            timingValue(value){return Timing.format(value);},
             resetCopy(){for(const timer of Object.values(this._copyTimers||{}))clearTimeout(timer);this._copyTimers={};this._copyRuns={};this.copyBusy={};this.copyMessage={};this.copyError={};},
             async copySection(section){
                 if(!['prompt','context'].includes(section)||!allowed(this.host)||this.copyBusy[section])return false;
@@ -216,11 +254,20 @@
           <header class="ctMtlDebugHeader" tabindex="0" aria-label="Move request details with arrow keys or drag" title="Drag to move · Arrow keys when focused" @keydown="moveKey" @pointerdown="startDrag" @pointermove="moveDrag" @pointerup="finishDrag" @pointercancel="finishDrag" @lostpointercapture="finishDrag">
             <strong id="ct-mtl-debug-title">MTL request details · Admin</strong><button ref="close" type="button" aria-label="Close request details" @click="host.ctMtlDebugClose()">×</button>
           </header>
-          <div class="ctMtlDebugBody"><p class="ctMtlDebugMode">{{ item.record.status === 'preview' ? 'Preview · not executed' : 'Submitted request · ' + item.record.status }}</p>
+          <div class="ctMtlDebugBody"><p class="ctMtlDebugMode">{{ item.record.status === 'preparing' ? 'Browser preparation' : item.record.status === 'preview' ? 'Preview · not executed' : 'Submitted request · ' + item.record.status }}</p>
             <p v-if="item.record.status === 'preview'">Current field and bounded context only. No request has been sent. The exact server prompt appears after Translate is used.</p>
-            <p v-else>{{ item.record.server?.providerRequest ? 'Selected fields from the executed request and server validation.' : 'Browser submission; an executed server prompt has not been confirmed.' }}</p>
+            <p v-else>{{ item.record.server?.providerRequest ? 'Selected fields from the executed request and server validation.' : item.record.browserTiming?.milestonesMs.postStart === null ? 'No request has been sent. Browser preparation timings are shown below.' : 'Browser submission; an executed server prompt has not been confirmed.' }}</p>
             <p>Read-only. Sensitive values are redacted. Server details expire after ten minutes; browser details clear when the account, workspace, language, source or selected record changes.</p>
             <p v-if="item.loading" role="status">Loading request details…</p><p v-if="item.error" role="alert">{{ item.error }}</p>
+            <details class="ctMtlTimingPanel"><summary>Timings (ms)</summary>
+              <p>Browser outcome: {{ timingState.browser?.outcome || 'Unavailable' }}. API outcome: {{ timingState.api?.outcome || 'Unavailable' }}.</p>
+              <p>Request: {{ item.record.requestId || 'Not submitted' }}. Browser and API clocks are independent. These rows overlap; do not add them or subtract timestamps across machines.</p>
+              <p>Unavailable means not recorded, not reached, a hidden/unmounted field, older API, or expired diagnostics. Provider observations do not identify queue or reasoning time.</p>
+              <section v-for="group in timingGroups" :key="group.title"><h5>{{ group.title }}</h5><p>{{ group.description }}</p>
+                <table><caption class="srOnly">{{ group.title }} in milliseconds</caption><thead><tr><th scope="col">Measurement</th><th scope="col">Milliseconds</th></tr></thead>
+                <tbody><tr v-for="row in group.rows" :key="row.key"><th scope="row">{{ row.label }}</th><td>{{ timingValue(row.value) }}</td></tr></tbody></table>
+              </section>
+            </details>
             <h4>Prompt and context</h4>
             <section v-for="section in ['prompt','context']" :key="section" class="ctMtlDebugSection">
               <div class="ctMtlDebugSectionTitle"><strong>{{ section === 'prompt' ? 'Prompt' : 'Context' }}</strong><button v-if="section === 'prompt' ? promptText : contextText" type="button" class="ctMtlCopyButton" :aria-label="'Copy '+section" :title="'Copy '+section" :aria-disabled="copyBusy[section] || undefined" @pointerdown.stop @click.stop="copySection(section)"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 8h12v13H8zM4 16H2V2h13v2"/></svg></button><small role="status" aria-live="polite">{{ copyMessage[section] }}</small></div>

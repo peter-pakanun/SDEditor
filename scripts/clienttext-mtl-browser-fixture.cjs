@@ -40,7 +40,7 @@ async function run(){
         'normalizedStore.js','normalizedRooms.js','offlineStore.js','clientTextState.js','contentAdapters.js','clientTextStore.js',
         'clientTextMtlState.js','clientTextMtlStore.js','clientTextMtlMemoryStore.js','clientTextMtlSync.js','clientTextMemoryStore.js',
         'vendor/fast-xml-parser-5.11.2.min.js','clientTextCodec.js','editorComponents.js','clientTextFormatting.js','clientTextComparisons.js',
-        'clientTextExportProgress.js','clientTextMtlContext.js','clientTextMtlProgress.js','clientTextMtlUi.js','clientTextMtlDebug.js','clientTextUi.js','editorSession.js'];
+        'clientTextExportProgress.js','clientTextMtlContext.js','clientTextMtlTiming.js','clientTextMtlProgress.js','clientTextMtlUi.js','clientTextMtlDebug.js','clientTextUi.js','editorSession.js'];
     const fixture=String.raw`(async()=>{
 const seed=${seed},ct=ClientTextUI.mixin,mtl=ClientTextMtlUI.mixin,debug=ClientTextMtlDebug.mixin;
 let app;
@@ -101,7 +101,7 @@ const options={
      const archive={id:'mtl-review_'+'a'.repeat(64),format:'sdeditor-mtl-dismissal-v1',status:'saved'};
      return mode==='memory'?{dismissal:{candidateId:candidate.id,requestId:candidate.requestId,status:'dismissed',revision:2},archive}:{candidate:{...candidate,localDisposition:false,status:'dismissed',revision:2},archive};
     }
-    if(path.startsWith('/v1/admin/mtl/requests/'))return{diagnostics:{providerRequest:{model:'synthetic-connection-config',instructions:'Synthetic executed prompt <img src=x onerror="window.__debugXss=true">',input:[{role:'user',content:'Synthetic context'}]},context:{accessToken:'synthetic-secret'},upstreamResponse:{contentType:'text/event-stream; charset=utf-8',hasBody:true,readableBody:true,bodyUsed:false,bodyLocked:false,redirected:false,responseType:'cors'},lookup:{enabled:false,rounds:[]},validation:'passed',elapsedMs:12}};
+    if(path.startsWith('/v1/admin/mtl/requests/'))return{diagnostics:{requestId:decodeURIComponent(path.split('/').at(-2)),timing:{version:'mtl-timing-v1',domain:'api-process',origin:'request-handler-entry',outcome:this._fixtureAsync?'running':'completed',milestonesMs:{apiReceived:0,admitted:2,credentialsStart:2,credentialsReady:6,providerRequest:10,providerHeaders:16,providerFirstByte:18,providerFirstEvent:20,providerFirstOutputText:30,providerFirstTranslation:40,providerCompleted:55,providerStreamEnd:60,validationStart:60,validationEnd:65,persistenceEnd:69,finished:80},durationsMs:{admissionMs:2,credentialsMs:4,streamMs:44,validationMs:5,persistenceMs:4,totalMs:80}},providerRequest:{model:'synthetic-connection-config',instructions:'Synthetic executed prompt <img src=x onerror="window.__debugXss=true">',input:[{role:'user',content:'Synthetic context'}]},context:{accessToken:'synthetic-secret'},upstreamResponse:{contentType:'text/event-stream; charset=utf-8',hasBody:true,readableBody:true,bodyUsed:false,bodyLocked:false,redirected:false,responseType:'cors'},lookup:{enabled:false,rounds:[]},validation:'passed',elapsedMs:12}};
     if(this._fixtureAsync){
      const snapshot=()=>({requestId:this._fixtureLive.body.requestId,status:this._fixtureLive.status,scope:{...scope,local:mode==='memory'},pollAfterMs:250,
        progress:{revision:this._fixtureLive.revision,phase:this._fixtureLive.phase,translation:this._fixtureLive.text,provisional:true},errorCode:this._fixtureLive.errorCode});
@@ -221,6 +221,7 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             await page.evaluate(()=>{window.__mtlApp.cloudUser={...window.__mtlApp.cloudUser,role:'admin',isAdmin:true};});
             await page.locator('.ctMtlDebugButton').click();
             assert.match(await page.locator('.ctMtlDebugDialog').textContent(),/Preview · not executed/);
+            await page.locator('.ctMtlTimingPanel summary').click();assert.equal(await page.locator('.ctMtlTimingPanel table').count(),4);assert.match(await page.locator('.ctMtlTimingPanel').textContent(),/Unavailable/);
             await auditCopy();
             assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureJobs.size),0,'Preview never generates');
             const header=page.locator('.ctMtlDebugHeader'),before=await page.locator('.ctMtlDebugDialog').boundingBox(),handle=await header.boundingBox();
@@ -239,6 +240,11 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             assert.equal(await page.locator('.ctMtlCount').count(),1);
             await page.locator('.ctMtlDebugButton').click();await page.waitForFunction(()=>!!window.__mtlApp.ctMtlDebugWindow?.record.server);
             assert.match(await page.locator('.ctMtlDebugDialog').textContent(),/Selected fields from the executed request and server validation/);
+            await page.locator('.ctMtlTimingPanel summary').click();
+            assert.match(await page.locator('.ctMtlTimingPanel').textContent(),/30.0 ms/);assert.match(await page.locator('.ctMtlTimingPanel').textContent(),/independent/);
+            assert.equal(await page.locator('.ctMtlTimingPanel table[role=grid]').count(),0);
+            for(const theme of ['light','grey','dark','modern-dark']){await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);await page.screenshot({path:join(outDir,mode+'-timing-'+theme+'.png'),fullPage:true});}
+            await page.locator('.ctMtlTimingPanel summary').click();
             await auditCopy();
             const selected=JSON.parse(await page.locator('.ctMtlDebugDialog pre[aria-label="Selected request fields"]').textContent());assert.equal(selected.model,undefined);assert.equal(selected.provider,undefined);
             assert.deepEqual(selected.upstreamResponse,{contentType:'text/event-stream; charset=utf-8',hasBody:true,readableBody:true,bodyUsed:false,bodyLocked:false,redirected:false,responseType:'cors'});
@@ -371,7 +377,7 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
                 }
             }
             for(const full of [false,true]){
-                await page.evaluate(async ({mode,full})=>{const app=window.__mtlApp;await app.configure(mode);app.ctEditor=full;app._fixtureAsync=true;app.ctMtlCapabilities={enabled:true,reviewArchive:true,consentVersion:'mtl-v2',delivery:'poll-v1'};},{mode,full});
+                await page.evaluate(async ({mode,full})=>{const app=window.__mtlApp;await app.configure(mode);app.ctEditor=full;if(mode==='memory'&&!full)app.cloudUser={...app.cloudUser,role:'admin',isAdmin:true};app._fixtureAsync=true;app.ctMtlCapabilities={enabled:true,reviewArchive:true,consentVersion:'mtl-v2',delivery:'poll-v1'};},{mode,full});
                 const memoryBeforeProgress=await page.evaluate(()=>window.__mtlApp.memoryCount());
                 await target().fill('Original draft {0}');await target().focus();await page.locator('.ctMtlButton').click();
                 await page.waitForSelector('.ctMtlSkeleton');await page.waitForFunction(()=>Object.values(window.__mtlApp.ctMtlLive).some(value=>value.canCancel));assert.equal(await target().getAttribute('readonly'),'');
@@ -392,6 +398,9 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
                 assert.equal(await page.locator('.ctMtlInlineOverlay img').count(),0);assert.equal(await page.evaluate(()=>window.__progressXss),undefined);
                 assert.match(await page.locator('.ctMtlStreamText').textContent(),/\nNext \\ line/);assert.equal(await target().inputValue(),'Original draft {0}');
                 assert.equal((await snapshot()).candidates,0);assert.equal(await page.evaluate(()=>window.__mtlApp.memoryCount()),memoryBeforeProgress);
+                if(mode==='memory'&&!full){await page.waitForFunction(()=>Object.values(window.__mtlApp.ctMtlDebugRecords).some(record=>record.browserTiming?.milestonesMs.firstTextFrameReady!==null));
+                    const timing=await page.evaluate(()=>Object.values(window.__mtlApp.ctMtlDebugRecords).find(record=>record.browserTiming)?.browserTiming);
+                    assert.ok(timing.milestonesMs.firstTextFrameReady>=timing.milestonesMs.firstProgress);assert.equal(timing.outcome,'running');}
                 for(const theme of ['light','grey','dark','modern-dark']){
                     await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
                     await page.screenshot({path:join(outDir,mode+'-'+(full?'full':'inline')+'-stream-'+theme+'.png'),fullPage:true});
@@ -464,7 +473,7 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             }
         }
         assert.deepEqual(external,[],'No external request is made');assert.deepEqual(errors,[],'Real native controls render without page errors');
-        const report={passed:true,results,externalRequests:external,pageErrors:errors};writeFileSync(join(outDir,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
+        const report={passed:true,timingChecks:['separate Admin panel with unavailable preview milestones','four themed timing tables and exact request correlation','first provisional frame after nonempty progress; no paint claim','ordinary roles hidden and context fence clears records'],results,externalRequests:external,pageErrors:errors};writeFileSync(join(outDir,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
     }catch(error){
         const page=browser?.contexts()[0]?.pages()[0];
         if(page){await page.screenshot({path:join(outDir,'failure.png'),fullPage:true});console.error(await page.evaluate(()=>({

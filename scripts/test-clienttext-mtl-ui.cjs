@@ -829,3 +829,75 @@ test('an older API without MTL capabilities leaves normal workbook activation qu
     assert.equal(h.app.ctMtlError,'');assert.equal(h.app.ctMtlCapabilities.unsupported,true);
     assert.equal(h.app.ctMtlCanGenerate(h.field),false);assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');
 });
+
+
+test('Admin timing starts at click and separates capabilities, notes, context, POST and adoption without changing drafts',async()=>{
+    const h=debugHarness();let now=0;h.app._ctMtlTimingNow=()=>now;h.app.ctMtlCapabilities=null;
+    h.app.ctToneNotesPrepare=async()=>{now=20;};
+    const build=h.app.ctMtlBuildContext;h.app.ctMtlBuildContext=(...args)=>{const result=build(...args);now=35;return result;};
+    const adopt=h.app.ctMtlAdoptCandidate;h.app.ctMtlAdoptCandidate=async(...args)=>{const result=await adopt(...args);now=80;return result;};
+    h.app._cloud.request=async(path,options)=>{if(path==='/v1/mtl/capabilities'){now=5;return{enabled:true,reviewArchive:true,consentVersion:'mtl-v2'};}
+        now=55;return{candidate:candidate(h.original,options.body.requestId,options.body.baseTargetHash)};};
+    assert.equal(await h.app.ctMtlGenerate(h.field),true);const record=h.app.ctMtlDebugRecords[h.field.id],timing=record.browserTiming;
+    assert.equal(record.requestId,h.app.ctMtlCandidates[0].requestId);assert.equal(timing.outcome,'completed');
+    assert.equal(timing.durationsMs.capabilitiesMs,5);assert.equal(timing.durationsMs.toneNotesMs,15);assert.equal(timing.durationsMs.contextMs,15);
+    assert.equal(timing.durationsMs.postRoundTripMs,20);assert.equal(timing.durationsMs.adoptionMs,25);assert.equal(timing.durationsMs.totalMs,80);
+    assert.equal(timing.milestonesMs.firstProgress,null);assert.equal(timing.milestonesMs.firstTextFrameReady,null);
+    assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');assert.equal(h.ordinaryEdits(),0);
+    assert.doesNotMatch(JSON.stringify(h.app.ctMtlCandidates),/milestonesMs|durationsMs/);
+});
+
+test('Admin preparation failures retain bounded browser timings without a POST or invented server milestones',async()=>{
+    const h=debugHarness();let now=0,posts=0;h.app._ctMtlTimingNow=()=>now;
+    h.app.ctToneNotesPrepare=async()=>{now=40;throw Error('Synthetic note read failed');};h.app._cloud.request=async()=>{posts++;};
+    assert.equal(await h.app.ctMtlGenerate(h.field),false);const timing=h.app.ctMtlDebugRecords[h.field.id].browserTiming;
+    assert.equal(timing.outcome,'failed');assert.equal(timing.durationsMs.toneNotesMs,40);assert.equal(timing.durationsMs.totalMs,40);
+    assert.equal(timing.milestonesMs.postStart,null);assert.equal(posts,0);assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');
+});
+
+test('ordinary roles cannot create timing records and timing state is cleared on the existing debug fence',()=>{
+    const h=debugHarness();h.app.cloudUser={...h.app.cloudUser,role:'translator',isAdmin:false};
+    assert.equal(h.app.ctMtlDebugTimingStart(h.field),null);assert.equal(h.app._ctMtlTimingRuns,undefined);
+    h.app.cloudUser={...h.app.cloudUser,role:'admin',isAdmin:true};const timing=h.app.ctMtlDebugTimingStart(h.field);assert.ok(timing);
+    h.app.ctMtlDebugReset();timing.mark('contextEnd');assert.deepEqual(h.app.ctMtlDebugRecords,{});assert.equal(h.app._ctMtlTimingRuns.size,0);
+});
+
+
+test('Admin frame-ready timing follows DOM flush and an animation frame and is fenced on context reset',async()=>{
+    const previous={document:global.document,requestAnimationFrame:global.requestAnimationFrame,cancelAnimationFrame:global.cancelAnimationFrame};
+    const frames=new Map();let serial=0,now=0;global.document={hidden:false};global.requestAnimationFrame=callback=>{frames.set(++serial,callback);return serial;};global.cancelAnimationFrame=id=>frames.delete(id);
+    try{const h=debugHarness();h.app._ctMtlTimingNow=()=>now;h.app.$nextTick=callback=>callback();
+        h.app.ctDictionaryTarget=()=>({getClientRects:()=>[{}],closest:()=>({querySelector:()=>({textContent:'Synthetic provisional text'})})});
+        const timing=h.app.ctMtlDebugTimingStart(h.field);now=10;timing.mark('firstProgress');h.app.ctMtlDebugTimingFrame(timing,'firstTextFrameReady',h.field.id,true);
+        assert.equal(timing.snapshot().milestonesMs.firstTextFrameReady,null);now=16;for(const callback of frames.values())callback();frames.clear();
+        assert.equal(timing.snapshot().milestonesMs.firstTextFrameReady,16);
+        global.document.hidden=true;h.app.ctMtlDebugTimingFrame(timing,'finalFrameReady',h.field.id);assert.equal(frames.size,0);
+        global.document.hidden=false;h.app.ctMtlDebugTimingFrame(timing,'finalFrameReady',h.field.id);assert.equal(frames.size,1);
+        h.app.ctMtlDebugReset();assert.equal(frames.size,0);assert.deepEqual(h.app.ctMtlDebugRecords,{});
+    }finally{for(const[key,value]of Object.entries(previous)){if(value===undefined)delete global[key];else global[key]=value;}}
+});
+
+test('Admin timing records stay capped at 32 and evicted traces cannot repopulate private state',()=>{
+    const h=debugHarness();let oldest;for(let i=0;i<35;i++){const field={...h.field,id:'synthetic-field-'+i};h.original.fields.push(field);const trace=h.app.ctMtlDebugTimingStart(field);if(!i)oldest=trace;}
+    assert.equal(h.app._ctMtlTimingRuns.size,32);assert.equal(Object.keys(h.app.ctMtlDebugRecords).length,32);
+    oldest.mark('postStart');assert.equal(h.app.ctMtlDebugRecords['synthetic-field-0'],undefined);
+    h.app.ctMtlDebugReset();assert.equal(h.app._ctMtlTimingRuns.size,0);
+});
+
+
+test('a repeated click during Admin capability preflight cannot replace the first active timing trace',()=>{
+    const h=debugHarness(),first=h.app.ctMtlDebugTimingStart(h.field);assert.ok(first);
+    assert.equal(h.app.ctMtlDebugTimingStart(h.field),null);assert.equal(h.app._ctMtlTimingRuns.get(h.field.id).timing,first);
+    first.finish('failed');const next=h.app.ctMtlDebugTimingStart(h.field);assert.ok(next);assert.notEqual(next,first);
+});
+
+
+test('Admin Stop records cancellation time and workflow outcome without another provider POST',async()=>{
+    const h=debugHarness();let now=0,body,posts=0;h.app._ctMtlTimingNow=()=>now;h.app.ctMtlCapabilities.delivery='poll-v1';
+    const status=changes=>({requestId:body.requestId,status:'running',scope:{...h.scope,local:false},progress:{revision:1,phase:'generating',translation:'Working {0}',provisional:true},pollAfterMs:250,...changes});
+    h.app.ctMtlRequestWait=job=>new Promise(resolve=>{job.wake=resolve;});
+    h.app._cloud.request=async(path,options={})=>{if(path.endsWith('/cancellations'))return status({status:'failed',errorCode:'MTL_CANCELLED'});posts++;body=options.body;return status();};
+    const pending=h.app.ctMtlGenerate(h.field);await settle();now=30;assert.equal(await h.app.ctMtlCancel(h.field),true);assert.equal(await pending,false);
+    const timing=h.app.ctMtlDebugRecords[h.field.id].browserTiming;assert.equal(timing.outcome,'cancelled');assert.equal(timing.milestonesMs.cancelRequested,30);
+    assert.equal(timing.durationsMs.totalMs,30);assert.equal(timing.milestonesMs.candidateReceived,null);assert.equal(posts,1);assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');
+});

@@ -124,6 +124,7 @@
             async ctMtlCancel(field) {
                 const job = this._ctMtlJobs?.get(key(this.ctSelection, field?.id));
                 if (!job?.current?.() || !job.cancel || job.cancelling) return false;
+                job.timing?.mark('cancelRequested');
                 job.cancelling = true; job.cancelledByUser = true; this.ctMtlProgressUpdate(job, {phase:'cancelling'});
                 const generation=this.ctMtlGenerations.find(value=>value.requestId===job.requestId);
                 if(generation){generation.suppressed=true;this.ctMtlRevision++;}
@@ -165,6 +166,7 @@
                         if (progress && (job.progressRevision === undefined || progress.revision >= job.progressRevision)) {
                             job.progressRevision = progress.revision;
                             this.ctMtlProgressUpdate(job, {phase:job.cancelling ? 'cancelling' : phase,text:progress.translation,canCancel:!job.cancelling});
+                            if(progress.translation&&!job.cancelledByUser){job.timing?.mark('firstProgress');if(job.timing)this.ctMtlDebugTimingFrame?.(job.timing,'firstTextFrameReady',job.fieldId,true);}
                         } else this.ctMtlProgressUpdate(job, {phase:job.cancelling ? 'cancelling' : undefined,canCancel:!job.cancelling});
                         delay = Math.max(250, Math.min(2000, Number.isFinite(response.pollAfterMs) ? response.pollAfterMs : 500));
                     }
@@ -700,21 +702,23 @@
                     ...(this.ctToneNotesSnapshot?{toneNotes:this.ctToneNotesSnapshot(root.ClientTextToneNotes?.roleKeys(this,unit)||[])}: {}) });
             },
             async ctMtlGenerate(field) {
+                const timing=this.ctMtlDebugTimingStart?.(field),early=outcome=>{timing?.finish(outcome);return false;};
                 const ctx = this.ctContext();
                 if (this.ctMtlCapabilities === null && this.ctActive && this.ctCurrentUnit?.fields.includes(field) && M.eligible(field) && permissions(this,ctx)) {
-                    await this.ctMtlLoadCapabilities();if(!this.ctCurrent(ctx))return false;
-                    if(this.ctMtlCapabilities===null){this.ctMtlError='The MTL connection could not be checked. Review MTL settings.';return false;}
+                    timing?.mark('capabilitiesStart');await this.ctMtlLoadCapabilities();timing?.mark('capabilitiesEnd');if(!this.ctCurrent(ctx))return early('stale');
+                    if(this.ctMtlCapabilities===null){this.ctMtlError='The MTL connection could not be checked. Review MTL settings.';return early('failed');}
                 }
-                if (!this.ctMtlCanGenerate(field)) { this.ctMtlError = this.ctMtlCapabilities?.enabled ? 'MTL is unavailable for this field or language.' : 'MTL is not connected. Review MTL settings.'; return false; }
-                const pending = this.ctMtlPendingGeneration(field); if (pending) return this.ctMtlRecover(field,pending);
-                if(!this.ctMtlArchiveSupported()){this.ctMtlError='The server needs an MTL review-archive upgrade before new translations can be requested. Existing work is unchanged.';return false;}
-                if (this.mtlConsentVersion !== 'mtl-v2') { this.ctMtlError = 'Review and enable the updated MTL data-sharing and private review-retention choice in MTL settings first.'; return false; }
+                if (!this.ctMtlCanGenerate(field)) { this.ctMtlError = this.ctMtlCapabilities?.enabled ? 'MTL is unavailable for this field or language.' : 'MTL is not connected. Review MTL settings.'; return early('unavailable'); }
+                const pending = this.ctMtlPendingGeneration(field); if (pending) {timing?.finish('recovery');return this.ctMtlRecover(field,pending);}
+                if(!this.ctMtlArchiveSupported()){this.ctMtlError='The server needs an MTL review-archive upgrade before new translations can be requested. Existing work is unchanged.';return early('unavailable');}
+                if (this.mtlConsentVersion !== 'mtl-v2') { this.ctMtlError = 'Review and enable the updated MTL data-sharing and private review-retention choice in MTL settings first.'; return early('unavailable'); }
                 const unit = this.ctCurrentUnit, client = this._cloud, capturedAccess = access(this), descriptor = this.ctMtlDescriptor(unit);
-                if (!descriptor) { this.ctMtlError = 'The original workbook identity is unavailable. Reopen this workspace.'; return false; }
+                if (!descriptor) { this.ctMtlError = 'The original workbook identity is unavailable. Reopen this workspace.'; return early('unavailable'); }
                 const name = key(unit.id, field.id), mutations = this._ctMtlEditMutations ||= raw(new Map()), mutation = mutations.get(name) || 0,
                     previous = String(this.ctValues[field.id] ?? ''), capturedSource = M.rawSourceHash(field.source), controller = new AbortController(), requestId = id();
                 const asynchronous = this.ctMtlCapabilities?.delivery === 'poll-v1',
-                    job = { requestId, controller, name, startedAt:Date.now(), client, scope:copy(ctx.scope) }, jobs = this._ctMtlJobs ||= raw(new Map()); jobs.set(name, job);
+                    job = { requestId, controller, name, startedAt:Date.now(), client, scope:copy(ctx.scope), ...(timing?{timing,fieldId:field.id}:{}) }, jobs = this._ctMtlJobs ||= raw(new Map()); jobs.set(name, job);
+                if(timing)this.ctMtlDebugTimingBind?.(timing,field,requestId);
                 this.ctMtlNoteRequest(unit);
                 this.ctMtlFocusBeforeRequest(field);
                 let sent = false, generation, confirmedFailure = false;
@@ -725,8 +729,9 @@
                 job.current = current;
                 this.ctMtlProgressUpdate(job, { phase:'waiting', text:'' });
                 try {
-                    if(this.ctToneNotesPrepare){await this.ctToneNotesPrepare(root.ClientTextToneNotes?.roleKeys(this,unit)||[],ctx);if(!current())throw stale();}
-                    const context = this.ctMtlBuildContext(field,unit,ctx);
+                    if(this.ctToneNotesPrepare){timing?.mark('roleHintsStart');const toneKeys=root.ClientTextToneNotes?.roleKeys(this,unit)||[];timing?.mark('roleHintsEnd');
+                        timing?.mark('toneNotesStart');try{await this.ctToneNotesPrepare(toneKeys,ctx);}finally{timing?.mark('toneNotesEnd');}if(!current())throw stale();}
+                    timing?.mark('contextStart');let context;try{context=this.ctMtlBuildContext(field,unit,ctx);}finally{timing?.mark('contextEnd');}
                     const body = { requestId, unitId: unit.id, fieldId: field.id, role: unit.role, assetHash: descriptor.assetHash || descriptor.hash,
                         parserVersion: descriptor.parserVersion, source: field.source, sourceHash: S.sourceHash(field.source), rawSourceHash: capturedSource,
                         baseTargetHash: S.hash(previous), baseRevision: this.ctSaved[unit.id]?.serverRevision || 0, clientFacts: S.clientFacts(unit),
@@ -737,16 +742,19 @@
                         : '/v1/content-groups/' + encodeURIComponent(ctx.scope.groupId) + '/mtl/requests?language=' + encodeURIComponent(ctx.scope.language);
                     if (asynchronous) path += (path.includes('?') ? '&' : '?') + 'async=1';
                     const store = this.ctMtlStorage(ctx);
-                    generation = await store.putGeneration(ctx.scope,{requestId,unitId:unit.id,fieldId:field.id,rawSourceHash:capturedSource,
+                    timing?.mark('pendingStoreStart');
+                    try { generation = await store.putGeneration(ctx.scope,{requestId,unitId:unit.id,fieldId:field.id,rawSourceHash:capturedSource,
                         sourceHash:body.sourceHash,assetHash:body.assetHash,parserVersion:body.parserVersion,baseTargetHash:body.baseTargetHash,
-                        createdAt:Date.now(),status:'pending',requestBodyHash:S.hash(body)});
+                        createdAt:Date.now(),status:'pending',requestBodyHash:S.hash(body)}); } finally {timing?.mark('pendingStoreEnd');}
                     if (!current()) throw stale();
                     this.ctMtlGenerations = raw([...this.ctMtlGenerations.filter(value=>value.requestId!==requestId),generation]);
-                    this.ctMtlDebugBegin?.(field, body);
+                    this.ctMtlDebugBegin?.(field, body, timing);
                     sent = true;
                     let response;
+                    timing?.mark('postStart');
                     try { response = await client.request(path, { method: 'POST', body, signal: controller.signal, timeout: asynchronous ? 15000 : 190000 }); }
                     catch (error) {
+                        timing?.mark('postEnd');
                         const status = error.status || error.statusCode;
                         if (!asynchronous || !current() || error.stale || status && ![408,429].includes(status) && status < 500) throw error;
                         // Admission can succeed even if the short response is lost.
@@ -754,10 +762,13 @@
                         this.ctMtlProgressUpdate(job, {phase:'reconnecting'});
                         response = await this.ctMtlPoll(job, null);
                     }
+                    timing?.mark('postEnd');
                     if (!current()) throw stale();
                     if (asynchronous && !response.candidate) response = await this.ctMtlPoll(job, response);
+                    timing?.mark('candidateReceived');timing?.mark('adoptionStart');
                     if(!job.cancelledByUser)this.ctMtlProgressUpdate(job, { phase:'validating' });
-                    const adopted = await this.ctMtlAdoptCandidate(ctx,unit,field,response.candidate,generation,current,()=>job.cancelledByUser || (mutations.get(name)||0)!==mutation);
+                    let adopted;try{adopted=await this.ctMtlAdoptCandidate(ctx,unit,field,response.candidate,generation,current,()=>job.cancelledByUser || (mutations.get(name)||0)!==mutation);}finally{timing?.mark('adoptionEnd');}
+                    timing?.finish(job.cancelledByUser?'cancelled':'completed');
                     if (current()) this.ctMtlDebugFinish?.(field, requestId);
                     return adopted;
                 } catch (error) {
@@ -785,15 +796,18 @@
                         await this.ctMtlStorage(ctx).putGeneration(ctx.scope,{requestId,status:sent && !confirmedFailure && error.code !== 'MTL_INVALID_RESPONSE' ? 'uncertain' : 'failed'});
                         if (current()) this.ctMtlGenerations = raw(await this.ctMtlStorage(ctx).getGenerations(ctx.scope));
                     } catch (_) { /* A disposed local session has no durable job. The online reservation remains recoverable. */ }
+                    timing?.finish(job.cancelledByUser||error.code==='MTL_CANCELLED'?'cancelled':error.stale?'stale':'failed');
                     if (current() && !error.stale && error.name !== 'AbortError') {
                         this.ctMtlError = error.message; this.ctMtlDebugFinish?.(field, requestId, error);
                     }
                     return false;
                 }
                 finally {
+                    timing?.finish(job.cancelledByUser?'cancelled':controller.signal.aborted?'stale':'failed');
                     this.ctMtlProgressClear(job);
                     if (jobs.get(name) === job) jobs.delete(name);
                     if (this.ctMtlRequests[name] === requestId) { const requests = { ...this.ctMtlRequests }; delete requests[name]; this.ctMtlRequests = requests; }
+                    if(timing)this.ctMtlDebugTimingFrame?.(timing,'finalFrameReady',field.id);
                 }
             },
             ctMtlKey(event) {

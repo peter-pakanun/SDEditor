@@ -218,3 +218,11 @@
 .ctMtlRowIndicator {display:inline-flex;gap:4px;align-items:center;margin-right:6px;font-size:11px;}
 .statusPill.mtl,.filterChip.mtl {border-color:#67D4F1;}
 @media (prefers-reduced-motion:reduce) {.ctMtlButton .ctAudioSpinner {animation:none;}}
+
+.ctMtlTimingPanel {margin:14px 0;padding:10px;border:1px solid var(--ui-border);border-radius:6px;}
+.ctMtlTimingPanel summary {cursor:pointer;font-weight:600;}
+.ctMtlTimingPanel table {width:100%;border-collapse:collapse;margin:8px 0 16px;font-variant-numeric:tabular-nums;}
+.ctMtlTimingPanel th,.ctMtlTimingPanel td {padding:6px;border-bottom:1px solid var(--ui-border);text-align:left;vertical-align:top;}
+.ctMtlTimingPanel th[scope="row"] {font-weight:400;}
+.ctMtlTimingPanel td {white-space:nowrap;text-align:right;}
+.ctMtlTimingPanel h5 {margin:16px 0 6px;}
