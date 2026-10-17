@@ -10,6 +10,14 @@ vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/editorCompone
 vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/clientTextUi.js'), 'utf8'), { window });
 const { NativeField, TextField, Tools, Preview, Autocomplete, TranslationMemory, Lookup, Comments, History, DiagnosticScan } = window.EditorComponents;
 
+test('MTL moves keyboard focus to its stable wrapper before disabling and leaves pointer field focus alone', () => {
+  const calls=[],button={parentElement:{focus(){calls.push('focus');}}},toolbar={controller:{generate(){calls.push('generate');}}};
+  window.document={activeElement:button};window.EditorComponents.FieldToolbar.methods.generateMtl.call(toolbar,{currentTarget:button});
+  assert.deepEqual(calls,['focus','generate']);
+  calls.length=0;window.document.activeElement={};window.EditorComponents.FieldToolbar.methods.generateMtl.call(toolbar,{currentTarget:button});
+  assert.deepEqual(calls,['generate']);delete window.document;
+});
+
 test('shared notices preserve severity semantics and explicit roles', () => {
   const { Notice } = window.EditorComponents;
   for (const [tone, role] of [['error', 'alert'], ['warning', 'alert'], ['info', 'status'], ['neutral', 'note']]) {

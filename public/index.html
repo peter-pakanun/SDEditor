@@ -160,8 +160,8 @@
               <small>Used when adding an entry manually or from autocomplete. Existing entries keep their game version.</small>
             </div>
             <h3 class="settingsSubheading">MTL</h3>
-            <p class="settingsHelp">MTL translates one ClientText field through OpenAI using Sign in with ChatGPT. Generation needs a network connection, including in-memory workbook sessions. Suggestions require review and Save before they become translations.</p>
-            <p class="settingsHelp">{{ ctMtlCapabilities?.enabled ? 'MTL generation is available.' : 'MTL generation is unavailable.' }} Model: gpt-6-luna · reasoning: xhigh. Credentials are managed by the private backend.</p>
+            <p class="settingsHelp">MTL provides machine translation for one ClientText field. Translation needs a network connection, including in-memory workbook sessions. Suggestions require review and Save before they become translations.</p>
+            <p class="settingsHelp">{{ ctMtlCapabilities?.enabled ? 'MTL is available.' : 'MTL is unavailable.' }}</p>
             <div v-if="mtlConnectionAllowed" class="settingsField">
               <strong>ChatGPT connection · Admin</strong>
               <p v-if="mtlConnectionLoaded" class="settingsHelp">{{ mtlConnectionLabel }}<span v-if="!mtlConnectionState.enabled"> · Generation is disabled on the server.</span></p>
@@ -170,7 +170,8 @@
               <app-notice v-if="mtlConnectionError" tone="warning" role="alert">{{ mtlConnectionError }}</app-notice>
               <div class="settingsActions"><button v-if="!mtlConnectionLoaded || mtlConnectionError" @click="mtlConnectionLoad" :disabled="mtlConnectionBusy">Check connection</button><button @click="mtlConnectionAction('disconnect')" :disabled="!mtlConnectionCanDisconnect">Disconnect</button><button @click="mtlConnectionAction('revoke')" :disabled="!mtlConnectionCanRevoke">Revoke</button></div>
             </div>
-            <label class="settingsToggle"><input type="checkbox" v-model="mtlConsentVersion" true-value="mtl-v1" false-value=""><span><strong>Allow MTL requests</strong><small>When I request MTL, send the selected English field and bounded relevant workbook context, Developer notes and approved glossary terms to OpenAI. Provider data handling follows the connected ChatGPT account and app terms. The workbook stays processed in this browser.</small></span></label>
+            <label class="settingsToggle"><input type="checkbox" v-model="mtlConsentVersion" true-value="mtl-v1" false-value=""><span><strong>Allow MTL requests</strong><small>Send the selected English field and relevant workbook context to the translation service when I request MTL. Review the data-sharing details below.</small></span></label>
+            <details class="settingsHelp"><summary>MTL data sharing and privacy</summary><p>MTL uses OpenAI through a connected ChatGPT account. Requests send the selected English field and bounded relevant workbook context, Developer notes and approved glossary terms to OpenAI. Provider data handling follows the connected ChatGPT account and app terms. Workbook parsing and export stay in this browser. Suggestions are machine-generated and require your review.</p></details>
             <p class="settingsHelp">Unreviewed suggestions and edits stay separate. Export uses prior Saved or original translations. In-memory suggestions disappear when the local workbook session ends or the page reloads.</p>
             <h3 class="settingsSubheading">Keyboard shortcuts</h3>
             <div class="settingsField"><label for="mtlShortcut">Translate current field with MTL</label><select id="mtlShortcut" v-model="mtlShortcut"><option value="disabled">Disabled</option><option value="f8">F8</option><option value="ctrl-alt-f8">Ctrl + Alt + F8</option></select><small>Only active while a ClientText translation field is focused.</small></div>
@@ -1444,6 +1445,7 @@
     <app-dialog></app-dialog>
     <app-tooltip :state="tooltip"></app-tooltip>
     <keyword-popup-overlay :host="$root"></keyword-popup-overlay>
+    <ct-mtl-debug-dialog v-if="ctMtlDebugAllowed && ctMtlDebugWindow" :host="$root"></ct-mtl-debug-dialog>
 
     </div>
   </div>
@@ -1523,6 +1525,7 @@
   <script src="clientTextExportProgress.js"></script>
   <script src="clientTextMtlContext.js"></script>
   <script src="clientTextMtlUi.js"></script>
+  <script src="clientTextMtlDebug.js"></script>
   <script src="mtlConnectionUi.js"></script>
   <script src="clientTextUi.js"></script>
   <script src="editorSession.js"></script>

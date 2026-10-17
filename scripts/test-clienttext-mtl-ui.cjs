@@ -2,6 +2,7 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const S=require('../public/clientTextState.js'),M=require('../public/clientTextMtlState.js'),Memory=require('../public/clientTextMtlMemoryStore.js');
 const UI=require('../public/clientTextMtlUi.js');
+const Debug=require('../public/clientTextMtlDebug.js');
 const {scope:baseScope,unit:makeUnit}=require('./clienttext-storage-fixture.cjs');
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};};
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
@@ -33,6 +34,134 @@ function candidate(unit,requestId='request1',baseTargetHash=S.hash(unit.fields[0
         assetHash:descriptor.assetHash,parserVersion:descriptor.parserVersion,sourceHash:S.sourceHash(field.source),rawSourceHash:M.rawSourceHash(field.source),
         generatedText:'Generated {0}',revision:1,status:'pending',createdAt:1,baseTargetHash,...changes};
 }
+function debugHarness(){
+    const h=harness(),app=h.app;
+    Object.assign(app,Debug.mixin.data());
+    for(const[name,method]of Object.entries(Debug.mixin.methods))app[name]=method.bind(app);
+    for(const[name,getter]of Object.entries(Debug.mixin.computed))Object.defineProperty(app,name,{configurable:true,get:()=>getter.call(app)});
+    app.cloudUser={...app.cloudUser,role:'admin',isAdmin:true};
+    return h;
+}
+
+test('Admin details preview is read-only, sends no inference, and ordinary roles cannot inspect',async()=>{
+    const h=debugHarness();let calls=0;h.app._cloud.request=async()=>{calls++;throw new Error('No request expected');};
+    assert.equal(await h.app.ctMtlDebugOpen(h.field),true);assert.equal(h.app.ctMtlDebugWindow.record.status,'preview');
+    assert.equal(h.app.ctMtlDebugWindow.record.snapshot.source,h.field.source);assert.equal(calls,0);
+    for(const role of ['translator','manager']){
+        h.app.cloudUser={...h.app.cloudUser,role,isAdmin:role==='manager'};h.app.ctMtlDebugReset();
+        assert.equal(await h.app.ctMtlDebugOpen(h.field),false);assert.equal(h.app.ctMtlDebugWindow,null);
+    }
+    h.app.cloudUser={...h.app.cloudUser,role:'admin',isAdmin:true};h.app.cloudProfileId='different-account';
+    assert.equal(await h.app.ctMtlDebugOpen(h.field),false);
+    assert.equal(calls,0);assert.deepEqual(h.app.ctValues,S.valuesFor(h.original));
+});
+
+test('Admin details show submitted context and escaped/redacted server data without persisting diagnostics',async()=>{
+    const h=debugHarness(),requests=[],generate=h.app._cloud.request;
+    h.app._cloud.request=async(path,options)=>{requests.push(path);return path.includes('/debug')
+        ?{diagnostics:{providerRequest:{instructions:'<img src=x onerror=alert(1)>',input:[]},context:{accessToken:'secret-context'},validation:'passed'}}
+        :generate(path,options);};
+    assert.equal(await h.app.ctMtlGenerate(h.field),true);assert.equal(requests.length,1);
+    assert.equal(await h.app.ctMtlDebugOpen(h.field),true);assert.equal(requests.length,2);assert.match(requests[1],/^\/v1\/admin\/mtl\/requests\/.*\/debug$/);
+    const record=h.app.ctMtlDebugWindow.record;
+    assert.equal(record.snapshot.source,h.field.source);assert.equal(record.server.context.accessToken,'[redacted]');
+    assert.equal(record.server.providerRequest.instructions,'<img src=x onerror=alert(1)>');
+    assert.equal(JSON.stringify(h.mtl.getGenerations(h.scope)).includes('providerRequest'),false);
+    assert.equal(JSON.stringify(h.mtl.list(h.scope)).includes('instructions'),false);
+    assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');assert.deepEqual(h.app.ctMtlAcceptances(),[]);
+    h.app.ctMtlReset();assert.equal(h.app.ctMtlDebugWindow,null);assert.deepEqual(h.app.ctMtlDebugRecords,{});
+});
+
+test('late diagnostics cannot return after account/language/source/context changes or logout',async()=>{
+    for(const change of [h=>h.app.cloudSignedIn=false,h=>h.app.cloudUser.role='manager',h=>h.scope.language='German',h=>h.field.source='Changed source']){
+        const h=debugHarness(),wait=deferred();h.app.ctMtlDebugBegin(h.field,{requestId:'synthetic',context:{}});
+        h.app._cloud.request=()=>wait.promise;
+        const pending=h.app.ctMtlDebugOpen(h.field);await settle();change(h);Debug.mixin.watch.ctMtlDebugOrigin.call(h.app);
+        wait.resolve({diagnostics:{source:'late private context'}});await pending;
+        assert.equal(h.app.ctMtlDebugWindow,null);assert.deepEqual(h.app.ctMtlDebugRecords,{});
+    }
+});
+
+test('preview redacts embedded credential-like values and diagnostic template uses escaped text',()=>{
+    const value=Debug.redact({refresh_token:'synthetic-secret',source:'Bearer synthetic-token accessToken="synthetic-value" sk-syntheticsecret123'});
+    assert.doesNotMatch(JSON.stringify(value),/synthetic/);assert.doesNotMatch(Debug.Dialog.template,/v-html/);
+    assert.match(Debug.Dialog.template,/<pre[^>]*>\{\{ details \}\}<\/pre>/);
+});
+
+test('ordinary MTL settings use neutral wording and retain an accessible provider disclosure in privacy details',()=>{
+    const html=require('node:fs').readFileSync(require('node:path').join(__dirname,'../public/index.html'),'utf8');
+    const settings=html.split('<h3 class="settingsSubheading">MTL</h3>')[1].split('id="autocompleteShortcut"')[0];
+    const ordinary=settings.replace(/<div v-if="mtlConnectionAllowed"[\s\S]*?<\/div>/,'').replace(/<details[\s\S]*?<\/details>/,'');
+    assert.doesNotMatch(ordinary.replace(/<[^>]*>/g,''),/OpenAI|ChatGPT|gpt-6|\bmodel\b|\bAI\b/i);
+    assert.match(settings,/<summary>MTL data sharing and privacy<\/summary>[\s\S]*OpenAI[\s\S]*bounded relevant workbook context/);
+});
+
+test('a proxy-masked generation failure reads the original job once and presents its validation failure without another POST',async()=>{
+    const h=harness(),calls=[];let requestId;
+    h.app._cloud.request=async(path,options={})=>{calls.push({path,method:options.method||'GET'});
+        if(options.method==='POST'){requestId=options.body.requestId;throw new TypeError('NetworkError when attempting to fetch resource.');}
+        assert.equal(path,'/v1/mtl/requests/'+requestId);return{status:'failed',errorCode:'MTL_OUTPUT_INVALID'};};
+    assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.deepEqual(calls.map(call=>call.method),['POST','GET']);
+    assert.match(h.app.ctMtlError,/invalid or incomplete translation/);assert.doesNotMatch(h.app.ctMtlError,/NetworkError/);
+    assert.equal(h.app.ctMtlGenerations[0].status,'failed');assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');
+});
+
+test('an explicit HTTP 422 rejection ends the request without a pending recovery or another provider POST',async()=>{
+    const h=harness();let calls=0;
+    h.app._cloud.request=async()=>{calls++;throw Object.assign(new Error('MTL returned an invalid or incomplete translation. The existing text is unchanged.'),{status:422,code:'MTL_OUTPUT_INVALID'});};
+    assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.equal(calls,1);
+    assert.equal(h.app.ctMtlGenerations[0].status,'failed');assert.equal(h.app.ctMtlPendingGeneration(h.field),null);
+    assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');assert.match(h.app.ctMtlError,/invalid or incomplete/);
+});
+
+test('Admin can inspect a precise protocol reason after a proxy masks a 502, without another inference',async()=>{
+    const h=debugHarness(),calls=[];
+    h.app._cloud.request=async(path,options={})=>{calls.push({path,method:options.method||'GET'});
+        if(options.method==='POST')throw new TypeError('NetworkError when attempting to fetch resource.');
+        if(path.endsWith('/debug'))return{diagnostics:{status:'failed',upstreamStatus:200,apiStatus:502,failureReason:'stream_json',validation:'not completed',validationReason:'An event-stream data record was not valid JSON.'}};
+        return{status:'failed',errorCode:'MTL_OUTPUT_INVALID'};};
+    assert.equal(await h.app.ctMtlGenerate(h.field),false);
+    assert.equal(await h.app.ctMtlDebugOpen(h.field),true);
+    assert.deepEqual(calls.map(call=>call.method),['POST','GET','GET']);
+    assert.equal(h.app.ctMtlDebugWindow.record.server.failureReason,'stream_json');
+    assert.equal(h.app.ctMtlDebugWindow.record.server.upstreamStatus,200);assert.equal(h.app.ctMtlDebugWindow.record.server.apiStatus,502);
+    assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');
+});
+
+test('unavailable status keeps a network-uncertain request recoverable and cannot publish across context changes',async()=>{
+    for(const changed of [false,true]){
+        const h=harness();let calls=0;
+        h.app._cloud.request=async(_path,options={})=>{calls++;if(options.method==='POST')throw new TypeError('Failed to fetch');
+            if(changed)h.changeEpoch();throw new TypeError('Failed to fetch');};
+        assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.equal(calls,2);
+        assert.equal(h.mtl.getGenerations(h.scope)[0].status,'uncertain');assert.equal(h.app.ctMtlError,changed?'': 'Failed to fetch');
+    }
+});
+
+test('HTML proxy responses through the real cloud JSON reader recover once without repeating inference',async()=>{
+    const Cloud=require('../public/cloudSync.js');
+    for(const lookupFails of [false,true]){
+        const h=harness(),calls=[];let originalError,requestId;
+        const client={apiBase:'https://synthetic.invalid',context:()=>({token:null}),permissionsCurrent:()=>true,
+            fetcher:async(url,options)=>{const path=new URL(url).pathname;calls.push({path,method:options.method});
+                if(options.method==='POST'){
+                    requestId=JSON.parse(options.body).requestId;
+                    return new Response('<html>Synthetic proxy error</html>',{status:502,headers:{'Content-Type':'text/html'}});
+                }
+                assert.equal(path,'/v1/mtl/requests/'+requestId);
+                if(lookupFails)throw new Error('Synthetic status lookup unavailable');
+                return new Response(JSON.stringify({status:'failed',errorCode:'MTL_OUTPUT_INVALID'}),{headers:{'Content-Type':'application/json'}});
+            }};
+        h.app._cloud.request=async(path,options)=>{try{return await Cloud.Client.prototype.request.call(client,path,options);}
+            catch(error){if(options?.method==='POST')originalError=error;throw error;}};
+        assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.equal(originalError.name,'SyntaxError');
+        assert.deepEqual(calls.map(call=>call.method),['POST','GET']);
+        assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');assert.equal(h.app.ctMtlCandidates.length,0);
+        assert.equal(h.mtl.getGenerations(h.scope)[0].status,lookupFails?'uncertain':'failed');
+        if(lookupFails)assert.equal(h.app.ctMtlError,originalError.message,'A failed status lookup preserves the original request error');
+        else {assert.match(h.app.ctMtlError,/invalid or incomplete translation/);assert.doesNotMatch(h.app.ctMtlError,/Unexpected token|not valid JSON/);}
+    }
+});
 test('all proxy input writes edit only the separate review until explicit Accept',async()=>{
     const h=harness();await h.put();
     assert.equal(h.app.ctInputValues[h.field.id],'Generated {0}');

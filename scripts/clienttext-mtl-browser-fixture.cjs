@@ -38,18 +38,18 @@ async function run(){
         'normalizedStore.js','normalizedRooms.js','offlineStore.js','clientTextState.js','contentAdapters.js','clientTextStore.js',
         'clientTextMtlState.js','clientTextMtlStore.js','clientTextMtlMemoryStore.js','clientTextMtlSync.js','clientTextMemoryStore.js',
         'vendor/fast-xml-parser-5.11.2.min.js','clientTextCodec.js','editorComponents.js','clientTextFormatting.js','clientTextComparisons.js',
-        'clientTextExportProgress.js','clientTextMtlContext.js','clientTextMtlUi.js','clientTextUi.js','editorSession.js'];
+        'clientTextExportProgress.js','clientTextMtlContext.js','clientTextMtlUi.js','clientTextMtlDebug.js','clientTextUi.js','editorSession.js'];
     const fixture=String.raw`(async()=>{
-const seed=${seed},ct=ClientTextUI.mixin,mtl=ClientTextMtlUI.mixin;
+const seed=${seed},ct=ClientTextUI.mixin,mtl=ClientTextMtlUI.mixin,debug=ClientTextMtlDebug.mixin;
 let app;
 const options={
- data(){return{...ct.data(),...mtl.data(),fixtureMode:'memory',lang:'Thai',gameVersion:'poe2',branchId:'default',cloudSignedIn:true,
+ data(){return{...ct.data(),...mtl.data(),...debug.data(),fixtureMode:'memory',lang:'Thai',gameVersion:'poe2',branchId:'default',cloudSignedIn:true,
  cloudProfileId:'synthetic-tester',cloudUser:{id:'synthetic-tester',role:'translator',language:'Thai',assignmentVersion:1},cloudCanAccessAllLanguages:false,
  managedCatalogScope:'synthetic-scope',mtlConsentVersion:'mtl-v1',mtlShortcut:'f8',ctMtlCapabilities:{enabled:true},inlineEditor:true,
  translationEditorBcp47:'th',dictionary:[],mapClientTextClassNames:true,autocompleteShortcut:'ctrl-space',ctEditor:false};},
- computed:{...ct.computed,...mtl.computed},
- methods:{...ct.methods,...mtl.methods,
-  ctKeyboardOverlayOpen(){return false;},ctInlineUnitVisible(){return true;},ctCloseCompletion(){this.ctCompletion=null;},
+ computed:{...ct.computed,...mtl.computed,...debug.computed},watch:{...debug.watch},
+ methods:{...ct.methods,...mtl.methods,...debug.methods,
+  ctKeyboardOverlayOpen(){return false;},ctInlineUnitVisible(){return this.ctActive&&!this.ctEditor&&!this.ctInlineClosed;},ctCloseCompletion(){this.ctCompletion=null;},
   scheduleClientTextDictionaryMatches(){},ctRefreshDiagnostics(){},ctRefreshDraftSummaries(){},ctLoadHistory(){},ctPresence(){},
   ctRefreshLayout(){},ctFocusRow(){},ctSync(){},ctMtlSync(){},ctClearDraftStageFailure(){},ctRememberDraftStageFailure(){},
   ctDictionaryTarget(id=this.ctFocusedField){return [...document.querySelectorAll('[data-ct-target]')].find(input=>input.dataset.ctTarget===id);},
@@ -73,6 +73,7 @@ const options={
    this._fixtureJobs=new Map();this._fixtureReleases=[];this._fixtureDefer=false;
    this._cloud=Vue.markRaw({request:async(path,init={})=>{
     if(path==='/v1/mtl/capabilities')return{enabled:true};
+    if(path.startsWith('/v1/admin/mtl/requests/'))return{diagnostics:{providerRequest:{instructions:'Synthetic executed prompt <img src=x onerror="window.__debugXss=true">',input:[{role:'user',content:'Synthetic context'}]},context:{accessToken:'synthetic-secret'},lookup:{enabled:false,rounds:[]},validation:'passed',elapsedMs:12}};
     if(init.method==='POST'){
      const body=init.body;
      if(this._fixtureDefer)await new Promise(resolve=>this._fixtureReleases.push(resolve));
@@ -93,12 +94,13 @@ const options={
     candidates:this.ctMtlCount,accepted:this.ctMtlAccepted(field),error:this.ctError||this.ctMtlError};},
   async memoryCount(){return (await this._fixtureStore.getMemory(this.ctWorkspace.scope))?.units?.length||0;}
  },
- template:'<div class="appRoot" data-density="compact"><main class="ctWorkspace" style="margin:24px;width:min(1200px,calc(100vw - 48px))"><h1>Synthetic MTL fixture</h1><button id="fixture-mode" @click="ctEditor=!ctEditor">Toggle full editor</button><button id="fixture-save" @click="ctSave()">Save</button><span v-if="ctMtlCount" class="ctMtlCount"><span class="ctMtlDot"></span>MTL {{ctMtlCount}}</span><section id="fixture-editor" :class="ctEditor ? \'ctFull ctFullEditor\' : \'inlineEditor\'"><ct-fields v-if="ctCurrentUnit" :host="$root" :side="ctEditor ? \'both\' : \'translation\'"></ct-fields></section><p class="fixture-error">{{ctError||ctMtlError}}</p></main></div>'
+ template:'<div class="appRoot" data-density="compact"><main class="ctWorkspace" style="margin:24px;width:min(1200px,calc(100vw - 48px))"><h1>Synthetic MTL fixture</h1><button id="fixture-mode" @click="ctEditor=!ctEditor">Toggle full editor</button><button id="fixture-save" data-inline-focus-surface @click="ctSave()">Save</button><span v-if="ctMtlCount" class="ctMtlCount"><span class="ctMtlDot"></span>MTL {{ctMtlCount}}</span><table><tbody><tr :data-unit-id="ctSelection" @click="ctRowClick(ctCurrentUnit,$event)" @focusout="ctInlineFocusOut"><td><section id="fixture-editor" :class="ctEditor ? \'ctFull ctFullEditor\' : \'inlineEditor\'"><ct-fields v-if="ctCurrentUnit && !ctInlineClosed" :host="$root" :side="ctEditor ? \'both\' : \'translation\'"></ct-fields></section></td></tr></tbody></table><p class="fixture-error">{{ctError||ctMtlError}}</p></main><ct-mtl-debug-dialog v-if="ctMtlDebugAllowed && ctMtlDebugWindow" :host="$root"></ct-mtl-debug-dialog></div>'
 };
 const vue=Vue.createApp(options);vue.directive('tooltip',{});
 vue.component('ct-fields',ClientTextUI.fieldsComponent);vue.component('ct-target',ClientTextUI.targetComponent);
 vue.component('editor-native-field',EditorComponents.NativeField);vue.component('editor-field-toolbar',EditorComponents.FieldToolbar);
 vue.component('editor-diagnostic-meta',EditorComponents.DiagnosticMeta);vue.component('app-notice',EditorComponents.Notice);
+vue.component('ct-mtl-debug-dialog',ClientTextMtlDebug.Dialog);
 app=vue.mount('#app');window.__mtlApp=app;
 document.addEventListener('keydown',event=>app.ctKey(event));await app.configure('memory');window.__mtlReady=true;
 })().catch(error=>{window.__mtlError=String(error.stack||error);console.error(error);});`;
@@ -120,6 +122,8 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
         const target=()=>page.locator('textarea[data-ct-target]').first(),snapshot=()=>page.evaluate(()=>window.__mtlApp.snapshot());
         for(const mode of ['memory','idb']){
             await page.evaluate(mode=>window.__mtlApp.configure(mode),mode);
+            await page.evaluate(()=>{window.__mtlApp.cloudUser={...window.__mtlApp.cloudUser,role:'translator',isAdmin:false};});
+            assert.equal(await page.locator('.ctMtlDebugButton').count(),0,'Translator sees ordinary MTL controls');
             for(const theme of ['light','grey','dark','modern-dark']){
                 await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
                 const toolbar=page.locator('[aria-label="Translation field tools"]').first();
@@ -138,13 +142,40 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
                 await page.locator('#fixture-mode').click();assert.equal(await target().getAttribute('rows'),'4');
                 await page.locator('#fixture-mode').click();assert.equal(await target().getAttribute('rows'),'1');
             }
+            await page.evaluate(()=>{window.__mtlApp.cloudUser={...window.__mtlApp.cloudUser,role:'manager',isAdmin:false};});
+            assert.equal(await page.locator('.ctMtlDebugButton').count(),0,'Manager has no debug access');
+            await page.evaluate(()=>{window.__mtlApp.cloudUser={...window.__mtlApp.cloudUser,role:'admin',isAdmin:true};});
+            await page.locator('.ctMtlDebugButton').click();
+            assert.match(await page.locator('.ctMtlDebugDialog').textContent(),/Preview · not executed/);
+            assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureJobs.size),0,'Preview never generates');
+            const header=page.locator('.ctMtlDebugHeader'),before=await page.locator('.ctMtlDebugDialog').boundingBox(),handle=await header.boundingBox();
+            await page.mouse.move(handle.x+80,handle.y+12);await page.mouse.down();await page.mouse.move(handle.x+160,handle.y+62,{steps:8});await page.mouse.up();
+            const after=await page.locator('.ctMtlDebugDialog').boundingBox();assert.ok(after.x>before.x+40&&after.y>before.y+20,'Dialog drags like KeywordPopups');
+            await header.focus();await header.press('ArrowLeft');assert.ok((await page.locator('.ctMtlDebugDialog').boundingBox()).x<after.x,'Keyboard can move dialog');
+            await header.press('Escape');assert.equal(await page.locator('.ctMtlDebugDialog').count(),0);
+            assert.equal(await page.locator('.ctMtlDebugButton').evaluate(node=>node===document.activeElement),true,'Escape restores focus');
             await page.evaluate(()=>{window.__mtlApp._fixtureDefer=true;});
-            await page.locator('.ctMtlButton').click();await page.waitForFunction(()=>window.__mtlApp._fixtureReleases.length===1);
+            await target().focus();await page.locator('.ctMtlButton').click();await page.waitForFunction(()=>window.__mtlApp._fixtureReleases.length===1);
+            await page.waitForTimeout(30);assert.equal(await page.evaluate(()=>window.__mtlApp.ctInlineClosed),false,'Translate does not collapse the inline row while busy');
             assert.equal(await page.locator('.ctMtlButton .ctAudioSpinner').count(),1,'Use existing audio spinner');
             assert.equal((await snapshot()).underlying,'Confirmed {0}');
             await page.evaluate(()=>{window.__mtlApp._fixtureReleases.shift()();window.__mtlApp._fixtureDefer=false;});
             await page.waitForFunction(()=>window.__mtlApp.snapshot().visible==='Generated {0}');
             assert.equal(await page.locator('.ctMtlCount').count(),1);
+            await page.locator('.ctMtlDebugButton').click();await page.waitForFunction(()=>!!window.__mtlApp.ctMtlDebugWindow?.record.server);
+            assert.match(await page.locator('.ctMtlDebugDialog').textContent(),/Actual executed request and server validation/);
+            assert.equal(await page.locator('.ctMtlDebugDialog img').count(),0,'Request text is escaped');
+            assert.equal(await page.evaluate(()=>window.__debugXss),undefined);assert.doesNotMatch(await page.locator('.ctMtlDebugDialog').textContent(),/synthetic-secret/);
+            for(const theme of ['light','grey','dark','modern-dark']){
+                await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
+                await page.screenshot({path:join(outDir,mode+'-debug-'+theme+'.png'),fullPage:true});
+            }
+            await page.setViewportSize({width:920,height:650});
+            await page.waitForFunction(()=>{const r=document.querySelector('.ctMtlDebugDialog').getBoundingClientRect();return r.x>=7&&r.y>=7&&r.right<=913&&r.bottom<=643;});
+            const resized=await page.locator('.ctMtlDebugDialog').boundingBox();assert.ok(resized.x>=7&&resized.y>=7&&resized.x+resized.width<=913&&resized.y+resized.height<=643,'Resized desktop keeps dialog reachable');
+            await page.setViewportSize({width:1440,height:1000});
+            await page.evaluate(()=>{window.__mtlApp.cloudUser={...window.__mtlApp.cloudUser,role:'translator',isAdmin:false};});
+            assert.equal(await page.locator('.ctMtlDebugDialog').count(),0);assert.equal(await page.evaluate(()=>Object.keys(window.__mtlApp.ctMtlDebugRecords).length),0,'Role change clears details');
             const accent=await page.locator('.ctMtlReview .ctMtlDot').evaluate(node=>getComputedStyle(node).backgroundColor);
             assert.equal(accent,'rgb(103, 212, 241)');
             for(const theme of ['light','grey','dark','modern-dark']){
@@ -167,6 +198,8 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             await page.locator('#fixture-mode').click();assert.equal(await target().inputValue(),'From memory {0}');await page.locator('#fixture-mode').click();
             assert.equal(await page.evaluate(()=>window.__mtlApp.exportTarget()),'Confirmed {0}','Unaccepted overlay does not export');
             await page.getByRole('button',{name:'Accept',exact:true}).click();await page.waitForFunction(()=>window.__mtlApp.snapshot().accepted);
+            assert.equal(await page.evaluate(()=>window.__mtlApp.ctInlineClosed),false,'Accept preserves inline editor');
+            assert.equal(await target().evaluate(node=>node===document.activeElement),true,'Accept returns focus to the same native field');
             assert.equal((await snapshot()).underlying,'From memory {0}');assert.equal(await page.evaluate(()=>window.__mtlApp.exportTarget()),'Confirmed {0}','Accepted unsaved draft does not export');
             await page.locator('#fixture-save').click();await page.waitForFunction(()=>{const app=window.__mtlApp,field=app.ctCurrentUnit.fields[0];
                 return app.ctError||!app.ctBusy&&app.ctSaved[app.ctSelection]?.values[field.id]==='From memory {0}';});
@@ -185,7 +218,23 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
                 const next=Vue.markRaw({...unit,fields:[{...field,source:'Changed source {0}'}]});app.ctUnits=Vue.markRaw([next]);app._ctUnitIndex=Vue.markRaw(new Map([[next.id,next]]));app.ctMtlRevision++;
                 return app.ctMtlPendingCandidate(next.fields[0])===null&&app.ctMtlCount===0;});
             assert.equal(sourceHidden,true,'Source change silently hides candidate');
-            results.push({mode,themes:4,inputRoutes:['typing','paste','format','autocomplete','TM'],exports:'original before Save, accepted after Save',raceGuards:true});
+            await page.evaluate(mode=>window.__mtlApp.configure(mode),mode);
+            await target().fill('Unconfirmed ordinary {0}');
+            const selection=await page.evaluate(()=>window.__mtlApp.ctSelection);
+            await page.evaluate(()=>{window.__mtlApp._fixtureDefer=true;});
+            await page.locator('.ctMtlButton').focus();await page.locator('.ctMtlButton').press('Enter');
+            await page.waitForFunction(()=>window.__mtlApp._fixtureReleases.length===1);await page.waitForTimeout(30);
+            assert.equal(await page.evaluate(()=>window.__mtlApp.ctInlineClosed),false,'Keyboard Translate preserves inline editor while disabled');
+            assert.equal((await snapshot()).underlying,'Unconfirmed ordinary {0}','Translate preserves ordinary draft');
+            await page.evaluate(()=>{window.__mtlApp._fixtureReleases.shift()();window.__mtlApp._fixtureDefer=false;});
+            await page.waitForFunction(()=>window.__mtlApp.snapshot().visible==='Generated {0}');
+            assert.equal(await page.evaluate(()=>window.__mtlApp.ctSelection),selection,'Async result preserves selection');
+            await page.getByRole('button',{name:'Dismiss',exact:true}).focus();await page.getByRole('button',{name:'Dismiss',exact:true}).press('Enter');
+            await page.waitForFunction(()=>window.__mtlApp.snapshot().candidates===0);await page.waitForTimeout(30);
+            assert.equal(await page.evaluate(()=>window.__mtlApp.ctInlineClosed),false,'Dismiss preserves inline editor');
+            assert.equal((await snapshot()).underlying,'Unconfirmed ordinary {0}');assert.equal(await target().evaluate(node=>node===document.activeElement),true,'Dismiss returns focus to the stable field');
+            results.push({mode,themes:4,inputRoutes:['typing','paste','format','autocomplete','TM'],exports:'original before Save, accepted after Save',raceGuards:true,
+                debug:['admin-only','read-only preview','actual request','drag','keyboard move','escape focus','resize','escaped','redacted','role reset'],inlineStable:['pointer Translate','keyboard Translate','async result','debug dialog','Accept','Dismiss','draft','selection']});
         }
         assert.deepEqual(external,[],'No external request is made');assert.deepEqual(errors,[],'Real native controls render without page errors');
         const report={passed:true,results,externalRequests:external,pageErrors:errors};writeFileSync(join(outDir,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));

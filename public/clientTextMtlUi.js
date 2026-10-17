@@ -11,6 +11,13 @@
     const key = (unitId, fieldId) => JSON.stringify([unitId, fieldId]);
     const id = () => root.crypto.randomUUID();
     const stale = () => Object.assign(new Error('The MTL request context changed.'), { stale: true, name: 'AbortError' });
+    const failureText = code => ({
+        MTL_OUTPUT_INVALID: 'MTL returned an invalid or incomplete translation. The existing text is unchanged. Try a new translation when ready.',
+        MTL_NOT_CONFIGURED: 'MTL is not connected. An administrator must configure the translation service.',
+        MTL_PROVIDER_LIMIT: 'The translation service has reached its usage limit. Try again later.',
+        MTL_PROVIDER_FAILED: 'The translation service could not complete this attempt. The existing text is unchanged.',
+        MTL_REFUSED: 'The translation service declined this attempt. The existing text is unchanged.',
+    })[code];
     function permissions(host, ctx) {
         const user = host.cloudUser;
         return !!host.cloudSignedIn && !!host._cloud && !!user && String(user.id) === String(ctx.scope.accountId)
@@ -65,6 +72,7 @@
         beforeUnmount() { this.ctMtlReset(); },
         methods: {
             ctMtlReset() {
+                this.ctMtlDebugReset?.();
                 this._ctMtlRun = null; this._ctMtlSync?.stop?.(); this._ctMtlSync = null;
                 for (const request of this._ctMtlJobs?.values() || []) request.controller.abort();
                 this._ctMtlJobs = raw(new Map()); this._ctMtlEditMutations = raw(new Map()); this._ctMtlReviewQueues = raw(new Map());
@@ -196,6 +204,13 @@
                 return result;
             },
             ctMtlBusy(field) { return !!this.ctMtlRequests[key(this.ctSelection, field?.id)]; },
+            ctMtlReviewFocus(field, event) {
+                // Review actions can remove their own buttons. Return focus to
+                // the stable field first, including for keyboard activation.
+                const button = event.target?.closest?.('button');
+                if (button && root.document?.activeElement === button && this.ctCurrentUnit?.fields.includes(field))
+                    this.ctDictionaryTarget?.(field.id)?.focus?.({ preventScroll: true });
+            },
             ctMtlHint(field) {
                 if (this.ctMtlBusy(field)) return 'Generating MTL for this field';
                 if (this.ctMtlPendingGeneration(field)) return 'Check the pending MTL request';
@@ -485,7 +500,7 @@
                         if (!current()) throw stale();
                         this.ctMtlGenerations = raw(await this.ctMtlStorage(ctx).getGenerations(ctx.scope));
                         if (!current()) throw stale();
-                        this.ctMtlError = response.request?.error?.message || response.error?.message || 'The earlier MTL request ended without a translation. Generate again when ready.';
+                        this.ctMtlError = failureText(response.errorCode || response.request?.error?.code) || response.request?.error?.message || response.error?.message || 'The earlier MTL request ended without a translation. Generate again when ready.';
                         return false;
                     }
                     this.ctMtlError = 'The earlier MTL request is still pending. Check it again shortly.'; return false;
@@ -505,6 +520,11 @@
                     if (this.ctMtlRequests[name] === generation.requestId) { const requests = {...this.ctMtlRequests}; delete requests[name]; this.ctMtlRequests = requests; }
                 }
             },
+            ctMtlBuildContext(field) {
+                const ctx = this.ctContext();
+                return Context.create({ unit: this.ctCurrentUnit, field, units: this.ctUnits, npcIndex: this._ctNpcIndex, convoIndex: this._ctConvoIndex,
+                    skillResolver: this.ctSkillResolver, dictionary: this.ctMtlCommittedGlossary(ctx), scope: ctx.scope });
+            },
             async ctMtlGenerate(field) {
                 const ctx = this.ctContext();
                 if (this.ctMtlCapabilities === null && this.ctActive && this.ctCurrentUnit?.fields.includes(field) && M.eligible(field) && permissions(this,ctx)) {
@@ -519,14 +539,13 @@
                 const name = key(unit.id, field.id), mutations = this._ctMtlEditMutations ||= raw(new Map()), mutation = mutations.get(name) || 0,
                     previous = String(this.ctValues[field.id] ?? ''), capturedSource = M.rawSourceHash(field.source), controller = new AbortController(), requestId = id();
                 const job = { requestId, controller }, jobs = this._ctMtlJobs ||= raw(new Map()); jobs.set(name, job);
-                let sent = false, generation;
+                let sent = false, generation, confirmedFailure = false;
                 this.ctMtlRequests = { ...this.ctMtlRequests, [name]: requestId };
                 const current = () => jobs.get(name) === job && !controller.signal.aborted && this.ctCurrent(ctx) && this.ctActive
                     && client === this._cloud && capturedAccess === access(this) && permissions(this, ctx) && this.mtlConsentVersion === 'mtl-v1'
                     && this._ctUnitIndex?.get(unit.id) === unit && unit.fields.includes(field) && M.rawSourceHash(field.source) === capturedSource;
                 try {
-                    const context = Context.create({ unit, field, units: this.ctUnits, npcIndex: this._ctNpcIndex, convoIndex: this._ctConvoIndex,
-                        skillResolver: this.ctSkillResolver, dictionary: this.ctMtlCommittedGlossary(ctx), scope: ctx.scope });
+                    const context = this.ctMtlBuildContext(field);
                     const body = { requestId, unitId: unit.id, fieldId: field.id, role: unit.role, assetHash: descriptor.assetHash || descriptor.hash,
                         parserVersion: descriptor.parserVersion, source: field.source, sourceHash: S.sourceHash(field.source), rawSourceHash: capturedSource,
                         baseTargetHash: S.hash(previous), baseRevision: this.ctSaved[unit.id]?.serverRevision || 0, clientFacts: S.clientFacts(unit),
@@ -541,16 +560,36 @@
                         createdAt:Date.now(),status:'pending',requestBodyHash:S.hash(body)});
                     if (!current()) throw stale();
                     this.ctMtlGenerations = raw([...this.ctMtlGenerations.filter(value=>value.requestId!==requestId),generation]);
+                    this.ctMtlDebugBegin?.(field, body);
                     sent = true;
                     const response = await client.request(path, { method: 'POST', body, signal: controller.signal, timeout: 190000 });
                     if (!current()) throw stale();
-                    return await this.ctMtlAdoptCandidate(ctx,unit,field,response.candidate,generation,current,()=>(mutations.get(name)||0)!==mutation);
+                    const adopted = await this.ctMtlAdoptCandidate(ctx,unit,field,response.candidate,generation,current,()=>(mutations.get(name)||0)!==mutation);
+                    if (current()) this.ctMtlDebugFinish?.(field, requestId);
+                    return adopted;
                 } catch (error) {
+                    if (error.status === 422 && ['MTL_OUTPUT_INVALID', 'MTL_REFUSED'].includes(error.code)) confirmedFailure = true;
+                    // A proxy can replace a failed POST with an unreadable error
+                    // page. Inspect the same job once; never repeat inference.
+                    if (sent && current() && ['TypeError', 'NetworkError', 'SyntaxError'].includes(error.name)) {
+                        let lookupFailed = false;
+                        try {
+                            const status = await client.request('/v1/mtl/requests/' + encodeURIComponent(requestId), { signal: controller.signal });
+                            if (!current()) throw stale();
+                            if (['failed', 'cancelled', 'expired', 'interrupted'].includes(status.status)) {
+                                confirmedFailure = true;
+                                error = Object.assign(new Error(failureText(status.errorCode) || 'This MTL attempt ended without a usable translation. The existing text is unchanged.'), { code: status.errorCode || 'MTL_FAILED' });
+                            }
+                        } catch (_) { lookupFailed = true; /* Keep the original request error if its status is unavailable. */ }
+                        if (!confirmedFailure && !lookupFailed) error = Object.assign(new Error('The MTL request could not be confirmed. The existing text is unchanged. Check the pending request before trying again.'), { code: 'MTL_REQUEST_UNCERTAIN' });
+                    }
                     if (generation) try {
-                        await this.ctMtlStorage(ctx).putGeneration(ctx.scope,{requestId,status:sent && error.code !== 'MTL_INVALID_RESPONSE' ? 'uncertain' : 'failed'});
+                        await this.ctMtlStorage(ctx).putGeneration(ctx.scope,{requestId,status:sent && !confirmedFailure && error.code !== 'MTL_INVALID_RESPONSE' ? 'uncertain' : 'failed'});
                         if (current()) this.ctMtlGenerations = raw(await this.ctMtlStorage(ctx).getGenerations(ctx.scope));
                     } catch (_) { /* A disposed local session has no durable job. The online reservation remains recoverable. */ }
-                    if (current() && !error.stale && error.name !== 'AbortError') this.ctMtlError = error.message;
+                    if (current() && !error.stale && error.name !== 'AbortError') {
+                        this.ctMtlError = error.message; this.ctMtlDebugFinish?.(field, requestId, error);
+                    }
                     return false;
                 }
                 finally {

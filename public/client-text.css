@@ -165,6 +165,15 @@
 .ctMtlDot {display:inline-block;width:7px;height:7px;flex:none;border-radius:50%;background:#67D4F1;}
 .ctMtlButton {font-size:12px;min-width:34px;display:inline-flex;align-items:center;justify-content:center;}
 .ctMtlButtonTarget {display:inline-flex;align-items:center;margin-left:auto;}
+.ctMtlDebugButton {font-size:14px;min-width:26px;padding-inline:5px;}
+.ctMtlDebugDialog {position:fixed;z-index:3500;box-sizing:border-box;width:720px;max-width:calc(100vw - 16px);max-height:min(760px,80vh);display:flex;flex-direction:column;border:1px solid var(--ui-border);border-radius:8px;background:var(--color-element);color:var(--color-font);box-shadow:0 12px 42px #0006;font-size:13px;}
+.ctMtlDebugHeader {display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 14px;border-bottom:1px solid var(--ui-border);cursor:grab;user-select:none;touch-action:none;}
+.ctMtlDebugDialog.dragging .ctMtlDebugHeader {cursor:grabbing;}
+.ctMtlDebugHeader button {font-size:20px;line-height:1;padding:2px 7px;}
+.ctMtlDebugBody {min-height:0;overflow:auto;padding:0 14px 14px;}
+.ctMtlDebugBody p {margin:10px 0;}
+.ctMtlDebugMode {font-weight:600;color:var(--ui-accent);}
+.ctMtlDebugBody pre {white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--ui-border);border-radius:4px;background:var(--color-element-alt);padding:12px;font-size:12px;user-select:text;}
 .ctMtlButtonTarget + .fieldToolbarSeparator {margin-left:0;}
 .ctTarget.mtl .editorFieldFrame {outline:1px solid #67D4F1;outline-offset:-1px;}
 .ctMtlReview {display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;padding:5px 0;}
