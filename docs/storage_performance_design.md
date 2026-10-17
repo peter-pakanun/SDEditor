@@ -224,6 +224,105 @@ The 16.18 profile contained only a short blur/focus transition, so it does not e
 - Include hidden-to-visible and visible-to-hidden transitions; do not use keyboard focus alone as visibility evidence.
 - Local synthetic fixture timings are not hosted production guarantees. Retest after deployment with comparable inputs and capture windows.
 
+### Managed SD collection exports (2026-10-17)
+
+Modern StatDescription content-group collections now reuse verified parsed originals,
+then verified persisted ZIPs, before requesting the original again. The dedicated
+source worker checks the ZIP hash, size, directory paths and expansion limits and
+extracts only collected paths in batches of at most 64. A detached immutable file
+cache retains at most two accepted descriptors, 2,048 files and 16 MiB of serialized
+file data. Its key includes the complete finalized archive descriptor, including
+ZIP identity, parser and duplicate decisions. It never contains authored targets,
+collection results, permissions or authenticated pending requests. Each collection
+still fetches its own authorized manifest and preserves the captured operation's
+account/access/game/version/group/language fences. Abort disposes only that export's
+worker. Corrupt persisted bytes are replaced only after a fresh download verifies.
+Legacy collection parsing and ClientText behavior retain their existing paths.
+
+The output is partial at the complete Saved-file boundary: ZIP paths equal the
+collected manifest, even when the verified original cache holds the whole source.
+A save stages the complete selected-language array for that file, so unchanged
+conditional entries within a Saved file are included. One SD file contains one
+description declaration; its stat header, English, conditions/variables, remarks,
+and original other-language blocks remain intact. The selected language comes
+only from the frozen Saved array. Unrelated files, unsaved drafts, pending uploads
+and separate Dropped copies are excluded. Synthetic checks cover three originals,
+one Saved file with two entries and a separately retained Dropped file. Every
+selected-language entry and path in all six real-corpus outputs also matches the
+Saved fixture rows: Thai 731 files/1,121 entries, German 764/1,166, Japanese
+333/584 and French 1,000/1,515, with zero unrelated paths.
+
+The companion API materializes each Saved row once inside the snapshot transaction,
+validates completeness before retaining that same projection, and computes named
+version catalog counts only in the final access-filtered projection. An optional
+SD-only `projection=files` manifest query sends filepath, target and revision without
+the duplicate `units` alias or editing/history metadata. Default responses, stored
+cutoffs, request hashes, receipts, Dropped snapshots and ClientText manifests keep
+their formats. No schema migration is needed. The frontend also accepts older API
+responses that ignore the query; an API redeploy is needed for the server-side gains.
+
+Two local runs used the audit's unchanged 23,189,013-byte ZIP (21,294 non-directory
+entries / 20,547 descriptions), with exactly the same fixture targets: Thai 731,
+German 764, Japanese 333 and French 1,000 Saved files. French is a stress fixture,
+not a production team workload. Edge 155 reported 28 logical processors and 32 GiB
+device memory. The browser/IndexedDB/worker and application API caches started cold;
+the OS disk cache was not flushed. There was no injected network latency. The final
+run had no concurrent browser fixtures.
+
+| Sequence | Audit total incl. catalog (s) | Final total incl. catalog (s) | Final download flow (s) | Baseline lookup to ready (s) | Entries inflated |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Thai cold | 6.40 | 1.78 | 1.17 | 0.454 | 731 |
+| German | 6.98 | 0.82 | 0.69 | 0.196 | 33 |
+| Japanese | 6.71 | 0.32 | 0.20 | 0.002 | 0 |
+| French | 7.24 | 0.99 | 0.86 | 0.287 | 236 |
+| Thai repeat | 6.62 | 0.49 | 0.35 | 0.005 | 0 |
+| Thai after page reload | Not measured | 0.97 | 0.83 | 0.383 | 731 |
+
+These are real local HTTP/native IndexedDB/current collection-method/FileSaver
+runs against an isolated on-disk API, rather than synthetic sparse extraction
+estimates. The harness supplies scope/UI state instead of mounting the whole app.
+The new method reconciles catalog metadata asynchronously; the comparison total
+explicitly awaits that reconciliation to match the audit's boundary. Baseline
+lookup includes its nested network/cache/worker phases: do not add them twice.
+Only the first run downloads the original; reload verifies the persisted ZIP.
+Every run and every expanded UTF-16LE/BOM entry is byte-identical to the audit's
+ZIP output, and the source ZIP hash is unchanged.
+
+The final cold original transfer took 108 ms at the browser boundary, 76 ms at the
+loopback proxy, and 5 ms of API preparation before streamed response headers.
+These overlapping boundaries are not separate additive network/server CPU costs.
+Snapshot response-ready server times were 377/162/86/203/108 ms for the five-team
+sequence; catalog server times were 610/131/125/131/137 ms. The first snapshot
+includes preparation (1,462 public-file projections for 731 Saved files); warm
+snapshots use one projection per Saved file. Catalogs compute four team counts
+once each. Thai manifest payload fell from about 1.44 MB to 0.27 MB. Browser
+encoding/compression remains on its existing path (77-305 ms in the final run).
+Maximum sampled timer lag was 66.7 ms in that run; an earlier concurrent run had
+312 ms, so this does not establish a frame-time or hosted latency guarantee.
+
+Validation passed: all 3,254 frontend tests, all 548 API tests and API syntax
+checks, including focused collection/source and workspace/storage/collaboration
+regressions. Native source-recovery, SD export progress/cancellation and ClientText
+export browser fixtures passed. Coverage includes parser/duplicate invalidation,
+corruption and retry, bounded/detached caches, worker failure fallback, Abort during
+work, retained receipts, frozen paging, fresh authorization even with warm originals
+and revoked access. Explicit partial-export regressions check a Saved file's whole
+entry array and separately retained Dropped work.
+
+The broad managed-version default and import-only browser fixtures and the mixed
+ClientText/SD browser fixture now pass after updating fixture setup/selectors for
+the current publishers, ended HEAD requirement, normalized activation, completed
+export dialogs and ended-window warnings. The mixed fixture verifies independent
+identical-ZIP groups online and offline, explicit Dropped review when the new
+original lacks the selected translation, and predecessor discovery across an
+omitted-content version. These fixture repairs do not change production behavior.
+
+Private reproducible inputs, scripts, phase/HTTP results, byte checks and logs remain
+under ignored `temp/sd-collection-optimization-20261017/`; the original audit remains
+under `temp/sd-collection-audit-20261016/`. No game source, target text, sessions or
+generated collections are added to Git. These changes are source implementation
+and local evidence, not a deployment or production benchmark.
+
 ## ClientText implementation and measured preparation
 
 [contentAdapters.js](../public/contentAdapters.js) supplies shared serialization/history/lookup/TM contracts; ClientText preserves raw `@`, actual newlines and literal `\n` rather than applying StatDescription editor transformations. Field kind and grammatical form constrain memory matching; heading, workbook role, sheet and record/field IDs remain context/provenance. Gender enum cells, blanks, grammatical `NONEXISTENT` sentinels, unreviewed Outdated values, conflicted records and source-only carries do not teach TM. Turkish Normal/Possessive forms treat `NONEXISTENT` as literal text and retain independent form contexts. Accepted shared events teach the local projection, independently of legacy cloud TM.

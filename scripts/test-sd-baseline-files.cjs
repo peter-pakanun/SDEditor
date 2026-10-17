@@ -28,6 +28,29 @@ test('cold ZIP comparison inflates only its requested file and reuses the indexe
   await assert.rejects(engine.extract(new Blob(['corrupt']), { ...f.descriptor, zipHash: 'a'.repeat(64), baselineId: undefined }, 'source/a.txt'), /corrupt|another baseline/);
   await assert.rejects(engine.extract(f.blob, f.descriptor, '../a.txt'), /filepath/);
 });
+test('collection batches verify once, inflate only selected paths, and yield per batch', async () => {
+  const f = await archive(); let yields = 0;
+  const engine = B.createArchiveEngine({ JSZip: f.JSZip, yieldTask: async () => { yields++; } });
+  await engine.prepare(f.blob, f.descriptor); assert.equal(f.reads.length, 0);
+  const before = yields;
+  const files = await engine.extractMany(f.blob, f.descriptor, ['source/b.txt', 'source/a.txt']);
+  assert.deepEqual(files.map(file => file.filepath), ['source/b.txt', 'source/a.txt']);
+  assert.deepEqual(f.reads, ['source/b.txt', 'source/a.txt']); assert.equal(f.opens(), 1); assert.equal(yields - before, 1);
+  await assert.rejects(engine.extractMany(f.blob, f.descriptor, Array(65).fill('source/a.txt')), /batch/);
+});
+test('failed collection worker falls back to the verified sparse engine and remains disposable', async () => {
+  const f = await archive(), engine = B.createArchiveEngine({ JSZip: f.JSZip, yieldTask: async () => {} });
+  class Worker {
+    constructor() { queueMicrotask(() => this.onmessage({ data: { type: 'ready' } })); }
+    postMessage() { queueMicrotask(() => this.onerror()); }
+    terminate() {}
+  }
+  const client = B.createWorkerClient({ Worker, engine });
+  await client.prepare(f.blob, f.descriptor);
+  assert.equal((await client.extractMany(f.blob, f.descriptor, ['source/b.txt']))[0].filepath, 'source/b.txt');
+  assert.deepEqual(f.reads, ['source/b.txt']); assert.equal(f.opens(), 1);
+  client.dispose(); await assert.rejects(client.extractMany(f.blob, f.descriptor, ['source/a.txt']), { name: 'AbortError' });
+});
 test('per-file duplicate decisions validate exactly that file without parsing unrelated files', async () => {
   const duplicate = text + '\nlang "English"\n1\n8 "Alternate source" alternate';
   const raw = codec.parseText('source/a.txt', duplicate, 'Thai', { strict: true });

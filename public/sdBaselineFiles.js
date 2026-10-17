@@ -64,14 +64,14 @@
       }
       return opening.get(key);
     }
-    async function extract(blob, archive, filepath) {
+    async function extract(blob, archive, filepath, yieldBefore = true) {
       const descriptor = await protocol.finalizeArchive(archive);
       if (!validPath(filepath) || !/\.txt$/i.test(filepath)) throw new Error('Invalid SD comparison filepath.');
       const value = await open(blob, descriptor);
       if (value.fileCount !== descriptor.fileCount) throw unavailable('The accepted ZIP file count changed.');
       const entry = value.zip.file(filepath);
       if (!entry || entry.dir) throw unavailable('This file is absent from its original ZIP. Your translation is preserved.');
-      await yieldTask();
+      if (yieldBefore) await yieldTask();
       const bytes = await entry.async('uint8array'); extractions++;
       if (bytes.byteLength > 2 * 1024 * 1024) throw unavailable('The source file exceeds the extracted-size limit.');
       const raw = codec.parseText(filepath, codec.decodeUTF16(bytes), 'English', { strict: true });
@@ -79,7 +79,19 @@
       const files = await codec.applyDuplicateSelections([raw], descriptor.decisions.filter(decision => decision.filepath === filepath), { language: 'English' });
       return protocol.witness(files[0]);
     }
-    return { extract, verifyZip, stats: () => ({ opens, extractions, archives: archives.size }), clear: () => archives.clear() };
+    async function extractMany(blob, archive, filepaths) {
+      if (!Array.isArray(filepaths) || filepaths.length > 64) throw new Error('Invalid SD extraction batch.');
+      await yieldTask();
+      const result = [];
+      for (const filepath of filepaths) result.push(await extract(blob, archive, filepath, false));
+      return result;
+    }
+    return { extract, extractMany, verifyZip, async prepare(blob, archive) {
+      const descriptor = await protocol.finalizeArchive(archive);
+      const value = await open(blob, descriptor);
+      if (value.fileCount !== descriptor.fileCount) throw unavailable('The accepted ZIP file count changed.');
+      return descriptor;
+    }, stats: () => ({ opens, extractions, archives: archives.size }), clear: () => archives.clear() };
   }
   function createWorkerClient({ Worker = root.Worker, url = 'sdBaselineWorker.js', engine = createArchiveEngine(), readyTimeout = 5000 } = {}) {
     let worker, sequence = 0, readyTimer, settled = false, disposed = false;
@@ -109,6 +121,8 @@
     } catch (_) { fail(); }
     const fallback = async (type, input) => {
       if (type === 'hash') return { zipHash: await protocol.zipHash(input.blob), zipSize: input.blob.size ?? input.blob.byteLength };
+      if (type === 'prepare') return engine.prepare(input.blob, input.archive);
+      if (type === 'extractMany') return engine.extractMany(input.blob, input.archive, input.filepaths);
       return type === 'verify' ? engine.verifyZip(input.blob, input.archive).then(({ descriptor }) => descriptor) : engine.extract(input.blob, input.archive, input.filepath);
     };
     async function run(type, input) {
@@ -125,7 +139,9 @@
         return fallback(type, input);
       }
     }
-    return { extract: (blob, archive, filepath) => run('extract', { blob, archive, filepath }), verify: (blob, archive) => run('verify', { blob, archive }),
+    return { extract: (blob, archive, filepath) => run('extract', { blob, archive, filepath }),
+      extractMany: (blob, archive, filepaths) => run('extractMany', { blob, archive, filepaths }),
+      prepare: (blob, archive) => run('prepare', { blob, archive }), verify: (blob, archive) => run('verify', { blob, archive }),
       hash: blob => run('hash', { blob }), dispose() { disposed = true; fail(); } };
   }
   function createResolver({ store = root.OfflineStore, extractor, maxFiles = 64, maxBytes = 16 * 1024 * 1024 } = {}) {

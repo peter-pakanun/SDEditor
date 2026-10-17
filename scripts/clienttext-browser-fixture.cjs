@@ -20,6 +20,11 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
 ].find(existsSync);
 if (!executablePath) throw new Error('No installed Edge/Chrome found; set FIXTURE_BROWSER_PATH.');
 
+async function closeExportDialog(page) {
+    await page.waitForFunction(() => !window.__clientFixtureApp._ctExportRun);
+    const close = page.locator('.ctExportDialog[open] [data-ct-export-close]');
+    if (await close.count()) await close.click();
+}
 const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 const escape = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\r/g, '&#13;');
 const cell = (r, value, s = 0) => `<c r="${r}" s="${s}" t="inlineStr"><is><t xml:space="preserve">${escape(value)}</t></is></c>`;
@@ -162,6 +167,14 @@ async function run() {
         store.assignLanguage('fixture-admin', 'fixture-translator', 'Thai');
     }
     const api = createApp({ config, database, store, oauthProvider: null }), apiServer = createServer(api);
+    const endFixtureHead = async () => {
+        const head = api.locals.versions.branch('poe2', 'default').head_version_id;
+        if (!head) return;
+        for (const group of api.locals.content.groups(head, 'fixture-admin')) for (const team of group.teams) {
+            await api.locals.content.collect(group.id, team.language, 'fixture-admin', { idempotencyKey: randomUUID(), endWindow: true });
+        }
+        await api.locals.versions.idle();
+    };
     api.locals.collaborationRealtime.attach(apiServer);
     await new Promise(resolve => apiServer.listen(0, '127.0.0.1', resolve));
     const apiOrigin = 'http://127.0.0.1:' + apiServer.address().port;
@@ -202,11 +215,11 @@ async function run() {
         stats: ['fire_damage'], variables: ['#'], remarks: [''], translations: { English: ['Fire damage'], French: [''] } };
     const statArchive = new JSZip(); statArchive.file(statDescription.filepath, StatCodec.descEncode(statDescription), { createFolders: false });
     const statFile = { name: 'StatDescriptions.zip', mimeType: 'application/zip', buffer: await statArchive.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }) };
-    const failures = [], results = [], isolationScopes = []; let browser;
+    const failures = [], results = [], isolationScopes = []; let browser, primaryPage;
     try {
         browser = await playwright.chromium.launch({ executablePath, headless: true, args: ['--disable-gpu'] });
         const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, acceptDownloads: true, ignoreHTTPSErrors: true });
-        const page = await context.newPage(); page.on('pageerror', error => failures.push(error.message));
+        const page = primaryPage = await context.newPage(); page.on('pageerror', error => failures.push(error.message));
         const bootstrap = async (target=page, account='admin') => {
             await target.goto(origin + '/?cloudApi=' + encodeURIComponent(apiOrigin));
             await target.waitForFunction(() => window.__clientFixtureApp?.offlineStoreReady && window.__clientFixtureApp?._cloud?.state, { timeout: 30000 });
@@ -235,9 +248,10 @@ async function run() {
                 { name: language + '_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: normal },
                 ...(['French','German','Polish','Portuguese','Russian','Spanish'].includes(language) ? [{ name: language + '_Gender_PoE2.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: gender }] : [])
             ]);
+            await endFixtureHead();
             await page.getByRole('button', { name: 'Upload next version', exact: true }).click();
             assert.equal(await upload.locator('.ctUploadPolicy').count(), 0, 'Content-role configuration remains admin-only');
-            await upload.locator('input[type=text]').fill('Manager every-language ClientText fixture');
+            await upload.locator('input[type=text]:not(:disabled)').fill('Manager every-language ClientText fixture');
             await upload.locator('input[type=file]').first().setInputFiles(managerFiles);
             assert.deepEqual(await page.evaluate(() => window.__clientFixtureApp.ctUploadFiles.map(file => [file.language, file.role])),
                 managerFiles.map(file => [file.name.split('_')[0], file.name.includes('_Gender_') ? 'gender' : 'normal']), 'Manager upload detects all language teams and paired roles');
@@ -282,6 +296,7 @@ async function run() {
             const endingDownload = page.waitForEvent('download');
             await thaiRow.getByRole('button', { name: 'Download and end', exact: true }).click();
             const exported = await endingDownload;
+            await closeExportDialog(page);
             const parsed = await Codec.parseWorkbook(readFileSync(await exported.path()), { filename: exported.suggestedFilename(), role: 'normal', language: 'Thai' });
             assert.equal(parsed.units.find(unit => unit.recordId === 'record').fields.find(field => field.name === 'Name').target, 'Manager Thai translation');
             await thaiRow.getByRole('button', { name: 'Reopen', exact: true }).waitFor();
@@ -291,6 +306,7 @@ async function run() {
             const pairedDownload = page.waitForEvent('download');
             await details.locator('tr[data-content-group="' + french.id + '"]').getByRole('button', { name: 'Download', exact: true }).click();
             const paired = await pairedDownload, pairedArchive = await JSZip.loadAsync(readFileSync(await paired.path()));
+            await closeExportDialog(page);
             assert.deepEqual(Object.keys(pairedArchive.files).filter(name => !pairedArchive.files[name].dir).sort(), ['French_Gender_PoE2.xlsm', 'French_PoE2.xlsm']);
             const translatorContext = await browser.newContext({ viewport: { width: 1440, height: 1000 }, ignoreHTTPSErrors: true });
             const translator = await translatorContext.newPage();
@@ -446,6 +462,7 @@ async function run() {
             await target('Normal').press('Control+s');await settleSave('blank',{[fid('Normal')]:'',[fid('Possessive')]:''});
             await choose('outdated');assert.equal(await page.evaluate(()=>{const vm=window.__clientFixtureApp;return vm.ctStatus().fields[JSON.stringify(['Display Name','Possessive Translation'])].outdated;}),true);
             await workspace.getByRole('button',{name:'Close',exact:true}).click();const downloaded=page.waitForEvent('download');await workspace.getByRole('button',{name:'Download workbooks',exact:true}).click();const download=await downloaded,output=readFileSync(await download.path());
+            await closeExportDialog(page);
             const parsed=await Codec.parseWorkbook(output,{filename:'Turkish.xlsx',role:'normal',language:'Turkish'}),edited=parsed.units.find(unit=>unit.recordId==='named');assert.deepEqual(Object.fromEntries(edited.fields.map(field=>[field.id,field.target])),values);
             const before=await JSZip.loadAsync(normal),after=await JSZip.loadAsync(output);for(const part of ['[Content_Types].xml','xl/workbook.xml','xl/_rels/workbook.xml.rels','xl/worksheets/sheet2.xml','xl/metadata'])assert.deepEqual(await after.file(part).async('uint8array'),await before.file(part).async('uint8array'));
             assert.deepEqual(failures,[]);console.log(JSON.stringify({status:'PASS',turkishFormsOnly:true,normalMode:true,themeChecks,screenshots:['turkish-preview-full.png','turkish-preview-inline.png'].map(name=>join(directory,name)),results:['Three previews with editable defaults, number variables, both team examples, conditional and blank-possessive fallback','Preview parameters retain full/inline handoff and leave real drafts unchanged','v4 preparation/publication/API saves; real native IndexedDB reload and independent history comparison','Normal/Possessive grids, C/D traversal and focus handoff in both editors across all four themes and two desktop widths','No sentinel expansion; blank-save and orange optional form behavior; targeted native workbook export']},null,2));return;
@@ -533,7 +550,7 @@ async function run() {
             // Seed retained local ClientText data for editor checks; the chooser exposes online entry only.
             await page.evaluate(() => window.__clientFixtureApp.ctOpenUpload(null, true));
             const upload = page.getByRole('region', { name: 'Content upload' });
-            await upload.locator('input[type=text]').fill('Class variants browser fixture'); await upload.locator('input[type=file]').first().setInputFiles(files);
+            await upload.locator('input[type=text]:not(:disabled)').fill('Class variants browser fixture'); await upload.locator('input[type=file]').first().setInputFiles(files);
             await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).click(); await page.waitForFunction(() => !window.__clientFixtureApp.ctUploading);
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctUploadError), '');
             const prepared = await page.evaluate(() => ({ warnings: window.__clientFixtureApp.ctPrepared[0].assets.flatMap(asset => asset.parsed.warnings),
@@ -738,7 +755,7 @@ async function run() {
             // Seed retained local ClientText data for editor checks; the chooser exposes online entry only.
             await page.evaluate(() => window.__clientFixtureApp.ctOpenUpload(null, true));
             const upload = page.getByRole('region', { name: 'Content upload' });
-            await upload.locator('input[type=text]').fill('Gender browser fixture'); await upload.locator('input[type=file]').first().setInputFiles(files);
+            await upload.locator('input[type=text]:not(:disabled)').fill('Gender browser fixture'); await upload.locator('input[type=file]').first().setInputFiles(files);
             await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).click();
             await page.waitForFunction(() => !window.__clientFixtureApp.ctUploading);
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctUploadError), '');
@@ -823,6 +840,7 @@ async function run() {
             await control().press('Control+s'); await checkSaved('raw-space', ' ');
             const downloaded = page.waitForEvent('download'); await workspace.getByRole('button', { name: 'Download workbooks', exact: true }).click();
             const download = await downloaded, archive = await JSZip.loadAsync(readFileSync(await download.path())), output = await archive.file('German.xlsm').async('uint8array'), parsed = await Codec.parseWorkbook(output, { filename: 'German.xlsm', role: 'normal' });
+            await closeExportDialog(page);
             for (const [id, value] of expected) assert.equal(parsed.units.find(unit => unit.recordId === id).fields.find(field => field.id === fieldId).target, value, 'Downloaded workbook preserves exact saved Gender ' + id);
             assert.equal(parsed.warnings.some(warning => warning.code === 'CLIENTTEXT_GENDER_VALUE' || warning.code === 'CLIENTTEXT_NONEXISTENT_FIELD'), false);
             const original = await JSZip.loadAsync(normal), exported = await JSZip.loadAsync(output);
@@ -845,7 +863,7 @@ async function run() {
             // Seed retained local ClientText data for editor checks; the chooser exposes online entry only.
             await page.evaluate(() => window.__clientFixtureApp.ctOpenUpload(null, true));
             const upload = page.getByRole('region', { name: 'Content upload' });
-            await upload.locator('input[type=text]').fill('German ClientText production audit');
+            await upload.locator('input[type=text]:not(:disabled)').fill('German ClientText production audit');
             await upload.locator('input[type=file]').first().setInputFiles(originals.map(original => ({ name: original.name, mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: original.bytes })));
             const detected = await page.evaluate(() => window.__clientFixtureApp.ctUploadFiles.map(candidate => ({ filename: candidate.file.name, language: candidate.language, role: candidate.role })));
             assert.deepEqual(detected, [{ filename: 'German.xlsm', language: 'German', role: 'normal' }, { filename: 'German_Gender.xlsm', language: 'German', role: 'gender' }], 'Neutral production filenames auto-detect German and both workbook roles');
@@ -1011,6 +1029,7 @@ async function run() {
         const desktopSizes = [{ width: 1440, height: 1000 }, { width: 1100, height: 850 }];
         const themes = ['light', 'grey', 'dark', 'modern-dark'];
         const checkUploadLayout = async ({ admin = false } = {}) => {
+            await upload.waitFor();
             const policy = upload.locator('.ctUploadPolicy');
             assert.equal(await policy.count(), admin ? 1 : 0, 'Role configuration is shown only in manager publication for an admin');
             assert.doesNotMatch(await upload.textContent(), /Missing_XXX\.txt is ignored|Missing_.*\.txt.*ignore/i, 'Removed Missing-file explanation stays absent');
@@ -1079,7 +1098,7 @@ async function run() {
             results.push(`${admin ? 'Admin publication' : 'Local import'} layout: two desktop sizes and four themes; spaced file/folder selectors${admin ? ' and role configuration' : ''}; fixed-right Cancel and stable progress controls from 0 to 1000000`);
         };
         if (!dictionaryOnly && !progressOnly) await checkUploadLayout();
-        await upload.locator('input[type=text]').fill('ClientText browser fixture');
+        await upload.locator('input[type=text]:not(:disabled)').fill('ClientText browser fixture');
         await upload.locator('input[type=file]').first().setInputFiles(files.slice(0, 1));
         await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).click();
         await upload.getByRole('alert').filter({ hasText: 'French requires exactly' }).waitFor();
@@ -1881,6 +1900,7 @@ async function run() {
         results.push('Shared full-editor Lookup keeps long results in its own scroll area with the last entry and tool tabs reachable in both desktop widths and all themes; local Comments require a published group');
         const downloaded = page.waitForEvent('download'); await workspace.getByRole('button', { name: 'Download workbooks', exact: true }).click();
         const download = await downloaded, path = await download.path();
+        await closeExportDialog(page);
         assert.match(download.suggestedFilename(), /ClientText\.zip$/);
         const archive = await JSZip.loadAsync(readFileSync(path));
         assert.deepEqual(Object.keys(archive.files).filter(name => !archive.files[name].dir).sort(), files.map(file => file.name).sort());
@@ -1941,11 +1961,19 @@ async function run() {
         results.push('Sheet filter, developer-note search, Gender combo box, six-form grid and NONEXISTENT completion');
         results.push('Four desktop themes; paired full-workbook download preserves macros/native metadata and gray/green/purple status fills');
         if (process.env.CLIENTTEXT_SHARED_FLOW === '1' || process.argv.includes('--shared')) {
+            const openStatEditor = async () => {
+                await page.getByRole('button', { name: 'Open full editor for fire.txt', exact: true }).click();
+                await page.waitForFunction(() => window.__clientFixtureApp.editorSessionActive || document.querySelector('.appDialogConfirm'));
+                const warning = page.getByRole('dialog', { name: 'Translation window ended', exact: true });
+                if (await warning.count()) await warning.getByRole('button', { name: 'Continue editing', exact: true }).click();
+                await page.waitForFunction(() => window.__clientFixtureApp.editorSessionActive && window.__clientFixtureApp.editorReady);
+            };
             await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
             await page.waitForFunction(() => window.__clientFixtureApp.versionChooserVisible);
+            await endFixtureHead();
             await page.getByRole('button', { name: 'Upload next version', exact: true }).click();
             await checkUploadLayout({ admin: true });
-            await upload.locator('input[type=text]').fill('Shared ClientText fixture');
+            await upload.locator('input[type=text]:not(:disabled)').fill('Shared ClientText fixture');
             await upload.getByRole('button', { name: 'Save version draft', exact: true }).click();
             await page.waitForFunction(() => !window.__clientFixtureApp.ctUploading);
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctUploadError), '', 'Metadata-only version draft is saved');
@@ -1996,7 +2024,7 @@ async function run() {
                     const archive=await JSZip.loadAsync(normal),sheet=await archive.file('xl/worksheets/sheet1.xml').async('string');
                     assert.match(sheet,/>Sword</);archive.file('xl/worksheets/sheet1.xml',sheet.replace('>Sword<','>'+english+'<'));
                     const changed=await archive.generateAsync({type:'nodebuffer'});
-                    await page.getByRole('button',{name:'Upload next version',exact:true}).click();await upload.locator('input[type=text]').fill(name);
+                    await page.getByRole('button',{name:'Upload next version',exact:true}).click();await upload.locator('input[type=text]:not(:disabled)').fill(name);
                     await upload.locator('input[type=file]').first().setInputFiles(files.map(file=>({...file,buffer:file.name.includes('Gender')?gender:changed})));
                     await upload.getByRole('button',{name:'Prepare and validate',exact:true}).click();await page.waitForFunction(()=>!window.__clientFixtureApp.ctUploading);
                     assert.equal(await page.evaluate(()=>window.__clientFixtureApp.ctUploadError),'');
@@ -2056,6 +2084,7 @@ async function run() {
             await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
             const acceptedEvent = page.waitForEvent('download'); await details.getByRole('button', { name: 'Download', exact: true }).click();
             const acceptedDownload = await acceptedEvent, acceptedArchive = await JSZip.loadAsync(readFileSync(await acceptedDownload.path()));
+            await closeExportDialog(page);
             const acceptedNormal = await Codec.parseWorkbook(await acceptedArchive.file(files[0].name).async('uint8array'), { filename: files[0].name, role: 'normal' });
             const acceptedField = get(acceptedNormal, 'record', 'Name'); assert.equal(acceptedField.target, 'En ligne'); assert.equal(acceptedField.originalFill, 'D9D9D9');
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctError), '', 'Immutable accepted-work collection downloads');
@@ -2278,7 +2307,7 @@ async function run() {
             }
             await page.setViewportSize(desktopSizes[0]); await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), 'modern-dark');
             results.push('ClientText and StatDescription share header/search/filter/table/footer presentation at two desktop widths in all four themes; ClientText preserves worksheet navigation and exact field workload');
-            await page.getByRole('button', { name: 'Open full editor for fire.txt', exact: true }).click();
+            await openStatEditor();
             await page.getByRole('button', { name: '📚 Dictionary', exact: true }).click();
             const statDictionary = page.locator('#fullEditorSidebarHost .dictionaryEntries');
             await page.locator('#fullEditorSidebarHost').getByRole('button', { name: 'Add entry', exact: true }).click();
@@ -2295,12 +2324,12 @@ async function run() {
             const statScope = await page.evaluate(() => { const vm = window.__clientFixtureApp; return { scope: vm.managedWorkspaceScope(), collaboration: vm._collaboration.snapshot({ includeFiles: false }).identity }; });
             isolationScopes.push(statScope.scope);
             assert.equal(statScope.scope.groupId, statGroup.id); assert.equal(statScope.scope.versionId, draftVersionId); assert.equal(statScope.collaboration.groupId, statGroup.id);
-            await page.getByRole('button', { name: 'Open full editor for fire.txt', exact: true }).click();
+            await openStatEditor();
             await translation.fill('Dégâts de feu temporaires');
             await page.getByRole('button', { name: 'Save & close', exact: true }).click();
             await page.evaluate(async () => { const vm = window.__clientFixtureApp; await vm.waitForPendingSaves(); await vm._collaboration?.retry(); });
             await page.waitForFunction(() => !window.__clientFixtureApp._collaboration?.snapshot({ includeFiles: false }).pending);
-            await page.getByRole('button', { name: 'Open full editor for fire.txt', exact: true }).click();
+            await openStatEditor();
             await page.getByRole('button', { name: '🕒 History', exact: true }).click();
             await page.waitForFunction(() => { const vm = window.__clientFixtureApp; return !vm.historyLoading && vm.historyItems.length >= 2; });
             const statHistory = page.locator('.historyPanel'); await statHistory.locator('.historyPick').nth(1).click();
@@ -2388,7 +2417,7 @@ async function run() {
             await workspace.getByRole('button', { name: 'Close', exact: true }).click();
             await openVersionGroup('Shared ClientText fixture', statGroup.id);
             await page.waitForFunction(groupId => !window.__clientFixtureApp.ctActive && window.__clientFixtureApp.activeContentGroup?.id === groupId && !window.__clientFixtureApp.workspaceInitializationActive, statGroup.id);
-            await page.getByRole('button', { name: 'Open full editor for fire.txt', exact: true }).click();
+            await openStatEditor();
             assert.equal(await translation.inputValue(), 'Dégâts de feu du groupe', 'StatDescription work survives ClientText switching');
             await page.getByRole('button', { name: 'Save & close', exact: true }).click();
             await page.waitForFunction(() => { const vm = window.__clientFixtureApp; return !vm.editorSessionActive && !vm.editorSaving; });
@@ -2396,11 +2425,13 @@ async function run() {
             await page.getByRole('button', { name: 'Shared ClientText fixture', exact: true }).click();
             const statCollection = page.waitForEvent('download'); await statTeam.getByRole('button', { name: 'Download', exact: true }).click();
             const statDownload = await statCollection, exportedStats = await JSZip.loadAsync(readFileSync(await statDownload.path()));
+            await closeExportDialog(page);
             const exportedDescription = StatCodec.parseText(statDescription.filepath, StatCodec.decodeUTF16(await exportedStats.file(statDescription.filepath).async('uint8array')), 'French', { strict: true });
             assert.deepEqual(exportedDescription.translations.French, ['Dégâts de feu du groupe']);
             results.push('Same version adds a StatDescription group for all teams; SD uses available width without a directory pane, Versions assignment rows switch CT↔SD while preserving both workspaces and proof-backed SD save/collection');
+            await endFixtureHead();
             await page.getByRole('button', { name: 'Upload next version', exact: true }).click();
-            await upload.locator('input[type=text]').fill('Identical-original StatDescription fixture');
+            await upload.locator('input[type=text]:not(:disabled)').fill('Identical-original StatDescription fixture');
             await upload.locator('input[type=file]').first().setInputFiles(statFile);
             await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).click();
             await page.waitForFunction(() => !window.__clientFixtureApp.ctUploading);
@@ -2413,9 +2444,12 @@ async function run() {
             const secondTeam = details.locator('tr[data-content-group="' + secondGroup.id + '"][data-language="French"]');
             await secondTeam.getByRole('button', { name: 'Open editor', exact: true }).click();
             await page.waitForFunction(groupId => { const vm = window.__clientFixtureApp; if (vm.managedVisibleError) throw new Error(vm.managedVisibleError); return vm.sourceLoaded && vm.activeContentGroup?.id === groupId && !vm.workspaceInitializationActive && !vm.versionChooserVisible; }, secondGroup.id);
-            await page.waitForFunction(() => { const vm = window.__clientFixtureApp, collaboration = vm._collaboration?.snapshot({ includeFiles: false }); return collaboration?.connected && !collaboration.pending && vm.statistic.hasChanges === 1; });
-            await page.getByRole('button', { name: 'Open full editor for fire.txt', exact: true }).click();
-            assert.equal(await translation.inputValue(), 'Dégâts de feu du groupe', 'Accepted previous work carries forward explicitly');
+            // The repeated original still lacks French, so previous Saved work must
+            // remain separate Dropped recovery until the translator accepts it.
+            await page.waitForFunction(() => { const vm = window.__clientFixtureApp, collaboration = vm._collaboration?.snapshot({ includeFiles: false }); return collaboration?.connected && !collaboration.pending && vm.statistic.hasChanges === 0 && vm.statistic.isDropped === 1; });
+            await openStatEditor();
+            await page.locator('.droppedTranslationPanel').getByRole('button', { name: 'Use for editing', exact: true }).click();
+            assert.equal(await translation.inputValue(), 'Dégâts de feu du groupe', 'Previous accepted work is preserved in Dropped and applied only by explicit review');
             isolationScopes.push(await page.evaluate(() => window.__clientFixtureApp.managedWorkspaceScope()));
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.sourceIdentity), statScope.scope.sourceHash, 'Original identity remains equal across independent groups');
             await translation.fill('Dégâts de feu du nouveau groupe');
@@ -2428,7 +2462,7 @@ async function run() {
             await secondTeam.getByRole('button', { name: 'Open editor', exact: true }).click();
             await page.waitForFunction(groupId => { const vm = window.__clientFixtureApp; if (vm.managedVisibleError) throw new Error(vm.managedVisibleError); return vm.activeContentGroup?.id === groupId && !vm.workspaceInitializationActive && !vm.versionChooserVisible; }, secondGroup.id);
             await page.waitForFunction(() => { const collaboration = window.__clientFixtureApp._collaboration?.snapshot({ includeFiles: false }); return collaboration?.connected && !collaboration.pending; });
-            await page.getByRole('button', { name: 'Open full editor for fire.txt', exact: true }).click();
+            await openStatEditor();
             assert.equal(await translation.inputValue(), 'Dégâts de feu du nouveau groupe', 'The new group reopens its own cached save after reload');
             await page.getByRole('button', { name: 'Save & close', exact: true }).click();
             await page.waitForFunction(() => !window.__clientFixtureApp.editorSessionActive && !window.__clientFixtureApp.editorSaving);
@@ -2456,11 +2490,11 @@ async function run() {
             await olderVersionWarning.getByRole('button', { name: 'Open editor', exact: true }).click();
             await page.waitForFunction(groupId => { const vm = window.__clientFixtureApp; if (vm.managedVisibleError) throw new Error(vm.managedVisibleError); return vm.activeContentGroup?.id === groupId && !vm.workspaceInitializationActive && !vm.versionChooserVisible; }, statGroup.id);
             await page.waitForFunction(() => { const collaboration = window.__clientFixtureApp._collaboration?.snapshot({ includeFiles: false }); return collaboration?.connected && !collaboration.pending; });
-            await page.getByRole('button', { name: 'Open full editor for fire.txt', exact: true }).click();
+            await openStatEditor();
             assert.equal(await translation.inputValue(), 'Dégâts de feu du groupe', 'The previous version retains its independent accepted work');
             await page.getByRole('button', { name: 'Save & close', exact: true }).click();
             await page.waitForFunction(() => !window.__clientFixtureApp.editorSessionActive && !window.__clientFixtureApp.editorSaving);
-            results.push('Identical-original new SD version carries accepted work, then keeps later edits and cached reloads separate; confirmation cancellation restores the current group');
+            results.push('Identical-original new SD version preserves previous accepted work for explicit Dropped review, then keeps accepted edits and cached reloads separate; confirmation cancellation restores the current group');
             await page.evaluate(async () => { const vm = window.__clientFixtureApp; await vm.waitForPendingSaves(); await vm._collaboration?.retry(); });
             await page.waitForFunction(() => !window.__clientFixtureApp._collaboration?.snapshot({ includeFiles: false }).pending);
             await context.setOffline(true);
@@ -2472,7 +2506,10 @@ async function run() {
                     return vm.managedContinueLocalVersion(cached);
                 }, groupId), true, 'Cached group activates with the browser fully offline');
                 await page.waitForFunction(selectedGroupId => { const vm = window.__clientFixtureApp; return vm.activeContentGroup?.id === selectedGroupId && vm.localDescs.groupId === selectedGroupId && !vm.workspaceInitializationActive && !vm.versionChooserVisible; }, groupId);
-                await page.getByRole('button', { name: 'Open full editor for fire.txt', exact: true }).click();
+                // Cached Online work retains its shared identity while disconnected.
+                // Wait for that scope's cache initialization before opening a file.
+                await page.waitForFunction(selectedGroupId => { const vm = window.__clientFixtureApp; return !vm._collabInitialization && !vm.workspaceInitializationActive && vm._collabKey === vm.collaborationInitializationKey() && vm._collaboration?.snapshot({ includeFiles: false }).identity?.groupId === selectedGroupId; }, groupId);
+                await openStatEditor();
                 assert.equal(await translation.inputValue(), expected, 'Offline activation preserves the exact group translation');
                 await page.locator('.editorActions').getByRole('button', { name: 'Close', exact: true }).click();
                 await page.waitForFunction(() => !window.__clientFixtureApp.editorSessionActive);
@@ -2497,8 +2534,9 @@ async function run() {
             await workspace.getByRole('button', { name: 'Save & close', exact: true }).click();
             await waitForAsync(page,async () => { const vm = window.__clientFixtureApp; return !vm.ctBusy && !(await vm._ctStore.getOutbox(vm.ctWorkspace.scope)).length && Object.values(vm.ctSaved).some(record => record.serverRevision > 0 && Object.values(record.values).includes('En ligne avant omission')); });
             await workspace.getByRole('button', { name: 'Versions', exact: true }).click();
+            await endFixtureHead();
             await page.getByRole('button', { name: 'Upload next version', exact: true }).click();
-            await upload.locator('input[type=text]').fill('Gap version B: Thai only');
+            await upload.locator('input[type=text]:not(:disabled)').fill('Gap version B: Thai only');
             await upload.locator('input[type=file]').first().setInputFiles({ name: 'Thai_PoE2.xlsm', mimeType: files[0].mimeType, buffer: normal });
             await upload.getByRole('button', { name: 'Prepare and validate', exact: true }).click();
             await page.waitForFunction(() => !window.__clientFixtureApp.ctUploading);
@@ -2516,8 +2554,9 @@ async function run() {
             });
             await page.evaluate(() => window.__clientFixtureApp.refreshManagedVersions());
             assert.deepEqual(await page.evaluate(() => window.__clientFixtureApp.managedVersions.map(version => version.id)), [gapBVersionId], 'A limited cached catalog does not contain the matching previous version');
+            await endFixtureHead();
             await page.getByRole('button', { name: 'Upload next version', exact: true }).click();
-            await upload.locator('input[type=text]').fill('Gap version C: matching content returns');
+            await upload.locator('input[type=text]:not(:disabled)').fill('Gap version C: matching content returns');
             const gapCNormalArchive = await JSZip.loadAsync(normal), gapCNormalSheet = await gapCNormalArchive.file('xl/worksheets/sheet1.xml').async('string');
             assert.match(gapCNormalSheet, />Sword</); gapCNormalArchive.file('xl/worksheets/sheet1.xml', gapCNormalSheet.replace('>Sword<', '>New Sword<'));
             const gapCNormalFile = { ...files[0], buffer: await gapCNormalArchive.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }) };
@@ -2561,7 +2600,7 @@ async function run() {
             await workspace.getByRole('button', { name: 'Close', exact: true }).click();
             await openVersionGroup('Gap version C: matching content returns', gapCStat.id);
             await page.waitForFunction(groupId => { const vm = window.__clientFixtureApp, state = vm._collaboration?.snapshot({ includeFiles: false }); return !vm.ctActive && vm.activeContentGroup?.id === groupId && !vm.workspaceInitializationActive && state?.connected && !state.pending; }, gapCStat.id);
-            await page.getByRole('button', { name: 'Open full editor for fire.txt', exact: true }).click();
+            await openStatEditor();
             assert.equal(await translation.inputValue(), 'Dégâts de feu du nouveau groupe', 'Returning SD content carries the latest matching accepted work');
             await page.locator('.editorActions').getByRole('button', { name: 'Close', exact: true }).click();
             await page.waitForFunction(() => !window.__clientFixtureApp.editorSessionActive);
@@ -2626,7 +2665,7 @@ async function run() {
             else if (!await page.getByRole('region', { name: 'Source versions' }).isVisible()) assert.equal(await page.evaluate(() => window.__clientFixtureApp.showVersionChooser()), true);
             // Seed retained local ClientText data for editor checks; the chooser exposes online entry only.
             await page.evaluate(() => window.__clientFixtureApp.ctOpenUpload(null, true));
-            await upload.locator('input[type=text]').fill('Production ClientText fixture');
+            await upload.locator('input[type=text]:not(:disabled)').fill('Production ClientText fixture');
             await upload.locator('input[type=file]').first().setInputFiles(productionFiles);
             await page.evaluate(() => {
                 const sample = window.__productionTiming = { started: performance.now(), maxEventLoopLag: 0, ticks: 0 }, interval = 100;
@@ -2727,8 +2766,10 @@ async function run() {
         assert.deepEqual(failures, [], 'All normal-mode browser script errors');
         console.log(JSON.stringify({ status: 'PASS', normalMode: true, browser: executablePath, results }, null, 2));
     } catch (error) {
-        const failedPage = browser?.contexts().at(-1)?.pages().at(-1);
+        const failedPage = primaryPage;
         if (failedPage && !failedPage.isClosed()) {
+            const summary = await failedPage.evaluate(() => { const vm=window.__clientFixtureApp;return { url:location.href,statistic:vm?.statistic,activeGroup:vm?.activeContentGroup?.id,editor:vm?.editorSessionActive,editorReady:vm?.editorReady,readOnly:vm?.editorTranslationReadOnly,editorError:vm?.editorLoadError,managedError:vm?.managedVisibleError,collaboration:vm?._collaboration?.snapshot({includeFiles:false}) }; }).catch(error=>({evaluationError:error.message}));
+            console.error('Fixture current page: '+JSON.stringify(summary));
             const state = await failedPage.evaluate(async scopes => {
                 const vm = window.__clientFixtureApp;
                 const workspaces = await Promise.all(scopes.map(async scope => {
@@ -2746,10 +2787,10 @@ async function run() {
                     clientSelectionId: vm?.ctSelection, clientUnits: vm?.ctUnits?.length, clientIndexSize: vm?._ctUnitIndex?.size,
                     clientIndexHasSelection: vm?._ctUnitIndex?.has(vm?.ctSelection), clientSelectionRunId: vm?._ctSelectRun?.unitId,
                     versionChooserMethod: typeof vm?.ctShowVersionChooser, clientSelectionPending: vm?._ctSelectRun?.pending,
-                    sourceLoaded: vm?.sourceLoaded, sourceHash: vm?.sourceIdentity, initializing: vm?.workspaceInitializationActive, managedBusy: vm?.managedVersionBusy,
+                    statistic: vm?.statistic, sourceLoaded: vm?.sourceLoaded, sourceHash: vm?.sourceIdentity, initializing: vm?.workspaceInitializationActive, managedBusy: vm?.managedVersionBusy,
                     chooser: vm?.versionChooserVisible, editor: vm?.editorSessionActive, editorSaving: vm?.editorSaving,
                     collaboration: vm?._collaboration?.snapshot({ includeFiles: false }), requests: vm?.ctRequests?.map(request => request.payload?.kind), workspaces };
-            }, isolationScopes).catch(() => null);
+            }, isolationScopes).catch(error => ({ evaluationError: error.message }));
             console.error('Fixture failure state: ' + JSON.stringify(state));
             await failedPage.screenshot({ path: join(directory, 'clienttext-fixture-failure.png'), fullPage: true }).catch(() => {});
             const { readPayload } = await load('payload-store.js');

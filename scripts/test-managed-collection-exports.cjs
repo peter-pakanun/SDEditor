@@ -115,7 +115,8 @@ test('a context change during original ZIP reading or ZIP generation rejects bef
 
 function appHarness(data, { cache = data.baseline, request, JSZipOverride, storage = {} } = {}) {
   const writes = [], downloads = [], requests = [];
-  const window = { ManagedCollectionExports: Exports, JSZip: JSZipOverride || JSZip,
+  const originalCache = Exports.createBaselineCache();
+  const window = { ManagedCollectionExports: { ...Exports, collectionBaseline: (manifest, options) => Exports.collectionBaseline(manifest, { ...options, cache: originalCache }) }, JSZip: JSZipOverride || JSZip,
     OfflineStore: { async getImportedBaseline() { return cache; }, ...storage },
     saveAs(blob, name) { downloads.push({ blob, name }); } };
   const context = vm.createContext({ window, URL, URLSearchParams, console, setTimeout, clearTimeout });
@@ -163,6 +164,59 @@ test('cache miss builds collection from original ZIP without activating or writi
   assert.equal(await app.managedDownloadCollection({ language: 'Thai', latestCollection: data.collection }), true);
   assert.deepEqual(requests.map(call => call.route), ['/v1/collections/frozen-1/manifest', '/v1/versions/weekly-1/original']);
   assert.equal(downloads.length, 1); assert.deepEqual(writes, []);
+});
+
+test('sparse collections use verified parsed originals or persisted ZIPs and share no Saved targets', async () => {
+  const data = await fixture(), B = require('../public/sdBaselineFiles.js'), cache = Exports.createBaselineCache();
+  const manifest = { ...data.response.manifest, archive: data.baseline.archive };
+  const engine = B.createArchiveEngine({ JSZip, yieldTask: async () => {} }); let downloads = 0;
+  const options = { cache, sourceWorker: () => engine, readZip: async () => data.bytes, fetchZip: async () => { downloads++; return data.bytes; } };
+  const first = await Exports.collectionBaseline(manifest, options);
+  assert.equal(engine.stats().extractions, 1); assert.equal(downloads, 0);
+  first[0].translations.German[0] = 'Edited return';
+  manifest.language = 'German'; manifest.files[0].translations = ['German saved', 'German saved'];
+  const second = await Exports.collectionBaseline(manifest, options);
+  assert.equal(second[0].translations.German[0], 'Erstes Original'); assert.equal(engine.stats().extractions, 1);
+  const zip = await JSZip.loadAsync(await Exports.generate(manifest, second, JSZip, { type: 'uint8array' }));
+  assert.match(Codec.decodeUTF16(await zip.file(manifest.files[0].filepath).async('uint8array')), /German saved/);
+  const parsed = await Exports.collectionBaseline(manifest, { baseline: data.baseline, cache: Exports.createBaselineCache(),
+    sourceWorker() { throw Error('A valid parsed cache needs no worker or original download'); } });
+  assert.equal(parsed.length, 1);
+});
+
+test('sparse collection cache identity includes parser decisions and rejects corrupt or missing originals without poisoning retry', async () => {
+  const data = await fixture(), B = require('../public/sdBaselineFiles.js'), cache = Exports.createBaselineCache();
+  const manifest = { ...data.response.manifest, archive: data.baseline.archive };
+  let downloads = 0, corrupt = true;
+  const options = { cache, readZip: async () => new Uint8Array(data.bytes.length),
+    sourceWorker: () => B.createArchiveEngine({ JSZip, yieldTask: async () => {} }),
+    fetchZip: async () => { downloads++; return corrupt ? new Uint8Array(data.bytes.length) : data.bytes; } };
+  await assert.rejects(Exports.collectionBaseline(manifest, options), /corrupt|another baseline/);
+  assert.equal(cache.stats().files, 0); corrupt = false;
+  await Exports.collectionBaseline(manifest, options); assert.equal(downloads, 2);
+  const decision = { ...data.baseline.archive.decisions[0], blockHash: 'f'.repeat(64) };
+  const archive = await Protocol.finalizeArchive({ ...manifest.archive, baselineId: undefined, configHash: undefined, decisions: [decision, ...manifest.archive.decisions.slice(1)] });
+  await assert.rejects(Exports.collectionBaseline({ ...manifest, archive }, options), /choice does not match/);
+  await assert.rejects(Exports.collectionBaseline({ ...manifest, files: [{ filepath: 'missing.txt', translations: ['target'] }] }, options), /absent/);
+  assert.equal((await Exports.collectionBaseline(manifest, options))[0].filepath, manifest.files[0].filepath);
+});
+
+test('immutable collection cache evicts by baseline, file count and byte limits and detaches values', () => {
+  const file = { filepath: 'one.txt', translations: { English: ['source'] } }, cache = Exports.createBaselineCache({ maxBaselines: 2, maxFiles: 2, maxBytes: 1024 });
+  cache.put('a', file); file.translations.English[0] = 'editor'; assert.equal(cache.get('a', file.filepath).translations.English[0], 'source');
+  cache.put('b', file); cache.put('c', file); assert.equal(cache.get('a', file.filepath), null);
+  cache.put('c', { ...file, filepath: 'two.txt' }); assert.equal(cache.get('b', file.filepath), null); assert.equal(cache.stats().files, 2);
+  cache.put('large', { ...file, translations: { English: ['x'.repeat(1024)] } }); assert.equal(cache.get('large', file.filepath), null);
+  cache.clear(); assert.deepEqual(cache.stats(), { baselines: 0, files: 0, bytes: 0 });
+});
+
+test('cancelled sparse batches cannot publish or cache late source results', async () => {
+  const data = await fixture(), cache = Exports.createBaselineCache(), gate = deferred(); let current = true, entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  const pending = Exports.collectionBaseline({ ...data.response.manifest, archive: data.baseline.archive }, { cache, current: () => current,
+    fetchZip: async () => data.bytes, sourceWorker: () => ({ prepare: async () => {}, extractMany: async () => { entered(); await gate.promise; return [data.baseline.source[0]]; } }) });
+  await started; current = false; gate.resolve(); await assert.rejects(pending, error => error.stale);
+  assert.equal(cache.stats().files, 0);
 });
 
 test('account, game, branch, source, selected language, access and selected version changes reject late managed exports', async () => {
@@ -230,42 +284,56 @@ test('interrupted manifest exports keep the durable cutoff request and retry for
   assert.deepEqual(writes, []); assert.equal(app.managedVisibleError, '');
 });
 
-// Synthetic progress/cancellation fixtures. The production path still parses the entire original ZIP.
+// Synthetic progress/cancellation fixtures cover sparse originals and immutable reuse.
 const turn = () => new Promise(resolve => setImmediate(resolve));
 async function modernHarness() {
   const data = await fixture(), journals = new Map(), workers = [];
   data.response.manifest.files[0].translations = ['Frozen first', 'Frozen second'];
   const group = { id: 'group-one', versionId: data.version.id, contentMode: 'statdescription' }, team = { language: 'Thai' };
   let pages = 0, originalReads = 0, posts = 0;
-  const h = appHarness(data, { request: async (route, options) => {
+  const h = appHarness(data, { cache: null, request: async (route, options) => {
     if (route.endsWith('/collections')) { posts++; return { collection: data.collection }; }
     if (route.includes('/manifest')) { pages++; return { collection: data.collection, manifest: { ...copy(data.response.manifest), groupId: group.id, language: team.language,
-      assets: [{role:'source',descriptor:data.baseline.archive}], files: route.includes('?') ? [] : copy(data.response.manifest.files) }, nextCursor: route.includes('?') ? '' : 'second' }; }
+      assets: [{role:'source',descriptor:data.baseline.archive}], files: route.includes('cursor=') ? [] : copy(data.response.manifest.files) }, nextCursor: route.includes('cursor=') ? '' : 'second' }; }
     if (route.endsWith('/original')) { originalReads++; return data.bytes; }
     throw Error('Unexpected local fixture route');
   }});
   h.app.ctRequestScope = () => ({accountId:h.app.cloudProfileId,game:h.app.gameVersion,branchId:h.app.branchId});
   h.app._ctStore = { async getRequest(s,k) {return journals.get(k);}, async putRequest(s,k,payload){journals.set(k,{payload:copy(payload)});}, async deleteRequest(s,k){journals.delete(k);} };
   h.app.managedReadDetails=async()=>{}; h.app.refreshManagedVersions=async()=>{};
-  h.window.SDBaselineFiles={createResolver(){const worker={disposed:0,async cacheOriginalZip(){},dispose(){this.disposed++;}};workers.push(worker);return worker;}};
+  const B = require('../public/sdBaselineFiles.js');
+  h.window.SDBaselineFiles={createWorkerClient(){const engine=B.createArchiveEngine({JSZip,yieldTask:async()=>{}}),worker={...engine,disposed:0,dispose(){this.disposed++;engine.clear();}};workers.push(worker);return worker;}};
   return {...h,data,group,team,journals,workers,counts:()=>({pages,originalReads,posts}),collect:()=>h.app.managedCollectStatGroup(data.version,group,team,true),download:()=>h.app.managedDownloadStatGroupCollection(data.version,group,team,data.collection)};
 }
-test('modern SD timing covers pages and existing full baseline work with byte-identical output across languages',async()=>{
+test('modern SD timing covers sparse cold work and immutable reuse with byte-identical output across languages',async()=>{
   const h=await modernHarness();
   for(const language of ['Thai','German','Thai']){
     h.team.language=h.app.lang=language;assert.equal(await h.collect(),true);
     const original=await Exports.parseOriginal(h.data.bytes,h.data.baseline.archive,language,JSZip);
     const expected=await Exports.generate({...h.data.response.manifest,language},original,JSZip);
     assert.deepEqual(Buffer.from(await h.downloads.at(-1).blob.arrayBuffer()),Buffer.from(await expected.arrayBuffer()));
-    for(const label of ['Request checkpoint','Server snapshot acceptance (network + server)','Manifest page 1 (network + server)','Manifest page 2 (network + server)','Baseline download (network + server)','Original ZIP verification','ZIP directory / path checks','Extraction / parsing','Applying duplicate decisions','Original ZIP worker verification / cache','Baseline verification','Encoding','Compression','Download initiation','Final receipt cleanup'])assert(h.app.ctExportTiming.rows.some(row=>row.label===label),label);
+    for(const label of ['Request checkpoint','Server snapshot acceptance (network + server)','Manifest page 1 (network + server)','Manifest page 2 (network + server)','Baseline lookup / reuse','Encoding','Compression','Download initiation','Final receipt cleanup'])assert(h.app.ctExportTiming.rows.some(row=>row.label===label),label);
+    if(h.downloads.length===1)for(const label of ['Baseline download (network + server)','Original ZIP worker verification / directory checks','Selected file extraction / parsing (worker)'])assert(h.app.ctExportTiming.rows.some(row=>row.label===label),label);
     const report=h.app.ctExportLogText;assert.match(report,/StatDescription export timing/);assert(!report.includes('Frozen'));assert(!report.includes(h.data.version.name));assert(!report.includes(language));
     assert.equal(h.app.ctBusy,false);assert.equal(h.app.managedVersionBusy,false);assert.equal(h.journals.size,0);
   }
-  assert.deepEqual(h.counts(),{pages:6,originalReads:3,posts:3},'instrumentation does not add original reuse or sparse extraction');assert(h.workers.every(worker=>worker.disposed===1));
+  assert.deepEqual(h.counts(),{pages:6,originalReads:1,posts:3});assert(h.workers.every(worker=>worker.disposed===1));
+});
+test('warm immutable collection reuse still requires a fresh authorized manifest and current manager access',async()=>{
+  const h=await modernHarness();assert.equal(await h.collect(),true);const before=h.counts();
+  h.app._cloud.request=async()=>{throw Error('Access was revoked by the server');};
+  assert.equal(await h.download(),false);assert.equal(h.downloads.length,1);
+  h.app.cloudCanAccessAllLanguages=false;
+  assert.equal(await h.download(),false);assert.equal(h.downloads.length,1);assert.deepEqual(h.counts(),before);
+});
+for(const change of ['archive','cursor'])test('modern collection rejects '+change+' changes across manifest pages before source use',async()=>{
+  const h=await modernHarness(),normal=h.app._cloud.request;
+  h.app._cloud.request=async(route,options)=>{const result=await normal(route,options);if(route.includes('cursor=')){if(change==='cursor')result.nextCursor='second';else result.manifest.assets[0].descriptor.zipSize++;}return result;};
+  assert.equal(await h.download(),false);assert.equal(h.counts().originalReads,0);assert.equal(h.downloads.length,0);
 });
 for(const boundary of ['manifest','original','worker'])test('modern SD Abort during '+boundary+' preserves accepted receipt and suppresses late download',async()=>{
   const h=await modernHarness(),gate=deferred(),normal=h.app._cloud.request;let entered=false,signal;
-  if(boundary==='worker')h.window.SDBaselineFiles.createResolver=()=>{const worker={async cacheOriginalZip(){entered=true;return gate.promise;},dispose(){worker.disposed=true;}};h.workers.push(worker);return worker;};
+  if(boundary==='worker')h.window.SDBaselineFiles.createWorkerClient=()=>{const worker={async prepare(){entered=true;return gate.promise;},dispose(){worker.disposed=true;}};h.workers.push(worker);return worker;};
   else h.app._cloud.request=async(route,options)=>{if(route.includes(boundary==='manifest'?'/manifest':'/original')){entered=true;signal=options.signal;return gate.promise;}return normal(route,options);};
   const pending=h.collect();for(let i=0;i<100 && !entered;i++)await turn();assert(entered);
   const run=h.app._ctExportRun;h.app.ctAbortExport();assert.equal(await pending,false);assert.equal(h.app.ctExportTiming.collection,'accepted');assert.equal(h.app.ctExportTiming.status,'aborted');assert.equal(h.app.managedVersionBusy,false);assert.equal(h.app.ctBusy,false);assert.equal(run.timer,null);assert.equal(h.journals.size,1);assert.equal(h.downloads.length,0);
@@ -343,4 +411,26 @@ test('legacy preparation failure survives reload and retries the same retained r
   let h=prepare();assert.equal(await h.app.managedCollect({language:'Thai',counts:{saved:1}}),false);const retainedId=requestId;assert(retainedId);assert.equal(posts,1);
   h=prepare();assert.equal(await h.app.managedCollect({language:'Thai',counts:{saved:1}}),true);
   assert.equal(posts,2);assert.equal(h.requests[0].options.body.idempotencyKey,retainedId);assert.equal(requestId,null);assert.equal(receipt,null);assert.equal(h.downloads.length,1);
+});
+
+test('SD partial ZIP includes only the collected Saved filepath and its complete frozen entry array',async()=>{
+  const h=await modernHarness();
+  const frozen=['Only first entry changed','Accepted second'];
+  h.data.response.manifest.files[0].translations=[...frozen];
+  h.app.importBaseline=copy(h.data.baseline);
+  h.app.descs=[{filepath:'source/b.txt',translations:{Thai:['Unsaved draft','Unsent save']}}];
+  h.app.localDescs={stagedVersion:1,dropped:{'source/b.txt':['Dropped recovery']}};
+  assert.equal(await h.collect(),true);
+  const zip=await JSZip.loadAsync(await h.downloads[0].blob.arrayBuffer());
+  assert.deepEqual(Object.keys(zip.files),['source/a.txt'],'The two-description baseline and unrelated notice produce one Saved file only');
+  const bytes=await zip.file('source/a.txt').async('uint8array'),text=Codec.decodeUTF16(bytes);
+  assert.deepEqual([...bytes.slice(0,2)],[255,254]);
+  assert.match(text,/^description example\r\n\t1 example_stat\r\n\t2\r\n/);
+  const exported=Codec.parseText('source/a.txt',text,'Thai',{strict:true});
+  assert.deepEqual(exported.translations.Thai,frozen,'No per-entry fallback to original, draft, pending or Dropped text');
+  assert.deepEqual(exported.translations.English,h.data.baseline.source[0].translations.English);
+  assert.deepEqual(exported.translations.German,h.data.baseline.source[0].translations.German,'Original other-language blocks remain within the selected file');
+  assert.deepEqual(exported.variables,['1','2']);assert.deepEqual(exported.remarks,['remark','']);
+  assert.equal((text.match(/^description /gm)||[]).length,1);
+  assert(!text.includes('Unsaved draft')&&!text.includes('Unsent save')&&!text.includes('Dropped recovery'));
 });

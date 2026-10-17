@@ -60,6 +60,87 @@
     if (JSON.stringify(descriptor) !== JSON.stringify(archive)) return null;
     return verifyBaseline(baseline.source, archive, options);
   }
+  // Only immutable, verified originals enter this bounded cache. Collection
+  // targets, auth, in-flight reads and generated results are never shared.
+  function createBaselineCache({ maxBaselines = 2, maxFiles = 2048, maxBytes = 16 * 1024 * 1024 } = {}) {
+    const baselines = new Map(); let bytes = 0, count = 0;
+    const remove = key => { for (const row of baselines.get(key).values()) { bytes -= row.size; count--; } baselines.delete(key); };
+    return {
+      get(key, filepath) {
+        const files = baselines.get(key), row = files?.get(filepath);
+        if (!row) return null;
+        baselines.delete(key); baselines.set(key, files); files.delete(filepath); files.set(filepath, row);
+        return copy(row.file);
+      },
+      put(key, file) {
+        const size = new TextEncoder().encode(JSON.stringify(file)).byteLength;
+        if (size > maxBytes) return;
+        let files = baselines.get(key);
+        if (!files) baselines.set(key, files = new Map());
+        if (files.has(file.filepath)) { bytes -= files.get(file.filepath).size; count--; files.delete(file.filepath); }
+        files.set(file.filepath, { file: copy(file), size }); bytes += size; count++;
+        while (baselines.size > maxBaselines) remove(baselines.keys().next().value);
+        while (count > maxFiles || bytes > maxBytes) {
+          const first = baselines.keys().next().value, rows = baselines.get(first), path = rows.keys().next().value;
+          bytes -= rows.get(path).size; count--; rows.delete(path); if (!rows.size) baselines.delete(first);
+        }
+      },
+      clear() { baselines.clear(); bytes = 0; count = 0; },
+      stats: () => ({ baselines: baselines.size, files: count, bytes }),
+    };
+  }
+  const originals = createBaselineCache();
+  async function collectionBaseline(manifest, { current, phase, baseline, readBaseline, readZip, fetchZip,
+    sourceWorker, storeZip, cache = originals } = {}) {
+    checkpoint(current);
+    phase?.('Baseline lookup / reuse');
+    const archive = await protocol.finalizeArchive(manifest.archive);
+    checkpoint(current);
+    const key = JSON.stringify(archive), paths = new Set(), found = new Map();
+    for (const file of manifest.files) {
+      if (!validPath(file?.filepath) || paths.has(file.filepath) || !strings(file.translations)) throw new Error('The collection contains an invalid Saved file.');
+      paths.add(file.filepath);
+      const original = cache.get(key, file.filepath); if (original) found.set(file.filepath, original);
+    }
+    if (found.size === paths.size) return [...found.values()];
+    baseline ||= await readBaseline?.(archive); checkpoint(current);
+    if (baseline?.source?.length) {
+      phase?.('Cached baseline verification');
+      let verified;
+      try { verified = await cachedBaseline(baseline, archive, { current }); }
+      catch (error) { checkpoint(current); if (error.stale) throw error; /* Rebuild invalid parsed caches from the verified ZIP. */ }
+      checkpoint(current);
+      for (const file of verified || []) if (paths.has(file.filepath)) { cache.put(key, file); found.set(file.filepath, file); }
+      if (found.size === paths.size) return [...found.values()];
+    }
+    phase?.('Cached original ZIP read');
+    let blob = await readZip?.(archive.zipHash); checkpoint(current);
+    const worker = sourceWorker();
+    if (blob) {
+      phase?.('Cached ZIP worker verification / directory checks');
+      try { await worker.prepare(blob, archive); }
+      catch (error) { checkpoint(current); if (error.stale) throw error; blob = null; }
+      checkpoint(current);
+    }
+    if (!blob) {
+      phase?.('Baseline download (network + server)');
+      blob = await fetchZip(); checkpoint(current);
+      phase?.('Original ZIP worker verification / directory checks');
+      await worker.prepare(blob, archive); checkpoint(current);
+      phase?.('Verified original ZIP cache');
+      await storeZip?.(archive.zipHash, blob, { verified: true, zipSize: archive.zipSize, archive }); checkpoint(current);
+    }
+    phase?.('Selected file extraction / parsing (worker)');
+    const missing = [...paths].filter(path => !found.has(path));
+    for (let start = 0; start < missing.length; start += 64) {
+      checkpoint(current);
+      const batch = missing.slice(start, start + 64), extracted = await worker.extractMany(blob, archive, batch);
+      checkpoint(current);
+      if (extracted.length !== batch.length || extracted.some((file, index) => file.filepath !== batch[index])) throw new Error('The extracted originals differ from the requested collection files.');
+      for (const file of extracted) { cache.put(key, file); found.set(file.filepath, file); }
+    }
+    return [...found.values()];
+  }
   async function parseOriginal(blob, archive, language, JSZip, { current, phase, cacheOriginalZip } = {}) {
     checkpoint(current);
     phase?.('Original ZIP verification');
@@ -122,5 +203,6 @@
     checkpoint(current);
     return blob;
   }
-  return { validateManifest, verifyBaseline, cachedBaseline, parseOriginal, generate, checkpoint };
+  return { validateManifest, verifyBaseline, cachedBaseline, parseOriginal, generate, collectionBaseline, createBaselineCache,
+    archiveDescriptor: archive => protocol.finalizeArchive(archive), checkpoint };
 });

@@ -56,7 +56,13 @@ async function run() {
     res.json(store.createSession('fixture-' + req.params.account));
   });
   frontend.get('/', (req, res) => res.type('html').send(readFileSync(join(__dirname, '../public/index.html'), 'utf8')
-    .replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')));
+    .replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')
+    .replace('https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js', '/fixture/vue.js')));
+  frontend.get('/fixture/vue.js', (req, res) => {
+    const file = process.env.FIXTURE_VUE_PATH || join(__dirname, '../temp/clienttext-fixture-vue.min.js');
+    if (existsSync(file)) res.type('js').send(readFileSync(file));
+    else res.redirect('https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js');
+  });
   frontend.get('/fixture/jszip.min.js', (req, res) => res.type('js').send(readFileSync(fromApi.resolve('jszip/dist/jszip.min.js'))));
   frontend.get('/index.js', (req, res) => res.type('js').send(readFileSync(join(__dirname, '../public/index.js'), 'utf8')
     .replace("app.mount('#app');", "window.__managedFixtureApp = app.mount('#app');")));
@@ -77,7 +83,7 @@ async function run() {
     const pages = await Promise.all(contexts.map(context => context.newPage()));
     for (const page of pages) page.on('pageerror', error => failures.push(error.message));
     const ready = async page => {
-      await page.goto(origin + '/?cloudApi=' + encodeURIComponent(apiOrigin));
+      await page.goto(origin + '/?cloudApi=' + encodeURIComponent(apiOrigin), { waitUntil: 'domcontentloaded' });
       await page.waitForFunction(() => window.__managedFixtureApp?.offlineStoreReady && window.__managedFixtureApp?._cloud?.state,
         { timeout: 30000 });
     };
@@ -108,7 +114,7 @@ async function run() {
           return original.apply(this, args);
         };
       };
-      for (const name of ['getSource', 'getWorkspace', 'getImportedBaseline', 'getImportBaseline', 'getVersionSource', 'getVersionWorkspace'])
+      for (const name of ['getSource', 'getWorkspace', 'getImportedBaseline', 'getImportBaseline', 'getVersionSource', 'getVersionWorkspace', 'activateVersion'])
         instrument(OfflineStore, name, 'reads');
       instrument(vm, 'loadVersionedStorage', 'hydration');
       instrument(vm, 'prepareStoredWorkspaceSource', 'hydration', source => !!source?.length);
@@ -214,9 +220,7 @@ async function run() {
         await page.locator('.teamVersionTable tbody tr').first().waitFor();
       }
     };
-    const teamRow = (page, language) => page.locator('.teamVersionTable tbody tr').filter({
-      has: page.locator('.teamEditorLink').filter({ hasText: new RegExp('^' + language + '$') }),
-    });
+    const teamRow = (page, language) => page.locator('.teamVersionTable tbody tr[data-language="' + language + '"]');
     const versionRow = (page, name) => page.locator('.onlineVersionTable tbody tr').filter({ hasText: name });
     const waitWorkspace = (page, version, language) => page.waitForFunction(({ sourceHash, language }) => {
       const vm = window.__managedFixtureApp;
@@ -291,6 +295,11 @@ async function run() {
       await page.locator('.appDialogConfirm').waitFor();
       await page.locator('.appDialogConfirm').click();
     };
+    const closeExportDialog = async page => {
+      await page.waitForFunction(() => !window.__managedFixtureApp._ctExportRun);
+      const close = page.locator('.ctExportDialog[open] [data-ct-export-close]');
+      if (await close.count()) await close.click();
+    };
     const checkTranslatedDownload = async download => {
       assert.equal(download.suggestedFilename(), '2026-10-05_POE2_Translated_Thai.zip');
       const downloadBytes = readFileSync(await download.path()), collectedZip = await JSZip.loadAsync(downloadBytes);
@@ -302,6 +311,7 @@ async function run() {
       assert.deepEqual(collectedDesc.translations.English, source.translations.English);
       assert.deepEqual(collectedDesc.translations.German, source.translations.German);
       assert.equal(collectedZip.file(source.filepath).date.toISOString(), '2000-01-01T00:00:00.000Z');
+      await closeExportDialog(manager);
       return downloadBytes;
     };
     const [manager, translator] = pages;
@@ -417,6 +427,9 @@ async function run() {
       });
       const versions = api.locals.versions, collaboration = api.locals.collaboration;
       const publishArchive = async (archiveBytes, name, expectedRoomId) => {
+        const head = versions.branch('poe2', 'default').head_version_id;
+        if (head) for (const team of versions.detail(head, 'fixture-manager').teams) versions.collect(head, team.language, 'fixture-manager', { format: 'manifest', idempotencyKey: randomUUID() });
+        await versions.idle();
         const created = versions.createUpload('fixture-manager', { game: 'poe2', name, idempotencyKey: randomUUID() });
         await versions.receiveArchive(created.upload.id, 'fixture-manager', Readable.from([archiveBytes]));
         versions.prepare(created.upload.id, 'fixture-manager', {}); await versions.idle();
@@ -537,7 +550,8 @@ async function run() {
       console.log(JSON.stringify({ status: 'PASS', normalMode: true, importModeOnly: true, browser: executablePath, results }, null, 2));
       return;
     }
-    await manager.getByRole('button', { name: 'Upload next version', exact: true }).click();
+    // This fixture targets the retained legacy publisher, not the modern navbar publisher.
+    await manager.evaluate(() => window.__managedFixtureApp.openManagedUpload());
     await manager.locator('#managerUploadName').fill('2026-10-05_POE2');
     const wrongGameZip = new JSZip(), uploadCount = database.prepare('SELECT COUNT(*) AS n FROM version_uploads').get().n;
     wrongGameZip.file('stat_descriptions/fire.txt', codec.descEncode({ ...source, filepath: 'stat_descriptions/fire.txt' }), { createFolders: false });
@@ -610,9 +624,11 @@ async function run() {
     assert.equal(initialDetails.wasRequested(), false, 'Initial catalog render does not prefetch any team details');
     assert.equal(await catalogProbe.locator('.versionDetails').count(), 0, 'Team details wait for explicit source selection');
     await versionRow(catalogProbe, version.name).locator('.versionSelect').click(); await initialDetails.wait();
-    await catalogProbe.locator('.versionDetails .versionLoading').filter({ hasText: 'Loading team details…' }).waitFor();
+    const heldAssignments = await catalogProbe.evaluate(() => window.__managedFixtureApp.ctAssignmentRows.length);
+    if (!heldAssignments) await catalogProbe.locator('.versionLoading').filter({ hasText: 'Loading team details…' }).waitFor();
+    else assert.equal(await catalogProbe.locator('.teamVersionTable tbody tr').count(), heldAssignments, 'Assignments already present in the list response remain visible while details are held');
     assert.equal(await catalogProbe.locator('.onlineVersionTable tbody tr').count(), 1);
-    assert.equal(await catalogProbe.locator('.teamVersionTable tbody tr').count(), 0);
+    assert.equal(await catalogProbe.locator('.teamVersionTable tbody tr').count(), heldAssignments);
     assert.equal(await catalogProbe.locator('.onlineVersions .versionLoading').count(), 0);
     await assertMetadataOnly(catalogProbe, 'Source row displayed before initial team-details response');
     await initialDetails.release(); await catalogProbe.locator('.teamVersionTable tbody tr').first().waitFor();
@@ -649,8 +665,8 @@ async function run() {
     await teamRow(catalogProbe, 'French').locator('.teamEditorLink').click(); await waitWorkspace(catalogProbe, version, 'French');
     await catalogProbe.waitForFunction(() => window.__managedFixtureApp._collaboration?.snapshot().roomId);
     const activatedProbe = await catalogCounters(catalogProbe);
-    assert.ok(activatedProbe.reads.getSource > 0 && activatedProbe.reads.getWorkspace > 0 && activatedProbe.reads.getImportedBaseline > 0,
-      'Explicit editor activation reads its source, workspace and immutable baseline');
+    assert.ok(activatedProbe.reads.getVersionSource > 0 && activatedProbe.reads.activateVersion > 0,
+      'Explicit editor activation reads the selected source and activates its scoped source/workspace/baseline snapshot');
     assert.ok(activatedProbe.hydration.loadVersionedStorage > 0 && Object.values(activatedProbe.status).some(Boolean),
       'Explicit editor activation performs translation hydration/status work');
     assert.ok(activatedProbe.roomJoins > 0, 'Explicit editor activation joins its exact-language collaboration room');
@@ -677,11 +693,11 @@ async function run() {
         alignment: Array.from(document.querySelectorAll('.versionTable th, .versionTable td')).map(cell => getComputedStyle(cell).verticalAlign),
         badges: Array.from(document.querySelectorAll('.versionCatalog .versionBadge')).map(badge => ({ height: badge.getBoundingClientRect().height,
           minWidth: getComputedStyle(badge).minWidth, fontSize: parseFloat(getComputedStyle(badge).fontSize) })),
-        nativeTitles: document.querySelectorAll('.versionCatalog [title]').length,
+        nativeTitles: document.querySelectorAll('.versionTable [title]').length,
       }));
       assert.ok(layout.alignment.every(alignment => alignment === 'middle'), 'Headers and data cells center vertically in ' + theme);
       assert.ok(layout.badges.every(badge => badge.height <= 22 && badge.minWidth === '0px' && badge.fontSize <= 11), 'Compact badges in ' + theme);
-      assert.equal(layout.nativeTitles, 0, 'Dashboard uses shared tooltips only in ' + theme);
+      assert.equal(layout.nativeTitles, 0, 'Dashboard table uses shared tooltips only in ' + theme);
       assert.equal(await thaiRow.getByRole('button', { name: 'Open editor', exact: true }).evaluate(element => element.classList.contains('primaryAction')), false,
         'Manager team actions keep equal prominence across all languages');
       await checkTooltip(manager, manager.locator('.onlineVersions time').first(), /local/);
@@ -707,7 +723,7 @@ async function run() {
     await managerVersionRow.locator('.versionSelect').focus(); await manager.keyboard.press('Enter');
     await manager.waitForFunction(id => window.__managedFixtureApp.managedVersionDetails?.version.id === id, version.id);
     assert.deepEqual(await entryScope(manager), managerBeforeRowOpen, 'Manager version name is a keyboard-selectable details control');
-    assert.equal(await manager.locator('.versionDetails > .versionPanelHeading button').count(), 0, 'Source actions reside in the upper table');
+    assert.deepEqual(await manager.locator('.versionDetails > .versionPanelHeading button').allTextContents(), ['Add content group'], 'Details retain the group publisher; source archive actions reside in the upper table');
     await manager.setViewportSize({ width: 1100, height: 820 });
     // Resize closes floating menus; settle that event before the keyboard opens one.
     await manager.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -825,7 +841,7 @@ async function run() {
       await translator.evaluate(theme => { const vm = window.__managedFixtureApp; vm.theme = theme; vm.applyTheme(theme); }, theme);
       await translator.keyboard.press('Tab');
       assert.equal(await translator.locator('html').getAttribute('data-theme'), theme);
-      await checkTooltip(translator, translator.locator('.editorVersionContext .versionStatusName'), /Import deadline:.*local/);
+      assert.equal(await translator.locator('.editorVersionContext .versionStatusName').count(), 0, 'Full editor avoids duplicating the workspace version selector');
       assert.equal(await translator.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 2), true, 'Editor fits ' + theme);
       await translator.screenshot({ path: join(directory, 'translator-' + theme + '.png'), fullPage: true });
     }
@@ -840,7 +856,7 @@ async function run() {
     const beforeDownloadOnly = api.locals.versions.detail(version.id, 'fixture-manager').teams.find(team => team.language === 'Thai');
     const onlyTrafficStart = collectionTraffic.length;
     const onlyDownload = manager.waitForEvent('download');
-    await thaiRow.getByRole('button', { name: 'Download only', exact: true }).click();
+    await thaiRow.getByRole('button', { name: 'Download', exact: true }).click();
     const onlyBytes = await checkTranslatedDownload(await onlyDownload);
     await manager.waitForFunction(() => !window.__managedFixtureApp.managedVersionBusy);
     const afterDownloadOnly = api.locals.versions.detail(version.id, 'fixture-manager').teams.find(team => team.language === 'Thai');
@@ -877,6 +893,7 @@ async function run() {
         const vm = window.__managedFixtureApp;
         return !vm.managedVersionBusy && vm.managedVersionDetails.teams.find(team => team.language === language).ended;
       }, language);
+      await closeExportDialog(manager);
     }
     await manager.waitForFunction(() => window.__managedFixtureApp.managedVersions[0].endedTeamCount === 12);
     assert.equal(await manager.locator('.onlineVersions tbody tr').first().locator('td').first().locator('.versionBadge.ended').textContent(), 'Ended');
@@ -931,8 +948,8 @@ async function run() {
     }, version.sourceHash);
     await checkStatusVersion(translator, version.name, { ended: true, deadline: true, online: true });
     const activatedCached = await catalogCounters(translator);
-    assert.ok(activatedCached.reads.getSource > 0 && activatedCached.reads.getWorkspace > 0 && activatedCached.reads.getImportedBaseline > 0,
-      'Cached editor activation reads its source, workspace and accepted baseline');
+    assert.ok(activatedCached.reads.getVersionSource > 0 && activatedCached.reads.activateVersion > 0,
+      'Cached editor activation reads the scoped source and activates its normalized workspace snapshot');
     assert.ok(activatedCached.hydration.loadVersionedStorage > 0 && Object.values(activatedCached.status).some(Boolean),
       'Cached editor activation hydrates translations and calculates status');
     const stored = await translator.evaluate(async () => {
@@ -979,7 +996,7 @@ async function run() {
     results.push('Import ZIP opens by pointer and keyboard in Offline mode across four themes, including a published matching baseline; Online mode disables it even for disconnected cached/ended versions');
     const successorZip = await JSZip.loadAsync(bytes); successorZip.comment = 'Distinct successor archive for catalog navigation fixture';
     const successorBytes = await successorZip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
-    await manager.getByRole('button', { name: 'Upload next version', exact: true }).click();
+    await manager.evaluate(() => window.__managedFixtureApp.openManagedUpload());
     await manager.locator('#managerUploadName').fill('2026-10-12_POE2');
     await manager.locator('#managerUploadArchive').setInputFiles({ name: 'StatDescriptions.zip', mimeType: 'application/zip', buffer: successorBytes });
     await manager.getByRole('button', { name: 'Upload and prepare', exact: true }).click();

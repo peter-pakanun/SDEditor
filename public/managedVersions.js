@@ -609,19 +609,29 @@
         let completed = false;
         try {
           if (!operation) run.accepted();
-          const client = this._cloud, files = [], options = this.managedExportOptions(run); let cursor = '', manifest, page = 0;
+          const client = this._cloud, files = [], options = this.managedExportOptions(run), cursors = new Set(); let cursor = '', manifest, page = 0, archiveIdentity;
           do {
             run.phase('Manifest page ' + (++page) + ' (network + server)');
-            const result = await run.wait(client.request('/v1/content-collections/' + encodeURIComponent(collectionId) + '/manifest' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''), { signal: run.signal }));
+            const result = await run.wait(client.request('/v1/content-collections/' + encodeURIComponent(collectionId) + '/manifest?projection=files' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), { signal: run.signal }));
             run.check(); manifest = result.manifest;
             if (result.collection?.id !== collectionId || manifest?.groupId !== groupId || manifest.versionId !== versionId || manifest.language !== language) throw new Error('The collection does not match the selected group and team.');
+            const pageArchive = await run.wait(root.ManagedCollectionExports.archiveDescriptor(manifest.assets?.find(asset => asset.role === 'source')?.descriptor)); run.check();
+            const identity = JSON.stringify(pageArchive);
+            if (archiveIdentity && archiveIdentity !== identity) throw new Error('The collection original changed between manifest pages.');
+            archiveIdentity = identity;
             files.push(...(manifest.files || [])); cursor = result.nextCursor || '';
+            if (cursor && cursors.has(cursor)) throw new Error('The collection manifest repeated a page.');
+            cursors.add(cursor);
           } while (cursor);
-          const archive = manifest.assets.find(asset => asset.role === 'source').descriptor;
-          run.phase('Baseline download (network + server)');
-          // Preserve the existing full-original path. Cache/sparse extraction optimization is separate work.
-          const blob = await run.wait(client.request('/v1/content-groups/' + encodeURIComponent(groupId) + '/assets/source/original', { responseType: 'blob', signal: run.signal })); run.check();
-          const baseline = await run.wait(root.ManagedCollectionExports.parseOriginal(blob, archive, language, root.JSZip, options)); run.check();
+          const archive = JSON.parse(archiveIdentity);
+          const baseline = await run.wait(root.ManagedCollectionExports.collectionBaseline({ ...manifest, archive, files }, { ...options,
+            baseline: this.importBaseline?.archive?.baselineId === archive.baselineId ? this.importBaseline : null,
+            readBaseline: () => root.OfflineStore.getImportedBaseline?.(archive.baselineId, version.game || this.gameVersion),
+            readZip: hash => root.OfflineStore.getStatDescriptionZip?.(hash),
+            fetchZip: () => client.request('/v1/content-groups/' + encodeURIComponent(groupId) + '/assets/source/original', { responseType: 'blob', signal: run.signal }),
+            sourceWorker: () => run.worker ||= root.SDBaselineFiles.createWorkerClient(),
+            storeZip: (hash, blob, evidence) => root.OfflineStore.putStatDescriptionZip?.(hash, blob, evidence),
+          })); run.check();
           const output = await run.wait(root.ManagedCollectionExports.generate({ ...manifest, files }, baseline, root.JSZip, options)); run.check();
           run.phase('Download initiation'); root.saveAs(output, `${version.name}_${language}_StatDescriptions.zip`); run.state.downloadStarted = true;
           if (!operation) this.managedSetOperationError(errorKey, '');
