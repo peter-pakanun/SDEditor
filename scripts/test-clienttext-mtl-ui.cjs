@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const S=require('../public/clientTextState.js'),M=require('../public/clientTextMtlState.js'),Memory=require('../public/clientTextMtlMemoryStore.js');
 const UI=require('../public/clientTextMtlUi.js');
 const Debug=require('../public/clientTextMtlDebug.js');
+const ModelSettings=require('../public/clientTextMtlSettingsUi.js');
 const {scope:baseScope,unit:makeUnit}=require('./clienttext-storage-fixture.cjs');
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};};
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
@@ -900,4 +901,58 @@ test('Admin Stop records cancellation time and workflow outcome without another 
     const pending=h.app.ctMtlGenerate(h.field);await settle();now=30;assert.equal(await h.app.ctMtlCancel(h.field),true);assert.equal(await pending,false);
     const timing=h.app.ctMtlDebugRecords[h.field.id].browserTiming;assert.equal(timing.outcome,'cancelled');assert.equal(timing.milestonesMs.cancelRequested,30);
     assert.equal(timing.durationsMs.totalMs,30);assert.equal(timing.milestonesMs.candidateReceived,null);assert.equal(posts,1);assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');
+});
+
+
+function modelSettingsHarness(){
+    const h=debugHarness(),app=h.app;Object.assign(app,ModelSettings.mixin.data());
+    for(const[name,method]of Object.entries(ModelSettings.mixin.methods))app[name]=method.bind(app);
+    for(const[name,getter]of Object.entries(ModelSettings.mixin.computed))Object.defineProperty(app,name,{configurable:true,get:()=>getter.call(app)});
+    const generate=app._cloud.request;app._cloud.request=async(path,options)=>path==='/v1/admin/mtl/model-settings'?{settings:{version:'mtl-inference-settings-v1',models:[
+        {model:'gpt-6-luna',efforts:['high','xhigh','max']},{model:'gpt-6.1-sol',efforts:['low','medium','high','xhigh','max']}]}}:generate(path,options);
+    return h;
+}
+test('model settings are pinned-Admin-only, session-local and never silently replace Luna/xhigh',async()=>{
+    const h=modelSettingsHarness(),{app,field}=h;assert.equal(app.ctMtlSettingsAllowed,true);assert.equal(app.ctMtlSettingsCapture(),undefined);
+    await app.ctMtlSettingsToggle(field);assert.deepEqual(app.ctMtlSettingsSelected(),ModelSettings.DEFAULT);assert.equal(app.ctMtlSettingsCapture(),undefined);
+    assert.equal(app.ctMtlSettingsChoose('model','gpt-6.1-sol'),true);assert.equal(app.ctMtlSettingsChoose('effort','low'),true);
+    const selected=app.ctMtlSettingsCapture();assert.deepEqual(selected,{version:'mtl-inference-settings-v1',model:'gpt-6.1-sol',effort:'low'});
+    selected.effort='max';assert.equal(app.ctMtlSettingsCapture().effort,'low');
+    assert.equal(app.ctMtlSettingsChoose('model','gpt-6-luna'),true);assert.equal(app.ctMtlSettingsCapture().effort,'high');assert.equal(app.ctMtlSettingsChoose('effort','low'),false);
+    assert.equal(app.ctMtlSettingsDefault(),true);assert.equal(app.ctMtlSettingsCapture(),undefined);
+    for(const role of ['translator','manager','viewer']){app.cloudUser={...app.cloudUser,role,isAdmin:role==='viewer'};assert.equal(app.ctMtlSettingsAllowed,false);assert.equal(await app.ctMtlSettingsToggle(field),false);assert.equal(app.ctMtlSettingsCapture(),undefined);}
+});
+test('model metadata and selections cannot cross account, client, role or assignment changes',async()=>{
+    for(const change of [app=>{app.cloudSignedIn=false;},app=>{app.cloudUser.role='manager';},app=>{app.cloudUser.assignmentVersion++;},app=>{app._cloud={...app._cloud};},app=>{app.cloudProfileId='other';}]){
+        const {app,field}=modelSettingsHarness(),gate=deferred();app._cloud.request=()=>gate.promise;
+        const loading=app.ctMtlSettingsToggle(field);change(app);gate.resolve({settings:{version:'mtl-inference-settings-v1',models:[{model:'gpt-6.1-sol',efforts:['low']}]}});
+        assert.equal(await loading,false);assert.equal(app.ctMtlSettingsCatalog,null);assert.equal(app.ctMtlSettingsCapture(),undefined);
+        ModelSettings.mixin.watch.ctMtlSettingsOrigin.call(app);assert.equal(app.ctMtlSettingsPanel,'');assert.equal(app.ctMtlSettingsLoading,false);
+    }
+    const {app,field}=modelSettingsHarness();await app.ctMtlSettingsToggle(field);app.ctMtlSettingsChoose('effort','max');app._cloud={...app._cloud};assert.equal(app.ctMtlSettingsCapture(),undefined);
+});
+test('each panel opening rechecks account availability; failed and unavailable choices never alter defaults',async()=>{
+    const {app,field}=modelSettingsHarness();let calls=0;const request=app._cloud.request;app._cloud.request=(...args)=>{calls++;return request(...args);};
+    await app.ctMtlSettingsToggle(field);await app.ctMtlSettingsToggle(field);await app.ctMtlSettingsToggle(field);assert.equal(calls,2);
+    await app.ctMtlSettingsToggle(field);app._cloud.request=async()=>{throw new Error('synthetic private token');};assert.equal(await app.ctMtlSettingsToggle(field),false);
+    assert.doesNotMatch(app.ctMtlSettingsError,/private token/);assert.equal(app.ctMtlSettingsCapture(),undefined);assert.deepEqual(app.ctMtlSettingsSelected(),ModelSettings.DEFAULT);
+    assert.throws(()=>ModelSettings.catalog({version:'mtl-inference-settings-v1',models:[{model:'gpt-6-astra',efforts:['high']}]}));
+    assert.throws(()=>ModelSettings.settings({...ModelSettings.DEFAULT,effort:'low'}));
+});
+test('Translate freezes the Admin selection before tone/context awaits and debug retains the captured request',async()=>{
+    const h=modelSettingsHarness(),{app,field}=h;await app.ctMtlSettingsToggle(field);app.ctMtlSettingsChoose('model','gpt-6.1-sol');app.ctMtlSettingsChoose('effort','low');
+    const notes=deferred();app.ctToneNotesPrepare=()=>notes.promise;let submitted;const request=app._cloud.request;
+    app._cloud.request=async(path,options)=>{if(options?.method==='POST')submitted=structuredClone(options.body);return request(path,options);};
+    const task=app.ctMtlGenerate(field);await settle();app.ctMtlSettingsChoose('effort','max');notes.resolve();assert.equal(await task,true);
+    assert.equal(submitted.inferenceSettings.effort,'low');assert.equal(app.ctMtlDebugRecords[field.id].snapshot.inferenceSettings.effort,'low');
+    assert.equal(app.ctMtlSettingsCapture().effort,'max');assert.equal(h.ordinaryEdits(),0);assert.equal(app.ctValues[field.id],field.target);
+});
+test('ordinary and reset-to-default generation omit overrides; candidates retain bounded immutable settings',async()=>{
+    const h=modelSettingsHarness(),{app,field}=h;let body;const request=app._cloud.request;app.cloudUser.role='translator';app.cloudUser.isAdmin=false;
+    app._cloud.request=async(path,options)=>{if(options?.method==='POST')body=options.body;return request(path,options);};
+    assert.equal(await app.ctMtlGenerate(field),true);assert.equal(Object.hasOwn(body,'inferenceSettings'),false);
+    const value=candidate(h.original,'settings-candidate',S.hash(field.target),{model:'gpt-6.1-sol',effort:'low',inferenceSettings:{version:'mtl-inference-settings-v1',model:'gpt-6.1-sol',effort:'low'}});
+    const normalized=M.normalizeCandidate(value);assert.deepEqual(normalized.inferenceSettings,value.inferenceSettings);
+    assert.throws(()=>M.mergeCandidate(normalized,{...value,inferenceSettings:{...value.inferenceSettings,effort:'high'},effort:'high'}),{code:'MTL_CANDIDATE_CHANGED'});
+    assert.throws(()=>M.normalizeCandidate({...value,inferenceSettings:{...value.inferenceSettings,accessToken:'synthetic'}}));
 });

@@ -167,7 +167,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
   const config = Vue.defineComponent({
-  mixins: [window.PrivateMediaUI?.mixin || {}, window.ClientTextSkillCardUI?.mixin || {}, window.KeywordPopups?.mixin || {}, window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.ClientTextMtlUI?.mixin || {}, window.ClientTextToneNotesUI?.mixin || {}, window.ClientTextMtlDebug?.mixin || {}, window.MtlConnectionUI?.mixin || {}, window.MtlLimitsUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}],
+  mixins: [window.PrivateMediaUI?.mixin || {}, window.ClientTextSkillCardUI?.mixin || {}, window.KeywordPopups?.mixin || {}, window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.ClientTextMtlUI?.mixin || {}, window.ClientTextMtlSettingsUI?.mixin || {}, window.ClientTextToneNotesUI?.mixin || {}, window.ClientTextMtlDebug?.mixin || {}, window.MtlConnectionUI?.mixin || {}, window.MtlLimitsUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -8218,6 +8218,7 @@ if (window.ClientTextUI) {
 }
 if (window.EditorComponents?.TextField) app.component('editor-text-field', window.EditorComponents.TextField);
 if (window.KeywordPopups) app.component('keyword-popup-overlay', window.KeywordPopups.Overlay);
+if (window.ClientTextMtlSettingsUI) app.component('ct-mtl-settings-bar', window.ClientTextMtlSettingsUI.Bar);
 if (window.ClientTextMtlDebug) app.component('ct-mtl-debug-dialog', window.ClientTextMtlDebug.Dialog);
 if (window.ClientTextToneNotesUI) app.component('ct-tone-notes-dialog', window.ClientTextToneNotesUI.Dialog);
 if (window.ClientTextMtlProgress) app.component('ct-mtl-progress', window.ClientTextMtlProgress.Overlay);

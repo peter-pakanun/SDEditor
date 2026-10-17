@@ -9,19 +9,26 @@ function hits(directory,filter){
         .flatMap((line,index)=>branded.test(line)?[{file:file.replace(/\\/g,'/'),line:index+1,text:line.trim()}]:[]));
 }
 
-test('all public runtime literals are unbranded except the preserved Google-data legal statement',()=>{
+test('ordinary runtime copy stays neutral; explicit Admin model configuration and technical provenance may name models',()=>{
     const found=hits(join(root,'public'),file=>/\.(?:js|html|css)$/.test(file)&&!/\.min\.js$/.test(file));
     const legal=found.filter(hit=>hit.file==='policy.html'&&hit.text.includes('We do not sell Google user data, use it for advertising, or use it to train AI models.')
         &&hit.text.includes('Google API Services User Data Policy'));
     assert.equal(legal.length,1,'Preserve and explicitly account for the existing legal disclosure');
-    assert.deepEqual(found.filter(hit=>!legal.includes(hit)),[],'No branded copy remains in runtime controls, Settings, privacy details, errors or fallbacks');
+    const modelConfig=hit=>hit.file==='clientTextMtlSettingsUi.js'
+        ||hit.file==='clientTextMtlState.js'&&hit.text.startsWith('const value=input.inferenceSettings,efforts=')
+        ||hit.file==='clientTextMtlDebug.js'&&hit.text.startsWith('snapshot:')&&hit.text.includes('inferenceSettings:');
+    assert.deepEqual(found.filter(hit=>!legal.includes(hit)&&!modelConfig(hit)),[],'Only the Admin model settings surface and bounded technical provenance may add model names');
+    const controls=readFileSync(join(root,'public/clientTextComparisons.js'),'utf8');assert.match(controls,/mtlSettings\(\).*ctMtlSettingsAllowed/);
+    const settings=readFileSync(join(root,'public/clientTextMtlSettingsUi.js'),'utf8');assert.match(settings,/isAdmin===true.*role==='admin'/);
 });
 
 test('remaining API literals are internal wire/configuration identifiers, not returned user-facing prose',()=>{
     const found=hits(join(root,'../SDEditor-API/src'),file=>/\.js$/.test(file)&&!/(?:^|[\\/])vendor[\\/]/.test(file));
     const internal=/\b(?:ISSUER|RESOURCE|SCOPES|MTL_MODEL|ENDPOINT)\s*=|\.scopes\.includes\(scope\)|\.issuer !==|provider:\s*(?:['"]openai-siwc|String\(provenance\.provider)|model:\s*String\(provenance\.model/;
     assert.ok(found.length>0,'Actual service identities remain intact');
-    assert.deepEqual(found.filter(hit=>!internal.test(hit.text)||/new ApiError/.test(hit.text)),[],
+    const modelConfig=hit=>hit.file==='mtl-inference-settings.js'&&!/new ApiError/.test(hit.text)
+        ||hit.file==='mtl-provider.js'&&hit.text.includes("transport('https://api.openai.com/v1/models'");
+    assert.deepEqual(found.filter(hit=>(!internal.test(hit.text)&&!modelConfig(hit))||/new ApiError/.test(hit.text)),[],
         'Every remaining branded API literal must be a technical identity, never an error message');
 });
 

@@ -35,11 +35,17 @@
         }
         for (const name of ['provider', 'model', 'effort', 'promptVersion', 'schemaVersion', 'actorId', 'resolvedBy', 'acceptedBy', 'acceptanceJobId'])
             if (own(result, name) && (typeof result[name] !== 'string' || result[name].length > 256)) throw new TypeError('Invalid MTL provenance.');
+        if(own(input,'inferenceSettings')){
+            const value=input.inferenceSettings,efforts=value?.model==='gpt-6-luna'?['high','xhigh','max']:value?.model==='gpt-6.1-sol'?['low','medium','high','xhigh','max']:[];
+            if(!value||value.version!=='mtl-inference-settings-v1'||Object.keys(value).some(key=>!['version','model','effort'].includes(key))
+                ||!efforts.includes(value.effort)||input.model!==value.model||input.effort!==value.effort)throw new TypeError('Invalid MTL inference settings.');
+            result.inferenceSettings={version:value.version,model:value.model,effort:value.effort};
+        }
         return result;
     }
     const immutable = candidate => S.hash(Object.fromEntries(['id', 'requestId', 'unitId', 'fieldId', 'role', 'assetHash', 'parserVersion',
         'sourceHash', 'rawSourceHash', 'generatedText', 'baseTargetHash', 'createdAt', 'provider', 'model', 'effort', 'promptVersion', 'schemaVersion',
-        'contextHash', 'glossaryHash', 'actorId'].filter(name => own(candidate, name)).map(name => [name, candidate[name]])));
+        'contextHash', 'glossaryHash', 'actorId', 'inferenceSettings'].filter(name => own(candidate, name)).map(name => [name, candidate[name]])));
     function mergeCandidate(before, input) {
         const next = normalizeCandidate(input);
         if (!before) return next;

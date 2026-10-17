@@ -712,6 +712,9 @@
                 const pending = this.ctMtlPendingGeneration(field); if (pending) {timing?.finish('recovery');return this.ctMtlRecover(field,pending);}
                 if(!this.ctMtlArchiveSupported()){this.ctMtlError='The server needs an MTL review-archive upgrade before new translations can be requested. Existing work is unchanged.';return early('unavailable');}
                 if (this.mtlConsentVersion !== 'mtl-v2') { this.ctMtlError = 'Review and enable the updated MTL data-sharing and private review-retention choice in MTL settings first.'; return early('unavailable'); }
+                let inferenceSettings;
+                try { inferenceSettings = this.ctMtlSettingsCapture?.(); }
+                catch(error) { this.ctMtlError=error.message;return early('unavailable'); }
                 const unit = this.ctCurrentUnit, client = this._cloud, capturedAccess = access(this), descriptor = this.ctMtlDescriptor(unit);
                 if (!descriptor) { this.ctMtlError = 'The original workbook identity is unavailable. Reopen this workspace.'; return early('unavailable'); }
                 const name = key(unit.id, field.id), mutations = this._ctMtlEditMutations ||= raw(new Map()), mutation = mutations.get(name) || 0,
@@ -735,7 +738,7 @@
                     const body = { requestId, unitId: unit.id, fieldId: field.id, role: unit.role, assetHash: descriptor.assetHash || descriptor.hash,
                         parserVersion: descriptor.parserVersion, source: field.source, sourceHash: S.sourceHash(field.source), rawSourceHash: capturedSource,
                         baseTargetHash: S.hash(previous), baseRevision: this.ctSaved[unit.id]?.serverRevision || 0, clientFacts: S.clientFacts(unit),
-                        context: context.initial, consentVersion: 'mtl-v2', ...(String(ctx.scope.groupId).startsWith('local:')
+                        context: context.initial, consentVersion: 'mtl-v2', ...(inferenceSettings ? {inferenceSettings:copy(inferenceSettings)} : {}), ...(String(ctx.scope.groupId).startsWith('local:')
                             ? { language: ctx.scope.language, game:ctx.scope.game, branchId:ctx.scope.branchId || 'default' } : {}) };
                     if (new TextEncoder().encode(JSON.stringify(body)).length > Context.LIMITS.bytes) throw new Error('This MTL source and context exceed the request size limit.');
                     let path = String(ctx.scope.groupId).startsWith('local:') ? '/v1/mtl/local/requests'

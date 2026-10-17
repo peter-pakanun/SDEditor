@@ -143,6 +143,7 @@
         }
         this._cloudApplying = true;
         this.mtlConnectionReset?.();
+        this.ctMtlSettingsReset?.();
         this._cloud = new window.CloudSync.Client({ store: window.OfflineStore, merge: window.DictionarySync,
           fetch: window.fetch.bind(window), apiBase: apiBase(), locks: navigator.locks,
           WebSocket: window.WebSocket,

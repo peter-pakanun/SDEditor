@@ -226,3 +226,16 @@
 .ctMtlTimingPanel th[scope="row"] {font-weight:400;}
 .ctMtlTimingPanel td {white-space:nowrap;text-align:right;}
 .ctMtlTimingPanel h5 {margin:16px 0 6px;}
+
+.ctMtlSettingsButton {font-size:14px;min-width:26px;padding-inline:5px;}
+.ctMtlSettingsBar {margin-top:5px;padding:8px;border:1px solid var(--ui-border);border-radius:4px;background:var(--color-element-alt);color:var(--color-font);font-size:12px;}
+.ctMtlSettingsFields {display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.ctMtlSettingsFields label {display:flex;align-items:center;gap:5px;min-width:0;}
+.ctMtlSettingsFields select {font:inherit;max-width:100%;min-width:70px;background:var(--color-element);color:var(--color-font);border:1px solid var(--ui-border);border-radius:4px;padding:4px;}
+.ctMtlSettingsFields button {font:inherit;}
+.ctMtlSettingsFast {color:var(--ui-muted);}
+.ctMtlSettingsBar p {margin:6px 0 0;line-height:1.4;}
+.ctMtlSettingsError {color:var(--color-error,#c44);}
+
+.ctMtlSettingsFast {white-space:nowrap;}
+.ctMtlSettingsFields input[type="checkbox"] {width:auto;flex:none;margin:0;}

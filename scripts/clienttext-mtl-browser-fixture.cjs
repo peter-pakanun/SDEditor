@@ -40,17 +40,17 @@ async function run(){
         'normalizedStore.js','normalizedRooms.js','offlineStore.js','clientTextState.js','contentAdapters.js','clientTextStore.js',
         'clientTextMtlState.js','clientTextMtlStore.js','clientTextMtlMemoryStore.js','clientTextMtlSync.js','clientTextMemoryStore.js',
         'vendor/fast-xml-parser-5.11.2.min.js','clientTextCodec.js','editorComponents.js','clientTextFormatting.js','clientTextComparisons.js',
-        'clientTextExportProgress.js','clientTextMtlContext.js','clientTextMtlTiming.js','clientTextMtlProgress.js','clientTextMtlUi.js','clientTextMtlDebug.js','clientTextUi.js','editorSession.js'];
+        'clientTextExportProgress.js','clientTextMtlContext.js','clientTextMtlTiming.js','clientTextMtlProgress.js','clientTextMtlSettingsUi.js','clientTextMtlUi.js','clientTextMtlDebug.js','clientTextUi.js','editorSession.js'];
     const fixture=String.raw`(async()=>{
-const seed=${seed},ct=ClientTextUI.mixin,mtl=ClientTextMtlUI.mixin,debug=ClientTextMtlDebug.mixin;
+const seed=${seed},ct=ClientTextUI.mixin,mtl=ClientTextMtlUI.mixin,debug=ClientTextMtlDebug.mixin,modelSettings=ClientTextMtlSettingsUI.mixin;
 let app;
 const options={
- data(){return{...ct.data(),...mtl.data(),...debug.data(),fixtureConsent:false,fixtureMode:'memory',lang:'Thai',gameVersion:'poe2',branchId:'default',cloudSignedIn:true,
+ data(){return{...ct.data(),...mtl.data(),...debug.data(),...modelSettings.data(),fixtureConsent:false,fixtureMode:'memory',lang:'Thai',gameVersion:'poe2',branchId:'default',cloudSignedIn:true,
  cloudProfileId:'synthetic-tester',cloudUser:{id:'synthetic-tester',role:'translator',language:'Thai',assignmentVersion:1},cloudCanAccessAllLanguages:false,
  managedCatalogScope:'synthetic-scope',mtlConsentVersion:'mtl-v2',mtlShortcut:'f8',ctMtlCapabilities:{enabled:true,reviewArchive:true,consentVersion:'mtl-v2'},inlineEditor:true,
  translationEditorBcp47:'th',dictionary:[],mapClientTextClassNames:true,autocompleteShortcut:'ctrl-space',ctEditor:false};},
- computed:{...ct.computed,...mtl.computed,...debug.computed},watch:{...mtl.watch,...debug.watch},
- methods:{...ct.methods,...mtl.methods,...debug.methods,
+ computed:{...ct.computed,...mtl.computed,...debug.computed,...modelSettings.computed},watch:{...mtl.watch,...debug.watch,...modelSettings.watch},
+ methods:{...ct.methods,...mtl.methods,...debug.methods,...modelSettings.methods,
   ctKeyboardOverlayOpen(){return false;},ctInlineUnitVisible(){return this.ctActive&&!this.ctEditor&&!this.ctInlineClosed;},ctCloseCompletion(){this.ctCompletion=null;},
   scheduleClientTextDictionaryMatches(){},ctRefreshDiagnostics(){},ctRefreshDraftSummaries(){},ctLoadHistory(){},ctPresence(){},
   ctRefreshLayout(){},ctFocusRow(){},ctSync(){},ctClearDraftStageFailure(){},ctRememberDraftStageFailure(){},
@@ -91,6 +91,7 @@ const options={
    this._fixtureDismissals=[];this._fixtureArchiveFailures=0;this._fixtureArchiveLostAcks=0;this._fixtureArchiveDefer=false;this._fixtureArchiveReleases=[];
    this._cloud=Vue.markRaw({request:async(path,init={})=>{
     if(path==='/v1/mtl/capabilities')return{enabled:true,reviewArchive:true,consentVersion:'mtl-v2'};
+    if(path==='/v1/admin/mtl/model-settings')return{settings:{version:'mtl-inference-settings-v1',models:[{model:'gpt-6-luna',efforts:['high','xhigh','max']},{model:'gpt-6.1-sol',efforts:['low','medium','high','xhigh','max']}]}};
     if(path.includes('/dismissals')){
      const body=structuredClone(init.body);this._fixtureDismissals.push({path,body});
      if(body.consentVersion!=='mtl-v2')throw Object.assign(new Error('Updated private-retention consent is required.'),{status:403,code:'MTL_REVIEW_CONSENT_REQUIRED'});
@@ -146,6 +147,7 @@ vue.component('editor-native-field',EditorComponents.NativeField);vue.component(
 vue.component('editor-diagnostic-meta',EditorComponents.DiagnosticMeta);vue.component('app-notice',EditorComponents.Notice);
 vue.component('ct-mtl-debug-dialog',ClientTextMtlDebug.Dialog);
 vue.component('ct-mtl-progress',ClientTextMtlProgress.Overlay);
+vue.component('ct-mtl-settings-bar',ClientTextMtlSettingsUI.Bar);
 vue.component('fixture-mtl-consent',{template:${JSON.stringify('<section data-inline-focus-surface>'+consentHtml.replace('v-model="mtlConsentVersion"','v-model="$root.mtlConsentVersion"')+'</section>')}});
 app=vue.mount('#app');window.__mtlApp=app;
 document.addEventListener('keydown',event=>app.ctKey(event));await app.configure('memory');window.__mtlReady=true;
@@ -189,8 +191,14 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
         await page.evaluate(()=>window.__mtlApp.configure('memory'));
         await page.evaluate(()=>{window.__mtlApp.fixtureConsent=false;});
         const auditCopy=async()=>{
-            const copy=await page.locator('body').evaluate(node=>[node.innerText,...[...node.querySelectorAll('[title],[aria-label],[placeholder]')]
-                .filter(item=>item.getClientRects().length).flatMap(item=>['title','aria-label','placeholder'].map(key=>item.getAttribute(key)||''))].join('\n'));
+            const copy=await page.locator('body').evaluate(node=>{
+                let visible=node.innerText;
+                const details=node.querySelector('pre[aria-label="Selected request fields"]');
+                if(details){const value=JSON.parse(details.textContent);delete value.inferenceSettings;visible=visible.replace(details.innerText,JSON.stringify(value));}
+                for(const bar of node.querySelectorAll('.ctMtlSettingsBar'))visible=visible.replace(bar.innerText,'');
+                return [visible,...[...node.querySelectorAll('[title],[aria-label],[placeholder]')]
+                    .filter(item=>item.getClientRects().length&&!item.closest('.ctMtlSettingsButton,.ctMtlSettingsBar')).flatMap(item=>['title','aria-label','placeholder'].map(key=>item.getAttribute(key)||''))].join('\n');
+            });
             assert.doesNotMatch(copy,/OpenAI|ChatGPT|\bAI\b|\bmodels?\b|gpt-|synthetic-connection-config/i,'Editor, hints and selected debug fields contain no connection identity or branded system copy');
         };
         for(const mode of ['memory','idb']){
@@ -218,7 +226,23 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             }
             await page.evaluate(()=>{window.__mtlApp.cloudUser={...window.__mtlApp.cloudUser,role:'manager',isAdmin:false};});
             assert.equal(await page.locator('.ctMtlDebugButton').count(),0,'Manager has no debug access');
+            assert.equal(await page.locator('.ctMtlSettingsButton').count(),0,'Manager has no model settings access');
             await page.evaluate(()=>{window.__mtlApp.cloudUser={...window.__mtlApp.cloudUser,role:'admin',isAdmin:true};});
+            assert.equal(await page.locator('.ctMtlSettingsButton').count(),1,'Admin has model settings beside Translate');
+            const beforeSettings=await page.evaluate(()=>window.__mtlApp.snapshot());
+            await page.locator('.ctMtlSettingsButton').click();await page.waitForFunction(()=>!window.__mtlApp.ctMtlSettingsLoading);
+            const settingsBar=page.getByRole('region',{name:'Translation model settings'});
+            await settingsBar.getByLabel('Model',{exact:true}).selectOption('gpt-6.1-sol');await settingsBar.getByLabel('Reasoning',{exact:true}).selectOption('low');
+            assert.equal(await settingsBar.getByRole('checkbox',{name:'Fast · unavailable'}).isDisabled(),true);
+            assert.deepEqual(await page.evaluate(()=>window.__mtlApp.ctMtlSettingsCapture()),{version:'mtl-inference-settings-v1',model:'gpt-6.1-sol',effort:'low'});
+            for(const theme of ['light','grey','dark','modern-dark']){
+                await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);await page.screenshot({path:join(outDir,mode+'-model-settings-'+theme+'.png'),fullPage:true});
+                const box=await settingsBar.boundingBox();assert.ok(box.width>250&&box.x>=0&&box.x+box.width<=1440,'Settings bar fits the desktop');
+            }
+            await page.setViewportSize({width:1000,height:850});assert.ok((await settingsBar.boundingBox()).width<1000,'Settings bar resizes');await page.setViewportSize({width:1440,height:1000});
+            assert.deepEqual(await page.evaluate(()=>window.__mtlApp.snapshot()),beforeSettings,'Opening model controls does not edit or save the draft');
+            await settingsBar.getByLabel('Reasoning',{exact:true}).press('Escape');assert.equal(await settingsBar.count(),0);assert.equal(await page.locator('.ctMtlSettingsButton').evaluate(node=>node===document.activeElement),true,'Escape restores settings-button focus');
+            await page.evaluate(()=>window.__mtlApp.ctMtlSettingsDefault());
             await page.locator('.ctMtlDebugButton').click();
             assert.match(await page.locator('.ctMtlDebugDialog').textContent(),/Preview · not executed/);
             await page.locator('.ctMtlTimingPanel summary').click();assert.equal(await page.locator('.ctMtlTimingPanel table').count(),4);assert.match(await page.locator('.ctMtlTimingPanel').textContent(),/Unavailable/);
@@ -473,7 +497,7 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             }
         }
         assert.deepEqual(external,[],'No external request is made');assert.deepEqual(errors,[],'Real native controls render without page errors');
-        const report={passed:true,timingChecks:['separate Admin panel with unavailable preview milestones','four themed timing tables and exact request correlation','first provisional frame after nonempty progress; no paint claim','ordinary roles hidden and context fence clears records'],results,externalRequests:external,pageErrors:errors};writeFileSync(join(outDir,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
+        const report={passed:true,modelSettingsChecks:['Admin-only toolbar bar','model and effort selection','unverified Fast disabled','four themes and desktop resize','Escape restores focus','draft unchanged'],timingChecks:['separate Admin panel with unavailable preview milestones','four themed timing tables and exact request correlation','first provisional frame after nonempty progress; no paint claim','ordinary roles hidden and context fence clears records'],results,externalRequests:external,pageErrors:errors};writeFileSync(join(outDir,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
     }catch(error){
         const page=browser?.contexts()[0]?.pages()[0];
         if(page){await page.screenshot({path:join(outDir,'failure.png'),fullPage:true});console.error(await page.evaluate(()=>({

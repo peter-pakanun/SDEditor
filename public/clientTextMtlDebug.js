@@ -56,7 +56,7 @@
         const value = { requestId: record.requestId, status: server?.status || record.status,
             scope: server?.scope || snapshot.scope, unit: snapshot.unit || (server?.unitId ? { id: server.unitId } : undefined),
             field: snapshot.field || server?.field, source: server?.source ?? snapshot.source, language: server?.language || snapshot.language,
-            context: server?.context || snapshot.context,
+            context: server?.context || snapshot.context, inferenceSettings: server?.inferenceSettings || snapshot.inferenceSettings,
             ...(request ? { prompt: { instructions: request.instructions, messages: request.input } } : {}),
             ...(server && Object.hasOwn(server, 'response') ? { response: server.response ? { translation: server.response.translation } : null } : {}), lookup: server?.lookup,
             validation: server?.validation, failureReason: server?.failureReason, failureStage: server?.failureStage,
@@ -133,7 +133,7 @@
             ctMtlDebugBegin(field, body, timing) {
                 if (!allowed(this)) return;
                 const record = { requestId: body.requestId, origin: this.ctMtlDebugOrigin, submittedAt: Date.now(),
-                    snapshot: this.ctMtlDebugSnapshot(field, body.context), status: 'submitted', server: null,
+                    snapshot: {...this.ctMtlDebugSnapshot(field, body.context), inferenceSettings: body.inferenceSettings ? {...body.inferenceSettings} : {version:'mtl-inference-settings-v1',model:'gpt-6-luna',effort:'xhigh'}}, status: 'submitted', server: null,
                     ...(timing ? {browserTiming:timing.snapshot()} : {}) };
                 this.ctMtlDebugRecords = raw({ ...this.ctMtlDebugRecords, [field.id]: record });
                 if (this.ctMtlDebugWindow?.fieldId === field.id) this.ctMtlDebugWindow = { ...this.ctMtlDebugWindow, record };
