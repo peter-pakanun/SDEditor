@@ -88,12 +88,28 @@ test('preview redacts embedded credential-like values and diagnostic template us
     assert.match(Debug.Dialog.template,/<pre[^>]*>\{\{ details \}\}<\/pre>/);
 });
 
-test('ordinary MTL settings use neutral wording and retain an accessible provider disclosure in privacy details',()=>{
+test('all MTL settings use neutral wording and retain an honest accessible data-sharing disclosure',()=>{
     const html=require('node:fs').readFileSync(require('node:path').join(__dirname,'../public/index.html'),'utf8');
     const settings=html.split('<h3 class="settingsSubheading">MTL</h3>')[1].split('id="autocompleteShortcut"')[0];
-    const ordinary=settings.replace(/<div v-if="mtlConnectionAllowed"[\s\S]*?<\/div>/,'').replace(/<details[\s\S]*?<\/details>/,'');
-    assert.doesNotMatch(ordinary.replace(/<[^>]*>/g,''),/OpenAI|ChatGPT|gpt-6|\bmodel\b|\bAI\b/i);
-    assert.match(settings,/<summary>MTL data sharing and privacy<\/summary>[\s\S]*OpenAI[\s\S]*bounded relevant workbook context/);
+    assert.doesNotMatch(settings.replace(/<[^>]*>/g,''),/OpenAI|ChatGPT|gpt-6|\bmodels?\b|\bAI\b/i);
+    assert.match(settings,/<summary>MTL data sharing and privacy<\/summary>[\s\S]*bounded relevant workbook context[\s\S]*external translation service/);
+    assert.match(settings,/human review and Save before they replace the prior saved or original translation/);
+});
+
+test('debug displays selected prompt/context/response without connection configuration or rewriting quoted text',()=>{
+    const quote='Source text mentions AI, OpenAI, ChatGPT and model names literally.';
+    const record={requestId:'synthetic-request',status:'completed',snapshot:{unit:{id:'unit',sheet:'ClientStrings'},field:{id:'field',kind:'text'},source:quote,context:{notes:[quote]}},
+        server:{status:'completed',provider:'synthetic-provider',model:'synthetic-model',providerRequest:{model:'synthetic-model',reasoning:{effort:'synthetic-effort'},instructions:'Translate the selected field.',input:[{role:'user',content:quote}]},
+            response:{translation:quote,model:'synthetic-model'},upstreamResponse:{contentType:'text/event-stream; charset=utf-8',hasBody:true,readableBody:true,bodyUsed:false,bodyLocked:false,redirected:false,responseType:'cors',
+                model:'synthetic-model',provider:'synthetic-provider',headers:{Authorization:'synthetic-secret'},body:'synthetic-upstream-body',url:'synthetic-upstream-url'},validation:'passed',elapsedMs:3}};
+    const shown=Debug.present(record);
+    assert.equal(shown.source,quote);assert.equal(shown.context.notes[0],quote);
+    assert.equal(shown.prompt.instructions,record.server.providerRequest.instructions);assert.equal(shown.prompt.messages[0].content,quote);assert.equal(shown.response.translation,quote);
+    assert.equal(shown.model,undefined);assert.equal(shown.provider,undefined);assert.equal(shown.response.model,undefined);
+    assert.deepEqual(shown.upstreamResponse,{contentType:'text/event-stream; charset=utf-8',hasBody:true,readableBody:true,bodyUsed:false,bodyLocked:false,redirected:false,responseType:'cors'});
+    assert.doesNotMatch(JSON.stringify(shown),/synthetic-model|synthetic-provider|synthetic-effort|providerRequest|synthetic-secret|synthetic-upstream/);
+    assert.equal(Debug.present({...record,server:{...record.server,response:null}}).response,null,'A missing executed response remains explicitly null');
+    assert.match(Debug.Dialog.template,/Prompt and context/);assert.match(Debug.Dialog.template,/Selected fields from the executed request/);
 });
 
 test('a proxy-masked generation failure reads the original job once and presents its validation failure without another POST',async()=>{
@@ -353,7 +369,7 @@ test('Accept refuses malformed structure and rechecks scope/access/ordinary muta
 test('only own selected language and Manager/Admin can generate; consent and provider stay gated',async()=>{
     const h=harness();h.app.cloudUser.language='German';assert.equal(h.app.ctMtlCanGenerate(h.field),false);
     h.app.cloudUser.role='manager';assert.equal(h.app.ctMtlCanGenerate(h.field),true);
-    h.app.mtlConsentVersion='';assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.match(h.app.ctMtlError,/data-transmission/);
+    h.app.mtlConsentVersion='';assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.equal(h.app.ctMtlError,'Review and enable the MTL data-sharing choice in MTL settings first.');
     h.app.mtlConsentVersion='mtl-v1';h.app.ctMtlCapabilities={enabled:false};assert.equal(await h.app.ctMtlGenerate(h.field),false);
     assert.equal(h.app.ctMtlCandidates.length,0);
 });

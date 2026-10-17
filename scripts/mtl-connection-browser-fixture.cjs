@@ -40,6 +40,7 @@ const app=Vue.createApp({
    this.mtlConnectionReset();this.cloudSignedIn=true;this.cloudProfileId='synthetic-admin';
    this.cloudUser={id:'synthetic-admin',role:'admin',isAdmin:true,assignmentVersion:1};this.privateMediaEpoch++;
    this.ctMtlCapabilities={enabled:mode!=='generation-disabled'};this._fixtureMode=mode;this._fixtureMetadata=structuredClone(metadata[mode]||metadata.connected);
+   if(MtlConnectionUI.states.includes(mode)&&!metadata[mode])this._fixtureMetadata={...metadata.disconnected,state:mode,enabled:mode!=='disabled'};
    this._fixtureRequests=[];this._fixtureDeferred=false;this._fixtureRelease=null;
    this._cloud=Vue.markRaw({epoch:1,request:async(path,options={})=>{
     this._fixtureRequests.push({path,method:options.method||'GET',body:options.body?structuredClone(options.body):undefined,timeout:options.timeout});
@@ -81,8 +82,17 @@ window.__mtlConnectionApp.fixtureConfigure().then(()=>window.__mtlConnectionRead
         const check=()=>page.getByRole('button',{name:'Check connection',exact:true}),disconnect=()=>page.getByRole('button',{name:'Disconnect',exact:true}),revoke=()=>page.getByRole('button',{name:'Revoke',exact:true});
         const snapshot=()=>page.evaluate(()=>window.__mtlConnectionApp.fixtureSnapshot());
         const configure=mode=>page.evaluate(mode=>window.__mtlConnectionApp.fixtureConfigure(mode),mode);
-        const load=async mode=>{await configure(mode);await check().click();await page.waitForFunction(()=>window.__mtlConnectionApp.mtlConnectionLoaded);};
+        const auditCopy=async label=>{
+            await page.locator('.settingsPanel details').evaluateAll(nodes=>nodes.forEach(node=>node.open=true));
+            const copy=await page.locator('.settingsPanel').evaluate(node=>[node.innerText,...[...node.querySelectorAll('[title],[aria-label],[placeholder]')]
+                .filter(item=>item.getClientRects().length).flatMap(item=>['title','aria-label','placeholder'].map(key=>item.getAttribute(key)||''))].join('\n'));
+            assert.doesNotMatch(copy,/OpenAI|ChatGPT|\bAI\b|\bmodels?\b|gpt-/i,label+': visible Settings, expanded privacy, labels and hints are neutral');
+            assert.match(copy,/external translation service/);assert.match(copy,/human review/);assert.match(copy,/prior saved or original translation/);
+            checks.push({neutralCopy:label,expandedPrivacy:true});
+        };
+        const load=async mode=>{await configure(mode);await check().click();await page.waitForFunction(()=>window.__mtlConnectionApp.mtlConnectionLoaded);await auditCopy(mode);};
         assert.equal((await snapshot()).requests.length,0,'Opening the isolated view does not fetch status or credentials.');
+        await auditCopy('initial Admin view');
         assert.equal(await disconnect().isDisabled(),true);assert.equal(await revoke().isDisabled(),true);assert.equal(await check().isEnabled(),true);
         await check().focus();await page.keyboard.press('Enter');await page.waitForFunction(()=>window.__mtlConnectionApp.mtlConnectionLoaded);
         assert.equal(await disconnect().isEnabled(),true);assert.equal(await revoke().isEnabled(),true);assert.equal(await check().count(),0);
@@ -112,7 +122,7 @@ window.__mtlConnectionApp.fixtureConfigure().then(()=>window.__mtlConnectionRead
         checks.push('intermediate states permit explicit local disconnect only');
 
         await load('revocation-unconfirmed');await revoke().click();await page.waitForFunction(()=>!!window.__mtlConnectionApp.mtlConnectionError);
-        const revocationError=(await snapshot()).error;assert.match(revocationError,/Remote revocation was not confirmed/);assert.match(revocationError,/ChatGPT Settings/);
+        const revocationError=(await snapshot()).error;assert.match(revocationError,/Remote revocation was not confirmed/);assert.match(revocationError,/translation service account settings/);await auditCopy('revocation error');
         assert.equal((await snapshot()).state.state,'revocation-failed');assert.ok(!JSON.stringify((await snapshot()).state).includes('NEVER_STORE'));
         assert.equal(await check().isEnabled(),true);await check().click();await page.waitForFunction(()=>!window.__mtlConnectionApp.mtlConnectionBusy);
         assert.equal((await snapshot()).error,revocationError,'Checking status cannot clear failed revoke.');
@@ -121,6 +131,7 @@ window.__mtlConnectionApp.fixtureConfigure().then(()=>window.__mtlConnectionRead
 
         await load('recent-admin');await disconnect().click();await page.waitForFunction(()=>!!window.__mtlConnectionApp.mtlConnectionError);
         const reauthError=(await snapshot()).error;assert.match(reauthError,/sign in again with Google as Admin/);assert.match(reauthError,/five minutes/);
+        await auditCopy('recent Admin error');
         assert.equal(await page.locator('[role="alert"]').count(),1);assert.ok(!(await page.locator('.settingsPanel').innerText()).includes('Unsafe raw'));
         await check().click();await page.waitForFunction(()=>!window.__mtlConnectionApp.mtlConnectionBusy);assert.equal((await snapshot()).error,reauthError);
         await page.screenshot({path:join(outDir,'recent-admin.png'),fullPage:true});screenshots.push('recent-admin.png');checks.push('403 recent Admin guidance persists through explicit status check');
@@ -132,9 +143,10 @@ window.__mtlConnectionApp.fixtureConfigure().then(()=>window.__mtlConnectionRead
         await page.waitForFunction(()=>!window.__mtlConnectionApp.mtlConnectionAllowed);assert.equal(await disconnect().count(),0);assert.equal(await revoke().count(),0);
         await page.evaluate(()=>window.__mtlConnectionApp._fixtureRelease());await page.waitForFunction(()=>!window.__mtlConnectionApp.mtlConnectionBusy);
         assert.equal((await snapshot()).state,null);assert.equal((await snapshot()).error,'');checks.push('role loss hides controls and fences pending action');
+        for(const state of await page.evaluate(()=>MtlConnectionUI.states))await load(state);
         for(const role of ['translator','manager']){
             await configure('connected');await page.evaluate(role=>{const app=window.__mtlConnectionApp;app.cloudUser={...app.cloudUser,role,isAdmin:false};},role);
-            assert.equal(await page.getByText('ChatGPT connection · Admin',{exact:true}).count(),0);assert.equal((await snapshot()).requests.length,0);
+            assert.equal(await page.getByText('MTL connection · Admin',{exact:true}).count(),0);assert.equal((await snapshot()).requests.length,0);await auditCopy(role);
         }
         const requests=(await snapshot()).requests;assert.deepEqual(requests,[]);
         assert.deepEqual(external,[],'No external network requests.');assert.deepEqual(errors,[],'No page errors.');

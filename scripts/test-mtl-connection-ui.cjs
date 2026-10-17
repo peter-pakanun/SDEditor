@@ -112,7 +112,7 @@ test('unconfirmed revocation adopts guarded safe metadata while preserving its a
     h.app._cloud.request=async()=>{throw Object.assign(new Error('private raw message'),{status:502,code:'MTL_REVOCATION_UNCONFIRMED',details:{connection}});};
     assert.equal(await h.app.mtlConnectionAction('revoke'),false);assert.equal(h.app.mtlConnectionState.state,'revocation-failed');assert.equal(h.app.mtlConnectionState.revision,5);
     assert.equal(h.app.mtlConnectionState.access_token,undefined);assert.match(h.app.mtlConnectionError,/Remote revocation was not confirmed/);
-    assert.match(h.app.mtlConnectionError,/ChatGPT Settings/);const error=h.app.mtlConnectionError;
+    assert.match(h.app.mtlConnectionError,/translation service account settings/);const error=h.app.mtlConnectionError;
     h.app._cloud.request=async()=>({connection});assert.equal(await h.app.mtlConnectionLoad(),true);assert.equal(h.app.mtlConnectionError,error);
     const wait=deferred();h.app._cloud.request=()=>wait.promise;const pending=h.app.mtlConnectionAction('revoke');h.app.cloudUser.assignmentVersion++;
     wait.reject(Object.assign(new Error(),{status:502,code:'MTL_REVOCATION_UNCONFIRMED',details:{connection}}));assert.equal(await pending,false);assert.equal(h.app.mtlConnectionState,null);

@@ -73,7 +73,7 @@ const options={
    this._fixtureJobs=new Map();this._fixtureReleases=[];this._fixtureDefer=false;
    this._cloud=Vue.markRaw({request:async(path,init={})=>{
     if(path==='/v1/mtl/capabilities')return{enabled:true};
-    if(path.startsWith('/v1/admin/mtl/requests/'))return{diagnostics:{providerRequest:{instructions:'Synthetic executed prompt <img src=x onerror="window.__debugXss=true">',input:[{role:'user',content:'Synthetic context'}]},context:{accessToken:'synthetic-secret'},lookup:{enabled:false,rounds:[]},validation:'passed',elapsedMs:12}};
+    if(path.startsWith('/v1/admin/mtl/requests/'))return{diagnostics:{providerRequest:{model:'synthetic-connection-config',instructions:'Synthetic executed prompt <img src=x onerror="window.__debugXss=true">',input:[{role:'user',content:'Synthetic context'}]},context:{accessToken:'synthetic-secret'},upstreamResponse:{contentType:'text/event-stream; charset=utf-8',hasBody:true,readableBody:true,bodyUsed:false,bodyLocked:false,redirected:false,responseType:'cors'},lookup:{enabled:false,rounds:[]},validation:'passed',elapsedMs:12}};
     if(init.method==='POST'){
      const body=init.body;
      if(this._fixtureDefer)await new Promise(resolve=>this._fixtureReleases.push(resolve));
@@ -120,10 +120,16 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
         await page.goto('http://127.0.0.1:'+server.address().port);await page.waitForFunction(()=>window.__mtlReady||window.__mtlError);
         assert.equal(await page.evaluate(()=>window.__mtlError),undefined,'Synthetic fixture initializes');
         const target=()=>page.locator('textarea[data-ct-target]').first(),snapshot=()=>page.evaluate(()=>window.__mtlApp.snapshot());
+        const auditCopy=async()=>{
+            const copy=await page.locator('body').evaluate(node=>[node.innerText,...[...node.querySelectorAll('[title],[aria-label],[placeholder]')]
+                .filter(item=>item.getClientRects().length).flatMap(item=>['title','aria-label','placeholder'].map(key=>item.getAttribute(key)||''))].join('\n'));
+            assert.doesNotMatch(copy,/OpenAI|ChatGPT|\bAI\b|\bmodels?\b|gpt-|synthetic-connection-config/i,'Editor, hints and selected debug fields contain no connection identity or branded system copy');
+        };
         for(const mode of ['memory','idb']){
             await page.evaluate(mode=>window.__mtlApp.configure(mode),mode);
             await page.evaluate(()=>{window.__mtlApp.cloudUser={...window.__mtlApp.cloudUser,role:'translator',isAdmin:false};});
             assert.equal(await page.locator('.ctMtlDebugButton').count(),0,'Translator sees ordinary MTL controls');
+            await auditCopy();
             for(const theme of ['light','grey','dark','modern-dark']){
                 await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
                 const toolbar=page.locator('[aria-label="Translation field tools"]').first();
@@ -147,6 +153,7 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             await page.evaluate(()=>{window.__mtlApp.cloudUser={...window.__mtlApp.cloudUser,role:'admin',isAdmin:true};});
             await page.locator('.ctMtlDebugButton').click();
             assert.match(await page.locator('.ctMtlDebugDialog').textContent(),/Preview · not executed/);
+            await auditCopy();
             assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureJobs.size),0,'Preview never generates');
             const header=page.locator('.ctMtlDebugHeader'),before=await page.locator('.ctMtlDebugDialog').boundingBox(),handle=await header.boundingBox();
             await page.mouse.move(handle.x+80,handle.y+12);await page.mouse.down();await page.mouse.move(handle.x+160,handle.y+62,{steps:8});await page.mouse.up();
@@ -163,7 +170,11 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             await page.waitForFunction(()=>window.__mtlApp.snapshot().visible==='Generated {0}');
             assert.equal(await page.locator('.ctMtlCount').count(),1);
             await page.locator('.ctMtlDebugButton').click();await page.waitForFunction(()=>!!window.__mtlApp.ctMtlDebugWindow?.record.server);
-            assert.match(await page.locator('.ctMtlDebugDialog').textContent(),/Actual executed request and server validation/);
+            assert.match(await page.locator('.ctMtlDebugDialog').textContent(),/Selected fields from the executed request and server validation/);
+            await auditCopy();
+            const selected=JSON.parse(await page.locator('.ctMtlDebugDialog pre').textContent());assert.equal(selected.model,undefined);assert.equal(selected.provider,undefined);
+            assert.deepEqual(selected.upstreamResponse,{contentType:'text/event-stream; charset=utf-8',hasBody:true,readableBody:true,bodyUsed:false,bodyLocked:false,redirected:false,responseType:'cors'});
+            assert.equal(selected.prompt.instructions,'Synthetic executed prompt <img src=x onerror="window.__debugXss=true">');
             assert.equal(await page.locator('.ctMtlDebugDialog img').count(),0,'Request text is escaped');
             assert.equal(await page.evaluate(()=>window.__debugXss),undefined);assert.doesNotMatch(await page.locator('.ctMtlDebugDialog').textContent(),/synthetic-secret/);
             for(const theme of ['light','grey','dark','modern-dark']){

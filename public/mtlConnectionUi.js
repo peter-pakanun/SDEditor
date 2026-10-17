@@ -42,7 +42,7 @@
         const code=error?.code;
         if(reauthCodes.has(code))return 'Sign out of SDEditor, then sign in again with Google as Admin and retry within five minutes. Activity does not renew this confirmation.';
         if(code==='MTL_CONNECTION_CHANGED')return 'The MTL connection changed. Review the current status and retry the action.';
-        if(['MTL_REVOCATION_UNCONFIRMED','MTL_REVOCATION_FAILED','MTL_REVOKE_FAILED'].includes(code))return 'Remote revocation was not confirmed. Revoke the SDEditor connection in ChatGPT Settings, or disconnect this server locally.';
+        if(['MTL_REVOCATION_UNCONFIRMED','MTL_REVOCATION_FAILED','MTL_REVOKE_FAILED'].includes(code))return 'Remote revocation was not confirmed. Revoke SDEditor access in the translation service account settings, or disconnect this server locally.';
         if(code==='MTL_STATUS_REQUIRED')return 'Load the current MTL connection status before changing it.';
         if(error?.name==='AbortError'&&operation!=='load')return 'The MTL connection action timed out. Open MTL settings again to check its status before trying again.';
         if(error instanceof TypeError)return 'The server returned invalid MTL connection metadata.';
@@ -69,7 +69,7 @@
                 if(this.mtlConnectionRequiresAdminReauth)return 'A new Admin sign-in must be no more than five minutes old. Continued activity does not extend that window.';
                 const state=this.mtlConnectionState?.state;
                 if(state==='disabled')return 'MTL generation is disabled in the server configuration.';
-                if(state==='revocation-failed')return 'Remote revocation was not confirmed. Revoke the SDEditor connection in ChatGPT Settings, or disconnect this server locally.';
+                if(state==='revocation-failed')return 'Remote revocation was not confirmed. Revoke SDEditor access in the translation service account settings, or disconnect this server locally.';
                 if(['not-configured','not-connected','needs-reconnection','disconnected'].includes(state))return 'Use the SDEditor local sign-in helper, then import its protected session on the server.';
                 if(state==='unavailable')return 'Connection status is unavailable. Open MTL settings again to retry.';
                 return '';

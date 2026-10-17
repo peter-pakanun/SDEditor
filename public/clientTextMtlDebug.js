@@ -20,6 +20,30 @@
             /^(?:authorization|proxy-authorization|cookie|set-cookie|password|secret|credentials?|(?:access|refresh|id)[_-]?token|api[_-]?key|session(?:id|token)?)$/i.test(key) ? '[redacted]' : redact(item, depth + 1)]));
         return value === null || ['boolean', 'number'].includes(typeof value) ? value : null;
     }
+    // A labeled selection of actual fields, not a raw transport dump. Preserve
+    // quoted prompt/workbook/response text; omit connection configuration.
+    function present(record) {
+        const server = record.server, snapshot = record.snapshot || {}, request = server?.providerRequest;
+        let upstreamResponse;
+        const metadata = server?.upstreamResponse;
+        if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+            upstreamResponse = { contentType: typeof metadata.contentType === 'string' ? metadata.contentType.slice(0, 256) : null };
+            for (const field of ['hasBody', 'readableBody', 'bodyUsed', 'bodyLocked', 'redirected'])
+                if (typeof metadata[field] === 'boolean') upstreamResponse[field] = metadata[field];
+            if (['basic', 'cors', 'default', 'error', 'opaque', 'opaqueredirect', 'unknown'].includes(metadata.responseType)) upstreamResponse.responseType = metadata.responseType;
+        }
+        const value = { requestId: record.requestId, status: server?.status || record.status,
+            scope: server?.scope || snapshot.scope, unit: snapshot.unit || (server?.unitId ? { id: server.unitId } : undefined),
+            field: snapshot.field || server?.field, source: server?.source ?? snapshot.source, language: server?.language || snapshot.language,
+            context: server?.context || snapshot.context,
+            ...(request ? { prompt: { instructions: request.instructions, messages: request.input } } : {}),
+            ...(server && Object.hasOwn(server, 'response') ? { response: server.response ? { translation: server.response.translation } : null } : {}), lookup: server?.lookup,
+            validation: server?.validation, failureReason: server?.failureReason, failureStage: server?.failureStage,
+            validationReason: server?.validationReason, upstreamStatus: server?.upstreamStatus, upstreamResponse, apiStatus: server?.apiStatus,
+            startedAt: server?.startedAt ?? record.submittedAt, sentAt: server?.sentAt, finishedAt: server?.finishedAt,
+            elapsedMs: server?.elapsedMs ?? record.elapsedMs, error: server?.error || record.error };
+        return redact(Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)));
+    }
     const mixin = {
         data: () => ({ ctMtlDebugWindow: null, ctMtlDebugRecords: raw({}) }),
         computed: {
@@ -97,7 +121,7 @@
     };
     const Dialog = {
         props: ['host'], data: () => ({ x: 24, y: 24, dragging: false }),
-        computed: { item() { return this.host.ctMtlDebugWindow; }, details() { return JSON.stringify(this.item.record.server || this.item.record, (key, value) => key === 'origin' ? undefined : value, 2); } },
+        computed: { item() { return this.host.ctMtlDebugWindow; }, details() { return JSON.stringify(present(this.item.record), null, 2); } },
         mounted() {
             this._resize = () => this.place(); window.addEventListener('resize', this._resize);
             this._observer = new ResizeObserver(this._resize); this._observer.observe(this.$refs.dialog);
@@ -138,12 +162,12 @@
           </header>
           <div class="ctMtlDebugBody"><p class="ctMtlDebugMode">{{ item.record.status === 'preview' ? 'Preview · not executed' : 'Submitted request · ' + item.record.status }}</p>
             <p v-if="item.record.status === 'preview'">Current field and bounded context only. No request has been sent. The exact server prompt appears after Translate is used.</p>
-            <p v-else>{{ item.record.server?.providerRequest ? 'Actual executed request and server validation.' : 'Browser submission; an executed server prompt has not been confirmed.' }}</p>
+            <p v-else>{{ item.record.server?.providerRequest ? 'Selected fields from the executed request and server validation.' : 'Browser submission; an executed server prompt has not been confirmed.' }}</p>
             <p>Read-only. Sensitive values are redacted. Server details expire after ten minutes; browser details clear when the account, workspace, language, source or selected record changes.</p>
             <p v-if="item.loading" role="status">Loading request details…</p><p v-if="item.error" role="alert">{{ item.error }}</p>
-            <pre tabindex="0">{{ details }}</pre>
+            <h4>Prompt and context</h4><pre tabindex="0" aria-label="Selected request fields">{{ details }}</pre>
           </div>
         </section></teleport>`,
     };
-    return { mixin, Dialog, allowed, redact };
+    return { mixin, Dialog, allowed, redact, present };
 });

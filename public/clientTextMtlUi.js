@@ -533,7 +533,7 @@
                 }
                 if (!this.ctMtlCanGenerate(field)) { this.ctMtlError = this.ctMtlCapabilities?.enabled ? 'MTL is unavailable for this field or language.' : 'MTL is not connected. Review MTL settings.'; return false; }
                 const pending = this.ctMtlPendingGeneration(field); if (pending) return this.ctMtlRecover(field,pending);
-                if (this.mtlConsentVersion !== 'mtl-v1') { this.ctMtlError = 'Review and enable the provider data-transmission choice in MTL settings first.'; return false; }
+                if (this.mtlConsentVersion !== 'mtl-v1') { this.ctMtlError = 'Review and enable the MTL data-sharing choice in MTL settings first.'; return false; }
                 const unit = this.ctCurrentUnit, client = this._cloud, capturedAccess = access(this), descriptor = this.ctMtlDescriptor(unit);
                 if (!descriptor) { this.ctMtlError = 'The original workbook identity is unavailable. Reopen this workspace.'; return false; }
                 const name = key(unit.id, field.id), mutations = this._ctMtlEditMutations ||= raw(new Map()), mutation = mutations.get(name) || 0,
