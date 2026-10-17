@@ -161,10 +161,13 @@
             result.surrounding.truncated = Object.entries(result.surrounding.omitted).some(([key, count]) => key !== 'untranslated' && count > 0);
         }
         updateSelection();
+        function fitsContext() {
+            const size = sizeOf(result);
+            return size.characters <= budget && size.bytes <= LIMITS.contextBytes && size.entries <= LIMITS.contextEntries;
+        }
         function add(array, item) {
             array.push(copy(item)); updateSelection();
-            const size = sizeOf(result);
-            if (size.characters <= budget && size.bytes <= LIMITS.contextBytes && size.entries <= LIMITS.contextEntries) return true;
+            if (fitsContext()) return true;
             array.pop(); updateSelection(); return false;
         }
         function sourceRecord(value, reason) {
@@ -213,15 +216,32 @@
             if (result.references.length >= 12) break;
             if (!included.has(related.unitId) && add(result.references, related)) included.add(related.unitId);
         }
-        const keywordNames = new Set(State.tokenize(field.source).filter(token => token.kind === 'keyword').map(token => token.identity));
+        const keywordNames = new Set(State.tokenize(field.source).filter(token => token.kind === 'keyword').map(token => token.identity)),
+            keywordRecords = new Map();
         // Keyword identities are resolved only against exact loaded record IDs. No remote catalog is consulted.
         for (const name of keywordNames) {
             const bare = String(name).replace(/^keyword:/, ''), matches = units.filter(candidate => candidate.role === unit.role
                 && /keyword/i.test(candidate.sheet) && [name, bare].includes(candidate.recordId));
             if (matches.length === 1) {
                 if (!included.has(matches[0].id) && add(result.keywords, sourceRecord(matches[0], 'exact-keyword-identity'))) included.add(matches[0].id);
+                const record = [...result.keywords, ...result.references].find(value => value.unitId === matches[0].id);
+                if (record) keywordRecords.set(matches[0].id, { original: matches[0], record });
             }
             else add(result.unavailable, { reference: bare, reason: matches.length ? 'ambiguous-keyword' : 'keyword-not-loaded' });
+        }
+        // Keep every retained English keyword record before spending the shared
+        // budget on whole trusted translations. A deduplicated metadata reference
+        // receives the same translation context without repeating the unit.
+        for (const { original, record } of keywordRecords.values()) {
+            const fields = new Map(original.fields.filter(Boolean).map(value => [value.id, value]));
+            for (let index = 0; index < record.fields.length; index++) {
+                const before = record.fields[index], field = fields.get(before.fieldId);
+                if (!field || !['text', 'form'].includes(field.kind) || State.audioOnly(field.source)) continue;
+                const translation = translationFor(original, field, options.saved);
+                if (!translation) continue;
+                record.fields[index] = { ...before, ...translation };
+                if (!fitsContext()) record.fields[index] = before;
+            }
         }
         const matchText = [field.source, ...result.references.flatMap(reference => reference.fields.map(item => item.source))].join('\n').toLocaleLowerCase();
         // The caller supplies only a committed shared Dictionary snapshot, never the editable Dictionary or TM.

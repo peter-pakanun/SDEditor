@@ -13,6 +13,7 @@ function unit(recordId, sheet = 'ClientStrings', source = 'A [Spark|spark] for a
 }
 test('context includes exact immutable references and labels speaker evidence precisely', () => {
     const selected = unit('Line'), actor = unit('Data/Actors/Scout', 'Characters', 'Scout'), keyword = unit('Spark', 'KeywordPopups', 'A small flash.');
+    keyword.fields[0].target='Original keyword translation';
     selected.metadata = { Speaker: 'Data/Actors/Scout', 'Character Filter': 'ListenerOnly', NPC: 'Data/NPC/Missing' };
     selected.developerNotes = 'Short and direct.';
     const built = Context.create({ unit: selected, field: selected.fields[0], units: [selected, actor, keyword], scope: {game: 'poe2'} });
@@ -21,6 +22,7 @@ test('context includes exact immutable references and labels speaker evidence pr
     assert.equal(built.initial.metadata.find(row => row.name === 'Character Filter').evidence, 'listener-constraint');
     assert.equal(built.initial.references[0].recordId, actor.recordId);
     assert.equal(built.initial.keywords[0].recordId, 'Spark');
+    assert.equal(built.initial.keywords[0].fields[0].translation, 'Original keyword translation');
     assert.ok(built.initial.unavailable.some(row => row.reason === 'reference-not-loaded'));
     assert.ok(!JSON.stringify(built.initial).includes('UNSENT TARGET'));
     assert.equal(built.contextHash, S.hash(built.initial));
@@ -392,4 +394,124 @@ test('speaker identities require unique loaded NPC records, including exact expl
     // An exact speaker alias shared by distinct NPC-index groups is unresolved.
     const distinctIndex=await N.buildNpcIndex(ambiguous,{yield:async()=>{}});
     assert.deepEqual(ids(build(selected,ambiguous,{npcIndex:distinctIndex,convoIndex})),[]);
+});
+
+function keyword(recordId = 'Spark', fields = [
+    {name:'Info Title',kind:'text',source:'Synthetic title English',target:'Synthetic title translation'},
+    {name:'Info Content',kind:'text',source:'Synthetic content English',target:'Synthetic content translation'}
+]) {
+    const value=unit(recordId,'KeywordPopups'),template=value.fields[0];
+    value.fields=fields.map(field=>({...template,...field,id:field.id || JSON.stringify([field.name,field.form || null])}));
+    return value;
+}
+
+test('keyword context retains English titles, content and labels with current original translations and provenance', () => {
+    const selected=unit('Selected'),popup=keyword('Spark',[
+        {name:'Info Title',kind:'text',source:'Synthetic title English',target:'  Synthetic title translation  '},
+        {name:'Info Content',kind:'text',source:'Synthetic content English',target:'Synthetic content translation'},
+        {name:'Label',kind:'form',form:'StrFour',source:'Synthetic label English',target:'Synthetic label translation'},
+        {name:'Gender',kind:'gender',source:'Gender English',target:'EXCLUDED GENDER'},
+        {name:'Empty',kind:'text',source:'',target:'EXCLUDED BLANK SOURCE'}
+    ]),rows=freeze([selected,popup]),before=JSON.stringify(rows),context=Context.create({unit:selected,field:selected.fields[0],units:rows});
+    const record=context.initial.keywords[0];
+    assert.equal(record.unitId,popup.id);assert.equal(record.sheet,'KeywordPopups');assert.equal(record.role,'normal');
+    assert.equal(record.recordId,'Spark');assert.equal(record.reason,'exact-keyword-identity');
+    assert.deepEqual(record.fields.map(field=>field.fieldId),popup.fields.slice(0,3).map(field=>field.id));
+    assert.deepEqual(record.fields.map(field=>field.name),['Info Title','Info Content','Label']);
+    assert.deepEqual(record.fields.map(field=>field.source),popup.fields.slice(0,3).map(field=>field.source));
+    assert.deepEqual(record.fields.map(field=>field.translation),popup.fields.slice(0,3).map(field=>field.target));
+    assert.ok(record.fields.every(field=>field.translationOrigin==='original-workbook'));
+    assert.doesNotMatch(JSON.stringify(context.initial),/EXCLUDED/);
+    assert.equal(context.contextHash,S.hash(context.initial));assert.equal(JSON.stringify(rows),before);
+});
+
+test('keyword Saved overrides use the scoped snapshot while drafts and MTL overlays stay excluded', () => {
+    const selected=unit('Selected'),popup=keyword(),title=popup.fields[0],saved=freeze({[popup.id]:{saved:true,values:{[title.id]:'Authored keyword title'}}});
+    for(const snapshot of [saved,new Map(Object.entries(saved))]) {
+        const result=build(selected,[selected,popup],{saved:snapshot,drafts:{[popup.id]:{values:{[title.id]:'DRAFT SECRET'}}},
+            candidates:[{unitId:popup.id,fieldId:title.id,generatedText:'MTL SECRET'}],reviewBuffers:{[popup.id]:'REVIEW SECRET'}});
+        assert.equal(result.keywords[0].fields[0].translation,'Authored keyword title');
+        assert.equal(result.keywords[0].fields[0].translationOrigin,'saved');
+        assert.equal(result.keywords[0].fields[1].translation,popup.fields[1].target);
+        assert.equal(result.keywords[0].fields[1].translationOrigin,'original-workbook');
+        assert.doesNotMatch(JSON.stringify(result),/SECRET/);
+    }
+    const unsaved=build(selected,[selected,popup],{saved:{[popup.id]:{saved:false,values:{[title.id]:'UNSAVED SECRET'}}}});
+    assert.equal(unsaved.keywords[0].fields[0].translation,title.target);
+    const cleared=build(selected,[selected,popup],{saved:{[popup.id]:{saved:true,values:{[title.id]:''}}}});
+    assert.equal(cleared.keywords[0].fields[0].translation,undefined,'an intentionally blank Saved value never falls back to the old target');
+    assert.equal(cleared.keywords[0].fields[0].source,title.source);
+});
+
+test('keyword context keeps current English but rejects stale, conflicted and unreviewed target text', () => {
+    const selected=unit('Selected'),popup=keyword('Spark',[
+        {name:'Original stale',kind:'text',source:'Current English 1',target:'STALE ORIGINAL SECRET',outdated:true},
+        {name:'Saved stale',kind:'text',source:'Current English 2',target:'STALE BASE SECRET',outdated:true},
+        {name:'Reviewed',kind:'text',source:'Current English 3',target:'STALE BASE SECRET',outdated:true},
+        {name:'Inherited stale',kind:'text',source:'Current English 4',target:'STALE INHERITED SECRET'},
+        {name:'Conflicted',kind:'text',source:'Current English 5',target:'CONFLICT BASE SECRET'},
+        {name:'Missing',kind:'text',source:'Current English 6',target:'MISSING SECRET',originalMissing:true},
+        {name:'Current',kind:'text',source:'Current English 7',target:'Current original translation'},
+        {name:'Audio',kind:'text',source:'[NOAUDIO]',target:'AUDIO SECRET'}
+    ]),fields=popup.fields,saved={[popup.id]:{saved:true,values:{[fields[1].id]:'STALE SAVED SECRET',[fields[2].id]:'Reviewed current translation',
+        [fields[3].id]:'INHERITED SAVED SECRET',[fields[4].id]:'CONFLICT SAVED SECRET'},reviewed:{[fields[1].id]:'old-source',
+        [fields[2].id]:S.sourceHash(fields[2].source)},outdated:[fields[3].id],conflicts:[{fieldId:fields[4].id}]}};
+    const result=build(selected,[selected,popup],{saved}),projected=result.keywords[0].fields;
+    assert.deepEqual(projected.map(field=>field.source),fields.map(field=>field.source));
+    assert.deepEqual(projected.map(field=>field.translation),[undefined,undefined,'Reviewed current translation',undefined,undefined,undefined,'Current original translation',undefined]);
+    assert.equal(projected[2].translationOrigin,'saved');assert.equal(projected[6].translationOrigin,'original-workbook');
+    assert.doesNotMatch(JSON.stringify(result),/SECRET/);
+});
+
+test('partial keyword workbooks retain source-only fields and optional missing records without invented translations', () => {
+    const selected=unit('Selected'),popup=keyword('Spark',[
+        {name:'Info Title',kind:'text',source:'Title English',target:undefined},
+        {name:'Info Content',kind:'text',source:'Content English',target:'   '},
+        {name:'Blank source',kind:'text',source:' ',target:'EXCLUDED'},
+        {name:'Nonexistent form',kind:'form',form:'StrFour',source:'Form English',target:'NONEXISTENT'}
+    ]);
+    const result=build(selected,[selected,popup]);
+    assert.deepEqual(result.keywords[0].fields.map(field=>field.name),['Info Title','Info Content','Nonexistent form']);
+    assert.ok(result.keywords[0].fields.every(field=>!Object.hasOwn(field,'translation')));
+    assert.doesNotMatch(JSON.stringify(result),/EXCLUDED/);
+    const absent=build(selected,[selected]);
+    assert.deepEqual(absent.keywords,[]);assert.ok(absent.unavailable.some(row=>row.reference==='Spark' && row.reason==='keyword-not-loaded'));
+});
+
+test('translated keywords preserve exact ID matching, role guards and reference deduplication', () => {
+    const selected=unit('Selected','ClientStrings','[Spark|visible label] [Spark|another label] [Missing|missing label]'),popup=keyword(),wrongRole=keyword('Spark');
+    wrongRole.id=JSON.stringify(['gender','KeywordPopups','Spark']);wrongRole.role='gender';wrongRole.fields[0].target='WRONG ROLE SECRET';
+    const result=build(selected,[selected,popup,popup,wrongRole]);
+    assert.equal(result.keywords.length,1);assert.equal(result.keywords[0].recordId,'Spark');
+    assert.equal(result.keywords[0].fields[0].translation,popup.fields[0].target);
+    assert.ok(result.unavailable.some(row=>row.reference==='Missing' && row.reason==='keyword-not-loaded'));
+    assert.doesNotMatch(JSON.stringify(result),/WRONG ROLE SECRET/);
+    selected.metadata={Context:'Spark'};
+    const deduplicated=build(selected,[selected,popup]);
+    assert.deepEqual(deduplicated.keywords,[]);assert.equal(deduplicated.references.length,1);
+    assert.equal(deduplicated.references[0].fields[0].translation,popup.fields[0].target);
+    const otherSheet=keyword();otherSheet.sheet='OtherKeywordPopups';otherSheet.id=JSON.stringify(['normal',otherSheet.sheet,'Spark']);
+    selected.metadata={};
+    const ambiguous=build(selected,[selected,popup,otherSheet]);
+    assert.deepEqual(ambiguous.keywords,[]);assert.ok(ambiguous.unavailable.some(row=>row.reference==='Spark' && row.reason==='ambiguous-keyword'));
+});
+
+test('keyword translation budgeting preserves all retained English and omits oversized translations whole', () => {
+    const selected=unit('Selected','ClientStrings','[Spark|spark] [Stone|stone]'),spark=keyword('Spark'),stone=keyword('Stone');
+    spark.fields[0].target='ก'.repeat(20000);stone.fields[1].target='Small complete translation';
+    const result=build(selected,[selected,spark,stone],{contextLimit:2400});
+    assert.deepEqual(result.keywords.map(row=>row.recordId),['Spark','Stone']);
+    assert.deepEqual(result.keywords.flatMap(row=>row.fields.map(field=>field.source)),[...spark.fields,...stone.fields].map(field=>field.source));
+    assert.equal(result.keywords[0].fields[0].translation,undefined);
+    assert.equal(result.keywords[1].fields[1].translation,'Small complete translation');
+    assert.ok(JSON.stringify(result).length<=2400);assert.ok(Buffer.byteLength(JSON.stringify(result))<=Context.LIMITS.contextBytes);
+    assert.ok(valueCount(result)<=Context.LIMITS.contextEntries);
+});
+
+test('keyword field caps remain unchanged when trusted translations are attached', () => {
+    const selected=unit('Selected'),popup=keyword('Spark',Array.from({length:12},(_,i)=>({name:'Field '+i,kind:'text',source:'English '+i,target:'Translation '+i}))),
+        result=build(selected,[selected,popup]);
+    assert.equal(result.keywords[0].fields.length,8);
+    assert.deepEqual(result.keywords[0].fields.map(field=>field.translation),popup.fields.slice(0,8).map(field=>field.target));
+    assert.ok(!JSON.stringify(result).includes('Translation 8'));
 });
