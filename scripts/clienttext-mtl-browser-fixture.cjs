@@ -38,7 +38,7 @@ async function run(){
         'normalizedStore.js','normalizedRooms.js','offlineStore.js','clientTextState.js','contentAdapters.js','clientTextStore.js',
         'clientTextMtlState.js','clientTextMtlStore.js','clientTextMtlMemoryStore.js','clientTextMtlSync.js','clientTextMemoryStore.js',
         'vendor/fast-xml-parser-5.11.2.min.js','clientTextCodec.js','editorComponents.js','clientTextFormatting.js','clientTextComparisons.js',
-        'clientTextExportProgress.js','clientTextMtlContext.js','clientTextMtlUi.js','clientTextMtlDebug.js','clientTextUi.js','editorSession.js'];
+        'clientTextExportProgress.js','clientTextMtlContext.js','clientTextMtlProgress.js','clientTextMtlUi.js','clientTextMtlDebug.js','clientTextUi.js','editorSession.js'];
     const fixture=String.raw`(async()=>{
 const seed=${seed},ct=ClientTextUI.mixin,mtl=ClientTextMtlUI.mixin,debug=ClientTextMtlDebug.mixin;
 let app;
@@ -47,7 +47,7 @@ const options={
  cloudProfileId:'synthetic-tester',cloudUser:{id:'synthetic-tester',role:'translator',language:'Thai',assignmentVersion:1},cloudCanAccessAllLanguages:false,
  managedCatalogScope:'synthetic-scope',mtlConsentVersion:'mtl-v1',mtlShortcut:'f8',ctMtlCapabilities:{enabled:true},inlineEditor:true,
  translationEditorBcp47:'th',dictionary:[],mapClientTextClassNames:true,autocompleteShortcut:'ctrl-space',ctEditor:false};},
- computed:{...ct.computed,...mtl.computed,...debug.computed},watch:{...debug.watch},
+ computed:{...ct.computed,...mtl.computed,...debug.computed},watch:{...mtl.watch,...debug.watch},
  methods:{...ct.methods,...mtl.methods,...debug.methods,
   ctKeyboardOverlayOpen(){return false;},ctInlineUnitVisible(){return this.ctActive&&!this.ctEditor&&!this.ctInlineClosed;},ctCloseCompletion(){this.ctCompletion=null;},
   scheduleClientTextDictionaryMatches(){},ctRefreshDiagnostics(){},ctRefreshDraftSummaries(){},ctLoadHistory(){},ctPresence(){},
@@ -56,7 +56,7 @@ const options={
   ctEditorElement(){return document.querySelector('#fixture-editor');},appConfirm:async()=>true,
   async configure(mode){
    clearTimeout(this._ctDraftTimer);this.ctMtlReset();this._fixtureStore?.dispose?.();
-   this.fixtureMode=mode;this.ctActive=false;this.ctBusy=false;this.ctError='';this.ctValues={};this.ctReviewed={};this.ctSaved=Vue.markRaw({});
+   this.fixtureMode=mode;this.cloudSignedIn=true;this.ctActive=false;this.ctBusy=false;this.ctError='';this.ctValues={};this.ctReviewed={};this.ctSaved=Vue.markRaw({});
    this.ctDraftDirty=false;this.ctDraftStageFailure=null;this._ctDraftHeads=new Map();this._ctDraftRevision=null;this._ctEditRevision=0;
    this._ctSaveJob=null;this._ctEpoch=(this._ctEpoch||0)+1;this._ctSelectRun={};this.ctVariantSelections={};
    const groupId=(mode==='memory'?'local:test:':'online:')+crypto.randomUUID();
@@ -70,10 +70,27 @@ const options={
    this.ctWorkspace={scope,metadata:{descriptors:seed.descriptors}};this.ctUnits=Vue.markRaw(units);this._ctUnitIndex=Vue.markRaw(new Map(units.map(unit=>[unit.id,unit])));
    this.ctSelection=units[0].id;this.ctValues=ClientTextState.valuesFor(units[0]);this.ctFocusedField=units[0].fields[0].id;
    this.ctActive=true;this.ctEditor=false;this.ctMtlCapabilities={enabled:true};this._ctMtlDescriptors=Vue.markRaw(seed.descriptors);
-   this._fixtureJobs=new Map();this._fixtureReleases=[];this._fixtureDefer=false;
+   this._fixtureJobs=new Map();this._fixtureReleases=[];this._fixtureDefer=false;this._fixtureAsync=false;this._fixtureStarts=0;this._fixtureCancels=0;this._fixturePollErrors=0;
+   this._fixtureCancelDefer=false;this._fixtureCancelReleases=[];
    this._cloud=Vue.markRaw({request:async(path,init={})=>{
     if(path==='/v1/mtl/capabilities')return{enabled:true};
     if(path.startsWith('/v1/admin/mtl/requests/'))return{diagnostics:{providerRequest:{model:'synthetic-connection-config',instructions:'Synthetic executed prompt <img src=x onerror="window.__debugXss=true">',input:[{role:'user',content:'Synthetic context'}]},context:{accessToken:'synthetic-secret'},upstreamResponse:{contentType:'text/event-stream; charset=utf-8',hasBody:true,readableBody:true,bodyUsed:false,bodyLocked:false,redirected:false,responseType:'cors'},lookup:{enabled:false,rounds:[]},validation:'passed',elapsedMs:12}};
+    if(this._fixtureAsync){
+     const snapshot=()=>({requestId:this._fixtureLive.body.requestId,status:this._fixtureLive.status,scope:{...scope,local:mode==='memory'},pollAfterMs:250,
+       progress:{revision:this._fixtureLive.revision,phase:this._fixtureLive.phase,translation:this._fixtureLive.text,provisional:true},errorCode:this._fixtureLive.errorCode});
+     if(path.endsWith('/cancellations')){this._fixtureCancels++;if(this._fixtureCancelDefer)await new Promise(resolve=>this._fixtureCancelReleases.push(resolve));
+      this._fixtureLive.status='failed';this._fixtureLive.errorCode='MTL_CANCELLED';return snapshot();}
+     if(init.method==='POST'){
+      this._fixtureStarts++;this._fixtureLive={body:init.body,status:'running',text:'First {0}',revision:1,phase:'generating'};return snapshot();
+     }
+     if(path.startsWith('/v1/mtl/requests/')){
+      if(this._fixturePollErrors>0){this._fixturePollErrors--;throw new TypeError('Synthetic polling interruption');}
+      if(!this._fixtureLive.complete)return snapshot();
+      const body=this._fixtureLive.body;return{candidate:{id:'candidate-'+body.requestId,requestId:body.requestId,unitId:body.unitId,fieldId:body.fieldId,role:body.role,
+       assetHash:body.assetHash,parserVersion:body.parserVersion,sourceHash:body.sourceHash,rawSourceHash:body.rawSourceHash,generatedText:'Generated {0}',
+       revision:1,status:'pending',createdAt:Date.now(),baseTargetHash:body.baseTargetHash}};
+     }
+    }
     if(init.method==='POST'){
      const body=init.body;
      if(this._fixtureDefer)await new Promise(resolve=>this._fixtureReleases.push(resolve));
@@ -101,6 +118,7 @@ vue.component('ct-fields',ClientTextUI.fieldsComponent);vue.component('ct-target
 vue.component('editor-native-field',EditorComponents.NativeField);vue.component('editor-field-toolbar',EditorComponents.FieldToolbar);
 vue.component('editor-diagnostic-meta',EditorComponents.DiagnosticMeta);vue.component('app-notice',EditorComponents.Notice);
 vue.component('ct-mtl-debug-dialog',ClientTextMtlDebug.Dialog);
+vue.component('ct-mtl-progress',ClientTextMtlProgress.Preview);
 app=vue.mount('#app');window.__mtlApp=app;
 document.addEventListener('keydown',event=>app.ctKey(event));await app.configure('memory');window.__mtlReady=true;
 })().catch(error=>{window.__mtlError=String(error.stack||error);console.error(error);});`;
@@ -244,11 +262,104 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             await page.waitForFunction(()=>window.__mtlApp.snapshot().candidates===0);await page.waitForTimeout(30);
             assert.equal(await page.evaluate(()=>window.__mtlApp.ctInlineClosed),false,'Dismiss preserves inline editor');
             assert.equal((await snapshot()).underlying,'Unconfirmed ordinary {0}');assert.equal(await target().evaluate(node=>node===document.activeElement),true,'Dismiss returns focus to the stable field');
+            await page.evaluate(async mode=>{const app=window.__mtlApp;await app.configure(mode);app._fixtureAsync=true;app.ctMtlCapabilities={enabled:true,delivery:'poll-v1'};},mode);
+            await target().focus();await page.locator('.ctMtlButton').click();
+            await page.waitForFunction(()=>window.__mtlApp._fixtureStarts===1&&!!window.__mtlApp.ctMtlProgressFor(window.__mtlApp.ctCurrentUnit.fields[0])?.text);
+            await page.locator('.ctMtlButtonTarget').hover();await page.waitForSelector('.ctMtlProgressPopup');
+            assert.match(await page.locator('.ctMtlProgressPopup').textContent(),/Receiving translation[\s\S]*First \{0\}/);
+            assert.equal(await target().inputValue(),'Confirmed {0}','Provisional text stays outside the native editor');
+            assert.equal(await page.evaluate(()=>window.__mtlApp.exportTarget()),'Confirmed {0}','Provisional text cannot export');
+            assert.equal((await snapshot()).candidates,0,'Provisional text is not a candidate');
+            await page.locator('.ctMtlLiveButton').focus();await page.locator('.ctMtlLiveButton').press('Enter');
+            assert.equal(await page.locator('.ctMtlProgressPopup').getAttribute('role'),'dialog');
+            assert.equal(await page.locator('.ctMtlProgressPopup pre').evaluate(node=>node===document.activeElement),true,'Keyboard Live opens a readable preview');
+            await page.evaluate(()=>{const job=window.__mtlApp._fixtureLive;job.revision++;job.text='Readable <img src=x onerror="window.__progressXss=true"> {0}\nNext \\ line';});
+            await page.waitForFunction(()=>document.querySelector('.ctMtlProgressPopup pre')?.textContent.includes('Readable <img'));
+            assert.equal(await page.locator('.ctMtlProgressPopup img').count(),0);assert.equal(await page.evaluate(()=>window.__progressXss),undefined);
+            assert.match(await page.locator('.ctMtlProgressPopup pre').textContent(),/\nNext \\ line/,'Readable decoded text preserves newlines and literal slashes');
+            for(const theme of ['light','grey','dark','modern-dark']){
+                await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
+                await page.screenshot({path:join(outDir,mode+'-live-'+theme+'.png'),fullPage:true});
+            }
+            await page.setViewportSize({width:920,height:650});
+            await page.waitForFunction(()=>{const box=document.querySelector('.ctMtlProgressPopup').getBoundingClientRect();return box.left>=7&&box.top>=7&&box.right<=913&&box.bottom<=643;});
+            await page.setViewportSize({width:1440,height:1000});
+            await page.locator('.ctMtlProgressPopup pre').press('Escape');assert.equal(await page.locator('.ctMtlProgressPopup').count(),0);
+            assert.equal(await page.locator('.ctMtlLiveButton').evaluate(node=>node===document.activeElement),true,'Escape returns to Live');
+            for(let attempt=0;attempt<24;attempt++){
+                await page.setViewportSize({width:1440,height:1000});await page.locator('.ctMtlButtonTarget').hover();
+                await page.locator('.ctMtlLiveButton').focus();await page.locator('.ctMtlLiveButton').press('Enter');
+                await page.setViewportSize({width:920+attempt%3*80,height:650+attempt%2*60});
+                await page.locator('.ctMtlProgressPopup pre').press('Escape');await page.waitForTimeout(150);
+                assert.equal(await page.locator('.ctMtlProgressPopup').count(),0,mode+': resize/Escape '+attempt+' remains dismissed under the stationary pointer');
+                await page.setViewportSize({width:1440,height:1000});await page.waitForTimeout(30);
+                assert.equal(await page.locator('.ctMtlProgressPopup').count(),0,mode+': layout after Escape '+attempt+' does not reopen a tooltip');
+                assert.equal(await page.locator('.ctMtlLiveButton').getAttribute('aria-expanded'),'false');
+                assert.equal(await page.locator('.ctMtlLiveButton').evaluate(node=>node===document.activeElement),true,'Repeated Escape restores keyboard focus');
+            }
+            await page.mouse.move(30,500);await page.locator('.ctMtlButtonTarget').hover();await page.waitForSelector('.ctMtlProgressPopup');
+            assert.equal(await page.locator('.ctMtlProgressPopup').getAttribute('role'),'tooltip','Fresh pointer departure and re-entry reopens the hover preview');
+            await page.locator('.ctMtlLiveButton').press('Escape');await page.waitForTimeout(150);assert.equal(await page.locator('.ctMtlProgressPopup').count(),0);
+            await page.keyboard.press('Tab');await page.keyboard.press('Shift+Tab');await page.waitForSelector('.ctMtlProgressPopup');
+            assert.equal(await page.locator('.ctMtlLiveButton').evaluate(node=>node===document.activeElement),true,'A fresh keyboard visit remains accessible');
+            assert.equal(await page.locator('.ctMtlProgressPopup').getAttribute('role'),'tooltip');
+            await page.locator('.ctMtlLiveButton').press('Escape');await page.waitForTimeout(150);assert.equal(await page.locator('.ctMtlProgressPopup').count(),0);
+            await page.locator('.ctMtlLiveButton').click();assert.equal(await page.locator('.ctMtlProgressPopup').getAttribute('role'),'dialog','A deliberate click reopens the pinned preview');
+            await page.locator('.ctMtlProgressPopup pre').press('Escape');await page.waitForTimeout(150);assert.equal(await page.locator('.ctMtlProgressPopup').count(),0);
+            await page.locator('.ctMtlLiveButton').press('Enter');await page.evaluate(()=>{window.__mtlApp._fixturePollErrors=1;});
+            await page.waitForFunction(()=>document.querySelector('.ctMtlProgressPopup')?.textContent.includes('Waiting for connection'));
+            assert.match(await page.locator('.ctMtlProgressPopup pre').textContent(),/Readable/,'An interruption preserves the last provisional text');
+            await page.waitForFunction(()=>document.querySelector('.ctMtlProgressPopup')?.textContent.includes('Receiving translation'));
+            assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureStarts),1,'Reconnect never starts another inference');
+            await page.evaluate(()=>{window.__mtlApp._fixtureLive.complete=true;});
+            await page.waitForFunction(()=>window.__mtlApp.snapshot().visible==='Generated {0}');
+            assert.equal(await page.locator('.ctMtlProgressPopup').count(),0);assert.equal(await page.evaluate(()=>window.__mtlApp.ctInlineClosed),false);
+            assert.equal(await target().inputValue(),'Generated {0}');assert.equal(await page.evaluate(()=>window.__mtlApp.exportTarget()),'Confirmed {0}');
+            await page.getByRole('button',{name:'Dismiss',exact:true}).click();await page.waitForFunction(()=>window.__mtlApp.snapshot().candidates===0);
+            await page.locator('.ctMtlButton').click();await page.waitForFunction(()=>window.__mtlApp._fixtureStarts===2);
+            await page.locator('.ctMtlLiveButton').focus();await page.locator('.ctMtlLiveButton').press('Enter');
+            await page.evaluate(()=>{window.__mtlApp._fixtureCancelDefer=true;document.body.style.minHeight='1800px';window.scrollTo(0,60);});
+            const beforeStop=await page.evaluate(()=>({scroll:window.scrollY,selection:window.__mtlApp.ctSelection,field:window.__mtlApp.ctFocusedField,
+                start:document.querySelector('textarea[data-ct-target]').selectionStart,end:document.querySelector('textarea[data-ct-target]').selectionEnd}));
+            const stop=page.getByRole('button',{name:'Stop translation',exact:true});await stop.focus();await stop.press('Enter');
+            await page.waitForFunction(()=>window.__mtlApp._fixtureCancels===1);
+            assert.equal(await stop.count(),1,'Stop remains mounted while cancellation is pending');assert.equal(await stop.isDisabled(),true);
+            assert.equal(await page.locator('.ctMtlProgressPopup pre').evaluate(node=>node===document.activeElement),true,'Keyboard Stop focuses the stable preview before disabling');
+            await page.keyboard.press('Enter');await page.keyboard.press('Enter');await stop.evaluate(node=>node.click());
+            await page.waitForTimeout(350);assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureCancels),1,'Repeated keyboard/click activation cannot cancel twice');
+            assert.equal(await stop.count(),1,'A pending poll also retains the disabled Stop button');assert.equal(await stop.isDisabled(),true);
+            await page.evaluate(()=>{window.__mtlApp._fixtureCancelReleases.shift()();window.__mtlApp._fixtureCancelDefer=false;});
+            await page.waitForFunction(()=>!Object.keys(window.__mtlApp.ctMtlRequests).length);
+            await page.waitForFunction(()=>document.querySelector('.ctMtlButton')===document.activeElement);
+            assert.equal(await page.locator('.ctMtlProgressPopup').count(),0);assert.equal(await page.evaluate(()=>window.__mtlApp.ctInlineClosed),false,'Keyboard Stop preserves the inline editor');
+            assert.deepEqual(await page.evaluate(()=>({scroll:window.scrollY,selection:window.__mtlApp.ctSelection,field:window.__mtlApp.ctFocusedField,
+                start:document.querySelector('textarea[data-ct-target]').selectionStart,end:document.querySelector('textarea[data-ct-target]').selectionEnd})),beforeStop,'Stop preserves viewport, selected field, row and native selection');
+            assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureCancels),1);assert.equal((await snapshot()).candidates,0);assert.equal(await target().inputValue(),'Confirmed {0}');
+            await page.evaluate(()=>{document.body.style.minHeight='';window.scrollTo(0,0);});
+            await page.locator('.ctMtlButton').click();await page.waitForFunction(()=>window.__mtlApp._fixtureStarts===3);
+            await page.locator('.ctMtlLiveButton').click();await target().fill('Typed while receiving {0}');
+            await page.evaluate(()=>{window.__mtlApp._fixtureLive.complete=true;});await page.waitForFunction(()=>!Object.keys(window.__mtlApp.ctMtlRequests).length);
+            assert.equal(await target().inputValue(),'Typed while receiving {0}','Completion preserves typing during progress');
+            assert.equal(await page.getByRole('button',{name:'Review MTL',exact:true}).count(),1);assert.equal(await page.evaluate(()=>window.__mtlApp.exportTarget()),'Confirmed {0}');
+            await page.evaluate(async mode=>{const app=window.__mtlApp;await app.configure(mode);app._fixtureAsync=true;app.ctMtlCapabilities={enabled:true,delivery:'poll-v1'};},mode);
+            await page.locator('.ctMtlButton').click();await page.waitForFunction(()=>window.__mtlApp._fixtureStarts===1);await page.locator('.ctMtlLiveButton').click();
+            await page.evaluate(()=>{window.__mtlApp.cloudSignedIn=false;});
+            await page.waitForFunction(()=>!Object.keys(window.__mtlApp.ctMtlLive).length);assert.equal(await page.locator('.ctMtlProgressPopup').count(),0);
+            assert.equal((await snapshot()).candidates,0);assert.equal(await target().inputValue(),'Confirmed {0}');
             results.push({mode,themes:4,inputRoutes:['typing','paste','format','autocomplete','TM'],exports:'original before Save, accepted after Save',raceGuards:true,
-                debug:['admin-only','read-only preview','actual request','drag','keyboard move','escape focus','resize','escaped','redacted','role reset'],inlineStable:['pointer Translate','keyboard Translate','async result','debug dialog','Accept','Dismiss','draft','selection']});
+                debug:['admin-only','read-only preview','actual request','drag','keyboard move','escape focus','resize','escaped','redacted','role reset'],inlineStable:['pointer Translate','keyboard Translate','async result','debug dialog','Accept','Dismiss','draft','selection'],
+                escapeDismissal:{resizeAttempts:24,reopens:0,hoverReentry:true,keyboardReentry:true,click:true},
+                progress:['live text','escaped','keyboard preview','escape focus','four themes','resize','reconnect same ID','provisional excluded from export','final validation','keyboard Stop focus','repeated Stop','Stop preserves viewport/selection','typing fence','logout clears']});
         }
         assert.deepEqual(external,[],'No external request is made');assert.deepEqual(errors,[],'Real native controls render without page errors');
         const report={passed:true,results,externalRequests:external,pageErrors:errors};writeFileSync(join(outDir,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
+    }catch(error){
+        const page=browser?.contexts()[0]?.pages()[0];
+        if(page){await page.screenshot({path:join(outDir,'failure.png'),fullPage:true});console.error(await page.evaluate(()=>({
+            inlineClosed:window.__mtlApp?.ctInlineClosed,editor:window.__mtlApp?.ctEditor,active:window.__mtlApp?.ctActive,
+            signedIn:window.__mtlApp?.cloudSignedIn,role:window.__mtlApp?.cloudUser?.role,debugAllowed:window.__mtlApp?.ctMtlDebugAllowed,
+            targetCount:document.querySelectorAll('[data-ct-target]').length,focused:document.activeElement?.outerHTML.slice(0,160)})));}
+        throw error;
     }finally{await browser?.close();await new Promise(resolve=>server.close(resolve));}
 }
 run().catch(error=>{console.error(error);process.exitCode=1;});

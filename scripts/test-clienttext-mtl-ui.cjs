@@ -42,6 +42,150 @@ function debugHarness(){
     app.cloudUser={...app.cloudUser,role:'admin',isAdmin:true};
     return h;
 }
+function pollingHarness(){
+    const h=harness();h.app.ctMtlCapabilities={enabled:true,delivery:'poll-v1'};
+    h.app.ctMtlRequestWait=async()=>{};
+    h.status=(body,changes={})=>({requestId:body.requestId,status:'running',scope:{...h.scope,local:String(h.scope.groupId).startsWith('local:')},
+        progress:{revision:1,phase:'generating',translation:'Working {0}',provisional:true},pollAfterMs:250,...changes});
+    return h;
+}
+
+test('submitted context uses scoped saved neighboring translations and excludes active provisional text',()=>{
+    const h=harness(),neighbor=makeUnit('Neighbor source {0}','Workbook neighbor {0}');
+    neighbor.id='synthetic-neighbor';neighbor.recordId='Neighbor';neighbor.fields[0].sourceCell='B3';neighbor.fields[0].targetCell='C3';h.app.ctUnits=[neighbor,h.original];
+    h.app.ctSaved={[neighbor.id]:{saved:true,values:{[h.field.id]:'Authored neighbor {0}'}}};
+    h.app.ctValues[h.field.id]='Unsaved selected {0}';h.app.ctMtlLive={synthetic:{text:'Unvalidated provisional {0}'}};
+    const context=h.app.ctMtlBuildContext(h.field).initial,field=context.surrounding.entries[0].fields[0];
+    assert.equal(field.translation,'Authored neighbor {0}');assert.equal(field.translationOrigin,'saved');
+    assert.doesNotMatch(JSON.stringify(context),/Unsaved selected|Unvalidated provisional/);
+});
+
+test('advertised polling starts once and shows only request-local provisional text until validated completion',async()=>{
+    for(const local of [false,true]){
+        const h=pollingHarness();if(local)h.scope.groupId='local:test:live';let body,posts=0,gets=0;
+        h.app._cloud.request=async(path,options={})=>{
+            if(options.method==='POST'){
+                posts++;body=options.body;assert.match(path,local?/^\/v1\/mtl\/local\/requests\?async=1$/:/\?language=Thai&async=1$/);
+                assert.equal(options.timeout,15000);return h.status(body);
+            }
+            gets++;assert.equal(path,'/v1/mtl/requests/'+body.requestId);
+            assert.equal(h.app.ctMtlProgressFor(h.field).text,gets===1?'Working {0}':'Working <b>{0}</b>\nNext');
+            assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');assert.equal(h.app.ctDraftDirty,false);
+            assert.deepEqual(h.mtl.list(h.scope),[]);assert.deepEqual(h.app.ctMtlAcceptances(),[]);
+            assert.doesNotMatch(JSON.stringify(h.mtl.getGenerations(h.scope)),/Working/);
+            return gets===1?h.status(body,{progress:{revision:2,phase:'generating',translation:'Working <b>{0}</b>\nNext',provisional:true}})
+                :{candidate:candidate(h.original,body.requestId,body.baseTargetHash)};
+        };
+        assert.equal(await h.app.ctMtlGenerate(h.field),true);assert.equal(posts,1);assert.equal(gets,2);
+        assert.deepEqual(h.app.ctMtlLive,{});assert.equal(h.app.ctMtlFieldValue(h.field),'Generated {0}');
+        assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');
+    }
+});
+
+test('lost start response and interrupted polling reconnect using the original ID without inference replay',async()=>{
+    const h=pollingHarness();let body,posts=0,gets=0;const phases=[];
+    const update=h.app.ctMtlProgressUpdate;h.app.ctMtlProgressUpdate=(job,value)=>{phases.push(value.phase);return update(job,value);};
+    h.app._cloud.request=async(path,options={})=>{
+        if(options.method==='POST'){posts++;body=options.body;throw new TypeError('Synthetic connection interruption');}
+        gets++;assert.equal(path,'/v1/mtl/requests/'+body.requestId);
+        if(gets===1)throw new TypeError('Synthetic connection interruption');
+        return gets===2?h.status(body):{candidate:candidate(h.original,body.requestId,body.baseTargetHash)};
+    };
+    assert.equal(await h.app.ctMtlGenerate(h.field),true);assert.equal(posts,1);assert.equal(gets,3);
+    assert.ok(phases.includes('reconnecting'));assert.ok(phases.includes('receiving'));assert.deepEqual(h.app.ctMtlLive,{});
+});
+
+test('polling rejects mismatched scope, request, malformed preview and nonmonotonic snapshots safely',async()=>{
+    for(const change of [value=>({...value,requestId:'another-request'}),value=>({...value,scope:{...value.scope,language:'German'}}),
+        value=>({...value,progress:{...value.progress,translation:'bad\u0000text'}}),value=>({...value,progress:{...value.progress,translation:'x'.repeat(32769)}}),
+        value=>({...value,progress:{...value.progress,provisional:false}}),value=>({...value,progress:{...value.progress,phase:'private-internal-phase'}})]){
+        const h=pollingHarness();h.app._cloud.request=async(_path,{body})=>change(h.status(body));
+        assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.match(h.app.ctMtlError,/does not match/);
+        assert.deepEqual(h.app.ctMtlLive,{});assert.deepEqual(h.mtl.list(h.scope),[]);assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');
+    }
+    const h=pollingHarness();let body,gets=0;
+    h.app._cloud.request=async(_path,options={})=>{
+        if(options.method==='POST'){body=options.body;return h.status(body,{progress:{revision:2,phase:'generating',translation:'Newer {0}',provisional:true}});}
+        if(++gets===1)return h.status(body,{progress:{revision:1,phase:'connecting',translation:'Older {0}',provisional:true}});
+        assert.equal(h.app.ctMtlProgressFor(h.field).text,'Newer {0}');return{candidate:candidate(h.original,body.requestId,body.baseTargetHash)};
+    };
+    assert.equal(await h.app.ctMtlGenerate(h.field),true);
+});
+
+test('Stop confirms cancellation once and removes preview without candidates or ordinary edits',async()=>{
+    const h=pollingHarness();let body,cancels=0,posts=0;
+    h.app.ctMtlRequestWait=job=>new Promise(resolve=>{job.wake=resolve;});
+    h.app._cloud.request=async(path,options={})=>{
+        if(path.endsWith('/cancellations')){cancels++;assert.deepEqual(options.body,{});return h.status(body,{status:'failed',errorCode:'MTL_CANCELLED'});}
+        posts++;body=options.body;return h.status(body);
+    };
+    const pending=h.app.ctMtlGenerate(h.field);await settle();
+    assert.equal(h.app.ctMtlProgressFor(h.field).canCancel,true);assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.equal(posts,1);
+    const first=h.app.ctMtlCancel(h.field),second=h.app.ctMtlCancel(h.field);assert.equal(await second,false);assert.equal(await first,true);
+    assert.equal(await pending,false);assert.equal(cancels,1);assert.deepEqual(h.app.ctMtlLive,{});assert.deepEqual(h.mtl.list(h.scope),[]);
+    assert.equal(h.app.ctMtlGenerations[0].status,'failed');assert.match(h.app.ctMtlError,/Translation stopped/);assert.equal(h.app.ctDraftDirty,false);
+});
+
+test('pending polling recovers after reload by GET only and authorization loss stops further polls',async()=>{
+    const h=pollingHarness();let body,posts=0,gets=0;
+    h.app._cloud.request=async(_path,options={})=>{
+        if(options.method==='POST'){posts++;body=options.body;throw Object.assign(new Error('Synthetic permission loss'),{status:403});}
+        gets++;return gets===1?h.status(body):{candidate:candidate(h.original,body.requestId,body.baseTargetHash)};
+    };
+    assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.equal(gets,0);assert.equal(h.app.ctMtlGenerations[0].status,'uncertain');
+    assert.equal(await h.app.ctMtlGenerate(h.field),true);assert.equal(posts,1);assert.equal(gets,2);
+});
+
+test('context boundaries abort polling and clear provisional text before late completion; typing suppresses its overlay',async()=>{
+    for(const change of [h=>h.app.cloudSignedIn=false,h=>h.app.cloudUser.assignmentVersion++,h=>h.scope.language='German',h=>h.changeEpoch(),h=>h.field.source='Changed {0}']){
+        const h=pollingHarness(),wait=deferred();let body;
+        h.app._cloud.request=async(_path,options={})=>{
+            if(options.method==='POST'){body=options.body;return h.status(body);}
+            await wait.promise;return{candidate:candidate(h.original,body.requestId,body.baseTargetHash)};
+        };
+        const pending=h.app.ctMtlGenerate(h.field);await settle();assert.ok(h.app.ctMtlProgressFor(h.field));
+        change(h);UI.mixin.watch.ctMtlRequestScopeKey.handler.call(h.app);assert.deepEqual(h.app.ctMtlLive,{});
+        wait.resolve();assert.equal(await pending,false);assert.deepEqual(h.mtl.list(h.scope),[]);
+    }
+    const h=pollingHarness(),wait=deferred();let body;
+    h.app._cloud.request=async(_path,options={})=>{
+        if(options.method==='POST'){body=options.body;return h.status(body);}
+        await wait.promise;return{candidate:candidate(h.original,body.requestId,body.baseTargetHash)};
+    };
+    const pending=h.app.ctMtlGenerate(h.field);await settle();h.app.ctValues[h.field.id]='Typing {0}';h.app.ctEdited(h.field);
+    wait.resolve();assert.equal(await pending,true);assert.equal(h.app.ctMtlCandidate(h.field),null);assert.equal(h.app.ctValues[h.field.id],'Typing {0}');
+    assert.equal(h.app.ctMtlCount,1);assert.deepEqual(h.app.ctMtlLive,{});
+});
+
+test('poll wait is abortable and does not keep a timer after a context change',async()=>{
+    const h=harness(),controller=new AbortController(),job={controller};
+    const pending=h.app.ctMtlRequestWait(job,10000);controller.abort();await assert.rejects(pending,{name:'AbortError'});assert.equal(job.wake,null);
+});
+
+test('poll rate limits back off and resume the same snapshot stream; terminal expiry never regenerates',async()=>{
+    const h=pollingHarness(),delays=[];let body,gets=0,posts=0;
+    h.app.ctMtlRequestWait=async(_job,delay)=>{delays.push(delay);};
+    h.app._cloud.request=async(_path,options={})=>{
+        if(options.method==='POST'){posts++;body=options.body;return h.status(body);}
+        if(++gets<=2)throw Object.assign(new Error('Synthetic rate limit'),{status:429});
+        if(gets===3)return h.status(body,{progress:{revision:2,phase:'validating',translation:'Working {0}',provisional:true}});
+        return h.status(body,{status:'completed',errorCode:'MTL_RESULT_EXPIRED',progress:undefined});
+    };
+    assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.deepEqual(delays,[250,500,1000,250]);assert.equal(posts,1);
+    assert.match(h.app.ctMtlError,/no longer available/);assert.deepEqual(h.app.ctMtlLive,{});assert.equal(h.app.ctMtlGenerations[0].status,'failed');
+    assert.deepEqual(h.mtl.list(h.scope),[]);assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');
+});
+
+test('poll authorization rejection stops reads and preserves the original recoverable request',async()=>{
+    const h=pollingHarness();let body,calls=0;
+    h.app._cloud.request=async(_path,options={})=>{
+        calls++;if(options.method==='POST'){body=options.body;return h.status(body);}
+        throw Object.assign(new Error('Synthetic access revoked'),{status:403});
+    };
+    assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.equal(calls,2);assert.deepEqual(h.app.ctMtlLive,{});
+    assert.equal(h.app.ctMtlGenerations[0].requestId,body.requestId);assert.equal(h.app.ctMtlGenerations[0].status,'uncertain');
+    assert.match(h.app.ctMtlError,/access revoked/);assert.deepEqual(h.mtl.list(h.scope),[]);
+});
 
 test('Admin details preview is read-only, sends no inference, and ordinary roles cannot inspect',async()=>{
     const h=debugHarness();let calls=0;h.app._cloud.request=async()=>{calls++;throw new Error('No request expected');};

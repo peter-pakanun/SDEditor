@@ -17,6 +17,9 @@
         MTL_PROVIDER_LIMIT: 'The translation service has reached its usage limit. Try again later.',
         MTL_PROVIDER_FAILED: 'The translation service could not complete this attempt. The existing text is unchanged.',
         MTL_REFUSED: 'The translation service declined this attempt. The existing text is unchanged.',
+        MTL_CANCELLED: 'Translation stopped. The existing text is unchanged.',
+        MTL_EXPIRED: 'This MTL attempt timed out. The existing text is unchanged.',
+        MTL_RESULT_EXPIRED: 'The earlier MTL result is no longer available. Generate again when ready.',
     })[code];
     function permissions(host, ctx) {
         const user = host.cloudUser;
@@ -29,8 +32,9 @@
             host.cloudUser?.language, host.cloudUser?.assignmentVersion, host.cloudUser?.isAdmin, host.cloudCanAccessAllLanguages]);
     }
     const mixin = {
-        data() { return { ctMtlCandidates: raw([]), ctMtlReviews: {}, ctMtlRecoveries:raw([]), ctMtlCapabilities: null, ctMtlError: '', ctMtlRequests: {}, ctMtlGenerations: raw([]), ctMtlRevision: 0 }; },
+        data() { return { ctMtlCandidates: raw([]), ctMtlReviews: {}, ctMtlRecoveries:raw([]), ctMtlCapabilities: null, ctMtlError: '', ctMtlRequests: {}, ctMtlLive: {}, ctMtlGenerations: raw([]), ctMtlRevision: 0 }; },
         computed: {
+            ctMtlRequestScopeKey() { return JSON.stringify([this.ctActive, this.ctWorkspace?.scope, this.lang, this.gameVersion, this.branchId, access(this), this._cloud?.epoch, this.mtlConsentVersion]); },
             ctInputValues() {
                 const host = this;
                 if (!this._ctMtlInputProxy) this._ctMtlInputProxy = raw(new Proxy({}, {
@@ -69,12 +73,103 @@
                 return fields.size;
             }
         },
+        watch: { ctMtlRequestScopeKey: { flush: 'sync', handler() { this.ctMtlAbortRequests(); } } },
         beforeUnmount() { this.ctMtlReset(); },
         methods: {
+            ctMtlAbortRequests() {
+                for (const job of this._ctMtlJobs?.values() || []) job.controller.abort();
+                this._ctMtlJobs?.clear(); this.ctMtlLive = {}; this.ctMtlRequests = {};
+            },
+            ctMtlProgressFor(field) {
+                this.ctRevision; this.ctMtlRevision;
+                const name = key(this.ctSelection, field?.id), value = this.ctMtlLive[name], job = this._ctMtlJobs?.get(name);
+                return value && value.requestId === job?.requestId && job.current?.() ? value : null;
+            },
+            ctMtlProgressUpdate(job, value) {
+                if (this._ctMtlJobs?.get(job.name) !== job || !job.current?.()) return false;
+                const old = this.ctMtlLive[job.name] || {}, phase = ['waiting', 'receiving', 'validating', 'reconnecting', 'cancelling'].includes(value.phase) ? value.phase : old.phase || 'waiting';
+                const text = typeof value.text === 'string' && value.text.length <= 32768 ? value.text : old.text || '';
+                const elapsedMs = Number.isFinite(value.elapsedMs) && value.elapsedMs >= 0 ? value.elapsedMs : Math.max(0, Date.now() - job.startedAt);
+                this.ctMtlLive = { ...this.ctMtlLive, [job.name]: { requestId: job.requestId, phase, text, elapsedMs, receivedAt: Date.now(), canCancel: value.canCancel === true } };
+                return true;
+            },
+            ctMtlProgressClear(job) {
+                if (this.ctMtlLive[job.name]?.requestId !== job.requestId) return;
+                const live = { ...this.ctMtlLive }; delete live[job.name]; this.ctMtlLive = live;
+            },
+            ctMtlRequestWait(job, delay) {
+                return new Promise((resolve, reject) => {
+                    const finish = error => { clearTimeout(timer); job.controller.signal.removeEventListener('abort', abort); if (job.wake === finish) job.wake = null; error ? reject(error) : resolve(); },
+                        abort = () => finish(stale()), timer = setTimeout(finish, delay);
+                    job.wake = finish; job.controller.signal.addEventListener('abort', abort, {once:true});
+                    if (job.controller.signal.aborted) abort();
+                });
+            },
+            async ctMtlCancel(field) {
+                const job = this._ctMtlJobs?.get(key(this.ctSelection, field?.id));
+                if (!job?.current?.() || !job.cancel || job.cancelling) return false;
+                job.cancelling = true; this.ctMtlProgressUpdate(job, {phase:'cancelling'});
+                try {
+                    const response = await job.cancel();
+                    if (!job.current()) return false;
+                    job.cancelResponse = response; job.wake?.(); return true;
+                } catch (error) {
+                    if (job.current() && !error.stale) {
+                        this.ctMtlError = 'The stop request could not be confirmed. The translation status will be checked automatically.';
+                        job.cancelling = false; this.ctMtlProgressUpdate(job, {phase:'reconnecting',canCancel:true});
+                    }
+                    return false;
+                }
+            },
+            async ctMtlPoll(job, initial) {
+                let response = initial, failures = 0, delay = 250;
+                const until = Date.now() + 210000, path = '/v1/mtl/requests/' + encodeURIComponent(job.requestId),
+                    invalid = () => Object.assign(new Error('The MTL progress response does not match this request. The existing text is unchanged.'), {code:'MTL_INVALID_RESPONSE'});
+                job.cancel = () => job.client.request(path + '/cancellations', {method:'POST',body:{},signal:job.controller.signal,timeout:10000});
+                while (job.current()) {
+                    if (response) {
+                        if (response.candidate) return response;
+                        if (response.requestId !== job.requestId || !['reserved','running','completed','failed','cancelled','expired','interrupted'].includes(response.status)) throw invalid();
+                        const scope = response.scope;
+                        if (!scope || scope.language !== job.scope.language || ['game','branchId'].some(name => scope[name] !== undefined && scope[name] !== job.scope[name])
+                            || (String(job.scope.groupId).startsWith('local:') ? scope.local !== true : scope.groupId !== job.scope.groupId)) throw invalid();
+                        if (!['reserved','running'].includes(response.status)) throw Object.assign(new Error(failureText(response.errorCode)
+                            || 'This MTL attempt ended without a usable translation. The existing text is unchanged.'), {code:response.errorCode || 'MTL_FAILED',mtlFinal:true});
+                        const progress = response.progress, phase = {preparing:'waiting',connecting:'waiting',generating:'receiving',validating:'validating'}[progress?.phase];
+                        if (progress && (progress.provisional !== true || !Number.isSafeInteger(progress.revision) || progress.revision < 0 || !phase
+                            || typeof progress.translation !== 'string' || progress.translation.length > 32768 || progress.translation.includes('\u0000')
+                            || progress.translation.isWellFormed && !progress.translation.isWellFormed())) throw invalid();
+                        if (progress && (job.progressRevision === undefined || progress.revision >= job.progressRevision)) {
+                            job.progressRevision = progress.revision;
+                            this.ctMtlProgressUpdate(job, {phase:job.cancelling ? 'cancelling' : phase,text:progress.translation,canCancel:!job.cancelling});
+                        } else this.ctMtlProgressUpdate(job, {phase:job.cancelling ? 'cancelling' : undefined,canCancel:!job.cancelling});
+                        delay = Math.max(250, Math.min(2000, Number.isFinite(response.pollAfterMs) ? response.pollAfterMs : 500));
+                    }
+                    if (Date.now() >= until) throw Object.assign(new Error('The MTL request could not be confirmed. Check the pending request when the connection returns.'), {code:'MTL_REQUEST_UNCERTAIN'});
+                    await this.ctMtlRequestWait(job, Math.min(5000, delay * Math.pow(2, Math.min(failures,4))));
+                    if (!job.current()) throw stale();
+                    if (job.cancelResponse) { response = job.cancelResponse; job.cancelResponse = null; continue; }
+                    try {
+                        response = await job.client.request(path, {signal:job.controller.signal,timeout:10000});
+                        if (!job.current()) throw stale();
+                        failures = 0;
+                    } catch (error) {
+                        if (!job.current() || error.stale) throw stale();
+                        const status = error.status || error.statusCode;
+                        if (status && ![408,429].includes(status) && status < 500) {
+                            if (status === 404) error.mtlFinal = true;
+                            throw error;
+                        }
+                        failures++; response = null;
+                        this.ctMtlProgressUpdate(job, {phase:job.cancelling ? 'cancelling' : 'reconnecting',canCancel:!job.cancelling});
+                    }
+                }
+                throw stale();
+            },
             ctMtlReset() {
                 this.ctMtlDebugReset?.();
+                this.ctMtlAbortRequests();
                 this._ctMtlRun = null; this._ctMtlSync?.stop?.(); this._ctMtlSync = null;
-                for (const request of this._ctMtlJobs?.values() || []) request.controller.abort();
                 this._ctMtlJobs = raw(new Map()); this._ctMtlEditMutations = raw(new Map()); this._ctMtlReviewQueues = raw(new Map());
                 this._ctMtlStoredReviews=raw(new Map());this._ctMtlRecoveryRun=null;
                 this._ctMtlDescriptors = raw([]); this._ctMtlSuppressed = raw(new Set()); this._ctMtlAcceptanceClaims = {};
@@ -483,15 +578,18 @@
                 const ctx = this.ctContext(), unit = this.ctCurrentUnit;
                 if (!generation || !unit?.fields.includes(field) || !permissions(this, ctx) || this.ctMtlBusy(field)) return false;
                 const client = this._cloud, capturedAccess = access(this), controller = new AbortController(), name = key(unit.id,field.id),
-                    jobs = this._ctMtlJobs ||= raw(new Map()), job = { requestId:generation.requestId, controller },
+                    jobs = this._ctMtlJobs ||= raw(new Map()), job = { requestId:generation.requestId, controller, name, startedAt:Date.now(), client, scope:copy(ctx.scope) },
                     mutation = this._ctMtlEditMutations?.get(name) || 0;
                 jobs.set(name,job); this.ctMtlRequests = {...this.ctMtlRequests,[name]:generation.requestId};
                 const current = () => jobs.get(name) === job && !controller.signal.aborted && this.ctCurrent(ctx) && this.ctActive
                     && client === this._cloud && capturedAccess === access(this) && permissions(this,ctx)
                     && this._ctUnitIndex?.get(unit.id) === unit && M.rawSourceHash(field.source) === generation.rawSourceHash;
+                job.current = current;
+                this.ctMtlProgressUpdate(job, { phase:'waiting', text:'' });
                 try {
-                    const response = await client.request('/v1/mtl/requests/' + encodeURIComponent(generation.requestId), {signal:controller.signal});
+                    let response = await client.request('/v1/mtl/requests/' + encodeURIComponent(generation.requestId), {signal:controller.signal});
                     if (!current()) throw stale();
+                    if (this.ctMtlCapabilities?.delivery === 'poll-v1' && !response.candidate) response = await this.ctMtlPoll(job, response);
                     if (response.candidate) return await this.ctMtlAdoptCandidate(ctx,unit,field,response.candidate,generation,current,
                         () => (this._ctMtlEditMutations?.get(name) || 0) !== mutation);
                     const status = response.request?.status || response.job?.status || response.status;
@@ -506,16 +604,17 @@
                     this.ctMtlError = 'The earlier MTL request is still pending. Check it again shortly.'; return false;
                 } catch (error) {
                     if (current() && !error.stale && error.name !== 'AbortError') {
-                        if (error.status === 404 || error.statusCode === 404 || ['MTL_INVALID_RESPONSE','REVISION_CONFLICT'].includes(error.code)) {
+                        if (error.mtlFinal || error.status === 404 || error.statusCode === 404 || ['MTL_INVALID_RESPONSE','REVISION_CONFLICT'].includes(error.code)) {
                             await this.ctMtlStorage(ctx).putGeneration(ctx.scope,{requestId:generation.requestId,status:'failed'});
                             if (!current()) return false;
                             this.ctMtlGenerations = raw(await this.ctMtlStorage(ctx).getGenerations(ctx.scope));
                             if (!current()) return false;
-                            this.ctMtlError = ['MTL_INVALID_RESPONSE','REVISION_CONFLICT'].includes(error.code) ? error.message : 'The earlier MTL request did not start. Generate again when ready.';
+                            this.ctMtlError = error.mtlFinal || ['MTL_INVALID_RESPONSE','REVISION_CONFLICT'].includes(error.code) ? error.message : 'The earlier MTL request did not start. Generate again when ready.';
                         } else this.ctMtlError = error.message;
                     }
                     return false;
                 } finally {
+                    this.ctMtlProgressClear(job);
                     if (jobs.get(name) === job) jobs.delete(name);
                     if (this.ctMtlRequests[name] === generation.requestId) { const requests = {...this.ctMtlRequests}; delete requests[name]; this.ctMtlRequests = requests; }
                 }
@@ -523,7 +622,7 @@
             ctMtlBuildContext(field) {
                 const ctx = this.ctContext();
                 return Context.create({ unit: this.ctCurrentUnit, field, units: this.ctUnits, npcIndex: this._ctNpcIndex, convoIndex: this._ctConvoIndex,
-                    skillResolver: this.ctSkillResolver, dictionary: this.ctMtlCommittedGlossary(ctx), scope: ctx.scope });
+                    skillResolver: this.ctSkillResolver, dictionary: this.ctMtlCommittedGlossary(ctx), saved: this.ctSaved, scope: ctx.scope });
             },
             async ctMtlGenerate(field) {
                 const ctx = this.ctContext();
@@ -538,12 +637,15 @@
                 if (!descriptor) { this.ctMtlError = 'The original workbook identity is unavailable. Reopen this workspace.'; return false; }
                 const name = key(unit.id, field.id), mutations = this._ctMtlEditMutations ||= raw(new Map()), mutation = mutations.get(name) || 0,
                     previous = String(this.ctValues[field.id] ?? ''), capturedSource = M.rawSourceHash(field.source), controller = new AbortController(), requestId = id();
-                const job = { requestId, controller }, jobs = this._ctMtlJobs ||= raw(new Map()); jobs.set(name, job);
+                const asynchronous = this.ctMtlCapabilities?.delivery === 'poll-v1',
+                    job = { requestId, controller, name, startedAt:Date.now(), client, scope:copy(ctx.scope) }, jobs = this._ctMtlJobs ||= raw(new Map()); jobs.set(name, job);
                 let sent = false, generation, confirmedFailure = false;
                 this.ctMtlRequests = { ...this.ctMtlRequests, [name]: requestId };
                 const current = () => jobs.get(name) === job && !controller.signal.aborted && this.ctCurrent(ctx) && this.ctActive
                     && client === this._cloud && capturedAccess === access(this) && permissions(this, ctx) && this.mtlConsentVersion === 'mtl-v1'
                     && this._ctUnitIndex?.get(unit.id) === unit && unit.fields.includes(field) && M.rawSourceHash(field.source) === capturedSource;
+                job.current = current;
+                this.ctMtlProgressUpdate(job, { phase:'waiting', text:'' });
                 try {
                     const context = this.ctMtlBuildContext(field);
                     const body = { requestId, unitId: unit.id, fieldId: field.id, role: unit.role, assetHash: descriptor.assetHash || descriptor.hash,
@@ -552,8 +654,9 @@
                         context: context.initial, consentVersion: 'mtl-v1', ...(String(ctx.scope.groupId).startsWith('local:')
                             ? { language: ctx.scope.language, game:ctx.scope.game, branchId:ctx.scope.branchId || 'default' } : {}) };
                     if (new TextEncoder().encode(JSON.stringify(body)).length > Context.LIMITS.bytes) throw new Error('This MTL source and context exceed the request size limit.');
-                    const path = String(ctx.scope.groupId).startsWith('local:') ? '/v1/mtl/local/requests'
+                    let path = String(ctx.scope.groupId).startsWith('local:') ? '/v1/mtl/local/requests'
                         : '/v1/content-groups/' + encodeURIComponent(ctx.scope.groupId) + '/mtl/requests?language=' + encodeURIComponent(ctx.scope.language);
+                    if (asynchronous) path += (path.includes('?') ? '&' : '?') + 'async=1';
                     const store = this.ctMtlStorage(ctx);
                     generation = await store.putGeneration(ctx.scope,{requestId,unitId:unit.id,fieldId:field.id,rawSourceHash:capturedSource,
                         sourceHash:body.sourceHash,assetHash:body.assetHash,parserVersion:body.parserVersion,baseTargetHash:body.baseTargetHash,
@@ -562,16 +665,27 @@
                     this.ctMtlGenerations = raw([...this.ctMtlGenerations.filter(value=>value.requestId!==requestId),generation]);
                     this.ctMtlDebugBegin?.(field, body);
                     sent = true;
-                    const response = await client.request(path, { method: 'POST', body, signal: controller.signal, timeout: 190000 });
+                    let response;
+                    try { response = await client.request(path, { method: 'POST', body, signal: controller.signal, timeout: asynchronous ? 15000 : 190000 }); }
+                    catch (error) {
+                        const status = error.status || error.statusCode;
+                        if (!asynchronous || !current() || error.stale || status && ![408,429].includes(status) && status < 500) throw error;
+                        // Admission can succeed even if the short response is lost.
+                        // Poll the original ID without replaying the POST body.
+                        this.ctMtlProgressUpdate(job, {phase:'reconnecting'});
+                        response = await this.ctMtlPoll(job, null);
+                    }
                     if (!current()) throw stale();
+                    if (asynchronous && !response.candidate) response = await this.ctMtlPoll(job, response);
+                    this.ctMtlProgressUpdate(job, { phase:'validating' });
                     const adopted = await this.ctMtlAdoptCandidate(ctx,unit,field,response.candidate,generation,current,()=>(mutations.get(name)||0)!==mutation);
                     if (current()) this.ctMtlDebugFinish?.(field, requestId);
                     return adopted;
                 } catch (error) {
-                    if (error.status === 422 && ['MTL_OUTPUT_INVALID', 'MTL_REFUSED'].includes(error.code)) confirmedFailure = true;
+                    if (error.mtlFinal || error.status === 422 && ['MTL_OUTPUT_INVALID', 'MTL_REFUSED'].includes(error.code)) confirmedFailure = true;
                     // A proxy can replace a failed POST with an unreadable error
                     // page. Inspect the same job once; never repeat inference.
-                    if (sent && current() && ['TypeError', 'NetworkError', 'SyntaxError'].includes(error.name)) {
+                    if (!asynchronous && sent && current() && ['TypeError', 'NetworkError', 'SyntaxError'].includes(error.name)) {
                         let lookupFailed = false;
                         try {
                             const status = await client.request('/v1/mtl/requests/' + encodeURIComponent(requestId), { signal: controller.signal });
@@ -593,6 +707,7 @@
                     return false;
                 }
                 finally {
+                    this.ctMtlProgressClear(job);
                     if (jobs.get(name) === job) jobs.delete(name);
                     if (this.ctMtlRequests[name] === requestId) { const requests = { ...this.ctMtlRequests }; delete requests[name]; this.ctMtlRequests = requests; }
                 }

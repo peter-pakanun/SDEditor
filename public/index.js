@@ -8218,6 +8218,7 @@ if (window.ClientTextUI) {
 if (window.EditorComponents?.TextField) app.component('editor-text-field', window.EditorComponents.TextField);
 if (window.KeywordPopups) app.component('keyword-popup-overlay', window.KeywordPopups.Overlay);
 if (window.ClientTextMtlDebug) app.component('ct-mtl-debug-dialog', window.ClientTextMtlDebug.Dialog);
+if (window.ClientTextMtlProgress) app.component('ct-mtl-progress', window.ClientTextMtlProgress.Preview);
 if (window.KeywordPopups) app.component('keyword-autocomplete-details', window.KeywordPopups.Details);
 if (window.KeywordPopups?.SheetPreview) app.component('keyword-sheet-preview', window.KeywordPopups.SheetPreview);
 if (window.EditorComponents?.Preview) app.component('editor-preview', window.EditorComponents.Preview);

@@ -175,6 +175,17 @@
 .ctMtlDebugMode {font-weight:600;color:var(--ui-accent);}
 .ctMtlDebugBody pre {white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--ui-border);border-radius:4px;background:var(--color-element-alt);padding:12px;font-size:12px;user-select:text;}
 .ctMtlButtonTarget + .fieldToolbarSeparator {margin-left:0;}
+.ctMtlProgressTarget {display:inline-flex;align-items:center;gap:2px;}
+.ctMtlProgressTarget:focus-visible {outline:2px solid var(--ui-accent);outline-offset:2px;border-radius:4px;}
+.ctMtlLiveButton {font-size:11px;padding:2px 5px;}
+.ctMtlProgressPopup {position:fixed;z-index:3400;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;width:420px;max-width:calc(100vw - 16px);max-height:min(400px,80vh);padding:12px;border:1px solid var(--ui-border);border-radius:7px;box-shadow:0 8px 28px #0005;background:var(--color-element);color:var(--color-font);font-size:12px;}
+.ctMtlProgressPopup header {display:flex;align-items:center;gap:10px;}
+.ctMtlProgressPopup header strong {margin-right:auto;}
+.ctMtlProgressPopup header button {font-size:16px;line-height:1;padding:2px 5px;}
+.ctMtlProgressPopup p {margin:0;}
+.ctMtlProvisionalLabel {font-weight:600;color:var(--ui-accent);}
+.ctMtlProgressPopup pre {box-sizing:border-box;min-height:48px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;margin:0;padding:10px;border:1px solid var(--ui-border);border-radius:4px;background:var(--color-element-alt);font:inherit;line-height:1.5;}
+.ctMtlProgressHelp {font-size:11px;color:var(--ui-muted);line-height:1.4;}
 .ctTarget.mtl .editorFieldFrame {outline:1px solid #67D4F1;outline-offset:-1px;}
 .ctMtlReview {display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;padding:5px 0;}
 .ctMtlReview small {flex-basis:100%;color:var(--ui-muted);}

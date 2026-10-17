@@ -294,6 +294,8 @@
                     get mtlBusy() { return !!host.ctMtlBusy?.(field); },
                     get mtlDisabled() { return this.disabled || !host.ctMtlCanGenerate?.(field); },
                     get mtlHint() { return host.ctMtlHint?.(field) || 'MTL'; },
+                    get mtlProgress() { return valid() ? host.ctMtlProgressFor?.(field) || null : null; },
+                    cancelMtl: () => valid() && host.ctMtlCancel?.(field),
                     get mtlDebug() { return !!host.ctMtlDebugAllowed; },
                     debugMtl(event) { return host.ctMtlDebugOpen?.(field, event); },
                     get mtlShortcut() { return host.mtlShortcut==='f8'?'F8':host.mtlShortcut==='ctrl-alt-f8'?'Control+Alt+F8':undefined; },
