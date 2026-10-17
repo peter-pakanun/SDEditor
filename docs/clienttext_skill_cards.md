@@ -14,8 +14,9 @@ workbook sheets remain outside scope.
 inline/full card and manages its artwork. `index.html`, `clientTextUi.js`,
 `editorComponents.js` and `index.js` connect it to the existing preview and
 variable list. Cards apply to verified active-skill descriptions,
-names, gem item names and mapped related tags/labels. Short descriptions retain
-the ordinary field preview because they belong to a different game surface.
+names, short descriptions, gem item names and mapped related tags/labels. When the
+catalog includes Short Description, a separate compact card appears below the
+full preview on each side. Selecting that field keeps both cards mounted.
 
 The card consumes independent `source` and `target` models and passes text through
 the existing
@@ -38,7 +39,19 @@ footer; unresolved combat rows are omitted explicitly. Decorative frames use
 CSS. The full editor gives contextual cards a larger initial preview height and
 retains manual resizing.
 
-Clicking the skill name or description, or Alt+Clicking any mapped workbook text,
+The compact card reuses the private icon/illustration and each side's existing
+font and segment renderer. Its header uses the ActiveSkills name (including when
+the full card shows a gem item name) and the same live Cost example as the full
+card. Both cards choose timing from the first immutable GemTags ID: `spell`
+means Cast Time, `attack` means Attack Time, and every other first tag (including
+no tags) means Use Time. Later tags and translated tag text do not change the
+choice. A divider separates the header from the light, wrapping Short Description
+text. Missing artwork or example labels leave the text usable; an absent short
+description reference hides the compact card. A blank translation displays
+`(empty)` without falling back to English. The full editor reserves 6 px of
+clearance between skill-card frames and its scrollbar gutter.
+
+Clicking the skill name or either description, or Alt+Clicking any mapped workbook text,
 navigates to its exact editable translation field in the selected workspace
 language, from either preview side.
 Related-sheet navigation checkpoints the outgoing draft using the existing
@@ -179,33 +192,53 @@ matches and ambiguous rows retain the normal preview rather than guessing.
 `compose` returns `state: 'ready' | 'partial' | 'unavailable'`. These are transient
 preview availability states, not persisted workspace statuses. Successful models
 contain `skillId`, `revision`, `clientBuild`, `assets`, `compatibility`, `warnings`,
-and independent `source`/`target` sides. Side entries contain raw `text`,
-`available`, `focused`, and, for workbook fields, `reference` and `origin`.
+and independent `source`/`target` sides. Each side includes `skillTitle` for the
+ActiveSkills name, alongside the existing context-sensitive `title` and optional
+`shortDescription`. `properties` and `shortProperties` contain each card's example
+rows with independent workbook availability and the same shared example values.
+Side entries contain raw `text`, `available`, `focused`, and, for workbook fields,
+`reference` and `origin`.
 Tabs preserve their catalog IDs. Missing SD data omits stat rows and the orphaned
 quality heading. The current same-scope row draft overrides Saved values including
 intentional blanks. Other rows use `ClientTextState.valuesFor`.
 
-The user explicitly requested four editable preview examples with these rendered
-defaults: Level 1, Quality +10%, Cost 5 Mana, and Critical Hit Chance 7.00%.
+Editable preview examples use these defaults: Level 1, Quality +10%, Cost 5 Mana,
+Critical Hit Chance 7.00%, and timing 1.00 seconds. Timing is one shared
+`skill-card:time` control for both cards, with two decimal places and a range of
+0–3600 seconds. It appears only when the corresponding immutable workbook timing
+label and value format match the canonical references below.
 `EXAMPLE_KEYS` supplies distinct keys for the existing variable-list model;
 `exampleDefaults()` returns a new default value map, `defaultExampleValue(key)`
 provides one default, and `resetExamples(values)` returns a copy resetting only
-these four keys. Preserve other text-template variables when resetting.
+these example keys. Preserve other text-template variables when resetting.
 `compose({variables})` derives each side's `properties` using its workbook label
 references and cost format, without editing fields, drafts or Saved values.
 The quality and critical labels retain keyword markup and must use the normal
 segment/keyword renderer in both the card and variable-list labels. `variableKeys`
-and `exampleValues` describe the four controls; `invalidExampleKeys` lets the UI
+and `exampleValues` describe the available controls; `invalidExampleKeys` lets the UI
 mark invalid input. Numeric validation rejects markup, non-finite values, range
 violations and fractional levels; invalid input renders the requested default.
 Critical chance renders two decimal places. These are labelled preview examples,
 not claims about the selected gem level or current character.
 
-The four keys are appended to `ctPreviewKeys` and `gamePreviewVarKeyList` for an
+The available keys are appended to `ctPreviewKeys` and `gamePreviewVarKeyList` for an
 available card, using the existing `ctPreviewGggVars`/`gamePreviewVarValues` map.
 `defaultPreviewVarValue` delegates these keys to `defaultExampleValue`. The
 variable list renders property labels through the keyword renderer. Reset changes
 only this preview map; no sample value enters `ctValues` or a save command.
+
+Timing uses exact normal ClientStrings record IDs and source fingerprints in the
+current immutable workbook, through the same scoped resolver/draft/navigation
+guards as catalog references. Full-card labels are
+`ItemDisplaySkillGemCastTime`, `ItemDisplaySkillGemAttackTimeOverride`, or
+`ItemDisplaySkillGemUseTime`; compact labels are `SkillPopupCastTime`,
+`SkillPopupAttackTime`, or `SkillPopupUseTime`. Full and compact value formats
+are `ItemDisplaySkillGemCastTimeValue` (`{0}s`) and `SkillPopupCastTimeValue`
+(`{0} s`). Both use the shared example duration and their own selected-language
+label/format. These optional workbook bindings require no catalog/API schema
+change. Each card independently omits absent, ambiguous or mismatched bindings;
+blank target labels or formats never fall back to English. Sample durations are
+not character data.
 
 An optional SD snapshot contains `accountId`, `game`, `language`, `archiveHash`,
 and `files`. Each file has `filepath`, ordered `stats`, and `translations`, as

@@ -13,7 +13,8 @@
         Object.freeze({ name: 'level', key: 'skill-card:level', defaultValue: '1', min: 1, max: 100, integer: true }),
         Object.freeze({ name: 'quality', key: 'skill-card:quality', defaultValue: '10', min: -100, max: 1000 }),
         Object.freeze({ name: 'cost', key: 'skill-card:cost', defaultValue: '5', min: 0, max: 1000000000 }),
-        Object.freeze({ name: 'criticalChance', key: 'skill-card:critical-chance', defaultValue: '7.00', min: 0, max: 100, decimals: 2 })
+        Object.freeze({ name: 'criticalChance', key: 'skill-card:critical-chance', defaultValue: '7.00', min: 0, max: 100, decimals: 2 }),
+        Object.freeze({ name: 'time', key: 'skill-card:time', defaultValue: '1.00', min: 0, max: 3600, decimals: 2 })
     ]);
     const EXAMPLE_KEYS = Object.freeze(EXAMPLE_VARIABLES.map(variable => variable.key));
     const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
@@ -23,6 +24,22 @@
     const text = (value, max = 32768) => typeof value === 'string' && value.length > 0 && value.length <= max;
     const hash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
     const slug = value => typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value) && value.length <= 128;
+    // Canonical ClientStrings bindings, checked against immutable workbook English
+    // before use. These optional labels need no new private catalog/API contract.
+    function timeReference(recordId, source) {
+        return Object.freeze({ sheet: 'ClientStrings', recordId, field: 'Text', source, sourceHash: State.sourceHash(source) });
+    }
+    const TIME_REFERENCES = Object.freeze({
+        cast: Object.freeze({ label: timeReference('ItemDisplaySkillGemCastTime', 'Cast Time'), shortLabel: timeReference('SkillPopupCastTime', 'Cast Time') }),
+        attack: Object.freeze({ label: timeReference('ItemDisplaySkillGemAttackTimeOverride', 'Attack Time'), shortLabel: timeReference('SkillPopupAttackTime', 'Attack Time') }),
+        use: Object.freeze({ label: timeReference('ItemDisplaySkillGemUseTime', 'Use Time'), shortLabel: timeReference('SkillPopupUseTime', 'Use Time') })
+    });
+    const TIME_FORMAT = timeReference('ItemDisplaySkillGemCastTimeValue', '{0}s');
+    const SHORT_TIME_FORMAT = timeReference('SkillPopupCastTimeValue', '{0} s');
+    function timingReferences(card) {
+        const first = card.tags[0]?.ref.recordId;
+        return { ...TIME_REFERENCES[first === 'spell' ? 'cast' : first === 'attack' ? 'attack' : 'use'], format: TIME_FORMAT, shortFormat: SHORT_TIME_FORMAT };
+    }
     function list(value, limit, label) {
         if (!Array.isArray(value) || value.length > limit) invalid(label);
         return value;
@@ -30,7 +47,7 @@
     function refs(card) {
         return [card.title, card.itemTitle, card.description, card.shortDescription,
             ...card.tags.map(tag => tag.ref), ...card.tabs.map(tab => tab.label), card.qualityLabel, card.footer,
-            ...Object.values(card.examples || {})].filter(Boolean);
+            ...Object.values(card.examples || {}), ...Object.values(timingReferences(card))].filter(Boolean);
     }
     function exampleDefaults() { return Object.fromEntries(EXAMPLE_VARIABLES.map(variable => [variable.key, variable.defaultValue])); }
     function defaultExampleValue(key) { return EXAMPLE_VARIABLES.find(variable => variable.key === key)?.defaultValue; }
@@ -180,7 +197,7 @@
                 return { id: line.id, source, target: typeof target === 'string' ? target : '', translated: typeof target === 'string' && !!target.trim(),
                     filepath: line.filepath, entryIndex: line.entryIndex };
             }
-            const title = field(unit.sheet === 'BaseItemTypes' ? card.itemTitle : card.title);
+            const skillTitle = field(card.title), title = unit.sheet === 'BaseItemTypes' ? field(card.itemTitle) : skillTitle;
             const description = field(card.description), shortDescription = field(card.shortDescription), footer = field(card.footer);
             const tags = card.tags.map(tag => ({ position: tag.position, value: field(tag.ref) }));
             const tabs = card.tabs.map(tab => ({ id: tab.id, label: field(tab.label), lines: tab.lines.map(stat).filter(Boolean) }));
@@ -188,25 +205,37 @@
             const qualityLabel = qualityLines.length ? field(card.qualityLabel) : null;
             const examples = normalizeExamples(options.variables), exampleLabels = card.examples
                 ? Object.fromEntries(Object.entries(card.examples).map(([name, ref]) => [name, field(ref)])) : null;
+            const timing = Object.fromEntries(Object.entries(timingReferences(card)).map(([name, ref]) => [name, lookup(ref).status === 'matched' ? field(ref) : null]));
+            const timeEnabled = !!(timing.label && timing.format || shortDescription && timing.shortLabel && timing.shortFormat);
+            const variableKeys = EXAMPLE_VARIABLES.filter(variable => variable.name === 'time' ? timeEnabled : !!exampleLabels).map(variable => variable.key);
             function side(translated) {
                 const value = entry => entry && ({ text: translated ? entry.target : entry.source,
                     available: translated ? entry.translated : !!entry.source, focused: entry.focused || false,
                     ...(entry.reference ? { reference: entry.reference, origin: entry.origin } : {}) });
-                const properties = exampleLabels ? EXAMPLE_VARIABLES.map(variable => {
+                const properties = exampleLabels ? EXAMPLE_VARIABLES.filter(variable => variable.name !== 'time').map(variable => {
                     const raw = examples.values[variable.key], format = translated ? exampleLabels.costFormat.target : exampleLabels.costFormat.source;
                     const formatted = variable.name === 'quality' ? (Number(raw) >= 0 ? '+' : '') + raw + '%'
                         : variable.name === 'criticalChance' ? raw + '%' : variable.name === 'cost' ? format.replace(/\{0\}/g, raw) : raw;
                     return { key: variable.key, label: value(exampleLabels[variable.name]), text: formatted,
                         available: !!formatted && (!translated || exampleLabels[variable.name].translated), example: true };
                 }) : [];
-                return { title: value(title), description: value(description), shortDescription: value(shortDescription), footer: value(footer), properties,
+                function timeProperty(label, format) {
+                    if (!label || !format || translated && (!label.translated || !format.translated)) return null;
+                    return { key: 'skill-card:time', label: value(label),
+                        text: (translated ? format.target : format.source).replace(/\{0\}/g, examples.values['skill-card:time']),
+                        available: true, example: true };
+                }
+                const fullTime = timeProperty(timing.label, timing.format), shortTime = shortDescription && timeProperty(timing.shortLabel, timing.shortFormat);
+                if (fullTime) properties.push(fullTime);
+                const shortProperties = [...properties.filter(property => property.key === 'skill-card:cost'), ...(shortTime ? [shortTime] : [])];
+                return { title: value(title), skillTitle: value(skillTitle), description: value(description), shortDescription: value(shortDescription), footer: value(footer), properties, shortProperties,
                     tags: tags.map(tag => ({ position: tag.position, ...value(tag.value) })),
                     tabs: tabs.map(tab => ({ id: tab.id, label: value(tab.label), lines: tab.lines.map(line => ({ id: line.id, ...value(line) })) })),
                     qualityLabel: value(qualityLabel), qualityLines: qualityLines.map(line => ({ id: line.id, ...value(line) })) };
             }
             return { state: warnings.size ? 'partial' : 'ready', skillId: card.id, revision: catalog.revision, clientBuild: catalog.clientBuild,
                 source: side(false), target: side(true), warnings: [...warnings],
-                variableKeys: card.examples ? [...EXAMPLE_KEYS] : [], exampleValues: examples.values, invalidExampleKeys: examples.invalidKeys,
+                variableKeys, exampleValues: examples.values, invalidExampleKeys: examples.invalidKeys.filter(key => variableKeys.includes(key)),
                 assets: card.assets ? { ...card.assets, game: catalog.game } : null,
                 compatibility: { matched: primary.filter(result => result.status === 'matched').length, total: primary.length } };
         }

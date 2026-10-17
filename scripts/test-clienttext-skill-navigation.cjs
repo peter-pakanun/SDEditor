@@ -19,6 +19,7 @@ function harness() {
             title: ref('ActiveSkills', id + '-skill', 'DisplayName', id + ' ability'),
             itemTitle: ref('BaseItemTypes', id + '-gem', 'Display Name', id + ' item'),
             description: ref('ActiveSkills', id + '-skill', 'Description', id + ' description'),
+            shortDescription: ref('ActiveSkills', id + '-skill', 'Short Description', id + ' brief description'),
             tags: [{ position: 'type', ref: tag }], tabs: [], examples: {
                 level: ref('ClientStrings', 'level-label', 'Text', 'Example level'),
                 quality: ref('ClientStrings', 'quality-label', 'Text', 'Example quality'),
@@ -131,13 +132,14 @@ test('read-only catalog text, missing/mismatched references and busy navigation 
     }
 });
 
-test('plain and Alt+Click on either preview name/description focus the exact selected-language translation field', async () => {
-    for (const side of ['source', 'target']) for (const name of ['title', 'description']) for (const altKey of [false, true]) {
+test('plain and Alt+Click on full/short preview names and descriptions focus the exact translation field', async () => {
+    for (const side of ['source', 'target']) for (const name of ['title', 'skillTitle', 'description', 'shortDescription']) for (const altKey of [false, true]) {
         const h = harness(), entry = h.app.ctSkillPreviewModel[side][name], text = textControl(h, entry, true), event = clickEvent({ altKey });
         const before = clone(h.app.ctValues);
         assert.equal(await text.edit(event), true); assert.equal(event.defaultPrevented, true); assert.equal(event.stopped, true);
         assert.equal(h.calls.select.length, 1); assert.equal(h.calls.focus.length, 1); assert.equal(h.calls.browse, 0);
-        assert.equal(h.calls.focus[0].fieldId, name === 'title' ? h.primary.fields[0].id : h.primary.fields[1].id);
+        const field = name === 'shortDescription' ? 2 : name === 'description' ? 1 : 0;
+        assert.equal(h.calls.focus[0].fieldId, h.primary.fields[field].id);
         assert.equal(h.app.ctWorkspace.scope.language, 'Thai'); assert.deepEqual(h.app.ctValues, before);
         assert.match(text.editLabel, /Click or Alt\+Click.*ActiveSkills \(Thai\)/);
     }
@@ -188,7 +190,8 @@ test('shared text captures navigation without appended controls and only name/de
     const h = harness(), { Text, Card } = h.window.ClientTextSkillCardUI;
     assert.match(Text.template, /@click.capture="edit"/); assert.doesNotMatch(Text.template, /<button|skillCardEdit["\s]/);
     const ordinary = [...Card.template.matchAll(/<skill-card-text\b[^>]*click-to-edit[^>]*\/>/g)].map(match => match[0]);
-    assert.equal(ordinary.length, 2); assert.match(ordinary[0], /:entry="side.title"/); assert.match(ordinary[1], /:entry="side.description"/);
+    assert.equal(ordinary.length, 4);
+    for (const [index, entry] of ['title', 'description', 'skillTitle', 'shortDescription'].entries()) assert.ok(ordinary[index].includes(':entry="side.' + entry + '"'));
     assert.match(Card.template, /:entry="item.label"/); assert.doesNotMatch(Card.template, /host\.ctSkillEditField/);
 });
 
@@ -199,6 +202,42 @@ test('same-unit field focus keeps draft and browse context while using guarded s
     assert.equal(h.calls.browse, 0); assert.equal(h.calls.writes.length, 0); assert.equal(h.calls.select.length, 1);
     assert.equal(h.app.ctBrowseMode, 'npcs'); assert.equal(h.app.ctSheet, 'old-sheet'); assert.deepEqual(h.app.ctValues, before);
     assert.deepEqual(h.calls.focus, [{ last: false, fieldId: field.id }]); assert.equal(h.app.ctSkillContextId, 'alpha');
+});
+
+test('selecting Short Description keeps both cards available, including without example labels', () => {
+    const h = harness(); h.app.ctPreviewField = h.primary.fields[2];
+    h.app.ctValues[h.primary.fields[2].id] = 'Live short draft';
+    assert.equal(h.app.ctSkillPreviewModel.target.shortDescription.text, 'Live short draft');
+    assert.equal(h.app.ctSkillPreviewModel.target.shortDescription.focused, true);
+    assert.deepEqual([...h.app.ctSkillVariableKeys], Cards.EXAMPLE_KEYS.filter(key => key !== 'skill-card:time'));
+    delete h.alpha.examples;
+    h.app.ctSkillResolver = Cards.createResolver(h.catalog, h.units, h.app.ctSkillScope);
+    assert.equal(h.app.ctSkillVariableKeys.length, 0);
+    assert.equal(h.app.ctSkillPreviewModel.target.shortDescription.text, 'Live short draft');
+    assert.deepEqual([...h.app.ctSkillPreviewModel.target.properties], []);
+});
+
+test('compact header shares the live Cost example and omits unavailable labels and values', () => {
+    const h = harness(), getter = h.window.ClientTextSkillCardUI.Card.computed.shortProperties;
+    h.app.ctPreviewGggVars = { 'skill-card:cost': '17' };
+    const model = h.app.ctSkillPreviewModel;
+    assert.equal(getter.call({ side: model.source })[0].text, '17 Example resource');
+    assert.equal(getter.call({ side: model.target })[0].text, 'Target 17 Example resource');
+    for (const property of [{ key: 'skill-card:cost', available: false, label: { available: true } },
+        { key: 'skill-card:cost', available: true, label: { available: false } }]) {
+        assert.equal(getter.call({ side: { shortProperties: [property] } }).length, 0);
+    }
+});
+
+test('compact-only timing supplies the shared duration control and its translated variable label', () => {
+    const h = harness();
+    h.ref('ClientStrings', 'SkillPopupUseTime', 'Text', 'Use Time');
+    h.ref('ClientStrings', 'SkillPopupCastTimeValue', 'Text', '{0} s');
+    h.app.ctSkillResolver = Cards.createResolver(h.catalog, h.units, h.app.ctSkillScope);
+    assert.ok(h.app.ctSkillVariableKeys.includes('skill-card:time'));
+    assert.equal(h.app.ctSkillPreviewModel.target.properties.some(property => property.key === 'skill-card:time'), false);
+    assert.equal(h.app.ctSkillPreviewModel.target.shortProperties.at(-1).text, 'Target 1.00 s');
+    assert.deepEqual(clone(h.app.ctSkillExampleLabel('skill-card:time')), { text: 'Target Use Time', translated: true });
 });
 
 test('final paint await and replacement unit identities fence delayed focus', async () => {
@@ -240,7 +279,7 @@ test('related-row loader keeps checkpointed unsaved description visible after na
 
 test('related draft reads are scoped and limited to unique matched reference units for the selected card', async () => {
     const h = harness(); await h.app.ctLoadSkillDrafts();
-    const refs = [h.alpha.title, h.alpha.itemTitle, h.alpha.description, ...h.alpha.tags.map(tag => tag.ref), ...Object.values(h.alpha.examples)];
+    const refs = [h.alpha.title, h.alpha.itemTitle, h.alpha.description, h.alpha.shortDescription, ...h.alpha.tags.map(tag => tag.ref), ...Object.values(h.alpha.examples)];
     const expected = [...new Set(refs.map(ref => JSON.stringify(['normal', ref.sheet, ref.recordId])))].sort();
     assert.deepEqual(h.calls.reads.map(read => read.id).sort(), expected);
     assert.ok(h.calls.reads.every(read => JSON.stringify(read.scope) === JSON.stringify(h.app.ctWorkspace.scope)));

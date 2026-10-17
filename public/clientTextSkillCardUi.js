@@ -29,13 +29,12 @@
                 return [this.ctSkillRelatedId, this.ctSkillContextId].find(id => choices.includes(id)) || '';
             },
             ctSkillVariableKeys() {
-                if (this.ctPreviewField?.name === 'Short Description') return emptyKeys;
                 return this.ctSkillBaseModel?.state !== 'unavailable' && this.ctSkillBaseModel?.variableKeys?.length
-                    ? root.ClientTextSkillCards.EXAMPLE_KEYS : emptyKeys;
+                    ? this.ctSkillBaseModel.variableKeys : emptyKeys;
             },
             ctSkillPreviewModel() {
                 this.ctRevision;
-                if (!this.ctSkillVariableKeys.length) return null;
+                if (!this.ctSkillBaseModel || this.ctSkillBaseModel.state === 'unavailable') return null;
                 return this.ctSkillResolver.compose({ scope: this.ctSkillScope, unit: this.ctCurrentUnit,
                     cardId: this.ctSkillSelectedId || undefined, fieldId: this.ctPreviewField?.id, saved: this.ctSaved,
                     draft: { scope: this.ctSkillScope, unitId: this.ctCurrentUnit.id, values: this.ctValues }, drafts: this.ctSkillDrafts, variables: this.ctPreviewGggVars });
@@ -139,8 +138,8 @@
             },
             ctSkillExampleLabel(key) {
                 const model = this.ctSkillPreviewModel;
-                const translated = model?.target.properties.find(property => property.key === key)?.label;
-                const source = model?.source.properties.find(property => property.key === key)?.label;
+                const label = side => [...(side?.properties || []), ...(side?.shortProperties || [])].find(property => property.key === key)?.label;
+                const translated = label(model?.target), source = label(model?.source);
                 return translated?.available ? { text: translated.text, translated: true } : { text: source?.text || key, translated: false };
             }
         }
@@ -174,6 +173,9 @@
         props: { host: Object, model: Object, translated: Boolean }, data: () => ({ selectedTab: '' }),
         computed: {
             side() { return this.translated ? this.model.target : this.model.source; },
+            shortProperties() {
+                return this.side.shortProperties.filter(property => property.available && property.label?.available && property.text);
+            },
             tab() { return this.side.tabs.find(tab => tab.id === this.selectedTab) || this.side.tabs[0]; },
             style() {
                 const background = this.host.ctSkillImages.background;
@@ -181,20 +183,31 @@
                     ...(background?.startsWith('blob:') ? { backgroundImage: 'linear-gradient(0deg,#101514 12%,transparent 85%),url("' + background + '")' } : {}) };
             }
         },
-        template: `<article class="ctSkillCard" :style="style" :aria-label="(translated?'Translation':'English')+' skill-card preview'">
+        template: `<div class="ctSkillCards"><article class="ctSkillCard ctSkillFullCard" :style="style" :aria-label="(translated?'Translation':'English')+' skill-card preview'">
             <header class="ctSkillCardHeading"><img v-if="host.ctSkillImages.icon" :src="host.ctSkillImages.icon" alt="" width="56" height="56">
                 <div><h3 :class="{'ctSkillFocused':side.title.focused}"><skill-card-text :host="host" :entry="side.title" :text="side.title.text || '(empty)'" :translated="translated" click-to-edit/></h3>
                     <div class="ctSkillCardType"><template v-for="(tag,index) in side.tags.filter(tag=>tag.position==='type' && tag.available)" :key="index"><skill-card-text :host="host" :entry="tag" :text="tag.text" :translated="translated"/></template></div>
                 </div></header>
             <div class="ctSkillCardTags"><template v-for="(tag,index) in side.tags.filter(tag=>tag.position==='tag' && tag.available)" :key="index"><span v-if="index">, </span><skill-card-text :host="host" :entry="tag" :text="tag.text" :translated="translated"/></template></div>
             <dl class="ctSkillCardProperties"><template v-for="property in side.properties" :key="property.key"><dt><skill-card-text :host="host" :entry="property.label" :text="property.label.text" :translated="translated"/>:</dt><dd><skill-card-text :host="host" :text="property.text || '(empty)'" :translated="translated"/></dd></template></dl>
-            <p class="ctSkillCardExample">Preview examples · change values in the variable list</p>
+            <p v-if="side.properties.length" class="ctSkillCardExample">Preview examples · change values in the variable list</p>
             <p class="ctSkillCardDescription" :class="{'ctSkillFocused':side.description.focused}"><skill-card-text :host="host" :entry="side.description" :text="side.description.text || '(empty)'" :translated="translated" click-to-edit/></p>
             <div v-if="side.tabs.length" class="ctSkillCardTabs" role="tablist" aria-label="Skill modes"><button v-for="item in side.tabs" :key="item.id" type="button" role="tab" :aria-selected="tab?.id===item.id" @click="selectedTab=item.id"><skill-card-text :host="host" :entry="item.label" :text="item.label.text || '(empty)'" :translated="translated"/></button></div>
             <p v-if="!tab?.lines.length" class="ctSkillCardOmitted">Combat values omitted from this translation preview.</p>
             <footer v-if="side.footer?.available"><skill-card-text :host="host" :entry="side.footer" :text="side.footer.text" :translated="translated"/></footer>
             <p v-if="model.warnings.includes('partial-workbook')" class="ctSkillCardPartial">Related workbook text is unavailable; missing translations remain empty.</p>
-        </article>`
+        </article>
+        <article v-if="side.shortDescription" class="ctSkillCard ctSkillShortCard" :style="style" :aria-label="(translated?'Translation':'English')+' short skill-card preview'">
+            <header class="ctSkillCardHeading">
+                <img v-if="host.ctSkillImages.icon" :src="host.ctSkillImages.icon" alt="" width="56" height="56">
+                <h3 class="ctSkillShortTitle" :class="{'ctSkillFocused':side.skillTitle.focused}"><skill-card-text :host="host" :entry="side.skillTitle" :text="side.skillTitle.text || '(empty)'" :translated="translated" click-to-edit/></h3>
+                <dl v-if="shortProperties.length" class="ctSkillShortProperties"><div v-for="property in shortProperties" :key="property.key">
+                    <dt><skill-card-text :host="host" :entry="property.label" :text="property.label.text" :translated="translated"/></dt>
+                    <dd><skill-card-text :host="host" :text="property.text" :translated="translated"/></dd>
+                </div></dl>
+            </header>
+            <p class="ctSkillShortDescription" :class="{'ctSkillFocused':side.shortDescription.focused}"><skill-card-text :host="host" :entry="side.shortDescription" :text="side.shortDescription.text || '(empty)'" :translated="translated" click-to-edit/></p>
+        </article></div>`
     };
     root.ClientTextSkillCardUI = { mixin, Card, Text };
 })(typeof window !== 'undefined' ? window : globalThis);

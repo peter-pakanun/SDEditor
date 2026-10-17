@@ -18,18 +18,26 @@ function ref(sheet,recordId,field,source,target){
 }
 const card={id:'example',activeSkillId:'example_skill',baseItemId:'ExampleGem',title:ref('ActiveSkills','example_skill','DisplayName','Example [Quality|ability]'),
     itemTitle:ref('BaseItemTypes','ExampleGem','Display Name','Example gem'),description:ref('ActiveSkills','example_skill','Description','An example [Quality] description.'),
-    tags:[{position:'type',ref:ref('GemTags','example_tag','Display Name','[Quality|Example type]','[Quality|Target type]')}],
+    shortDescription:ref('ActiveSkills','example_skill','Short Description','A brief [Quality|ability] with [Critical|keywords].','A translated brief [Quality|ability] with [Critical|keywords].'),
+    tags:[{position:'type',ref:ref('GemTags','spell','Display Name','[Quality|Example type]','[Quality|Target type]')}],
     tabs:[{id:'example-mode',label:ref('GrantedEffectLabels','ExampleMode','LabelString','Example mode'),lines:[]}],
     footer:ref('ClientStrings','ExampleFooter','Text','Example footer.'),examples:{level:ref('ClientStrings','ExampleLevel','Text','Level','Target level'),
         quality:ref('ClientStrings','ExampleQuality','Text','[Quality]','[Quality|Target quality]'),cost:ref('ClientStrings','ExampleCost','Text','Cost','Target cost'),
         criticalChance:ref('ClientStrings','ExampleCritical','Text','[Critical|Critical Hit] Chance','[Critical|Target critical] Chance'),
         costFormat:ref('ClientStrings','ExampleMana','Text','{0} Mana','{0} Target mana')},assets:{id:'example',icon:true,background:true}};
+for(const [type,id] of [['Cast','CastTime'],['Attack','AttackTimeOverride'],['Use','UseTime']]){
+    ref('ClientStrings','ItemDisplaySkillGem'+id,'Text',type+' Time','Target '+type+' Time');
+    ref('ClientStrings','SkillPopup'+type+'Time','Text',type+' Time','Target '+type+' Time');
+}
+ref('ClientStrings','ItemDisplaySkillGemCastTimeValue','Text','{0}s','{0} target seconds');
+ref('ClientStrings','SkillPopupCastTimeValue','Text','{0} s','{0} target s');
+const attackTag=ref('GemTags','attack','Display Name','[Quality|Attack type]','[Quality|Target attack type]'),useTag=ref('GemTags','buff','Display Name','[Quality|Buff type]','[Quality|Target buff type]');
 for(const id of ['Quality','Critical']){ref('KeywordPopups',id,'Info Title',id+' concept','Target '+id+' concept');ref('KeywordPopups',id,'Info Content','Example explanation. '+(id==='Quality'?'[Critical]':''),'Target explanation. '+(id==='Quality'?'[Critical|Target critical]':''));}
 const audioRef=ref('NPCTextAudio','ExampleAudio','Text','Example dialogue.');
 units.find(u=>u.sheet==='NPCTextAudio').metadata['Audio File']='synthetic/example.wav';
 const secondCard={...card,id:'second-example',activeSkillId:'second_skill',baseItemId:'SecondGem',
     title:ref('ActiveSkills','second_skill','DisplayName','Second ability'),itemTitle:ref('BaseItemTypes','SecondGem','Display Name','Second gem'),
-    description:ref('ActiveSkills','second_skill','Description','Second ability description.'),assets:undefined,
+    description:ref('ActiveSkills','second_skill','Description','Second ability description.'),shortDescription:undefined,assets:undefined,
     tabs:[...card.tabs,{id:'other-mode',label:ref('GrantedEffectLabels','OtherMode','LabelString','Other mode'),lines:[]}]};
 const catalog={schemaVersion:1,game:'poe2',revision:'synthetic-browser-1',clientBuild:'12345',cards:[card,secondCard]};
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');
@@ -56,7 +64,7 @@ async function jump(page,locator,sheet,field,alt=false){
 }
 (async()=>{let browser;try{
     mkdirSync(folder,{recursive:true});await new Promise(done=>server.listen(0,'127.0.0.1',done));
-    browser=await chromium.launch({executablePath,headless:true});const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];
+    browser=await chromium.launch({executablePath,headless:true,ignoreDefaultArgs:['--hide-scrollbars']});const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];
     await page.addInitScript(()=>{window.fixtureRevoked=[];const revoke=URL.revokeObjectURL.bind(URL);URL.revokeObjectURL=url=>{fixtureRevoked.push(url);return revoke(url);};});
     page.on('pageerror',error=>errors.push(error.message));
     page.on('console',message=>{if(message.type()==='error' && !message.text().includes('Failed to load resource')){errors.push(message.text());console.log('Browser:',message.text().slice(0,800));}});
@@ -77,23 +85,82 @@ async function jump(page,locator,sheet,field,alt=false){
         window.fixtureUnitsBefore=JSON.stringify(units);await host.$nextTick();
     },units);
     try{await page.waitForSelector('.ctSkillCard');}catch(error){console.log('Fixture state',JSON.stringify(await page.evaluate(()=>({active:fixtureApp.ctActive,workspace:fixtureApp.ctWorkspace,signedIn:fixtureApp.cloudSignedIn,allowed:fixtureApp.privateMediaAllowed,catalog:!!fixtureApp.ctSkillCatalog,scope:fixtureApp.ctSkillContextKey,model:fixtureApp.ctSkillBaseModel,selection:fixtureApp.ctSelection,fields:fixtureApp.ctPreviewField?.name}))),errors,requests);throw error;}await page.waitForFunction(()=>fixtureApp.ctSkillImages.icon?.startsWith('blob:'));
-    assert.equal(await page.locator('.ctSkillCard').count(),2);
-    const source=page.locator('.gamePreviewSourcePane .ctSkillCard'),target=page.locator('.gamePreviewTargetPane .ctSkillCard');
+    assert.equal(await page.locator('.ctSkillCard').count(),4);
+    const source=page.locator('.gamePreviewSourcePane .ctSkillFullCard'),target=page.locator('.gamePreviewTargetPane .ctSkillFullCard');
+    const shortSource=page.locator('.gamePreviewSourcePane .ctSkillShortCard'),shortTarget=page.locator('.gamePreviewTargetPane .ctSkillShortCard');
     assert.equal(await page.locator('.skillCardEdit').count(),0,'no trailing edit controls');
     assert.equal(await source.locator('.skillCardClickEditable').count(),2,'only name and description use ordinary click');
-    assert.deepEqual(await source.locator('dd').allTextContents(),['1','+10%','5 Mana','7.00%']);
+    assert.deepEqual(await source.locator('dd').allTextContents(),['1','+10%','5 Mana','7.00%','1.00s']);
+    assert.equal(await source.locator('dt').last().innerText(),'Cast Time:');assert.equal(await shortSource.locator('dt').last().innerText(),'Cast Time');
     assert.match(await target.innerText(),/Target quality/);assert.match(await target.innerText(),/5 Target mana/);
     const input=page.getByRole('textbox',{name:'Preview example: level',exact:true});await input.fill('6');await settle(page);assert.equal(await source.locator('dd').first().innerText(),'6');
     await page.getByRole('textbox',{name:'Preview example: critical-chance',exact:true}).fill('12.5');await settle(page);assert.equal(await target.locator('dd').nth(3).innerText(),'12.50%');
     await page.getByRole('textbox',{name:'Preview example: cost',exact:true}).fill('<img src=x>');await settle(page);assert.equal(await source.locator('dd').nth(2).innerText(),'5 Mana');assert.equal(await page.locator('.gamePreviewVarInput[aria-invalid="true"]').count(),1);
-    await page.getByRole('button',{name:'Reset preview examples'}).click();await settle(page);assert.deepEqual(await source.locator('dd').allTextContents(),['1','+10%','5 Mana','7.00%']);
+    await page.getByRole('textbox',{name:'Preview example: cost',exact:true}).fill('19');await settle(page);
+    assert.equal(await shortSource.locator('dd').first().innerText(),'19 Mana');assert.equal(await shortTarget.locator('dd').first().innerText(),'19 Target mana');
+    await page.getByRole('textbox',{name:'Preview example: time',exact:true}).fill('1.3');await settle(page);
+    assert.equal(await source.locator('dd').last().innerText(),'1.30s');assert.equal(await shortSource.locator('dd').last().innerText(),'1.30 s');
+    assert.equal(await target.locator('dd').last().innerText(),'1.30 target seconds');assert.equal(await shortTarget.locator('dd').last().innerText(),'1.30 target s');
+    await page.getByRole('button',{name:'Reset preview examples'}).click();await settle(page);assert.deepEqual(await source.locator('dd').allTextContents(),['1','+10%','5 Mana','7.00%','1.00s']);
     await page.evaluate(async()=>{fixtureApp.ctValues.Description='Current [Quality|edited description]';await fixtureApp.$nextTick();});await settle(page);
     assert.match(await target.locator('.ctSkillCardDescription').innerText(),/Current edited description/);assert.match(await source.locator('.ctSkillCardDescription').innerText(),/An example Quality description/);
     assert.equal(await page.evaluate(()=>JSON.stringify(fixtureApp.ctUnits)===fixtureUnitsBefore),true);
+    await page.evaluate(()=>{window.fixtureTimingUnits=fixtureApp.ctUnits;});
+    for(const [recordId,affected] of [['ItemDisplaySkillGemCastTime','full'],['ItemDisplaySkillGemCastTimeValue','full'],['SkillPopupCastTime','short'],['SkillPopupCastTimeValue','short']]){
+        for(const blank of [false,true]){
+            await page.evaluate(async({recordId,blank})=>{const host=fixtureApp,units=JSON.parse(JSON.stringify(fixtureTimingUnits));
+                if(blank)units.find(unit=>unit.recordId===recordId).fields[0].target='';else units.splice(units.findIndex(unit=>unit.recordId===recordId),1);
+                host.ctUnits=Vue.markRaw(units);host._ctUnitIndex=Vue.markRaw(new Map(units.map(unit=>[unit.id,unit])));host.ctRevision++;await host.$nextTick();},{recordId,blank});await settle(page);
+            const missing=affected==='full'?target:shortTarget,retained=affected==='full'?shortTarget:target;
+            assert.doesNotMatch(await missing.locator('dt').allTextContents().then(labels=>labels.join('|')),/Target Cast Time/);
+            assert.match(await retained.locator('dt').allTextContents().then(labels=>labels.join('|')),/Target Cast Time/,'the other card retains its independently valid timing');
+            assert.equal(await page.getByRole('textbox',{name:'Preview example: time',exact:true}).count(),1,'partial bindings keep one duration control');
+        }
+    }
+    await page.evaluate(async()=>{const host=fixtureApp;host.ctUnits=fixtureTimingUnits;host._ctUnitIndex=Vue.markRaw(new Map(host.ctUnits.map(unit=>[unit.id,unit])));host.ctRevision++;await host.$nextTick();});await settle(page);
     await target.locator('.ctSkillCardProperties .gamePreviewKw').first().click();await page.waitForSelector('.keywordPreviewWindow');assert.match(await page.locator('.keywordPreviewWindow').innerText(),/Target Quality concept/);await page.locator('.keywordPreviewClose').click();
     assert.equal(await page.evaluate(()=>fixtureApp.ctCurrentUnit.recordId),'example_skill','keyword actions never navigate fields');
     await page.evaluate(()=>{const host=fixtureApp,navigate=host.ctSkillEditField,pin=host.pinKeywordWindow;window.fixtureNavigation=[];window.fixturePins=[];
         host.ctSkillEditField=(...args)=>{fixtureNavigation.push(args[0].reference);return navigate(...args);};host.pinKeywordWindow=item=>{fixturePins.push(item.id);return pin(item);};});
+    await jump(page,plainText(shortTarget.locator('.ctSkillShortDescription')),'ActiveSkills','Short Description');
+    const shortInput=page.locator('textarea[data-ct-target="Short Description"]:visible');
+    await shortInput.fill('Live brief [Quality|nested keyword]');await settle(page);
+    assert.equal(await shortInput.evaluate(node=>node===document.activeElement),true,'short card updates before blur');
+    assert.equal(await shortTarget.locator('.ctSkillShortDescription').innerText(),'Live brief nested keyword');
+    assert.equal(await shortSource.locator('.ctSkillShortDescription').innerText(),'A brief ability with keywords.');
+    assert.equal(await page.locator('.ctSkillFullCard').count(),2,'selecting Short Description keeps the full preview');
+    for(const [card,language] of [[shortSource,'English'],[shortTarget,'Thai']]){
+        const keyword=card.locator('.ctSkillShortDescription .gamePreviewKw').first(),before=await navigationState(page);
+        await keyword.hover();await settle(page);assert.equal(await page.locator('[data-keyword-window]').getAttribute('data-language'),language);
+        await keyword.click();await settle(page);assert.equal((await navigationState(page)).pins,before.pins+1);assert.equal((await navigationState(page)).calls,before.calls);
+        await page.locator('[data-keyword-window] .keywordPreviewContent .gamePreviewKw').click();await settle(page);
+        assert.equal(await page.locator('[data-keyword-window]').last().getAttribute('data-language'),language);
+        assert.match(await page.locator('[data-keyword-window]').last().innerText(),/Critical concept/);await page.keyboard.press('Escape');await page.keyboard.press('Escape');
+    }
+    await jump(page,shortTarget.locator('.ctSkillShortDescription .gamePreviewKw'),'ActiveSkills','Short Description',true);
+    await shortInput.fill('');await settle(page);assert.equal(await shortTarget.locator('.ctSkillShortDescription').innerText(),'(empty)');
+    assert.equal(await shortSource.locator('.ctSkillShortDescription').innerText(),'A brief ability with keywords.');
+    await shortInput.fill('Live brief [Quality|nested keyword]');
+    await jump(page,plainText(shortSource.locator('h3')),'ActiveSkills','DisplayName');
+    const beforeCost=await navigationState(page);await plainText(shortTarget.locator('dt').first()).click();assert.deepEqual(await navigationState(page),beforeCost);
+    await jump(page,plainText(shortTarget.locator('dt').first()),'ClientStrings','Text',true);
+    assert.equal(await page.evaluate(()=>fixtureApp.ctCurrentUnit.recordId),'ExampleCost');
+    await page.waitForFunction(()=>fixtureApp.ctSkillPreviewModel?.target.shortDescription.text.startsWith('Live brief'));
+    await jump(page,plainText(shortTarget.locator('.ctSkillShortDescription')),'ActiveSkills','Short Description');
+    assert.equal(await shortInput.inputValue(),'Live brief [Quality|nested keyword]','cross-sheet round trip preserves short draft');
+    await page.evaluate(async()=>{const host=fixtureApp,unit=host.ctUnits.find(u=>u.sheet==='BaseItemTypes' && u.recordId==='ExampleGem');await host.ctSelect(unit,true,{focus:false});host.ctTool='preview';await host.$nextTick();});await settle(page);
+    assert.equal(await source.locator('h3').innerText(),'Example gem');assert.equal(await shortSource.locator('h3').innerText(),'Example ability');
+    await jump(page,plainText(shortTarget.locator('h3')),'ActiveSkills','DisplayName');
+    for(const [tag,type] of [[attackTag,'Attack'],[useTag,'Use'],[card.tags[0].ref,'Cast']]){
+        await page.evaluate(async tag=>{const host=fixtureApp,catalog=JSON.parse(JSON.stringify(host.ctSkillCatalog));catalog.cards.find(card=>card.id==='example').tags[0].ref=tag;host.ctSkillCatalog=Vue.markRaw(catalog);await host.$nextTick();},tag);await settle(page);
+        assert.equal(await source.locator('dt').last().innerText(),type+' Time:');assert.equal(await shortSource.locator('dt').last().innerText(),type+' Time');
+        assert.equal(await target.locator('dt').last().innerText(),'Target '+type+' Time:');assert.equal(await shortTarget.locator('dt').last().innerText(),'Target '+type+' Time');
+    }
+    await jump(page,plainText(shortTarget.locator('dt').last()),'ClientStrings','Text',true);
+    assert.equal(await page.evaluate(()=>fixtureApp.ctCurrentUnit.recordId),'SkillPopupCastTime');
+    await page.locator('textarea[data-ct-target="Text"]:visible').fill('Live cast label');await settle(page);
+    assert.equal(await shortTarget.locator('dt').last().innerText(),'Live cast label');assert.equal(await shortSource.locator('dt').last().innerText(),'Cast Time');
+    await jump(page,plainText(shortTarget.locator('h3')),'ActiveSkills','DisplayName');
     await page.locator('textarea[data-ct-target="Description"]:visible').fill('Unsaved navigation [Quality|draft]');
     await jump(page,plainText(source.locator('h3')),'ActiveSkills','DisplayName');
     await jump(page,plainText(target.locator('.ctSkillCardDescription')),'ActiveSkills','Description');
@@ -116,6 +183,7 @@ async function jump(page,locator,sheet,field,alt=false){
     await page.waitForFunction(()=>fixtureApp.ctSkillPreviewModel?.target.description.text.includes('Unsaved navigation'));
     assert.match(await target.locator('.ctSkillCardDescription').innerText(),/Unsaved navigation draft/,'related-row preview preserves checkpointed unsaved draft');
     await page.locator('.ctSkillRelatedChoice select').selectOption('second-example');await page.waitForFunction(()=>fixtureApp.ctSkillPreviewModel?.skillId==='second-example');assert.match(await target.locator('h3').innerText(),/Second ability/);
+    assert.equal(await page.locator('.ctSkillShortCard').count(),0,'an absent short field hides the compact card in both languages');
     const otherMode=target.getByRole('tab',{name:'Target Other mode'}),beforeTab=await navigationState(page);await otherMode.click();assert.equal(await otherMode.getAttribute('aria-selected'),'true');assert.deepEqual(await navigationState(page),beforeTab,'plain tabs select mode without changing workbook row');
     await jump(page,otherMode.locator('.skillCardText'),'GrantedEffectLabels','LabelString',true);assert.equal(await page.evaluate(()=>fixtureApp.ctCurrentUnit.recordId),'OtherMode');
     await jump(page,plainText(target.locator('.ctSkillCardDescription')),'ActiveSkills','Description');assert.equal(await page.evaluate(()=>fixtureApp.ctCurrentUnit.recordId),'second_skill');
@@ -123,18 +191,28 @@ async function jump(page,locator,sheet,field,alt=false){
     assert.match(await page.locator('textarea[data-ct-target="Description"]:visible').inputValue(),/Unsaved navigation/,'returning restores the same durable unsaved draft');
     const layout=[];
     for(const theme of ['light','grey','dark','modern-dark']){
-        await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);await page.mouse.move(0,0);await settle(page);
+        await page.evaluate(theme=>{document.documentElement.dataset.theme=theme;for(const pane of document.querySelectorAll('.gamePreviewSourcePane,.gamePreviewTargetPane'))pane.scrollTop=0;},theme);await page.mouse.move(0,0);await settle(page);
         const measure=()=>source.evaluate(node=>[node,...node.querySelectorAll('h3,.ctSkillCardType,.ctSkillCardProperties,.ctSkillCardDescription,footer')].map(element=>{const rect=element.getBoundingClientRect();return {x:rect.x,y:rect.y,width:rect.width,height:rect.height};}));
         const before=await measure();await plainText(source.locator('h3')).hover();await settle(page);assert.deepEqual(await measure(),before,'hover hint preserves all card geometry');
         assert.match(await source.locator('h3 .skillCardText').getAttribute('title'),/Click or Alt\+Click.*DisplayName.*Thai/);assert.match(await source.locator('footer .skillCardText').getAttribute('title'),/^Alt\+Click/);
         assert.equal(await page.locator('.skillCardEdit').count(),0);layout.push({theme,rects:before});await page.screenshot({path:join(folder,'card-'+theme+'.png')});
+        for(const card of [shortSource,shortTarget])await card.scrollIntoViewIfNeeded();await settle(page);
+        const shortLayout=await shortTarget.evaluate(node=>{const pane=node.closest('.gamePreviewTargetPane'),card=node.getBoundingClientRect(),full=pane.querySelector('.ctSkillFullCard').getBoundingClientRect(),frame=pane.getBoundingClientRect();return {clearance:frame.left+pane.clientLeft+pane.clientWidth-card.right,gap:card.top-full.bottom,horizontalOverflow:pane.scrollWidth-pane.clientWidth};});
+        assert.ok(shortLayout.clearance>=5.9,'card frame stays clear of the scrollbar: '+JSON.stringify(shortLayout));assert.ok(shortLayout.gap>=11.9,'short preview is a separate card below the full one');assert.equal(shortLayout.horizontalOverflow,0);
+        layout.at(-1).short=shortLayout;await page.screenshot({path:join(folder,'short-card-'+theme+'.png')});
     }
     writeFileSync(join(folder,'navigation-layout.json'),JSON.stringify(layout,null,2));
-    await page.evaluate(async()=>{fixtureApp.ctEditor=false;fixtureApp.ctInlineClosed=false;await fixtureApp.$nextTick();});await settle(page);assert.equal(await page.locator('#inlineEditorPreviewHost .ctSkillCard').count(),2);
+    await page.evaluate(async()=>{fixtureApp.hideSourceInPreviewPanel=true;await fixtureApp.$nextTick();});await settle(page);await shortTarget.scrollIntoViewIfNeeded();
+    assert.equal(await page.locator('.gamePreviewSourcePane').count(),0);
+    assert.equal(await shortTarget.evaluate(node=>{const heading=node.querySelector('header'),title=heading.querySelector('h3').getBoundingClientRect(),properties=heading.querySelector('dl').getBoundingClientRect();return properties.left>=title.right && properties.top<title.bottom;}),true,'wide compact header keeps the timing columns to the right of the name');
+    await shortTarget.screenshot({path:join(folder,'short-card-wide.png')});
+    await page.evaluate(async()=>{fixtureApp.hideSourceInPreviewPanel=false;await fixtureApp.$nextTick();});await settle(page);
+    await page.evaluate(async()=>{fixtureApp.ctEditor=false;fixtureApp.ctInlineClosed=false;await fixtureApp.$nextTick();});await settle(page);assert.equal(await page.locator('#inlineEditorPreviewHost .ctSkillCard').count(),4);
     await jump(page,source.locator('.ctSkillCardType .gamePreviewKw'),'GemTags','Display Name',true);assert.equal(await page.evaluate(()=>fixtureApp.ctEditor),false);
     await jump(page,plainText(target.locator('.ctSkillCardDescription')),'ActiveSkills','Description');assert.match(await page.locator('textarea[data-ct-target="Description"]:visible').inputValue(),/Unsaved navigation/);
     await page.evaluate(async()=>{fixtureApp.ctEditor=true;await fixtureApp.$nextTick();});await settle(page);
-    await page.setViewportSize({width:1150,height:850});await settle(page);assert.equal(await target.isVisible(),true);
+    await page.setViewportSize({width:1150,height:850});await settle(page);assert.equal(await target.isVisible(),true);await shortTarget.scrollIntoViewIfNeeded();
+    assert.equal(await shortTarget.evaluate(node=>node.scrollWidth-node.clientWidth),0);await page.screenshot({path:join(folder,'short-card-resized.png')});
     await page.evaluate(async()=>{fixtureApp.ctUnits=Vue.markRaw(fixtureApp.ctUnits.filter(u=>u.sheet!=='GemTags'));fixtureApp._ctUnitIndex=Vue.markRaw(new Map(fixtureApp.ctUnits.map(u=>[u.id,u])));fixtureApp.ctRevision++;await fixtureApp.$nextTick();});await settle(page);assert.equal(await target.locator('.ctSkillCardPartial').count(),1);
     const unavailable=source.locator('.ctSkillCardType .skillCardText'),beforeUnavailable=await navigationState(page);assert.equal(await unavailable.getAttribute('title'),null);await unavailable.locator('.gamePreviewKw').click({modifiers:['Alt']});await settle(page);assert.deepEqual(await navigationState(page),beforeUnavailable,'unavailable mapped text neither navigates nor pins a popup');
     const navigation=await navigationState(page);
@@ -158,6 +236,6 @@ async function jump(page,locator,sheet,field,alt=false){
     await page.evaluate(async()=>{fixtureApp.cloudSignedIn=false;await fixtureApp.$nextTick();});await settle(page);assert.equal(await page.locator('.ctSkillCard').count(),0);assert.equal(await page.locator('.gamePreviewWindow').count(),2);
     assert.equal(await page.locator('.ctPortrait img').count(),0);assert.equal(await page.locator('audio').count(),0);assert.equal(await page.evaluate(urls=>urls.every(url=>fixtureRevoked.includes(url)),[portraitUrl,audioUrl]),true,'logout revokes both native-media Blob URLs');
     assert.ok(requests.length>=3);assert.ok(requests.every(r=>r.authorized && r.language===undefined && !r.path.includes('xxxxxxxx')));
-    assert.deepEqual(errors,[]);writeFileSync(join(folder,'results.json'),JSON.stringify({passed:true,requests,navigation,checks:['defaults','edit','reset','validation','source-target separation','draft','no mutation','keyword popup','plain name/description clicks','Alt+Click all mapped categories and nested keywords exactly once without pinning','other plain clicks and unmapped values do not navigate','cross-sheet drafts and selected language/full/inline','no trailing controls or hover layout changes in four themes','resized desktop','partial workbook and unavailable destination','assembled keyword sheet before blur/full/inline/nested/language/blank/record switch','portrait and audio authenticated Blob sources','logout URL revocation']},null,2));
+    assert.deepEqual(errors,[]);writeFileSync(join(folder,'results.json'),JSON.stringify({passed:true,requests,navigation,checks:['defaults','edit','reset','validation','source-target separation','draft','no mutation','keyword popup','plain full/short name/description clicks','short description live before blur, blanks, related drafts and absent fields','first-tag Spell/Attack/otherwise Use timing in both cards, live labels and shared duration','Alt+Click all mapped categories and nested keywords exactly once without pinning','other plain clicks and unmapped values do not navigate','cross-sheet drafts and selected language/full/inline','no trailing controls or hover layout changes in four themes','visible scrollbar clearance and separate short-card frames','wide header and resized desktop','partial workbook and unavailable destination','assembled keyword sheet before blur/full/inline/nested/language/blank/record switch','portrait and audio authenticated Blob sources','logout URL revocation']},null,2));
     console.log('Skill-card browser fixture passed: click/Alt+Click navigation, keyword precedence, preserved drafts/language, full/inline cards, stable layout in four themes, unavailable targets, examples and authenticated media; '+requests.length+' authenticated private requests.');
 }finally{await browser?.close();await new Promise(done=>{server.close(done);server.closeAllConnections();});}})().catch(error=>{console.error(error);process.exitCode=1;});

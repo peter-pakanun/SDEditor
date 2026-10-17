@@ -59,6 +59,7 @@ test('composes distinct English and translated cards using actual field identiti
     const f = fixture(), before = clone(f), result = compose(f);
     assert.equal(result.state, 'ready');
     assert.equal(result.source.title.text, 'Example ability');
+    assert.equal(result.source.skillTitle.text, 'Example ability');
     assert.equal(result.target.title.text, 'Translated Example ability');
     assert.equal(result.source.description.text, f.card.description.source);
     assert.deepEqual(result.source.tags.map(tag => tag.position), ['type', 'tag']);
@@ -67,6 +68,112 @@ test('composes distinct English and translated cards using actual field identiti
     assert.equal(result.target.qualityLines[0].text, 'Test bonus {0}%.');
     assert.deepEqual(result.compatibility, { matched: 3, total: 3 });
     assert.deepEqual(clone(f), before, 'No original, draft, catalog or SD record is changed');
+});
+
+test('short descriptions keep live scoped drafts, Saved values, blanks and independent English', () => {
+    const f = fixture(), field = f.unit.fields.find(field => field.name === 'Short Description');
+    const saved = { [f.unit.id]: { values: { [field.id]: 'Saved brief text' } } };
+    assert.equal(compose(f, { saved }).target.shortDescription.text, 'Saved brief text');
+    const draft = { scope: f.scope, unitId: f.unit.id, values: { [field.id]: 'Live [ExampleTag|brief]' } };
+    const result = compose(f, { saved, draft, fieldId: field.id });
+    assert.equal(result.target.shortDescription.text, draft.values[field.id]);
+    assert.equal(result.source.shortDescription.text, field.source);
+    assert.equal(result.target.shortDescription.focused, true);
+    draft.values[field.id] = '';
+    assert.equal(compose(f, { saved, draft }).target.shortDescription.available, false);
+    for (const key of ['accountId', 'language', 'groupId', 'accessKey']) {
+        const wrong = { ...draft, scope: { ...f.scope, [key]: 'different' } };
+        assert.equal(compose(f, { saved, draft: wrong }).target.shortDescription.text, 'Saved brief text');
+    }
+});
+
+test('compact card always names the active skill, while gem preview keeps its item name', () => {
+    const f = fixture(), item = f.units.find(unit => unit.sheet === 'BaseItemTypes'), result = compose(f, { unit: item });
+    assert.equal(result.source.title.text, f.card.itemTitle.source);
+    assert.equal(result.source.skillTitle.text, f.card.title.source);
+    assert.equal(result.target.skillTitle.reference.sheet, 'ActiveSkills');
+    delete f.card.shortDescription; delete f.card.examples;
+    const absent = compose(f);
+    assert.equal(absent.source.shortDescription, null); assert.equal(absent.target.shortDescription, null);
+    assert.deepEqual(absent.variableKeys, []); assert.deepEqual(absent.source.properties, []);
+});
+
+function timingFixture(f) {
+    for (const [type, full] of [['Cast', 'CastTime'], ['Attack', 'AttackTimeOverride'], ['Use', 'UseTime']]) {
+        f.ref('ClientStrings', 'ItemDisplaySkillGem' + full, 'Text', type + ' Time');
+        f.ref('ClientStrings', 'SkillPopup' + type + 'Time', 'Text', type + ' Time');
+    }
+    f.ref('ClientStrings', 'ItemDisplaySkillGemCastTimeValue', 'Text', '{0}s');
+    f.ref('ClientStrings', 'SkillPopupCastTimeValue', 'Text', '{0} s');
+    return f;
+}
+
+test('both timing labels use only the first immutable tag: Spell, Attack, otherwise Use', () => {
+    for (const [first, second, expected] of [['spell', 'attack', 'Cast'], ['attack', 'spell', 'Attack'],
+        ['buff', 'spell', 'Use'], [null, null, 'Use']]) {
+        const f = timingFixture(fixture());
+        f.card.tags = [first, second].filter(Boolean).map(id => ({ position: 'type', ref: f.ref('GemTags', id, 'Display Name', '[' + id + ']', '[Unrelated translated tag]') }));
+        const result = compose(f, { variables: { 'skill-card:time': '1.3' } }), source = result.source.properties.at(-1), target = result.target.properties.at(-1);
+        assert.equal(source.key, 'skill-card:time'); assert.equal(source.label.text, expected + ' Time'); assert.equal(result.source.shortProperties.at(-1).label.text, expected + ' Time');
+        assert.equal(target.label.text, 'Translated ' + expected + ' Time'); assert.equal(result.target.shortProperties.at(-1).label.text, 'Translated ' + expected + ' Time');
+        assert.equal(source.text, '1.30s'); assert.equal(result.source.shortProperties.at(-1).text, '1.30 s');
+        assert.equal(target.text, 'Translated 1.30s'); assert.equal(result.target.shortProperties.at(-1).text, 'Translated 1.30 s');
+        assert.ok(result.variableKeys.includes('skill-card:time'));
+    }
+});
+
+test('timing labels/formats use exact scoped workbook fields and live related drafts', () => {
+    const f = timingFixture(fixture()), resolver = Cards.createResolver(f.catalog, f.units, f.scope);
+    const property = compose(f).source.shortProperties.at(-1), label = resolver.resolveReference(property.label.reference, f.scope);
+    assert.equal(label.unit.recordId, 'SkillPopupUseTime');
+    const format = f.units.find(unit => unit.recordId === 'SkillPopupCastTimeValue'), field = format.fields[0];
+    const drafts = { [label.unit.id]: { scope: f.scope, unitId: label.unit.id, values: { [label.field.id]: 'Live timing label' } },
+        [format.id]: { scope: f.scope, unitId: format.id, values: { [field.id]: 'seconds {0}' } } };
+    const result = compose(f, { drafts, variables: { 'skill-card:time': '2.5' } });
+    assert.equal(result.target.shortProperties.at(-1).label.text, 'Live timing label');
+    assert.equal(result.target.shortProperties.at(-1).text, 'seconds 2.50');
+    assert.equal(result.source.shortProperties.at(-1).label.text, 'Use Time');
+    drafts[label.unit.id].scope = { ...f.scope, language: 'different' };
+    assert.equal(compose(f, { drafts }).target.shortProperties.at(-1).label.text, 'Translated Use Time');
+});
+
+test('timing validates examples and omits absent, ambiguous or mismatched workbook bindings', () => {
+    const f = timingFixture(fixture());
+    for (const input of ['-1', '3601', 'Infinity', '<img src=x>']) {
+        const result = compose(f, { variables: { 'skill-card:time': input } });
+        assert.equal(result.source.properties.at(-1).text, '1.00s'); assert.deepEqual(result.invalidExampleKeys, ['skill-card:time']);
+    }
+    assert.equal(Cards.resetExamples({ 'skill-card:time': '12' })['skill-card:time'], '1.00');
+    for (const change of [f => f.units.splice(f.units.findIndex(unit => unit.recordId === 'ItemDisplaySkillGemUseTime'), 1),
+        f => f.units.find(unit => unit.recordId === 'ItemDisplaySkillGemUseTime').fields[0].source = 'Changed label',
+        f => f.units.push(clone(f.units.find(unit => unit.recordId === 'ItemDisplaySkillGemUseTime')))]) {
+        const f = timingFixture(fixture()); change(f);
+        const result = compose(f); assert.equal(result.variableKeys.includes('skill-card:time'), true, 'verified compact timing retains the shared control');
+        assert.equal(result.source.properties.some(property => property.key === 'skill-card:time'), false);
+        assert.equal(result.source.shortProperties.at(-1).label.text, 'Use Time');
+    }
+});
+
+test('full and compact timing independently omit missing source bindings and blank translated labels or formats', () => {
+    for (const [recordId, affected] of [['ItemDisplaySkillGemUseTime', 'properties'], ['ItemDisplaySkillGemCastTimeValue', 'properties'],
+        ['SkillPopupUseTime', 'shortProperties'], ['SkillPopupCastTimeValue', 'shortProperties']]) {
+        for (const unavailable of ['absent', 'mismatched', 'ambiguous', 'blank-target']) {
+            const f = timingFixture(fixture()), unit = f.units.find(unit => unit.recordId === recordId);
+            if (unavailable === 'absent') f.units.splice(f.units.indexOf(unit), 1);
+            else if (unavailable === 'mismatched') unit.fields[0].source = 'Unverified timing';
+            else if (unavailable === 'ambiguous') f.units.push(clone(unit));
+            else unit.fields[0].target = '   ';
+            const result = compose(f, { variables: { 'skill-card:time': '2.5' } }), other = affected === 'properties' ? 'shortProperties' : 'properties';
+            const timing = (side, key) => result[side][key].find(property => property.key === 'skill-card:time');
+            assert.equal(timing('target', affected), undefined, recordId + ': ' + unavailable);
+            assert.equal(timing('target', other).text, other === 'properties' ? 'Translated 2.50s' : 'Translated 2.50 s');
+            assert.equal(!!timing('source', affected), unavailable === 'blank-target');
+            assert.ok(timing('source', other)); assert.ok(result.variableKeys.includes('skill-card:time'));
+        }
+    }
+    const f = timingFixture(fixture());
+    f.units = f.units.filter(unit => !['ItemDisplaySkillGemUseTime', 'SkillPopupUseTime'].includes(unit.recordId));
+    assert.equal(compose(f).variableKeys.includes('skill-card:time'), false);
 });
 
 test('saved values and same-scope current draft override targets, including an intentional blank', () => {
@@ -200,7 +307,7 @@ test('requested preview examples start at level 1, quality +10%, cost 5 and crit
     assert.equal(result.target.properties[2].text, 'Test resource 5');
     assert.equal(result.source.properties[1].label.text, '[ExampleQuality]');
     assert.equal(result.source.properties[3].label.text, '[ExampleCritical|Critical Hit] Chance');
-    assert.deepEqual(result.variableKeys, Cards.EXAMPLE_KEYS);
+    assert.deepEqual(result.variableKeys, Cards.EXAMPLE_KEYS.filter(key => key !== 'skill-card:time'));
     assert.equal(Cards.defaultExampleValue('skill-card:critical-chance'), '7.00');
     assert.equal(Cards.defaultExampleValue('ordinary-template-variable'), undefined);
 });
@@ -226,7 +333,7 @@ test('example input validation rejects markup, non-finite, out-of-range and frac
         'skill-card:cost': 'Infinity', 'skill-card:critical-chance': '101' };
     const result = compose(fixture(), { variables: values });
     assert.deepEqual(result.exampleValues, Cards.exampleDefaults());
-    assert.deepEqual(result.invalidExampleKeys, Cards.EXAMPLE_KEYS);
+    assert.deepEqual(result.invalidExampleKeys, Cards.EXAMPLE_KEYS.filter(key => key !== 'skill-card:time'));
     assert.ok(!JSON.stringify(result.source.properties).includes('<img'));
     assert.equal(Cards.normalizeExamples({ 'skill-card:critical-chance': '0.25' }).values['skill-card:critical-chance'], '0.25');
     assert.equal(Cards.normalizeExamples({ 'skill-card:quality': '-5' }).values['skill-card:quality'], '-5');
