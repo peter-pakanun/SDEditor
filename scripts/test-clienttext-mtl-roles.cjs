@@ -364,3 +364,70 @@ test('singleton conversation fallback matches exact NPC identity rather than its
     const ambiguous=await build(selected,units,{convoIndex});
     assert.equal(ambiguous.surrounding.reason,'singleton-without-verified-npc');assert.equal(ambiguous.surrounding.entries.length,0);
 });
+
+test('explicit known catalog NPC paths resolve partial-workbook roles without inventing workbook names or biography',async()=>{
+    const path='Metadata/NPC/Four_Act4/HoodedMentorKingsmarchIntro',selected=line('Selected',{Speaker:path}),
+        speaker=await build(selected,[selected]);
+    assert.equal(speaker.roleHints.speaker.status,'resolved');assert.equal(key(speaker,'speaker'),'npc:'+path);
+    assert.equal(speaker.roleHints.speaker.confidence,'explicit');assert.equal(speaker.roleHints.speaker.priority,3);
+    const identity=speaker.roleHints.identities.find(value=>value.key==='npc:'+path);
+    assert.deepEqual(identity,{key:'npc:'+path,kind:'npc',identityEvidence:'reviewed-catalog-exact-path',references:[path]});
+    assert.equal(identity.name,undefined);assert.deepEqual(speaker.toneContext.profiles,[]);
+    assert.ok(speaker.toneContext.unavailable.some(value=>value.reason==='npc-biography-not-in-workbook'));
+    selected.metadata={Listener:path};
+    const listener=await build(selected,[selected]);assert.equal(listener.roleHints.listener.status,'resolved');
+    assert.equal(key(listener,'listener'),'npc:'+path);assert.equal(key(listener,'speaker'),undefined);
+});
+
+test('catalog fallback is unavailable to NPC relationships, filters, names and suffixes even after resolving an explicit role',async()=>{
+    const path='Metadata/NPC/Four_Act4/HoodedMentorKingsmarchIntro',other='Metadata/NPC/Four_Act4/DoryaniTownKingsmarchIntro';
+    for(const [recordId,metadata] of [['Selected',{NPC:path}],['Selected',{'Character Filter':path}],
+        ['Selected='+path,{}],['Selected='+path.split('/').at(-1),{}],['Selected',{Speaker:Catalog.games.poe2.npcs[path][1]}]]) {
+        const selected=line(recordId,metadata),result=await build(selected,[selected]);
+        assert.equal(key(result,'speaker'),undefined);assert.equal(key(result,'listener'),undefined);
+    }
+    const selected=line('Selected='+other,{Speaker:path,NPC:other}),result=await build(selected,[selected]);
+    assert.equal(key(result,'speaker'),'npc:'+path);assert.equal(key(result,'listener'),undefined);
+    assert.equal(result.roleHints.idSuffix.status,'unresolved');assert.equal(result.roleHints.order.status,'suppressed');
+});
+
+test('unknown, malformed, wrong-case and conflicting explicit paths cannot become catalog identities',async()=>{
+    const path='Metadata/NPC/Four_Act4/HoodedMentorKingsmarchIntro',other='Metadata/NPC/Four_Act4/DoryaniTownKingsmarchIntro';
+    for(const value of [P,path.toLowerCase(),path+'?',path+'/../Unknown','https://example.invalid/'+path,'constructor']) {
+        const selected=line('Selected',{Speaker:value}),result=await build(selected,[selected]);
+        assert.equal(result.roleHints.speaker.status,'unknown');assert.equal(key(result,'speaker'),undefined);
+    }
+    const selected=line('Selected',{Speaker:path,'Speaking Character':other}),result=await build(selected,[selected]);
+    assert.equal(result.roleHints.speaker.status,'conflict');assert.equal(key(result,'speaker'),undefined);assert.deepEqual(result.toneContext.voiceExamples,[]);
+});
+
+test('missing or wrong-game catalogs preserve unresolved roles while loaded NPC identity still works',async()=>{
+    const path='Metadata/NPC/Four_Act4/HoodedMentorKingsmarchIntro',selected=line('Selected',{Speaker:path});
+    assert.equal(Object.hasOwn(Catalog.games.poe1.npcs,path),false);
+    const wrongGame=await build(selected,[selected],{scope:{game:'poe1'}});assert.equal(wrongGame.roleHints.speaker.status,'unknown');
+    for(const catalog of [undefined,{games:{poe2:{characters:{},npcs:{}}}}]) {
+        const sandbox={ClientTextState:S,DictionaryScope,TextEncoder,ClientTextPortraitCatalog:catalog};vm.createContext(sandbox);
+        vm.runInContext(readFileSync(require.resolve('../public/clientTextMtlContext.js'),'utf8'),sandbox);
+        const args={unit:selected,field:selected.fields[0],units:[selected],scope:{game:'poe2'}},result=sandbox.ClientTextMtlContext.build(args);
+        assert.equal(result.roleHints.speaker.status,'unknown');assert.equal(key(result,'speaker'),undefined);
+        const loaded=sandbox.ClientTextMtlContext.build({...args,units:[selected,npc(path,'Synthetic source name')]});
+        assert.equal(loaded.roleHints.speaker.status,'resolved');assert.equal(key(loaded,'speaker'),'npc:'+path);
+    }
+});
+
+test('catalog exact paths cannot be displaced by a different loaded NPC name that resembles the path',async()=>{
+    const path='Metadata/NPC/Four_Act4/HoodedMentorKingsmarchIntro',impostor=npc(P,path),selected=line('Selected',{Speaker:path}),
+        result=await build(selected,[selected,impostor]);
+    assert.equal(key(result,'speaker'),'npc:'+path);assert.notEqual(key(result,'speaker'),'npc:'+P);
+    assert.equal(result.roleHints.identities.find(value=>value.key==='npc:'+path).name,undefined);
+});
+
+test('partial-workbook voice examples match exact explicit catalog paths without merging shared artwork',async()=>{
+    const paths=['Metadata/NPC/League/Chayula/ChayulaFarmerHub','Metadata/NPC/League/Chayula/ChayulaFarmerNearDreamer'],
+        selected=line('Selected',{Speaker:paths[0]},30),own=line('Own',{Speaker:paths[0]},29,'Verified same path voice.'),
+        other=line('Other',{Speaker:paths[1]},31,'OTHER PATH VOICE'),name=line('NameOnly',{Speaker:Catalog.games.poe2.npcs[paths[0]][1]},28,'NAME ONLY VOICE'),
+        result=await build(selected,[selected,own,other,name]);
+    assert.equal(Catalog.games.poe2.npcs[paths[0]][0],Catalog.games.poe2.npcs[paths[1]][0]);
+    assert.deepEqual(result.toneContext.voiceExamples.map(value=>value.provenance.recordId),['Own']);
+    assert.ok(result.toneContext.voiceExamples.every(value=>value.identityKey==='npc:'+paths[0]));
+});

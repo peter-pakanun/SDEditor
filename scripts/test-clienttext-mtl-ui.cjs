@@ -98,6 +98,40 @@ test('submitted context uses scoped saved neighboring translations and excludes 
     assert.doesNotMatch(JSON.stringify(context),/Unsaved selected|Unvalidated provisional/);
 });
 
+test('tone-note preparation keeps generation bound to its captured record across record navigation and fences scope changes',async()=>{
+    for(const changeScope of [false,true]){
+        const h=harness(),wait=deferred(),other=makeUnit('Other English {0}','Other target {0}');other.id='other-unit';other.recordId='Other record';
+        h.app.ctUnits.push(other);h.app._ctUnitIndex.set(other.id,other);h.app.ctToneNotesPrepare=()=>wait.promise;
+        h.app.ctToneNotesSnapshot=()=>({status:'ready',accountId:h.scope.accountId,scope:{game:h.scope.game,branchId:h.scope.branchId,language:h.scope.language},entries:[]});
+        let sent;h.app._cloud.request=async(_path,options)=>{sent=options.body;return{candidate:candidate(h.original,sent.requestId,sent.baseTargetHash)};};
+        const pending=h.app.ctMtlGenerate(h.field);await settle();
+        if(changeScope)h.changeEpoch();else{h.app.ctSelection=other.id;h.app.ctValues=S.valuesFor(other);}
+        wait.resolve();assert.equal(await pending,!changeScope);
+        if(changeScope)assert.equal(sent,undefined);
+        else{assert.equal(sent.context.identity.unitId,h.original.id);assert.equal(sent.unitId,h.original.id);assert.equal(h.app.ctValues[h.field.id],'Other target {0}');}
+    }
+});
+
+test('unavailable tone-note preparation cannot admit a translation or change its underlying draft',async()=>{
+    const h=harness();let requests=0;h.app.ctValues[h.field.id]='Private ordinary draft {0}';
+    h.app.ctToneNotesPrepare=async()=>{throw Object.assign(new Error('Shared tone notes could not be checked.'),{code:'MTL_TONE_NOTES_UNAVAILABLE'});};
+    h.app._cloud.request=async()=>{requests++;throw Error('Inference must not start');};
+    assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.equal(requests,0);assert.deepEqual(h.app.ctMtlGenerations,[]);
+    assert.equal(h.app.ctValues[h.field.id],'Private ordinary draft {0}');assert.match(h.app.ctMtlError,/could not be checked/);
+});
+
+test('stale tone-note admission refreshes notes and ends the request without automatic translation replay',async()=>{
+    for(const asynchronous of [false,true]){
+        const h=harness();if(asynchronous)h.app.ctMtlCapabilities.delivery='poll-v1';let reads=0,posts=0;
+        h.app.ctToneNotesPrepare=async()=>{reads++;};h.app._cloud.request=async(_path,options={})=>{
+            assert.equal(options.method,'POST');posts++;throw Object.assign(new Error('Synthetic stale guidance'),{status:409,code:'MTL_TONE_NOTES_CHANGED'});
+        };
+        assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.equal(reads,2);assert.equal(posts,1);
+        assert.equal(h.app.ctMtlGenerations[0].status,'failed');assert.equal(h.app.ctMtlPendingGeneration(h.field),null);
+        assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');assert.match(h.app.ctMtlError,/changed before translation started/);
+    }
+});
+
 test('advertised polling starts once and shows only request-local provisional text until validated completion',async()=>{
     for(const local of [false,true]){
         const h=pollingHarness();if(local)h.scope.groupId='local:test:live';let body,posts=0,gets=0;

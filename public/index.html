@@ -199,7 +199,7 @@
               <button v-if="mtlLimitsLoadError" type="button" @click="mtlLimitsLoad(true)" :disabled="mtlLimitsLoading || mtlLimitsSaving">Reload limits and usage</button>
             </details>
             <label class="settingsToggle"><input type="checkbox" v-model="mtlConsentVersion" true-value="mtl-v2" false-value=""><span><strong>Allow MTL requests and private review retention</strong><small>Send the selected English field and relevant context to an external translation service. Retain the source, prompt and context privately on this app's server, including for local workbooks. Explicit Dismiss also saves the original generated translation and my edited rejection. Review the details below.</small></span></label>
-            <details class="settingsHelp"><summary>MTL data sharing and privacy</summary><p>MTL sends the selected English field and bounded relevant workbook context, Developer notes and approved glossary terms to an external translation service. Data handling follows the connected service account and applicable service and app terms. The app's server privately retains generation evidence, including the selected source, executed prompt and context. Explicit Dismiss saves a private review archive with that evidence, the original generated translation and any edited rejection text. This applies to online workspaces and local in-memory sessions; closing a local session does not delete evidence already received by the server. Archives are excluded from translation exports and TM. Workbook parsing and export stay in this browser. Suggestions require human review and Save before they replace the prior saved or original translation.</p></details>
+            <details class="settingsHelp"><summary>MTL data sharing and privacy</summary><p>MTL sends the selected English field and bounded relevant workbook context, Developer notes, saved character tone notes and approved glossary terms to an external translation service. Data handling follows the connected service account and applicable service and app terms. The app's server privately retains generation evidence, including the selected source, executed prompt and context. Explicit Dismiss saves a private review archive with that evidence, the original generated translation and any edited rejection text. This applies to online workspaces and local in-memory sessions; closing a local session does not delete evidence already received by the server. Archives are excluded from translation exports and TM. Workbook parsing and export stay in this browser. Suggestions require human review and Save before they replace the prior saved or original translation.</p></details>
             <p class="settingsHelp">Unreviewed suggestions and edits stay separate. Export uses prior Saved or original translations. In-memory suggestions disappear when the local workbook session ends or the page reloads.</p>
             <h3 class="settingsSubheading">Keyboard shortcut</h3>
             <div class="settingsField"><label for="mtlShortcut">Translate current field with MTL</label><select id="mtlShortcut" v-model="mtlShortcut"><option value="disabled">Disabled</option><option value="f8">F8</option><option value="ctrl-alt-f8">Ctrl + Alt + F8</option></select><small>Only active while a ClientText translation field is focused.</small></div>
@@ -1468,6 +1468,7 @@
     <app-tooltip :state="tooltip"></app-tooltip>
     <keyword-popup-overlay :host="$root"></keyword-popup-overlay>
     <ct-mtl-debug-dialog v-if="ctMtlDebugAllowed && ctMtlDebugWindow" :host="$root"></ct-mtl-debug-dialog>
+    <ct-tone-notes-dialog v-if="ctToneWindow" ref="ctToneDialog" :host="$root"></ct-tone-notes-dialog>
 
     </div>
   </div>
@@ -1546,6 +1547,8 @@
   <script src="clientTextPortraits.js"></script>
   <script src="clientTextExportProgress.js"></script>
   <script src="clientTextMtlContext.js"></script>
+  <script src="clientTextToneNotes.js"></script>
+  <script src="clientTextToneNotesUi.js"></script>
   <script src="clientTextMtlProgress.js"></script>
   <script src="clientTextMtlUi.js"></script>
   <script src="clientTextMtlDebug.js"></script>

@@ -199,6 +199,19 @@
 .ctMtlReview {display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;padding:5px 0;}
 .ctMtlReview small {flex-basis:100%;color:var(--ui-muted);}
 .ctMtlReview button {font-size:12px;padding:2px 7px;}
+.ctToneButton {margin:5px 0 0 6px;padding:2px 7px;font-size:12px;}
+.ctToneWarning {color:var(--ui-warning);}
+.ctToneBackdrop {display:flex;align-items:center;justify-content:center;position:fixed;inset:0;padding:20px;background:#10182e80;z-index:10050;}
+.ctToneDialog {width:min(640px,100%);max-height:calc(100dvh - 40px);}
+.ctToneDialog textarea {display:block;box-sizing:border-box;width:100%;resize:vertical;min-height:100px;max-height:35vh;margin-top:6px;padding:10px;border:1px solid var(--ui-border);border-radius:6px;background:var(--color-bg);color:var(--color-font);font:inherit;line-height:1.5;}
+.ctToneDialog textarea::placeholder {color:var(--ui-muted);opacity:1;}
+.ctToneIdentity {font-size:12px;overflow-wrap:anywhere;color:var(--ui-muted);}
+.ctToneDialog .ctToneInvalid {color:var(--ui-error);}
+.ctToneConflict {padding:12px;border:1px solid var(--ui-warning);border-radius:6px;margin:14px 0;}
+.ctToneDialog pre {white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;}
+.ctToneHistory {padding-left:20px;}.ctToneHistory li {padding:10px 0;border-bottom:1px solid var(--ui-border);}.ctToneHistory time {display:block;font-size:12px;color:var(--ui-muted);}
+.ctToneDialog button[aria-disabled="true"] {opacity:.5;cursor:default;}
+.ctToneDialog .settingsFooter .settingsActionPrimary {margin-left:auto;}
 .ctMtlDismissal {padding:8px 10px;margin-top:6px;border:1px solid var(--ui-border);border-radius:4px;background:var(--color-element);color:var(--color-font);line-height:1.5;}
 .ctMtlDismissal > span {flex:1 1 320px;}
 .ctMtlDismissal small {font-size:12px;}

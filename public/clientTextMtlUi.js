@@ -694,10 +694,10 @@
                     if (this.ctMtlRequests[name] === generation.requestId) { const requests = {...this.ctMtlRequests}; delete requests[name]; this.ctMtlRequests = requests; }
                 }
             },
-            ctMtlBuildContext(field) {
-                const ctx = this.ctContext();
-                return Context.create({ unit: this.ctCurrentUnit, field, units: this.ctUnits, npcIndex: this._ctNpcIndex, convoIndex: this._ctConvoIndex,
-                    skillResolver: this.ctSkillResolver, dictionary: this.ctMtlCommittedGlossary(ctx), saved: this.ctSaved, scope: ctx.scope });
+            ctMtlBuildContext(field,unit=this.ctCurrentUnit,ctx=this.ctContext()) {
+                return Context.create({ unit, field, units: this.ctUnits, npcIndex: this._ctNpcIndex, convoIndex: this._ctConvoIndex,
+                    skillResolver: this.ctSkillResolver, dictionary: this.ctMtlCommittedGlossary(ctx), saved: this.ctSaved, scope: ctx.scope,
+                    ...(this.ctToneNotesSnapshot?{toneNotes:this.ctToneNotesSnapshot(root.ClientTextToneNotes?.roleKeys(this,unit)||[])}: {}) });
             },
             async ctMtlGenerate(field) {
                 const ctx = this.ctContext();
@@ -725,7 +725,8 @@
                 job.current = current;
                 this.ctMtlProgressUpdate(job, { phase:'waiting', text:'' });
                 try {
-                    const context = this.ctMtlBuildContext(field);
+                    if(this.ctToneNotesPrepare){await this.ctToneNotesPrepare(root.ClientTextToneNotes?.roleKeys(this,unit)||[],ctx);if(!current())throw stale();}
+                    const context = this.ctMtlBuildContext(field,unit,ctx);
                     const body = { requestId, unitId: unit.id, fieldId: field.id, role: unit.role, assetHash: descriptor.assetHash || descriptor.hash,
                         parserVersion: descriptor.parserVersion, source: field.source, sourceHash: S.sourceHash(field.source), rawSourceHash: capturedSource,
                         baseTargetHash: S.hash(previous), baseRevision: this.ctSaved[unit.id]?.serverRevision || 0, clientFacts: S.clientFacts(unit),
@@ -761,6 +762,11 @@
                     return adopted;
                 } catch (error) {
                     if (error.mtlFinal || error.status === 422 && ['MTL_OUTPUT_INVALID', 'MTL_REFUSED'].includes(error.code)) confirmedFailure = true;
+                    if((error.status||error.statusCode)===409&&['MTL_TONE_NOTES_CHANGED','MTL_TONE_NOTE_SNAPSHOT_MISMATCH'].includes(error.code)){
+                        confirmedFailure=true;
+                        if(current())try{await this.ctToneNotesPrepare?.(root.ClientTextToneNotes?.roleKeys(this,unit)||[],ctx);}catch(_){/* Preserve the note draft/conflict and the explicit translation failure. */}
+                        error.message='Shared tone notes changed before translation started. Review Tone notes, then request translation again.';
+                    }
                     // A proxy can replace a failed POST with an unreadable error
                     // page. Inspect the same job once; never repeat inference.
                     if (!asynchronous && sent && current() && ['TypeError', 'NetworkError', 'SyntaxError'].includes(error.name)) {

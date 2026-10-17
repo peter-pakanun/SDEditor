@@ -1741,7 +1741,7 @@
             },
             ctKeyboardOverlayOpen() {
                 return !!(root.AppDialogs?.isOpen
-                    || this.versionChooserVisible || this.settingsDialogVisible || this.showSetting || this.ctUploadVisible
+                    || this.ctToneWindow || this.versionChooserVisible || this.settingsDialogVisible || this.showSetting || this.ctUploadVisible
                     || this.$refs?.ctExportDialog?.open || this.ctDiagnosticDialog()?.open || this.workspaceInitializationActive || this._importingSource
                     || this.cloudResolverVisible || this.cloudHistoryVisible || this.settingsImportDraft || this.draftRecoveryVisible);
             },
@@ -3278,6 +3278,7 @@
         </section>` };
     const fieldsComponent = { props: {host:Object,side:{type:String,default:'both'}},
         components: {...(root.ClientTextAudio ? {'ct-dialogue-audio':root.ClientTextAudio.controlsComponent} : {}),
+            ...(root.ClientTextToneNotesUI ? {'ct-tone-notes-button':root.ClientTextToneNotesUI.Button} : {}),
             ...(root.ClientTextPortraits ? {'ct-portraits':root.ClientTextPortraits.component} : {})},
         methods: {
             showTooltip(event,text) { this.host.showTooltip?.(event,text); },
@@ -3319,6 +3320,7 @@
                         </component>
                         <ct-dialogue-audio v-if="$options.components['ct-dialogue-audio'] && audioSource(group,source)" :host="host" :surface="side"></ct-dialogue-audio>
                         <ct-portraits v-if="$options.components['ct-portraits'] && host.ctRowPortraits && audioSource(group,source)" :items="host.ctRowPortraits(host.ctCurrentUnit)"></ct-portraits>
+                        <ct-tone-notes-button v-if="$options.components['ct-tone-notes-button'] && audioSource(group,source)" :host="host"></ct-tone-notes-button>
                     </div>
                     </template>
                 </div>

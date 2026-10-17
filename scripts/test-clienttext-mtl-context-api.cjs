@@ -166,3 +166,46 @@ test('API retains distinct same-name NPC identities without importing another pa
     assert.equal(conflict.roleHints.speaker.status,'conflict');assert.equal(conflict.toneContext.voiceExamples.length,0);
     validation.mtlRequestInput(request(selected,conflict,validation));
 });
+
+test('API accepts canonical scoped shared tone notes without changing role uncertainty or request budgets',options,async()=>{
+    const validation=await api(),path='Metadata/Characters/Int/IntFour',listener='Metadata/Characters/Str/StrFour',
+        selected=unit('NPCTalkDialogueTextAudio','SyntheticSelected',[field('Text','Use [Spark|spark].','Approved selected')]),
+        popup=unit('KeywordPopups','Spark',[field('Info Content','Synthetic keyword source.','Approved keyword translation.')]),
+        scope={accountId:'synthetic-account',game:'poe2',branchId:'default',language:'Thai'},
+        toneNotes={status:'ready',accountId:scope.accountId,scope:{game:'poe2',branchId:'default',language:'Thai'},entries:[
+            {identityKey:'character:'+path,revision:3,text:'😀'.repeat(300)},
+            {identityKey:'character:'+listener,revision:7,text:'\u0e01'.repeat(300)}]};
+    selected.metadata={Speaker:path,Listener:listener};
+    const context=Context.build({unit:selected,field:selected.fields[0],units:[selected,popup],scope,toneNotes}),body=request(selected,context,validation);
+    assert.deepEqual(context.sharedToneNotes,{version:'clienttext-shared-tone-notes-v1',scope:toneNotes.scope,
+        entries:toneNotes.entries.map((value,i)=>({...value,roles:[i?'listener':'speaker']}))});
+    assert.equal(context.toneContext.styleNoteSelection.characters,600);assert.equal(context.omitted.styleNotes,0);
+    assert.equal(context.keywords[0].fields[0].translation,'Approved keyword translation.');
+    for(const local of [false,true]) {
+        const input=local?{...body,language:'Thai',game:'poe2',branchId:'default'}:body;
+        assert.deepEqual(validation.mtlRequestInput(input,{local}).context,context);bounds(context,input);
+    }
+    selected.metadata={Character:path};
+    const tentative=Context.build({unit:selected,field:selected.fields[0],units:[selected,popup],scope,toneNotes});
+    assert.equal(tentative.roleHints.speaker.confidence,'heuristic');assert.equal(tentative.sharedToneNotes.entries.length,1);
+    assert.deepEqual(tentative.sharedToneNotes.entries[0].roles,['speaker']);
+    validation.mtlRequestInput(request(selected,tentative,validation));
+});
+
+test('API accepts explicit exact catalog NPC role notes from a partial workbook without invented source records',options,async()=>{
+    const validation=await api(),path='Metadata/NPC/Four_Act4/HoodedMentorKingsmarchIntro',
+        selected=unit('NPCTalkDialogueTextAudio','SyntheticPartial',[field('Text','Synthetic dialogue.','Approved selected')]),
+        scope={accountId:'synthetic-account',game:'poe2',branchId:'default',language:'Thai'},
+        toneNotes={status:'ready',accountId:scope.accountId,scope:{game:'poe2',branchId:'default',language:'Thai'},
+            entries:[{identityKey:'npc:'+path,revision:2,text:'Saved synthetic speaker style.'}]};
+    selected.metadata={Speaker:path};
+    const context=Context.build({unit:selected,field:selected.fields[0],units:[selected],scope,toneNotes}),body=request(selected,context,validation);
+    assert.equal(context.roleHints.speaker.status,'resolved');assert.equal(context.roleHints.speaker.identityKey,'npc:'+path);
+    assert.deepEqual(context.sharedToneNotes.entries,[{...toneNotes.entries[0],roles:['speaker']}]);
+    assert.equal(context.roleHints.identities[0].name,undefined);assert.equal(context.roleHints.identities[0].identityEvidence,'reviewed-catalog-exact-path');
+    assert.deepEqual(context.references,[]);assert.deepEqual(context.toneContext.profiles,[]);
+    for(const local of [false,true]) {
+        const input=local?{...body,language:'Thai',game:'poe2',branchId:'default'}:body;
+        assert.deepEqual(validation.mtlRequestInput(input,{local}).context,context);bounds(context,input);
+    }
+});
