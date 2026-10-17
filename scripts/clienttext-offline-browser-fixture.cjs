@@ -101,6 +101,8 @@ async function monitor(page, enabled) {
             window.__offlineTestWrites = [];
             window.__offlineTestStorageWrites = [];
             window.__offlineTestRequests = [];
+            window.__offlineTestReadOnlyCatalogRequests = [];
+            window.__offlineTestReadOnlyMediaRequests = [];
         }
     }, enabled);
 }
@@ -112,6 +114,16 @@ async function assertLocal(page, label, exited = false) {
     }));
     if (exited) activity.requests = activity.requests.filter(path => !/^\/v1\/comments\/unread\?game=poe2$/.test(path));
     assert.deepEqual(activity, { indexedDb: [], browserStorage: [], requests: [] }, label + ': the test session writes no durable data or cloud requests');
+    const catalogReads=await page.evaluate(()=>window.__offlineTestReadOnlyCatalogRequests||[]);
+    for(const request of catalogReads)assert.deepEqual(request,{path:'/v1/skill-card-catalogs/poe2/v1',method:'GET'},
+        label+': only the existing protected read-only catalog uses the explicit synthetic stub');
+    const mediaReads=await page.evaluate(()=>window.__offlineTestReadOnlyMediaRequests||[]);
+    for(const request of mediaReads){
+        assert.equal(request.method,'GET',label+': fixture media is read only');
+        assert.ok(request.kind==='portrait'&&/^\/portraits\/poe2\/[a-z0-9]+(?:-[a-z0-9]+)*\.webp\?v=4$/.test(request.path)
+            ||request.kind==='audio'&&request.path==='/audio/poe2db?path='+encodeURIComponent(audioReference.toLowerCase()),
+            label+': only exact validated workbook portraits and the generated fixture clip are permitted');
+    }
 }
 async function saved(page, unitId, fieldId, target) {
     await page.waitForFunction(({ unitId, fieldId, target }) => {
@@ -119,6 +131,11 @@ async function saved(page, unitId, fieldId, target) {
         return !vm.ctBusy && vm.ctSaved[unitId]?.values[fieldId] === target;
     }, { unitId, fieldId, target });
     assert.equal(await page.evaluate(() => window.__offlineTestApp.ctError), '');
+}
+async function closeExportDialog(page){
+    await page.waitForFunction(()=>!window.__offlineTestApp._ctExportRun);
+    const close=page.locator('.ctExportDialog[open] [data-ct-export-close]');
+    if(await close.count())await close.click();
 }
 async function caretFormatting(page, surface, label) {
     const target=surface.locator('.ctTarget').first(),input=target.locator('[data-ct-target]'),
@@ -238,11 +255,12 @@ async function run() {
             await page.evaluate(() => window.OfflineStore?.updateHybridState?.(state => { state.auth = null; state.activeProfile = 'guest'; return state; }));
             await page.goto(origin);
             await page.waitForFunction(() => window.__offlineTestApp?.offlineStoreReady && window.__offlineTestApp?._cloud?.state && !window.__offlineTestApp.workspaceInitializationActive);
-            await page.evaluate(async ({ role, selectedLanguage }) => {
+            await page.evaluate(async ({ role, selectedLanguage, fixtureAudioPath }) => {
                 const vm = window.__offlineTestApp;
                 // Keep the actual cloud client for scope guards. Destroy its
-                // scheduling and replace API transport; only empty catalog
-                // lookups are allowed, and no network leaves this fixture.
+                // scheduling and replace API transport. Only empty catalogs,
+                // synthetic mapped portraits and the generated loopback clip
+                // are allowed; no authoring/sync or external network is used.
                 vm._cloud.destroy();
                 vm._cloud.destroyed = false;
                 vm._cloud.schedule = () => {};
@@ -252,8 +270,30 @@ async function run() {
                 clearInterval(vm._managedTimer);
                 clearInterval(vm._commentsPollTimer);
                 clearTimeout(vm._commentsReadTimer);
-                vm._cloud.request = async path => {
+                vm._cloud.request = async (path, options = {}) => {
                     if (String(path).startsWith('/v1/versions?')) return { versions: [], branch: { id: 'default' } };
+                    // Authorized local editing already loads this optional, read-only
+                    // preview catalog. Keep it synthetic and separate from the strict
+                    // no-authoring/no-sync request log; never exempt other /v1 routes.
+                    if(path==='/v1/skill-card-catalogs/poe2/v1'&&String(options.method||'GET').toUpperCase()==='GET'){
+                        if(window.__offlineTestMonitoring)window.__offlineTestReadOnlyCatalogRequests.push({path,method:'GET'});
+                        return{schemaVersion:1,game:'poe2',revision:'synthetic-offline-empty',clientBuild:'0',cards:[]};
+                    }
+                    if(String(options.method||'GET').toUpperCase()==='GET'&&options.responseType==='blob'){
+                        const portraits=new Set((vm.ctUnits||[]).flatMap(unit=>vm.ctRowPortraits(unit))
+                            .filter(item=>item.game==='poe2'&&/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(item.id||''))
+                            .map(item=>'/portraits/poe2/'+item.id+'.webp?v=4'));
+                        if(portraits.has(path)){
+                            if(window.__offlineTestMonitoring)window.__offlineTestReadOnlyMediaRequests.push({path,method:'GET',kind:'portrait'});
+                            // The same synthetic one-pixel PNG used by the dedicated
+                            // skill-card fixture. No packaged/private image is read.
+                            return new Blob([Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='),char=>char.charCodeAt(0))],{type:'image/png'});
+                        }
+                        if(path===fixtureAudioPath){
+                            if(window.__offlineTestMonitoring)window.__offlineTestReadOnlyMediaRequests.push({path,method:'GET',kind:'audio'});
+                            return fetch(location.origin+path,{method:'GET',signal:options.signal,cache:'no-store',credentials:'omit'});
+                        }
+                    }
                     if (window.__offlineTestMonitoring) window.__offlineTestRequests.push(String(path));
                     if (String(path).startsWith('/v1/comments/unread?')) return { total: 0, files: [] };
                     throw new Error('Offline test attempted cloud data request: ' + path);
@@ -276,7 +316,7 @@ async function run() {
                 await vm.activateGameVersion('poe2', { checkMigration: false });
                 await vm.ctRefreshLocal();
                 await vm.$nextTick();
-            }, { role, selectedLanguage });
+            }, { role, selectedLanguage, fixtureAudioPath:'/audio/poe2db?path='+encodeURIComponent(audioReference.toLowerCase()) });
             await page.getByRole('region', { name: 'Source versions' }).waitFor();
             // Scope changes may queue ordinary settings/account preparation;
             // complete those fixture tasks before measuring test activity.
@@ -453,6 +493,7 @@ async function run() {
         await page.waitForFunction(() => !window.__offlineTestApp.ctBusy);
         assert.equal(await page.evaluate(() => window.__offlineTestApp.ctError), '', 'Export succeeds');
         const download = await downloaded;
+        await closeExportDialog(page);
         assert.equal(download.suggestedFilename(), 'French.xlsm');
         const output = readFileSync(await download.path()), exportedZip = await JSZip.loadAsync(output);
         assert.deepEqual(await exportedZip.file('xl/vbaProject.bin').async('nodebuffer'), VBA, 'XLSM export preserves VBA bytes');
@@ -1123,6 +1164,7 @@ async function run() {
             const downloading = page.waitForEvent('download', { timeout: 180000 });
             await workspace.getByRole('button', { name: 'Download workbooks', exact: true }).click();
             const download = await downloading, outputPath = join(disposableFolder, 'hint-' + download.suggestedFilename());
+            await closeExportDialog(page);
             await download.saveAs(outputPath);
             await page.waitForFunction(() => !window.__offlineTestApp.ctBusy, null, { timeout: 180000 });
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctError), '');
@@ -1291,6 +1333,7 @@ async function run() {
                 await page.waitForFunction(() => !window.__offlineTestApp.ctBusy, null, { timeout: 180000 });
                 assert.equal(await page.evaluate(() => window.__offlineTestApp.ctError), '', 'Real supplied workbook export succeeds');
                 const download = await downloadPromise;
+                await closeExportDialog(page);
                 const outputPath = join(disposableFolder, language + '-' + download.suggestedFilename());
                 await download.saveAs(outputPath);
                 const downloadedBytes = readFileSync(outputPath);
@@ -1350,7 +1393,8 @@ async function run() {
         }
         results.push('Ordinary New Version and Add Content retain separate Prepare and validate/Publish complete groups actions');
         assert.deepEqual(failures, [], 'No browser runtime errors');
-        console.log(JSON.stringify({ ok: true, results }, null, 2));
+        console.log(JSON.stringify({ ok: true, results, permittedReadOnlyCatalogRequests:await page.evaluate(()=>window.__offlineTestReadOnlyCatalogRequests||[]),
+            permittedReadOnlyMediaRequests:await page.evaluate(()=>window.__offlineTestReadOnlyMediaRequests||[]) }, null, 2));
     } catch (error) {
         if (page && !page.isClosed()) console.error('Offline fixture state:', JSON.stringify(await page.evaluate(() => {
             const vm = window.__offlineTestApp;
@@ -1362,7 +1406,8 @@ async function run() {
                 comparisonBusy:vm?.ctComparisonBusy,comparisonError:vm?.ctComparisonError,historyError:vm?.ctHistoryError,comparisons:vm?.ctComparisonVersions?.length,
                 chooser: vm?.versionChooserVisible, stores: vm?._ctTestStores?.size,
                 writes: window.__offlineTestWrites, storageWrites: window.__offlineTestStorageWrites,
-                requests: window.__offlineTestRequests };
+                requests: window.__offlineTestRequests,readOnlyCatalogRequests:window.__offlineTestReadOnlyCatalogRequests,
+                readOnlyMediaRequests:window.__offlineTestReadOnlyMediaRequests };
         }).catch(() => null), null, 2));
         console.error('Browser errors:', failures);
         throw error;

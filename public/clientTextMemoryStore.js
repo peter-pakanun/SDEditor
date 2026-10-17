@@ -24,6 +24,8 @@
     }
     function create(dependencies = {}) {
         const workspaces = new Map();
+        const mtlApi=globalThis.ClientTextMtlMemoryStore || (typeof require==='function' ? require('./clientTextMtlMemoryStore.js') : null);
+        const mtl=mtlApi?.create();
         let disposed = false;
         const pause = dependencies.yield || (() => new Promise(resolve => setTimeout(resolve, 0)));
         function guard(options) {
@@ -155,7 +157,8 @@
             const values = S.normalizeValues(unit, input?.values), reviewed = S.normalizeReviewed(unit, input?.reviewed || {});
             const previous = workspace.drafts.get(unitId);
             if (own(options, 'expectedRevision') && (previous?.revision || null) !== options.expectedRevision) throw Object.assign(new Error('This ClientText draft changed.'), { code: 'DRAFT_CHANGED' });
-            const draft = { unitId, values, reviewed, revision: (previous?.revision || 0) + 1, updatedAt: Date.now() };
+            const draft = { unitId, values, reviewed, revision: (previous?.revision || 0) + 1, updatedAt: Date.now(),
+                ...(input.mtlAcceptances?.length ? {mtlAcceptances:S.copy(input.mtlAcceptances)} : {}) };
             guard(options); workspace.drafts.set(unitId, draft); return S.copy(draft);
         }
         async function getDraft(rawScope, unitId, options) {
@@ -177,6 +180,7 @@
             if (own(input, 'origin') && !['save', 'restore'].includes(input.origin)) throw new TypeError('ClientText save origin must be save or restore.');
             const values = S.normalizeValues(unit, input.values), reviewed = S.normalizeReviewed(unit, input.reviewed || {});
             const command = { scope: captured.scope, unitId, values, reviewed,
+                ...(input.mtlAcceptances?.length ? {mtlAcceptances:S.copy(input.mtlAcceptances)} : {}),
                 ...(own(input, 'origin') ? { origin: input.origin } : {}),
                 ...(own(input, 'baseRevision') ? { baseRevision: input.baseRevision } : {}),
                 ...(own(input, 'expectedRevision') ? { expectedRevision: input.expectedRevision } : {}),
@@ -189,12 +193,17 @@
             const before = workspace.saved.get(unitId), draft = workspace.drafts.get(unitId);
             if (own(input, 'expectedRevision') && (before?.revision || 0) !== input.expectedRevision) throw Object.assign(new Error('The ClientText saved translation changed.'), { code: 'UNIT_CHANGED' });
             if (own(input, 'expectedDraftRevision') && (draft?.revision || null) !== input.expectedDraftRevision) throw Object.assign(new Error('This ClientText draft changed.'), { code: 'DRAFT_CHANGED' });
+            const acceptedMtl=input.mtlAcceptances?.length ? mtl.validateAcceptances(captured.scope,unit,input.mtlAcceptances,values,workspace.metadata.descriptors.find(value=>value.role===unit.role)) : [];
+            if(acceptedMtl.length && ((input.origin||options.origin)==='restore' || acceptedMtl.some(claim=>({...before?.reviewed,...reviewed})[claim.fieldId]!==claim.candidate.sourceHash)))
+                throw Object.assign(new Error('MTL acceptance requires a normal Save reviewed against the current source.'),{code:'MTL_REVIEW_MISMATCH'});
             const after = { unitId, values, reviewed: { ...before?.reviewed, ...reviewed }, saved: true, revision: (before?.revision || 0) + 1,
                 serverRevision: before?.serverRevision || input.baseRevision || 0, baseRevision: before?.serverRevision || input.baseRevision || 0,
-                savedAt: Date.now(), jobId: input.jobId, origin: input.origin || options.origin || 'save', outdated: before?.outdated || [] };
+                savedAt: Date.now(), jobId: input.jobId, origin: input.origin || options.origin || 'save', outdated: before?.outdated || [],
+                ...(acceptedMtl.length ? {mtlAcceptances:S.copy(input.mtlAcceptances)} : {}) };
             const entry = { id: input.jobId, unitId, before: before || null, after, origin: after.origin, createdAt: after.savedAt };
             const committed = { jobId: input.jobId, signature, unitId, saved: after, committedAt: Date.now() };
             guard(options);
+            if(acceptedMtl.length)mtl.resolveAcceptances(captured.scope,acceptedMtl,{jobId:input.jobId,now:after.savedAt});
             workspace.saved.set(unitId, after);
             const history = workspace.history.get(unitId) || []; history.push(entry); workspace.history.set(unitId, history);
             if (own(input, 'expectedDraftRevision')) workspace.drafts.delete(unitId);
@@ -208,9 +217,9 @@
         async function getMemory(rawScope, options) {
             capture(rawScope, options); return { units: [], counts: { total: 0, text: 0, form: 0 } };
         }
-        function dispose() { disposed = true; workspaces.clear(); }
+        function dispose() { disposed = true; workspaces.clear(); mtl?.dispose(); }
         return { import: importContent, importContent, getMetadata, listWorkspaces, seedPreviousVersion, getUnits, getUnitsByIds, getUnit, getSaved, getAsset,
-            putDraft, getDraft, getDraftSummaries, discardDraft, save, listHistory, getMemory, normalizeScope, scopeKey, dispose };
+            putDraft, getDraft, getDraftSummaries, discardDraft, save, listHistory, getMemory, normalizeScope, scopeKey, mtl, dispose };
     }
     return { normalizeScope, scopeKey, create };
 });

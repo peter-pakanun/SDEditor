@@ -22,7 +22,7 @@
     ];
     // Start with workload and saved changes; complete originals remain
     // available through the Unchanged filter.
-    const defaultFilters = () => statusFilters.filter(item=>item.key!=='unchanged').map(item=>item.key);
+    const defaultFilters = () => [...statusFilters.filter(item=>item.key!=='unchanged').map(item=>item.key),'mtl'];
     const scanTypes = [
         {key:'whitespace',label:'Whitespace',description:'Leading, trailing, and repeated spaces.'},
         {key:'dash',label:'Dash spacing',description:'Dashes at line boundaries or next to spaces.'},
@@ -423,9 +423,9 @@
                 }));return this._ctDiagnosticScanController;
             },
             ctStatusFilterOptions() {
-                const counts={...this.ctCounts,error:0,warning:0,draft:this.ctDraftCount};
+                const counts={...this.ctCounts,error:0,warning:0,draft:this.ctDraftCount,mtl:this.ctMtlCount || 0};
                 for(const issues of Object.values(this.ctDiagnostics))for(const severity of ['error','warning'])if(issues.some(issue=>issue.severity===severity))counts[severity]++;
-                return statusFilters.map(item=>({...item,count:counts[item.key] || 0}));
+                return [...statusFilters,...(counts.mtl ? [{key:'mtl',label:'MTL',tone:'mtl'}] : [])].map(item=>({...item,count:counts[item.key] || 0}));
             },
             ctEffectivePageSize() { return Math.max(1,Math.floor(Number(this.pageSize || this.ctPageSize) || 20)); },
             ctRows() {
@@ -437,10 +437,10 @@
                     const status = this.ctStatus(unit);
                     if (this.ctFilter === 'error' || this.ctFilter === 'warning') {
                         if (!(this.ctDiagnostics[unit.id] || []).some(item => item.severity === this.ctFilter)) return false;
-                    } else if (this.ctFilter === 'draft' ? !this.ctDraftUnitIds.has(unit.id) : this.ctFilter && !status[this.ctFilter]) return false;
+                    } else if (this.ctFilter === 'mtl' ? !this.ctMtlUnitIds?.has(unit.id) : this.ctFilter === 'draft' ? !this.ctDraftUnitIds.has(unit.id) : this.ctFilter && !status[this.ctFilter]) return false;
                     if(!this.ctFilter && !this.ctSelectedFilters.some(key=>key==='error'||key==='warning'
                         ? (this.ctDiagnostics[unit.id] || []).some(issue=>issue.severity===key) : key==='draft'
-                            ? this.ctDraftUnitIds.has(unit.id) : status[key]))return false;
+                            ? this.ctDraftUnitIds.has(unit.id) : key==='mtl' ? this.ctMtlUnitIds?.has(unit.id) : status[key]))return false;
                     if (!query) return true;
                     const values = root.ClientTextState.valuesFor(unit, this.ctSaved[unit.id]);
                     return [unit.recordId, unit.sheet, ...fields.flatMap(field => [field.source, values[field.id]]), ...this.ctNotes(unit)].some(text => String(text).toLocaleLowerCase().includes(query));
@@ -833,11 +833,11 @@
                 const field=this.ctCurrentUnit?.fields.find(field=>field.id===this.ctFocusedField),input=this.ctDictionaryTarget(field?.id),replacement=(alt || word).replace;
                 if(!field || field.kind==='gender' || !input || input.isConnected===false || typeof replacement!=='string')return false;
                 if(root.EditorSession)return root.EditorSession.insert(this,field,replacement,{input});
-                const text=this.ctValues[field.id],start=input.selectionStart,end=input.selectionEnd;
+                const text=(this.ctInputValues || this.ctValues)[field.id],start=input.selectionStart,end=input.selectionEnd;
                 if(typeof text!=='string' || input.value!==text || !Number.isInteger(start) || !Number.isInteger(end) || start<0 || end<start || end>text.length)return false;
-                const next=text.slice(0,start)+replacement+text.slice(end);this.ctValues[field.id]=next;this.ctCloseCompletion();this.ctEdited(field);
+                const next=text.slice(0,start)+replacement+text.slice(end);(this.ctInputValues || this.ctValues)[field.id]=next;this.ctCloseCompletion();this.ctEdited(field);
                 this.$nextTick?.(()=>{
-                    if(!this.ctDictionaryContextCurrent(ctx,unitId,dictionary) || this.ctFocusedField!==field.id || this.ctValues[field.id]!==next || input.isConnected===false)return;
+                    if(!this.ctDictionaryContextCurrent(ctx,unitId,dictionary) || this.ctFocusedField!==field.id || (this.ctInputValues || this.ctValues)[field.id]!==next || input.isConnected===false)return;
                     input.focus();input.setSelectionRange?.(start+replacement.length,start+replacement.length);this.ctResizeField(input);
                 });return true;
             },
@@ -1093,7 +1093,7 @@
             ctShowAllLoaded() {
                 return this.ctChangeBrowse(()=>{
                     const views=this._ctBrowseViews ||= {};views[this.ctBrowseMode]=this.ctBrowseViewSnapshot();this.ctBrowseMode='sheets';
-                    this.ctFilter='';this.ctSheet='';this.ctSheetFilter='';this.ctSelectedFilters=statusFilters.map(item=>item.key);
+                    this.ctFilter='';this.ctSheet='';this.ctSheetFilter='';this.ctSelectedFilters=[...statusFilters.map(item=>item.key),'mtl'];
                     this.ctSearch='';this.ctAppliedSearch='';this.ctPage=1;
                 });
             },
@@ -1241,6 +1241,7 @@
                     if(this._ctDraftRevision===revision){this._ctDraftRevision=null;const head=this._ctDraftHeads?.get(JSON.stringify([root.ClientTextStore.scopeKey(ctx.scope),unitId]));if(head&&!head.pending){head.revision=null;head.signature=null;}}
                     if(signature!==JSON.stringify([this.ctValues,this.ctReviewed])){this.ctQueueDraft();return false;}
                     this.ctValues=this.ctValuesFor(this.ctCurrentUnit);this.ctReviewed={...(this.ctSaved[unitId]?.reviewed || {})};
+                    this.ctMtlRestoreAcceptances?.(null);
                     this.ctChoices=copy(this.ctSaved[unitId]?.conflicts || []);this.ctDraftDirty=false;this.ctDraftStageFailure=null;this.ctCloseCompletion();await this.ctRefreshDraftSummaries(ctx);return true;
                 } catch(error){if(this.ctCurrent(ctx))this.ctError='Draft was not discarded: '+error.message;return false;}
                 finally{if(this.ctCurrent(ctx))this.ctBusy=false;}
@@ -1297,6 +1298,7 @@
                 this.ctFlushDraft().catch(()=>{});
                 this.ctFlushCommentDraft().catch(()=>{});
                 this.ctFlushReplyCommentDrafts().catch(()=>{});
+                this.ctMtlReset?.();
                 this._ctEpoch = (this._ctEpoch || 0) + 1; this._ctAbort?.abort(); clearInterval(this._ctSyncTimer); clearTimeout(this._ctDraftTimer);clearTimeout(this._ctSearchTimer);
                 this._ctDictionaryRequest?.cancel?.();this._ctDictionaryRun=null;this.ctDictionaryPack=null;this._ctPendingDictionaryPack=null;this.ctDraftSummaries=[];
                 this._ctSync?.stop?.(); this._ctSync = null;
@@ -1607,10 +1609,12 @@
                     await this.ctInitializationStep('Preparing Dictionary matches',async()=>{await this.$nextTick?.();check();if(!test){await this._cloudLanguageSwitch;check();await this.ensureDictionarySnapshot?.();check();}},initialization);
                     await this.ctInitializationStep('Opening ClientText workspace',async()=>{
                     check();this.ctActive = true; if(!test)this.lang = scope.language; this.versionChooserVisible = false; this.editorVisible = false;
-                    if(test){this._ctTestTool=this.ctTool;this._ctTestFilters=this.ctSelectedFilters.slice();this.ctTool='lookup';this.ctSelectedFilters=statusFilters.map(item=>item.key);}
+                    if(test){this._ctTestTool=this.ctTool;this._ctTestFilters=this.ctSelectedFilters.slice();this.ctTool='lookup';this.ctSelectedFilters=[...statusFilters.map(item=>item.key),'mtl'];}
                     const memory=()=>{if(this.ctCurrent(ctx) && this.ctActive)return this.ctLoadMemory(ctx);};
                     if(this.queueWorkspaceBackground)this.queueWorkspaceBackground('clienttext-memory',memory);else setTimeout(memory,0);
                     this.activeContentGroup = metadata?.group || { id: scope.groupId, contentMode: 'clienttext' };
+                    const mtl=()=>{if(this.ctCurrent(ctx) && this.ctActive)return this.ctMtlActivate?.(ctx);};
+                    if(this.queueWorkspaceBackground)this.queueWorkspaceBackground('clienttext-mtl',mtl);else mtl();
                     if (this.managedOnlineAvailable && (this.cloudCanAccessAllLanguages || scope.language===this.cloudUser?.language) && !String(scope.groupId).startsWith('local:')) {
                         const request = (path, options) => this._cloud.request(path, options);
                         this._ctSync = root.ClientTextSync.create({ scope, store: this._ctStore, request, isCurrent: () => this.ctCurrent(ctx) && this.ctActive });
@@ -1646,6 +1650,7 @@
                         if(issue){this._ctSyncError=issue;this.ctError=issue;}
                         else {if(this.ctError===this._ctSyncError)this.ctError='';this._ctSyncError='';}
                         await this.ctPresence(ctx);
+                        await this.ctMtlSync?.(ctx);
                     } catch (error) { if (this.ctCurrent(ctx) && !error.stale){this._ctSyncError=error.message;this.ctError=error.message;} }
                 })();
                 const run={sync,promise:operation};this._ctSyncRun=run;
@@ -1685,6 +1690,8 @@
                 this.ctChoices = copy(this.ctSaved[unit.id]?.conflicts || []); this._ctEditRevision = this.ctSaved[unit.id]?.revision || 0;
                 this._ctDraftRevision = draft?.revision || null;
                 if (draft?.values) { this.ctValues = { ...this.ctValues, ...draft.values }; this.ctReviewed = { ...this.ctReviewed, ...draft.reviewed }; this.ctDraftDirty = true; }
+                await this.ctMtlLoadReviews?.(unit);if(!current())return false;
+                this.ctMtlRestoreAcceptances?.(draft);
                 this.ctInitializeVariants(unit);const displayed=this.ctDisplayedFields(unit);
                 this.ctFocusedField=this.ctTabFields(unit).find(field=>displayed.includes(field))?.id || '';
                 this.ctResetHistory(); this.ctComments = [];
@@ -1823,6 +1830,8 @@
                 const scrollTop=field.scrollTop;field.style.height='auto';field.style.height=field.scrollHeight+2+'px';field.scrollTop=scrollTop;
             },
             ctEdited(field) {
+                if(this.ctMtlCandidate?.(field))return;
+                this.ctMtlUnderlyingEdited?.(field);
                 this.ctReviewed[field.id] = this.ctReviewHash(field);
                 this.ctDraftStageFailure=null;this.ctDraftDirty = true; this.ctQueueDraft();
             },
@@ -1896,7 +1905,7 @@
                 if(!target || active && active!==input && active!==target && active!==root.document?.body && active!==root.document?.documentElement)return true;
                 target.focus?.({preventScroll:true});target.setSelectionRange?.(caret,caret,'none');this.ctResizeField(target);return true;
             },
-            ctMarkReviewed(field) { this.ctReviewed[field.id] = this.ctReviewHash(field); this.ctDraftStageFailure=null;this.ctDraftDirty = true; this.ctQueueDraft(); },
+            ctMarkReviewed(field) { if(this.ctMtlCandidate?.(field))return;this.ctReviewed[field.id] = this.ctReviewHash(field); this.ctDraftStageFailure=null;this.ctDraftDirty = true; this.ctQueueDraft(); },
             ctChooseAlternative(choice, side) { const field = this.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId); this.ctValues[choice.fieldId] = side === 'local' ? choice.local : choice.upstream ?? choice.remote; this.ctChoices = this.ctChoices.filter(item=>item!==choice); if(field)this.ctEdited(field); },
             ctCompleteForm(field, event) {
                 if(event.isComposing || event.keyCode===229)return;
@@ -1921,10 +1930,10 @@
                 if (!root.ClientTextState.allowsNonexistent(field) || event.key !== 'Tab' || !plain || !this.ctActive || this.ctBusy
                     || this.ctHistoryViewer || this.versionChooserVisible || this.settingsDialogVisible || this.showSetting || this.ctDiagnosticDialog()?.open
                     || !current || current.source!==field.source || current.kind!==field.kind) return;
-                const value = this.ctValues[field.id];
+                const value = (this.ctInputValues || this.ctValues)[field.id];
                 const caret=event.target?.selectionStart,end=event.target?.selectionEnd;
                 if (value && 'NONEXISTENT'.startsWith(value.toUpperCase()) && value !== 'NONEXISTENT'
-                    && (!Number.isInteger(caret) || caret===value.length && end===caret)) { event.preventDefault(); this.ctValues[field.id] = 'NONEXISTENT'; this.ctEdited(field); }
+                    && (!Number.isInteger(caret) || caret===value.length && end===caret)) { event.preventDefault(); (this.ctInputValues || this.ctValues)[field.id] = 'NONEXISTENT'; this.ctEdited(field); }
             },
             ctTargetKeydown(field,event) {
                 if(event.defaultPrevented || event.isComposing || event.keyCode===229 || this.ctKeyboardBlocked()
@@ -1963,7 +1972,7 @@
                     && completion.fieldId===field?.id && completion.unitId===this.ctSelection && this.ctCurrent(completion.context)
                     && unproxy(completion.unit)===unproxy(this.ctCurrentUnit) && unproxy(completion.field)===unproxy(current)
                     && current && current.kind!=='gender' && current.source===completion.source
-                    && (!this.ctFocusedField || this.ctFocusedField===field.id) && this.ctValues[field.id]===completion.text
+                    && (!this.ctFocusedField || this.ctFocusedField===field.id) && (this.ctInputValues || this.ctValues)[field.id]===completion.text
                     && input && input.isConnected!==false && !input.composing && input.selectionStart===completion.selectionStart && input.selectionEnd===completion.selectionEnd
                     && (typeof input.value!=='string' || input.value===completion.text.replace(/\r\n?/g,'\n')));
             },
@@ -2010,7 +2019,7 @@
             ctSuggest(field,event,options={}) {
                 this.ctCloseCompletion();this._ctDictionaryReturn=null;
                 if(!this.ctActive || this.ctBusy || this.ctHistoryViewer || event.isComposing || event.keyCode===229 || field.kind==='gender')return false;
-                const current=this.ctCurrentUnit?.fields.find(item=>item.id===field.id),input=event.target,text=this.ctValues[field.id];
+                const current=this.ctCurrentUnit?.fields.find(item=>item.id===field.id),input=event.target,text=(this.ctInputValues || this.ctValues)[field.id];
                 const caret=input?.selectionStart,selectionEnd=input?.selectionEnd;
                 if(!current || current.source!==field.source || current.kind!==field.kind || typeof text!=='string'
                     || !Number.isInteger(caret) || !Number.isInteger(selectionEnd) || !options.manual && selectionEnd!==caret)return false;
@@ -2039,9 +2048,9 @@
                 }
                 if(root.EditorSession)return root.EditorSession.insert(this,field,item.value,{input:target,start:completion.start,end:completion.end,raw:true,caretOffset:item.caretOffset});
                 const text=completion.text.slice(0,completion.start)+item.value+completion.text.slice(completion.end);
-                this.ctValues[field.id]=text;this.ctCloseCompletion();this.ctEdited(field);
+                (this.ctInputValues || this.ctValues)[field.id]=text;this.ctCloseCompletion();this.ctEdited(field);
                 this.$nextTick?.(()=>{
-                    if(!this.ctCurrent(completion.context) || this.ctSelection!==completion.unitId || this.ctValues[field.id]!==text
+                    if(!this.ctCurrent(completion.context) || this.ctSelection!==completion.unitId || (this.ctInputValues || this.ctValues)[field.id]!==text
                         || this.ctFocusedField && this.ctFocusedField!==field.id || target?.isConnected===false)return;
                     const caret=text.slice(0,completion.start+(item.caretOffset ?? item.value.length)).replace(/\r\n?/g,'\n').length;
                     target?.focus();target?.setSelectionRange(caret,caret);this.ctResizeField(target);
@@ -2062,16 +2071,17 @@
                 clearTimeout(this._ctDraftTimer);
                 if (!this.ctDraftDirty || !this.ctCurrentUnit || !this.ctWorkspace) return true;
                 const ctx = this.ctContext(), unitId = this.ctSelection, values = copy(this.ctValues), reviewed = copy(this.ctReviewed);
+                const mtlAcceptances=this.ctMtlCheckpointAcceptances ? this.ctMtlCheckpointAcceptances(unitId,values) : this.ctMtlAcceptances?.(unitId,values) || [];
                 const store=this.ctStorage(ctx.scope);
                 const id=JSON.stringify([root.ClientTextStore.scopeKey(ctx.scope),unitId]),heads=this._ctDraftHeads ||= new Map();
                 let head=heads.get(id);
                 if(!head){head={revision:this._ctDraftRevision||null,pending:0,queue:Promise.resolve(),signature:null};heads.set(id,head);}
                 else if(!head.pending && head.revision!==(this._ctDraftRevision||null)){head.revision=this._ctDraftRevision||null;head.signature=null;}
-                const signature=JSON.stringify([values,reviewed]);head.pending++;
+                const signature=JSON.stringify([values,reviewed,...(mtlAcceptances.length?[mtlAcceptances]:[])]);head.pending++;
                 try {
                     const pending = head.queue.catch(()=>{}).then(async()=>{
                         if(head.signature===signature)return;
-                        const saved = await store.putDraft(ctx.scope, unitId, { values, reviewed }, { expectedRevision: head.revision });
+                        const saved = await store.putDraft(ctx.scope, unitId, { values, reviewed,...(mtlAcceptances.length?{mtlAcceptances}: {}) }, { expectedRevision: head.revision });
                         head.revision=saved.revision;head.signature=signature;
                         if(this.ctCurrent(ctx) && this.ctSelection===unitId){this._ctDraftRevision=saved.revision;this.ctRefreshDraftSummaries(ctx);}
                     });head.queue=pending;
@@ -2095,6 +2105,7 @@
                 this._ctSaveJob=job;this.ctBusy = true;let submittedSignature;
                 try {
                     const command=job.command ||= { jobId:job.id, values: copy(this.ctValues), reviewed: copy(this.ctReviewed), baseRevision: this.ctSaved[unitId]?.serverRevision || 0, expectedRevision: this._ctEditRevision || 0, expectedDraftRevision:this._ctDraftRevision || null,
+                        ...(this.ctMtlAcceptances?.(unitId)?.length ? {mtlAcceptances:copy(this.ctMtlAcceptances(unitId))} : {}),
                         ...(options.origin ? {origin:options.origin}: {}) };
                     submittedSignature=JSON.stringify([command.values,command.reviewed]);
                     const result = await store.save(ctx.scope, unitId, command);
@@ -2102,6 +2113,8 @@
                     const sameEditor=JSON.stringify([this.ctValues,this.ctReviewed])===JSON.stringify([command.values,command.reviewed]);
                     this.ctSaved = raw({ ...this.ctSaved, [unitId]: result.saved }); this.ctRevision++; this.ctDraftDirty = !sameEditor;this.ctClearDraftStageFailure(ctx,unitId,submittedSignature); if(this._ctSaveJob===job)this._ctSaveJob = null;
                     this._ctEditRevision=result.saved.revision;
+                    try{await this.ctMtlSaved?.(ctx,unitId);}catch(error){if(this.ctCurrent(ctx))this.ctMtlError='Saved, but MTL review state could not be refreshed: '+error.message;}
+                    if(!this.ctCurrent(ctx))return false;
                     const head=this._ctDraftHeads?.get(JSON.stringify([scopeKey,unitId]));
                     if(this._ctDraftRevision===command.expectedDraftRevision){this._ctDraftRevision=null;if(head&&!head.pending){head.revision=null;head.signature=null;}}
                     this.ctRefreshDiagnostics([unitId]); this.ctError = ''; this.ctLoadHistory(ctx, unitId);this.ctLoadMemory(ctx);this.ctRefreshDraftSummaries(ctx);
@@ -2135,7 +2148,7 @@
             ctHasEditorChanges() {
                 const unit=this.ctCurrentUnit;if(!unit)return false;
                 const committed=this.ctValuesFor(unit),saved=this.ctSaved[unit.id],status=this.ctStatus(unit);
-                return unit.fields.some(field=>this.ctValues[field.id]!==committed[field.id]
+                return !!this._ctMtlAcceptanceClaims?.[unit.id]?.length || unit.fields.some(field=>this.ctValues[field.id]!==committed[field.id]
                     || status.fields[field.id]?.outdated && this.ctReviewed[field.id]===this.ctReviewHash(field) && saved?.reviewed?.[field.id]!==this.ctReviewed[field.id])
                     || !this.ctChoices.length && !!saved?.conflicts?.length;
             },
@@ -2145,7 +2158,7 @@
             },
             ctNeedsAttention(unit) {
                 const status=this.ctStatus(unit);
-                return !!(status.missing || status.outdated || (this.ctDiagnostics[unit.id] || []).some(issue=>['error','warning'].includes(issue.severity)));
+                return !!(status.missing || status.outdated || this.ctMtlUnitIds?.has(unit.id) || (this.ctDiagnostics[unit.id] || []).some(issue=>['error','warning'].includes(issue.severity)));
             },
             async ctSaveAndNavigate(reverse=false,options={}) {
                 if(this.ctKeyboardBlocked() || this._ctNavigationRun)return false;
@@ -2197,6 +2210,7 @@
                 } finally {if(this._ctNavigationRun===run){this._ctNavigationRun=null;this.ctNavigationBusy=false;}}
             },
             async ctKey(event) {
+                if(this.ctMtlKey?.(event))return;
                 if(event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && ['Comma','Period'].includes(event.code)){
                     if(event.defaultPrevented || event.isComposing || event.keyCode===229 || event.target?.composing)return;
                     event.preventDefault();
@@ -2398,15 +2412,15 @@
             async ctLoadMemory(ctx=this.ctContext()) {if(!this.ctCurrent(ctx) || !this.ctWorkspace)return;try{const memory=await this.ctStorage(ctx.scope).getMemory?.(ctx.scope);if(this.ctCurrent(ctx))this.ctMemory=raw(memory?.units || []);}catch(error){if(this.ctCurrent(ctx))this.ctError=error.message;}},
             async ctApplyMemory(match) {
                 const field=this.ctPreviewField;if(!field || !match || typeof match.target!=='string' || this.ctBusy || this.ctHistoryViewer)return false;
-                const ctx=this.ctContext(),unit=this.ctCurrentUnit,value=this.ctValues[field.id],selection=this._ctSelectRun,target=match.target,
+                const ctx=this.ctContext(),unit=this.ctCurrentUnit,value=(this.ctInputValues || this.ctValues)[field.id],selection=this._ctSelectRun,target=match.target,
                     current=()=>!match.id || this.ctMemoryResults?.some(candidate=>candidate.id===match.id && candidate.target===target);
                 if(!current())return false;
                 if(String(value || '').trim() && value!==target && !await this.appConfirm('Replace this entry’s draft with the selected TM translation?',{title:'Use TM translation?',confirmLabel:'Replace translation',danger:false}))return false;
-                if(!this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || this._ctSelectRun!==selection || this.ctPreviewField!==field || this.ctValues[field.id]!==value
+                if(!this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || this._ctSelectRun!==selection || this.ctPreviewField!==field || (this.ctInputValues || this.ctValues)[field.id]!==value
                     || this.ctBusy || this.ctHistoryViewer || match.target!==target || !current())return false;
                 const input=this.ctDictionaryTarget(field.id);
                 if(input && root.EditorSession)return root.EditorSession.insert(this,field,target,{input,whole:true});
-                this.ctValues[field.id]=target;this.ctEdited(field);this.ctFocusTarget(false,field.id);return true;
+                (this.ctInputValues || this.ctValues)[field.id]=target;this.ctEdited(field);this.ctFocusTarget(false,field.id);return true;
             },
             async ctRestoreHistory(entry, side = 'after') {
                 if (this.ctBusy || !['before', 'after'].includes(side) || !this.ctHistoryEntryCurrent(entry) || !entry[side].available) return false;
@@ -2419,6 +2433,7 @@
                 if(!this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || !this.ctHistoryEntryCurrent(entry) || JSON.stringify([this.ctValues,this.ctReviewed])!==editor)return false;
                 if (!await this.ctFlushDraft() || !this.ctCurrent(ctx) || this.ctCurrentUnit !== unit || !this.ctHistoryEntryCurrent(entry)
                     || JSON.stringify([this.ctValues, this.ctReviewed]) !== editor) return false;
+                await this.ctMtlUnderlyingReplaced?.(unit);if(!this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || JSON.stringify([this.ctValues,this.ctReviewed])!==editor)return false;
                 this.ctValues = Object.fromEntries(unit.fields.map(field => [field.id,
                     typeof snapshot.values[field.id] === 'string' ? snapshot.values[field.id] : String(this.ctValues[field.id] ?? field.target ?? '')]));
                 this.ctReviewed = Object.fromEntries(Object.entries(snapshot.reviewed).filter(([id, hash]) => unit.fields.some(field => field.id === id && this.ctReviewHash(field) === hash)));
@@ -3325,16 +3340,17 @@
             field: {flush:'sync',handler() {this.genderMultilineLatched=this.genderMultilineRequired;}},
             genderMultilineRequired: {immediate:true,flush:'sync',handler(value) {if(value)this.genderMultilineLatched=true;}},
         }, template: `
-        <div class="ctTarget" :class="{missing:host.ctFieldStatus(field).missing,outdated:host.ctFieldStatus(field).outdated}">
+        <div class="ctTarget" :class="{missing:host.ctFieldStatus(field).missing,outdated:host.ctFieldStatus(field).outdated,mtl:!!host.ctMtlCandidate?.(field)}">
             <label :for="'ctfield-'+field.targetCell" :class="{srOnly:field.kind === 'form' || (field.kind === 'gender' ? !compact : compact)}">{{ field.kind === 'gender' ? 'Gender' : field.kind === 'form' ? field.name+' '+host.ctClassVariantLabel(field) : (host.ctWorkspace?.scope.language || host.lang)+' translation' }} <small>{{ field.required ? '' : 'Optional' }}</small></label>
             <component :is="host.ctFieldToolbar ? 'editor-field-toolbar' : 'div'" :controller="host.ctFieldToolbar ? host.ctFieldToolbar(field,'translation') : undefined">
             <template v-if="field.kind === 'gender'">
                 <div v-if="genderMultiline" class="textHL editorTextField multiline"><textarea :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" :value="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @input="host.ctGenderEdited(field,$event)" @compositionend="host.ctGenderEdited(field,$event)" @paste="host.ctGenderPaste(field,$event)" @keydown="host.ctGenderKeydown(field,$event)" aria-label="Gender" spellcheck="false" rows="1"></textarea></div>
                 <template v-else><input type="text" :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" :list="'ctgender-'+field.targetCell" :value="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @input="host.ctGenderEdited(field,$event)" @compositionend="host.ctGenderEdited(field,$event)" @paste="host.ctGenderPaste(field,$event)" @keydown="host.ctGenderKeydown(field,$event)" aria-label="Gender" placeholder="Blank" spellcheck="false" autocomplete="off"><datalist :id="'ctgender-'+field.targetCell"><option v-for="gender in host.ctGenderSuggestions(field)" :key="gender" :value="gender" :label="host.ctGenderSuggestionLabel(gender,field)"></option></datalist></template>
             </template>
-            <editor-native-field v-else :controller="host.ctFieldController(field)" kind="translation" :compact="compact"></editor-native-field>
+            <editor-native-field v-else :controller="host.ctFieldController(field)" kind="translation" :key="field.id+':'+(host.ctMtlCandidate?.(field)?.id || 'underlying')" :compact="compact"></editor-native-field>
             </component>
-            <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated || diagnosticPresentation.warningCount || diagnosticPresentation.errorCount" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button><editor-diagnostic-meta :presentation="diagnosticPresentation"></editor-diagnostic-meta></div>
+            <div v-if="host.ctMtlPendingCandidate?.(field) || host.ctMtlAccepted?.(field)" class="ctMtlReview" data-inline-focus-surface><span class="ctMtlDot" aria-hidden="true"></span><span>MTL · {{ host.ctMtlAccepted?.(field) ? 'Accepted draft · Save to apply' : 'Needs review' }}</span><template v-if="host.ctMtlCandidate?.(field)"><button type="button" @click="host.ctMtlAccept(field)" :disabled="host.ctBusy" title="Use as a reviewed draft. Save applies this text.">Accept</button><button type="button" @click="host.ctMtlDismiss(field)" :disabled="host.ctBusy">Dismiss</button><small>Save and export use the underlying translation until you accept this text.</small></template><template v-else-if="host.ctMtlAccepted?.(field)"><button type="button" @click="host.ctMtlUndoAccept(field)" :disabled="host.ctBusy">Undo accept</button></template><template v-else><button type="button" @click="host.ctMtlShow(field)" :disabled="host.ctBusy">Review MTL</button><button type="button" @click="host.ctMtlDismiss(field)" :disabled="host.ctBusy">Dismiss</button></template><button v-if="host.ctMtlRecoveryReviews?.(field)?.length" type="button" @click="host.ctMtlRecoverReview(field)" :disabled="host.ctBusy">Recover my review</button></div>
+            <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated || diagnosticPresentation.warningCount || diagnosticPresentation.errorCount" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" :disabled="!!host.ctMtlCandidate?.(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button><editor-diagnostic-meta :presentation="diagnosticPresentation"></editor-diagnostic-meta></div>
             <div v-for="(issue,index) in diagnosticPresentation.notes" :key="index" :class="issue.kind === 'consistency' ? 'consistencyWarning' : 'terminologyWarning'" role="note">{{ issue.message }}</div>
         </div>` };
     const comparisonMixin=root.ClientTextComparisons?.mixin;

@@ -1,0 +1,272 @@
+const {test} = require('node:test');
+const assert = require('node:assert/strict');
+const S=require('../public/clientTextState.js'),M=require('../public/clientTextMtlState.js'),Memory=require('../public/clientTextMtlMemoryStore.js');
+const UI=require('../public/clientTextMtlUi.js');
+const {scope:baseScope,unit:makeUnit}=require('./clienttext-storage-fixture.cjs');
+const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};};
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+const descriptor={role:'normal',assetHash:'a'.repeat(64),parserVersion:S.PARSER_VERSION};
+function harness(changes={}){
+    const scope={...baseScope},original=makeUnit('Hello {0}','Confirmed {0}'),mtl=Memory.create();
+    let epoch=0,ordinaryEdits=0;
+    const normal={mtl,getMetadata:async()=>({descriptors:[descriptor]})};
+    const app={...UI.mixin.data(),ctActive:true,ctBusy:false,ctHistoryViewer:false,ctWorkspace:{scope},ctSelection:original.id,
+        ctValues:S.valuesFor(original),ctReviewed:{},ctDraftDirty:false,ctSaved:{},ctUnits:[original],_ctUnitIndex:new Map([[original.id,original]]),
+        cloudSignedIn:true,cloudProfileId:scope.accountId,cloudUser:{id:scope.accountId,role:'translator',language:scope.language,assignmentVersion:1},
+        cloudCanAccessAllLanguages:false,mtlConsentVersion:'mtl-v1',mtlShortcut:'disabled',ctMtlCapabilities:{enabled:true},
+        ctContext:()=>({scope:structuredClone(scope),epoch}),ctCurrent:ctx=>ctx.epoch===epoch&&JSON.stringify(ctx.scope)===JSON.stringify(scope),
+        ctStorage:()=>normal,ctCloseCompletion(){},
+        ctEdited(field){if(this.ctMtlCandidate(field))return;this.ctMtlUnderlyingEdited(field);this.ctReviewed[field.id]=S.sourceHash(field.source);this.ctDraftDirty=true;ordinaryEdits++;},
+        ...changes};
+    for(const[name,method]of Object.entries(UI.mixin.methods))app[name]=method.bind(app);
+    for(const[name,getter]of Object.entries(UI.mixin.computed))Object.defineProperty(app,name,{configurable:true,get:()=>getter.call(app)});
+    Object.defineProperty(app,'ctCurrentUnit',{get:()=>app._ctUnitIndex.get(app.ctSelection)||null});
+    app._ctMtlDescriptors=[descriptor];
+    app._cloud={request:async(path,options)=>{const body=options.body;return{candidate:candidate(original,body.requestId,body.baseTargetHash)}}};
+    const field=original.fields[0];
+    return{app,scope,original,field,mtl,normal,changeEpoch(){epoch++;},ordinaryEdits:()=>ordinaryEdits,
+        async put(value=candidate(original)){mtl.putCandidate(scope,value);app.ctMtlCandidates=mtl.list(scope);return value;},
+        async reviews(){for(const head of app._ctMtlReviewQueues?.values()||[])await head.queue;}};
+}
+function candidate(unit,requestId='request1',baseTargetHash=S.hash(unit.fields[0].target),changes={}){
+    const field=unit.fields[0];return{id:'candidate-'+requestId,requestId,unitId:unit.id,fieldId:field.id,role:unit.role,
+        assetHash:descriptor.assetHash,parserVersion:descriptor.parserVersion,sourceHash:S.sourceHash(field.source),rawSourceHash:M.rawSourceHash(field.source),
+        generatedText:'Generated {0}',revision:1,status:'pending',createdAt:1,baseTargetHash,...changes};
+}
+test('all proxy input writes edit only the separate review until explicit Accept',async()=>{
+    const h=harness();await h.put();
+    assert.equal(h.app.ctInputValues[h.field.id],'Generated {0}');
+    h.app.ctInputValues[h.field.id]='Reviewed {0}';h.app.ctEdited(h.field);await h.reviews();
+    assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');assert.deepEqual(h.app.ctReviewed,{});assert.equal(h.app.ctDraftDirty,false);
+    assert.equal(h.ordinaryEdits(),0);assert.equal(h.mtl.getReview(h.scope,h.original.id,h.field.id).text,'Reviewed {0}');
+    assert.deepEqual(h.app.ctMtlAcceptances(),[]);
+    assert.equal(await h.app.ctMtlAccept(h.field),true);
+    assert.equal(h.app.ctValues[h.field.id],'Reviewed {0}');assert.equal(h.ordinaryEdits(),1);assert.equal(h.app.ctDraftDirty,true);
+    assert.equal(h.app.ctMtlCandidate(h.field),null);assert.equal(h.app.ctMtlAcceptances()[0].reviewedTextHash,S.hash('Reviewed {0}'));
+    assert.equal(h.mtl.getReview(h.scope,h.original.id,h.field.id).previousValue,'Confirmed {0}');
+    assert.equal(h.app.ctMtlCount,1); // Candidate remains pending until the ordinary save transaction.
+});
+test('Dismiss restores underlying draft and never marks Source reviewed',async()=>{
+    const h=harness();h.app.ctValues[h.field.id]='Unconfirmed draft {0}';await h.put();
+    await h.app.ctMtlShow(h.field);
+    h.app.ctInputValues[h.field.id]='Edited MTL {0}';await h.reviews();
+    assert.equal(await h.app.ctMtlDismiss(h.field),true);
+    assert.equal(h.app.ctInputValues[h.field.id],'Unconfirmed draft {0}');assert.equal(h.app.ctMtlCount,0);
+    assert.deepEqual(h.app.ctReviewed,{});assert.equal(h.ordinaryEdits(),0);
+});
+test('source changes hide exact-bound candidates silently, including normalized audio markers',async()=>{
+    const h=harness();await h.put();h.original.fields[0]={...h.field,source:'[NOAUDIO] '+h.field.source};
+    const field=h.original.fields[0];assert.equal(S.sourceHash(h.field.source),S.sourceHash(field.source));
+    assert.equal(h.app.ctMtlPendingCandidate(field),null);assert.equal(h.app.ctMtlCount,0);assert.equal(h.app.ctMtlError,'');
+});
+test('late generation after typing then undo never replaces the latest ordinary field',async()=>{
+    const h=harness(),wait=deferred();let sent;
+    h.app._cloud.request=async(path,options)=>{sent=options.body;await wait.promise;return{candidate:candidate(h.original,sent.requestId,sent.baseTargetHash)}};
+    const pending=h.app.ctMtlGenerate(h.field);await settle();assert.equal(h.app.ctMtlBusy(h.field),true);
+    h.app.ctValues[h.field.id]='Typing {0}';h.app.ctEdited(h.field);
+    h.app.ctValues[h.field.id]='Confirmed {0}';h.app.ctEdited(h.field);
+    wait.resolve();assert.equal(await pending,true);assert.equal(h.app.ctMtlBusy(h.field),false);
+    assert.equal(h.app.ctMtlCandidate(h.field),null);assert.equal(h.app.ctInputValues[h.field.id],'Confirmed {0}');assert.equal(h.app.ctMtlCount,1);
+    assert.equal(await h.app.ctMtlShow(h.field),true);assert.equal(h.app.ctInputValues[h.field.id],'Generated {0}');
+});
+test('late results cannot publish after account, assignment, source or scope changes',async()=>{
+    for(const change of [h=>h.changeEpoch(),h=>h.app.cloudUser.assignmentVersion++,h=>h.app.cloudUser.language='German',h=>h.field.source='Different {0}']){
+        const h=harness(),wait=deferred();let body;
+        h.app._cloud.request=async(path,options)=>{body=options.body;await wait.promise;return{candidate:candidate(h.original,body.requestId,body.baseTargetHash)}};
+        const pending=h.app.ctMtlGenerate(h.field);await settle();change(h);wait.resolve();assert.equal(await pending,false);
+        assert.equal(h.app.ctMtlCandidates.length,0);assert.equal(h.app.ctMtlError,'');
+    }
+});
+test('network failure and invalid structural output preserve ordinary text and prior candidate',async()=>{
+    const h=harness();await h.put();const previous=h.app.ctMtlCandidates[0];
+    h.app._cloud.request=async()=>{throw new Error('Provider unavailable');};
+    assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.equal(h.app.ctMtlError,'Provider unavailable');
+    h.app._cloud.request=async()=>{throw Object.assign(new Error('Not found'),{status:404});};
+    assert.equal(await h.app.ctMtlGenerate(h.field),false);
+    h.app._cloud.request=async(path,{body})=>({candidate:candidate(h.original,body.requestId,body.baseTargetHash,{generatedText:'Lost placeholder'})});
+    assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');
+    assert.deepEqual(h.app.ctMtlCandidates,[previous]);
+});
+test('an uncertain generation is retrieved by the original request ID without another POST',async()=>{
+    const h=harness();let posts=0,gets=0,body;
+    h.app._cloud.request=async(path,options={})=>{
+        if(options.method==='POST'){posts++;body=options.body;throw new Error('Connection lost');}
+        gets++;assert.equal(path,'/v1/mtl/requests/'+body.requestId);
+        return{candidate:candidate(h.original,body.requestId,body.baseTargetHash)};
+    };
+    assert.equal(await h.app.ctMtlGenerate(h.field),false);
+    assert.equal(h.mtl.getGenerations(h.scope,{activeOnly:true}).length,1);
+    assert.equal(await h.app.ctMtlGenerate(h.field),true);
+    assert.equal(posts,1);assert.equal(gets,1);assert.equal(h.mtl.getGenerations(h.scope,{activeOnly:true}).length,0);
+    assert.equal(h.app.ctInputValues[h.field.id],'Generated {0}');
+});
+test('journal survives reload and typing suppression prevents event-delivered overlays',async()=>{
+    const h=harness();let body;
+    h.app._cloud.request=async(path,options)=>{body=options.body;throw new Error('Connection lost');};
+    assert.equal(await h.app.ctMtlGenerate(h.field),false);
+    h.app.ctValues[h.field.id]='Typing {0}';h.app.ctEdited(h.field);
+    h.app.ctValues[h.field.id]='Confirmed {0}';h.app.ctEdited(h.field);await settle();
+    const journal=h.mtl.getGenerations(h.scope)[0];assert.equal(journal.suppressed,true);
+    h.app.ctMtlReset();h.app._ctMtlDescriptors=[descriptor];h.app.ctMtlGenerations=h.mtl.getGenerations(h.scope);
+    h.mtl.putCandidate(h.scope,candidate(h.original,body.requestId,body.baseTargetHash));h.app.ctMtlCandidates=h.mtl.list(h.scope);
+    assert.equal(h.app.ctMtlCandidate(h.field),null);assert.equal(h.app.ctMtlCount,1);
+    assert.equal(await h.app.ctMtlShow(h.field),true);assert.equal(h.app.ctInputValues[h.field.id],'Generated {0}');
+});
+test('local generation carries game/language/branch and uses only disposable memory',async()=>{
+    const h=harness();h.scope.groupId='local:test:mtl';let path,body;
+    h.app._cloud.request=async(url,options)=>{path=url;body=options.body;return{candidate:candidate(h.original,body.requestId,body.baseTargetHash)}};
+    assert.equal(await h.app.ctMtlGenerate(h.field),true);
+    assert.equal(path,'/v1/mtl/local/requests');assert.equal(body.game,'poe2');assert.equal(body.language,'Thai');assert.equal(body.branchId,'default');
+    h.mtl.dispose();h.app.ctMtlReset();assert.equal(h.app.ctMtlCount,0);assert.throws(()=>h.mtl.list(h.scope),/disposed/);
+});
+test('opening an explicit local workbook performs no capability or provider request',async()=>{
+    const h=harness();h.scope.groupId='local:test:no-network';let calls=0;
+    h.app._cloud.request=async()=>{calls++;return{enabled:false};};h.app.ctMtlCapabilities=null;
+    assert.equal(await h.app.ctMtlActivate(),true);assert.equal(calls,0);assert.equal(h.app.ctMtlCapabilities,null);
+    assert.equal(h.app.ctMtlCanGenerate(h.field),true,'An explicit icon action can check the connection.');
+    assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.equal(calls,1);assert.equal(h.app.ctMtlCapabilities.enabled,false);
+    assert.equal(h.app.ctMtlCanGenerate(h.field),false);
+});
+test('an unrelated successful action cannot clear an outstanding MTL sync failure',async()=>{
+    const h=harness();await h.put();h.app._ctMtlSyncError='Sync conflict';h.app.ctMtlError='Sync conflict';
+    assert.equal(await h.app.ctMtlAccept(h.field),true);assert.equal(h.app.ctMtlError,'Sync conflict');
+    assert.equal(await h.app.ctMtlUndoAccept(h.field),true);assert.equal(h.app.ctMtlError,'Sync conflict');
+});
+test('a post-save overlay refresh failure cannot retain an already committed acceptance claim',async()=>{
+    const h=harness();await h.put();await h.app.ctMtlAccept(h.field);assert.equal(h.app.ctMtlAcceptances().length,1);
+    h.mtl.list=()=>{throw new Error('Read failed after commit');};
+    await assert.rejects(h.app.ctMtlSaved(h.app.ctContext(),h.original.id),/Read failed/);
+    assert.deepEqual(h.app.ctMtlAcceptances(),[]);
+});
+test('another tab review revision is not overwritten by stale personal typing',async()=>{
+    const h=harness();const value=await h.put();
+    h.mtl.putReview(h.scope,h.original.id,h.field.id,{candidateId:value.id,candidateRevision:value.revision,rawSourceHash:value.rawSourceHash,text:'Peer review {0}',dirty:true});
+    h.app.ctInputValues[h.field.id]='My stale review {0}';await settle();
+    assert.match(h.app.ctMtlError,/review changed/);
+    assert.equal(h.mtl.getReview(h.scope,h.original.id,h.field.id).text,'Peer review {0}');
+    assert.equal(h.app.ctInputValues[h.field.id],'My stale review {0}','The rejected local edit remains available for recovery.');
+    const archives=h.mtl.listReviews(h.scope,{includeArchived:true}).filter(value=>value.reason==='review-conflict');
+    assert.equal(archives.length,1);assert.equal(archives[0].text,'My stale review {0}');
+    assert.equal(h.app.ctMtlRecoveryReviews(h.field).length,1);
+});
+test('a durable conflicting review survives reload and explicit recovery uses a fresh peer CAS',async()=>{
+    const h=harness(),value=await h.put();
+    h.mtl.putReview(h.scope,h.original.id,h.field.id,{candidateId:value.id,candidateRevision:value.revision,rawSourceHash:value.rawSourceHash,text:'Peer review {0}',dirty:true});
+    h.app.ctInputValues[h.field.id]='Recover this {0}';await settle();
+    const fresh=harness();fresh.normal.mtl=h.mtl;fresh.app.ctMtlCandidates=h.mtl.list(h.scope);
+    await fresh.app.ctMtlLoadReviews();
+    assert.equal(fresh.app.ctMtlFieldValue(fresh.field),'Peer review {0}');assert.equal(fresh.app.ctMtlRecoveryReviews(fresh.field).length,1);
+    assert.equal(await fresh.app.ctMtlRecoverReview(fresh.field),true);
+    assert.equal(fresh.app.ctMtlFieldValue(fresh.field),'Recover this {0}');assert.equal(fresh.app.ctValues[fresh.field.id],'Confirmed {0}');
+    assert.equal(h.mtl.getReview(h.scope,h.original.id,h.field.id).text,'Recover this {0}');assert.equal(fresh.app.ctMtlRecoveryReviews(fresh.field).length,0);
+    assert.equal(h.mtl.listReviews(h.scope,{includeArchived:true}).filter(row=>row.reason==='review-conflict').length,1,'Recovery archives remain durable after use.');
+});
+test('a peer change during explicit review recovery is archived again without overwriting the peer',async()=>{
+    const h=harness(),value=await h.put();
+    h.mtl.putReview(h.scope,h.original.id,h.field.id,{candidateId:value.id,candidateRevision:value.revision,rawSourceHash:value.rawSourceHash,text:'Peer review {0}',dirty:true});
+    h.app.ctInputValues[h.field.id]='My recovery {0}';await settle();
+    const get=h.mtl.getReview;let changed=false;
+    h.mtl.getReview=(...args)=>{const result=get(...args);if(!changed){changed=true;h.mtl.putReview(h.scope,h.original.id,h.field.id,{...result,text:'Newest peer {0}'},{expectedRevision:result.revision});}return result;};
+    assert.equal(await h.app.ctMtlRecoverReview(h.field),false);
+    assert.equal(get(h.scope,h.original.id,h.field.id).text,'Newest peer {0}');
+    assert.ok(h.mtl.listReviews(h.scope,{includeArchived:true}).some(row=>row.reason==='review-conflict'&&row.text==='My recovery {0}'));
+    assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');
+});
+test('dirty personal review survives peer candidate replacement without an automatic overlay',async()=>{
+    const h=harness();await h.put();h.app.ctInputValues[h.field.id]='My review {0}';await h.reviews();
+    await h.put(candidate(h.original,'request2',S.hash(h.field.target),{createdAt:2}));
+    assert.equal(h.app.ctMtlCandidate(h.field),null);assert.equal(h.app.ctMtlReviews[JSON.stringify([h.original.id,h.field.id])].text,'My review {0}');
+    assert.equal(h.app.ctInputValues[h.field.id],'Confirmed {0}');assert.equal(h.app.ctMtlCount,1);
+});
+test('reload requires a matching ordinary draft acceptance rather than only persisted review flag',async()=>{
+    const h=harness();await h.put();await h.app.ctMtlAccept(h.field);const claims=h.app.ctMtlAcceptances();
+    h.app.ctValues[h.field.id]='Confirmed {0}';h.app.ctMtlRestoreAcceptances(null);assert.ok(h.app.ctMtlCandidate(h.field));
+    h.app.ctValues[h.field.id]='Generated {0}';h.app.ctMtlRestoreAcceptances({mtlAcceptances:claims});assert.equal(h.app.ctMtlCandidate(h.field),null);
+    h.app.ctValues[h.field.id]='Human changed {0}';h.app.ctEdited(h.field);
+    assert.equal(h.app.ctMtlAcceptances()[0].reviewedTextHash,S.hash('Human changed {0}'));
+});
+test('Undo acceptance restores only the replaced ordinary field and its exact Source review',async()=>{
+    const h=harness();h.app.ctValues[h.field.id]='Original draft {0}';h.app.ctReviewed[h.field.id]='old-review';
+    h.app.ctValues.other='Other draft';h.app.ctReviewed.other='other-review';await h.put();await h.app.ctMtlShow(h.field);
+    assert.equal(await h.app.ctMtlAccept(h.field),true);assert.equal(h.app.ctMtlAccepted(h.field),true);
+    assert.equal(h.app.ctMtlCanGenerate(h.field),false);
+    h.app.ctValues[h.field.id]='Accepted then edited {0}';h.app.ctEdited(h.field);h.app.ctValues.other='Newer other draft';
+    assert.equal(await h.app.ctMtlUndoAccept(h.field),true);
+    assert.equal(h.app.ctValues[h.field.id],'Original draft {0}');assert.equal(h.app.ctReviewed[h.field.id],'old-review');
+    assert.equal(h.app.ctValues.other,'Newer other draft');assert.equal(h.app.ctReviewed.other,'other-review');
+    assert.equal(h.app.ctInputValues[h.field.id],'Accepted then edited {0}');assert.deepEqual(h.app.ctMtlAcceptances(),[]);
+});
+test('explicit history replacement detaches MTL claims without promoting or discarding recovery',async()=>{
+    const h=harness();await h.put();await h.app.ctMtlAccept(h.field);
+    h.app.ctMtlUnderlyingReplaced();h.app.ctValues[h.field.id]='Restored history {0}';await h.reviews();
+    assert.equal(h.app.ctMtlCandidate(h.field),null);assert.equal(h.app.ctInputValues[h.field.id],'Restored history {0}');
+    assert.deepEqual(h.app.ctMtlAcceptances(),[]);assert.equal(h.app.ctMtlCount,1);
+    assert.equal(h.mtl.getReview(h.scope,h.original.id,h.field.id).text,'Generated {0}');
+});
+test('a peer-resolved accepted draft retains a durable checkpoint and can Undo without a pending candidate',async()=>{
+    const h=harness(),value=await h.put();await h.app.ctMtlAccept(h.field);
+    h.mtl.applyRemote(h.scope,{candidates:[{...value,status:'dismissed',revision:2}]});h.app.ctMtlCandidates=h.mtl.list(h.scope);
+    assert.equal(h.app.ctMtlPendingCandidate(h.field),null);assert.equal(h.app.ctMtlAccepted(h.field),true);
+    assert.equal(h.app.ctMtlCount,1);assert.equal(h.app.ctMtlFieldCount,1,'A stale accepted draft remains discoverable until Save or Undo.');
+    assert.throws(()=>h.app.ctMtlAcceptances(),/changed/);assert.equal(h.app.ctMtlCheckpointAcceptances()[0].candidateId,value.id);
+    assert.equal(await h.app.ctMtlUndoAccept(h.field),true);
+    assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');assert.equal(h.app.ctReviewed[h.field.id],undefined);
+    assert.equal(h.app.ctMtlAccepted(h.field),false);assert.deepEqual(h.app.ctMtlCheckpointAcceptances(),[]);assert.equal(h.app.ctMtlCount,0);
+});
+test('Accept refuses malformed structure and rechecks scope/access/ordinary mutation after persistence',async()=>{
+    const h=harness();await h.put();h.app.ctInputValues[h.field.id]='No variable';await h.reviews();
+    assert.equal(await h.app.ctMtlAccept(h.field),false);assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');
+    h.app.ctInputValues[h.field.id]='Valid {0}';await h.reviews();
+    const persist=h.app.ctMtlPersistReview,wait=deferred();h.app.ctMtlPersistReview=async(...args)=>{await wait.promise;return persist(...args);};
+    const pending=h.app.ctMtlAccept(h.field);h.app.cloudUser.assignmentVersion++;wait.resolve();
+    assert.equal(await pending,false);assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');
+});
+test('only own selected language and Manager/Admin can generate; consent and provider stay gated',async()=>{
+    const h=harness();h.app.cloudUser.language='German';assert.equal(h.app.ctMtlCanGenerate(h.field),false);
+    h.app.cloudUser.role='manager';assert.equal(h.app.ctMtlCanGenerate(h.field),true);
+    h.app.mtlConsentVersion='';assert.equal(await h.app.ctMtlGenerate(h.field),false);assert.match(h.app.ctMtlError,/data-transmission/);
+    h.app.mtlConsentVersion='mtl-v1';h.app.ctMtlCapabilities={enabled:false};assert.equal(await h.app.ctMtlGenerate(h.field),false);
+    assert.equal(h.app.ctMtlCandidates.length,0);
+});
+test('committed glossary excludes editable Dictionary and other accounts',()=>{
+    const h=harness();h.app.dictionary=[{find:'Secret draft',replace:'Not committed'}];
+    h.app._cloud.state={activeProfile:h.scope.accountId,profiles:{[h.scope.accountId]:{dictionaries:{Thai:{base:{entries:[{find:'Hello',replace:'Approved'}]}}}}}};
+    assert.deepEqual(h.app.ctMtlCommittedGlossary(),[{find:'Hello',replace:'Approved'}]);
+    h.app._cloud.state.activeProfile='other';assert.deepEqual(h.app.ctMtlCommittedGlossary(),[]);
+});
+test('MTL hotkey is exact, focused, IME safe and disabled by default',()=>{
+    const h=harness();let calls=0;h.app.ctMtlGenerate=()=>{calls++;};h.app.ctFocusedField=h.field.id;
+    const event=extra=>({key:'F8',target:{dataset:{ctTarget:h.field.id}},preventDefault(){this.defaultPrevented=true;},...extra});
+    assert.equal(h.app.ctMtlKey(event()),false);h.app.mtlShortcut='f8';assert.equal(h.app.ctMtlKey(event()),true);
+    for(const extra of [{repeat:true},{isComposing:true},{ctrlKey:true},{altKey:true},{metaKey:true},{target:{dataset:{ctSource:h.field.id}}}])assert.equal(h.app.ctMtlKey(event(extra)),false);
+    h.app.mtlShortcut='ctrl-alt-f8';assert.equal(h.app.ctMtlKey(event({ctrlKey:true,altKey:true})),true);assert.equal(calls,2);
+});
+test('reset aborts in-flight work and removes ephemeral overlays',async()=>{
+    const h=harness(),wait=deferred();let body,signal;
+    h.app._cloud.request=async(path,options)=>{body=options.body;signal=options.signal;await wait.promise;return{candidate:candidate(h.original,body.requestId,body.baseTargetHash)}};
+    const pending=h.app.ctMtlGenerate(h.field);await settle();h.app.ctMtlReset();assert.equal(signal.aborted,true);wait.resolve();
+    assert.equal(await pending,false);assert.equal(h.app.ctMtlCount,0);assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');
+});
+
+
+test('revoking transmission consent while generation is checkpointed prevents its first POST',async()=>{
+    const h=harness(),wait=deferred(),put=h.mtl.putGeneration.bind(h.mtl);let posts=0;
+    h.mtl.putGeneration=async(...args)=>{const result=put(...args);if(args[1].status==='pending')await wait.promise;return result;};
+    h.app._cloud.request=async(path,options)=>{posts++;return{candidate:candidate(h.original,options.body.requestId,options.body.baseTargetHash)};};
+    const pending=h.app.ctMtlGenerate(h.field);await settle();
+    h.app.mtlConsentVersion='';wait.resolve();
+    assert.equal(await pending,false);assert.equal(posts,0);
+    assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');assert.equal(h.app.ctMtlCandidates.length,0);
+    assert.equal(h.mtl.getGenerations(h.scope,{activeOnly:true}).length,0);
+});
+
+
+test('an older API without MTL capabilities leaves normal workbook activation quiet and skips lifecycle requests',async t=>{
+    const h=harness(),previous=globalThis.ClientTextMtlSync;let syncs=0,requests=0;
+    t.after(()=>{if(previous===undefined)delete globalThis.ClientTextMtlSync;else globalThis.ClientTextMtlSync=previous;});
+    globalThis.ClientTextMtlSync={create(){syncs++;throw new Error('Old API has no MTL lifecycle');}};
+    h.app._cloud.request=async path=>{requests++;assert.equal(path,'/v1/mtl/capabilities');throw Object.assign(new Error('Not found'),{status:404});};
+    assert.equal(await h.app.ctMtlActivate(),true);assert.equal(requests,1);assert.equal(syncs,0);
+    assert.equal(h.app.ctMtlError,'');assert.equal(h.app.ctMtlCapabilities.unsupported,true);
+    assert.equal(h.app.ctMtlCanGenerate(h.field),false);assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');
+});

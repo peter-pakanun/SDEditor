@@ -12,6 +12,7 @@
         memory: 'clienttext_memory', memoryHistory: 'clienttext_memory_history',
         cacheMeta: 'clienttext_original_caches', cacheAssets: 'clienttext_original_assets', cacheUnits: 'clienttext_original_units' };
     const names = Object.values(stores), own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
+    const mtlStorage = () => root.ClientTextMtlStore || (typeof require === 'function' ? require('./clientTextMtlStore.js') : null);
     const copy = S.copy, key = (...values) => JSON.stringify(values);
     const request = req => new Promise((resolve, reject) => { req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
     const completed = tx => new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = tx.onerror = () => reject(tx.error || new Error('ClientText transaction aborted.')); });
@@ -30,6 +31,7 @@
             if (name === stores.meta && !store.indexNames.contains('by_account')) store.createIndex('by_account', 'accountId');
             if ([stores.history,stores.drafts,stores.outbox,stores.memoryHistory].includes(name) && !store.indexNames.contains('by_unit')) store.createIndex('by_unit', 'unitKey');
         }
+        mtlStorage()?.upgrade(db, tx);
     }
     function create(dependencies = {}) {
         const getDb = dependencies.openDb || (() => {
@@ -555,7 +557,8 @@
             return transaction([stores.drafts],'readwrite',async tx=>{
                 const previous=await get(tx,stores.drafts,key(scope,unitId));
                 if(own(options,'expectedRevision')&&(previous?.revision||null)!==options.expectedRevision)throw Object.assign(new Error('Another tab changed this ClientText draft.'),{code:'DRAFT_CHANGED'});
-                const draft={unitId,values,reviewed,revision:(previous?.revision||0)+1,updatedAt:Date.now()};
+                const draft={unitId,values,reviewed,revision:(previous?.revision||0)+1,updatedAt:Date.now(),
+                    ...(input.mtlAcceptances?.length ? {mtlAcceptances:copy(input.mtlAcceptances)} : {})};
                 put(tx,stores.drafts,scope,unitId,draft,{unitKey:key(scope,unitId)});return draft;
             },options);
         }
@@ -579,12 +582,14 @@
             const unit=await getUnit(rawScope,unitId,options);if(!unit)throw new Error('ClientText save source is unavailable.');
             const values=S.normalizeValues(unit,input.values), reviewed=S.normalizeReviewed(unit,input.reviewed||{});
             const command={scope:captured.scope,unitId,values,reviewed,
+                ...(input.mtlAcceptances?.length ? {mtlAcceptances:copy(input.mtlAcceptances)} : {}),
                 ...(own(input,'origin')?{origin:input.origin}:{}),
                 ...(own(input,'baseRevision')?{baseRevision:input.baseRevision}:{}),
                 ...(own(input,'expectedRevision')?{expectedRevision:input.expectedRevision}:{}),
                 ...(own(input,'expectedDraftRevision')?{expectedDraftRevision:input.expectedDraftRevision}:{})};
             const signature=S.hash(command);
-            return transaction([stores.meta,stores.cacheUnits,stores.saved,stores.drafts,stores.history,stores.outbox,stores.receipts,stores.memory,stores.memoryHistory],'readwrite',async tx=>{
+            const mtl=input.mtlAcceptances?.length ? mtlStorage() : null;
+            return transaction([stores.meta,stores.cacheUnits,stores.saved,stores.drafts,stores.history,stores.outbox,stores.receipts,stores.memory,stores.memoryHistory,...(mtl?.names || [])],'readwrite',async tx=>{
                 const receipt=await get(tx,stores.receipts,key(scope,input.jobId));
                 if(receipt){if(receipt.signature!==signature)throw Object.assign(new Error('ClientText job ID was reused for different content.'),{code:'SAVE_RECEIPT_MISMATCH'});return {saved:receipt.saved,receipt,replayed:true};}
                 const currentMetadata=await get(tx,stores.meta,key(scope,'meta'));
@@ -593,23 +598,30 @@
                 const before=await get(tx,stores.saved,key(scope,unitId)),draft=await get(tx,stores.drafts,key(scope,unitId));
                 if(own(input,'expectedRevision')&&(before?.revision||0)!==input.expectedRevision)throw Object.assign(new Error('Another tab changed the ClientText saved translation.'),{code:'UNIT_CHANGED'});
                 if(own(input,'expectedDraftRevision')&&(draft?.revision||null)!==input.expectedDraftRevision)throw Object.assign(new Error('Another tab changed this ClientText draft.'),{code:'DRAFT_CHANGED'});
+                const descriptor=metadata.descriptors.find(value=>value.role===unit.role);
+                const acceptedMtl=mtl ? await mtl.validateAcceptancesTx(tx,captured.scope,unit,input.mtlAcceptances,values,descriptor) : [];
+                if(acceptedMtl.length && ((input.origin||options.origin)==='restore' || acceptedMtl.some(claim=>({...before?.reviewed,...reviewed})[claim.fieldId]!==claim.candidate.sourceHash)))
+                    throw Object.assign(new Error('MTL acceptance requires a normal Save reviewed against the current source.'),{code:'MTL_REVIEW_MISMATCH'});
                 const after={unitId,values,reviewed:{...before?.reviewed,...reviewed},saved:true,revision:(before?.revision||0)+1,
                     serverRevision:before?.serverRevision||input.baseRevision||0,baseRevision:before?.serverRevision||input.baseRevision||0,
-                    savedAt:Date.now(),jobId:input.jobId,origin:input.origin||options.origin||'save',outdated:before?.outdated||[]};
+                    savedAt:Date.now(),jobId:input.jobId,origin:input.origin||options.origin||'save',outdated:before?.outdated||[],
+                    ...(acceptedMtl.length ? {mtlAcceptances:copy(input.mtlAcceptances)} : {})};
+                if(mtl)await mtl.resolveAcceptancesTx(tx,captured.scope,acceptedMtl,{jobId:input.jobId,now:after.savedAt});
                 put(tx,stores.saved,scope,unitId,after);
                 await learnMemory(tx,captured.scope,unit,after,input.jobId,after.origin);
                 put(tx,stores.history,scope,input.jobId,{id:input.jobId,unitId,before:before||null,after,origin:after.origin,createdAt:after.savedAt},{unitKey:key(scope,unitId)});
                 if(own(input,'expectedDraftRevision'))del(tx,stores.drafts,scope,unitId);
                 if(options.sync!==false){
                     const pending=await get(tx,stores.outbox,key(scope,unitId));
-                    const descriptor=metadata.descriptors.find(value=>value.role===unit.role);
                     const operation={unitId,mutationId:input.jobId,storageProtocol:S.STORAGE_PROTOCOL,role:unit.role,assetHash:descriptor.assetHash,parserVersion:descriptor.parserVersion,
+                        ...(acceptedMtl.length ? {mtlAcceptances:copy(input.mtlAcceptances)} : {}),
                         ...(own(input,'origin')?{origin:input.origin}:{}),
                         clientFacts:S.clientFacts(unit),originalValues:S.originalValues(unit),values:copy(values),reviewed:copy(after.reviewed),baseRevision:after.serverRevision,
                         base:pending?.base||{values:before?.values||S.valuesFor(unit),reviewed:before?.reviewed||{},revision:after.serverRevision},state:'queued',createdAt:Date.now()};
-                    // An uncertain submission remains byte-identical until its
-                    // receipt arrives. The newer local save waits behind it.
-                    if(pending&&['sending','uncertain'].includes(pending.state))operation.predecessor=copy(pending);
+                    // Accepted MTL must reach the server as its own atomic Save.
+                    // Keep that queued claim and every uncertain request intact
+                    // while newer human saves wait for the original receipt.
+                    if(pending&&(['sending','uncertain'].includes(pending.state)||pending.state==='queued'&&pending.mtlAcceptances?.length))operation.predecessor=copy(pending);
                     else if(pending?.predecessor)operation.predecessor=copy(pending.predecessor);
                     put(tx,stores.outbox,scope,unitId,operation,{unitKey:key(scope,unitId)});
                 }

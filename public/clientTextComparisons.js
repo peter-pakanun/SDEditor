@@ -224,7 +224,7 @@
                 const input = event?.target || this.ctDictionaryTarget(field.id), unit = this.ctCurrentUnit;
                 if (!unit?.fields.includes(field) || field.kind === 'gender' || !input || input.isConnected === false || input.composing
                     || !Number.isInteger(input.selectionStart) || !Number.isInteger(input.selectionEnd)) return false;
-                const text = String(this.ctValues[field.id] ?? ''), shown = text.replace(/\r\n?/g, '\n');
+                const text = String((this.ctInputValues || this.ctValues)[field.id] ?? ''), shown = text.replace(/\r\n?/g, '\n');
                 if (input.dataset?.ctSource || input.dataset?.ctTarget && input.dataset.ctTarget !== field.id
                     || typeof input.value === 'string' && input.value !== shown
                     || input.selectionStart < 0 || input.selectionEnd < input.selectionStart || input.selectionEnd > shown.length) {
@@ -240,7 +240,7 @@
             ctStyleActive(field, style) {
                 const selection = this.ctStyleSelection, context = this._ctStyleSelectionContext;
                 return !!(selection && context && this.ctCurrent(context.ctx) && this.ctCurrentUnit === context.unit
-                    && this.ctFocusedField === field.id && selection.fieldId === field.id && selection.text === this.ctValues[field.id] && selection.active[style]);
+                    && this.ctFocusedField === field.id && selection.fieldId === field.id && selection.text === (this.ctInputValues || this.ctValues)[field.id] && selection.active[style]);
             },
             ctCaptureToolbarSelection(field) {
                 const input = this.ctDictionaryTarget(field.id);
@@ -248,7 +248,7 @@
                 if (!input || input.composing || !Number.isInteger(input.selectionStart) || !Number.isInteger(input.selectionEnd)) return;
                 this.ctFocusedField = field.id;
                 if (!this.ctFormattingSelectionChanged(field, { target: input })) return;
-                this._ctToolbarSelection = { ctx: this.ctContext(), unit: this.ctCurrentUnit, field, input, value: this.ctValues[field.id],
+                this._ctToolbarSelection = { ctx: this.ctContext(), unit: this.ctCurrentUnit, field, input, value: (this.ctInputValues || this.ctValues)[field.id],
                     start: input.selectionStart, end: input.selectionEnd };
             },
             ctFormatSelection(field, style) {
@@ -256,7 +256,7 @@
                 const selected = this._ctToolbarSelection;
                 if (!selected || selected.field !== field) this.ctCaptureToolbarSelection(field);
                 const selection = this._ctToolbarSelection;
-                if (!selection || !this.ctCurrent(selection.ctx) || this.ctCurrentUnit !== selection.unit || selection.value !== this.ctValues[field.id]
+                if (!selection || !this.ctCurrent(selection.ctx) || this.ctCurrentUnit !== selection.unit || selection.value !== (this.ctInputValues || this.ctValues)[field.id]
                     || !selection.unit.fields.includes(field) || selection.input.isConnected === false || selection.input.composing) return false;
                 if (!root.ClientTextFormatting) return false;
                 const previous = String(selection.value), start = root.EditorSession.rawOffset(previous, selection.start), end = root.EditorSession.rawOffset(previous, selection.end),
@@ -290,6 +290,12 @@
                 return {
                     get open() { return host.ctComparisonState(field, side).open; }, get side() { return side; },
                     get disabled() { return host.ctBusy || !valid(); }, get formatting() { return field.kind !== 'gender'; },
+                    get mtl() { return side==='translation' && !!root.ClientTextMtlState?.eligible(field); },
+                    get mtlBusy() { return !!host.ctMtlBusy?.(field); },
+                    get mtlDisabled() { return this.disabled || !host.ctMtlCanGenerate?.(field); },
+                    get mtlHint() { return host.ctMtlHint?.(field) || 'MTL'; },
+                    get mtlShortcut() { return host.mtlShortcut==='f8'?'F8':host.mtlShortcut==='ctrl-alt-f8'?'Control+Alt+F8':undefined; },
+                    generate: () => valid() && host.ctMtlGenerate?.(field),
                     get tone() { const status=host.ctFieldStatus(field);return side==='source' ? '' : status.outdated ? 'outdated' : status.missing ? 'missing' : ''; },
                     get formattingDisabled() { return side === 'source' || this.disabled; },
                     styleActive: style => side === 'translation' && valid() && host.ctStyleActive(field, style),

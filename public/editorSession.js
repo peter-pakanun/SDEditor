@@ -38,8 +38,8 @@
   function rawHistory(host,field,previous) {
     const scope=key(host,false),unit=host.ctCurrentUnit;
     if(host._ctRawEditHistory?.scope!==scope || host._ctRawEditHistory.unit!==unit)host._ctRawEditHistory={scope,unit,fields:new Map()};
-    const records=host._ctRawEditHistory.fields;let record=records.get(field.id);
-    if(!record || record.values[record.at]!==previous){record={values:[previous],selections:[null],formatEdits:[false],at:0,newlines:new Map()};records.set(field.id,record);}
+    const records=host._ctRawEditHistory.fields,view=host.ctMtlCandidate?.(field)?.id || '';let record=records.get(field.id);
+    if(!record || record.view!==view || record.values[record.at]!==previous){record={view,values:[previous],selections:[null],formatEdits:[false],at:0,newlines:new Map()};records.set(field.id,record);}
     return record;
   }
   function rememberRawNewlines(record,previous,value) {
@@ -65,14 +65,14 @@
     host.$nextTick?.(()=>{
       const active=root.document?.activeElement;
       if(host._ctRawSelectionRun!==run || key(host,false)!==scope || host.ctCurrentUnit!==unit || !unit?.fields.includes(field) || host.ctFocusedField!==field.id
-        || host.ctValues[field.id]!==value || host._ctRawEditHistory?.fields.get(field.id)!==record || record.at!==at || input.isConnected===false
+        || (host.ctInputValues || host.ctValues)[field.id]!==value || host._ctRawEditHistory?.fields.get(field.id)!==record || record.at!==at || input.isConnected===false
         || input.value!==nativeText(value)
         || active && active!==input && active!==root.document.body && active!==root.document.documentElement)return;
       input.setSelectionRange?.(selection.start,selection.end,selection.direction || 'none');host.ctFormattingSelectionChanged?.(field,{target:input});
     });
   }
   function applyRawInput(host,field,shown,inputType,input) {
-    const previous=String(host.ctValues[field.id] ?? ''),record=rawHistory(host,field,previous),text=String(shown ?? ''),run=host._ctRawSelectionRun={};
+    const previous=String((host.ctInputValues || host.ctValues)[field.id] ?? ''),record=rawHistory(host,field,previous),text=String(shown ?? ''),run=host._ctRawSelectionRun={};
     if(inputType==='historyUndo' || inputType==='historyRedo'){
       const direction=inputType==='historyUndo'?-1:1;
       for(let at=record.at+direction;at>=0 && at<record.values.length;at+=direction)if(nativeText(record.values[at])===text){record.at=at;if(record.formatEdits[direction<0?at+1:at])restoreHistorySelection(host,field,input,record,record.values[at],run);return record.values[at];}
@@ -153,7 +153,7 @@
     const scope=key(host,false),unit=host.ctCurrentUnit,input=options.input || host.ctDictionaryTarget?.(field.id);
     if(!unit?.fields.includes(field) || !input || input.isConnected===false || input.composing || input.readOnly
       || input.dataset?.ctTarget && input.dataset.ctTarget!==field.id || input.dataset?.ctSource)return false;
-    const previous=String(host.ctValues[field.id] ?? ''),start=options.whole ? 0 : options.raw ? options.start : rawOffset(previous,options.start ?? input.selectionStart ?? 0),
+    const previous=String((host.ctInputValues || host.ctValues)[field.id] ?? ''),start=options.whole ? 0 : options.raw ? options.start : rawOffset(previous,options.start ?? input.selectionStart ?? 0),
       end=options.whole ? previous.length : options.raw ? options.end : rawOffset(previous,options.end ?? input.selectionEnd ?? input.selectionStart ?? 0);
     if(typeof input.value==='string' && input.value!==previous.replace(/\r\n?/g,'\n') || !Number.isInteger(start) || !Number.isInteger(end) || start<0 || end<start || end>previous.length)return false;
     const next=previous.slice(0,start)+replacement+previous.slice(end),offset=Number.isInteger(options.caretOffset) ? Math.max(0,Math.min(replacement.length,options.caretOffset)) : replacement.length,
@@ -172,18 +172,18 @@
     rememberRawNewlines(history,previous,next);
     if(history.values[history.at]!==previous && nativeText(history.values[history.at])===nativeText(next))history.values[history.at]=next;else recordRawValue(history,next);
     if(options.historySelection){history.selections[history.at]={start:caret,end:selectionEnd,direction:'none'};history.formatEdits[history.at]=true;}
-    host.ctValues[field.id]=next;host.ctFocusedField=field.id;host.ctEdited(field);host.ctCloseCompletion?.();
-    host.$nextTick?.(()=>{const active=root.document?.activeElement;if(key(host,false)!==scope || host.ctCurrentUnit!==unit || host.ctFocusedField!==field.id || host.ctValues[field.id]!==next || input.isConnected===false
+    (host.ctInputValues || host.ctValues)[field.id]=next;host.ctFocusedField=field.id;host.ctEdited(field);host.ctCloseCompletion?.();
+    host.$nextTick?.(()=>{const active=root.document?.activeElement;if(key(host,false)!==scope || host.ctCurrentUnit!==unit || host.ctFocusedField!==field.id || (host.ctInputValues || host.ctValues)[field.id]!==next || input.isConnected===false
       || active && active!==input && active!==root.document.body && active!==root.document.documentElement)return;
       input.focus?.({preventScroll:true});input.setSelectionRange?.(caret,selectionEnd);host.ctFormattingSelectionChanged?.(field,{target:input});host.ctResizeField?.(input);});return true;
   }
   function fieldController(host, field, sourceText) {
     const source=sourceText!==undefined,unit=host.ctCurrentUnit,captured=key(host,false),fieldId=field.id;
     const valid=()=>host.ctActive && key(host,false)===captured && host.ctCurrentUnit===unit && unit?.fields.includes(field);
-    const value=()=>source ? String(sourceText) : String(host.ctValues[fieldId] ?? '');
+    const value=()=>source ? String(sourceText) : String((host.ctInputValues || host.ctValues)[fieldId] ?? '');
     const list=()=>ranges(host,field,value(),source),descriptor={id:fieldId,isMultiline:true,
       get english(){return source ? value() : String(field.source ?? '');},get translation(){return value();},
-      set translation(text){if(valid() && !host.ctBusy && !host.ctHistoryViewer)host.ctValues[fieldId]=applyRawInput(host,field,text);},get readonly(){return source || !valid() || host.ctBusy || host.ctHistoryViewer;},
+      set translation(text){if(valid() && !host.ctBusy && !host.ctHistoryViewer)(host.ctInputValues || host.ctValues)[fieldId]=applyRawInput(host,field,text);},get readonly(){return source || !valid() || host.ctBusy || host.ctHistoryViewer;},
       get placeholder(){return source?'English':field.kind==='form' && !field.required?'Optional translation':'Translation';},
       get lang(){return source?'en':host.translationEditorBcp47;},
       get dataAttrs(){const issues=diagnostics();
@@ -206,7 +206,7 @@
       ...diagnostics().map(issue=>({...issue,classes:['diagnosticRange',(issue.level || issue.severity)==='error'?'diagError':'diagWarning']})),
     ]);},highlightAttrs:{},
       input(event){if(!valid() || host.ctBusy || host.ctHistoryViewer || event.isComposing || event.keyCode===229)return;
-        host.ctValues[fieldId]=applyRawInput(host,field,event.target.value,event.inputType,event.target);host.ctEdited(field);host.ctFormattingSelectionChanged?.(field,event);host.ctResizeField(event.target);host.ctSuggest?.(field,event);},
+        (host.ctInputValues || host.ctValues)[fieldId]=applyRawInput(host,field,event.target.value,event.inputType,event.target);host.ctEdited(field);host.ctFormattingSelectionChanged?.(field,event);host.ctResizeField(event.target);host.ctSuggest?.(field,event);},
       focus(event){if(!valid())return;host.ctFocusedField=fieldId;if(source)host.ctClearFormattingSelection?.();else host.ctFormattingSelectionChanged?.(field,event);host.ctCompletionSelectionChanged?.(field,event);},
       keydown(event){if(!valid())return;host.ctTargetKeydown?.(field,event);},
       selection(event){if(valid()){if(!source)host.ctFormattingSelectionChanged?.(field,event);host.ctCompletionSelectionChanged?.(field,event);}},
@@ -280,7 +280,7 @@
   function formatAdapter(host,id) {
     const ct=id==='clienttext',getFields=()=>ct ? (host.ctCurrentUnit?.fields || []).map(field=>({
       sessionKey:key(host,false),unitId:host.ctSelection,
-      identity:JSON.stringify([host.ctSelection,field.id]),id:field.id,source:field.source,target:host.ctValues[field.id] ?? '',
+      identity:JSON.stringify([host.ctSelection,field.id]),id:field.id,source:field.source,target:(host.ctInputValues || host.ctValues)[field.id] ?? '',
       control:field.kind==='gender' && !host.ctGenderMultiline?.(field)?'input':'textarea',tokens:root.ClientTextState?.tokenize(field.source) || [],
       diagnostics:fieldController(host,field).diagnostics,metadata:field,
     })) : (host.editorBlocks || []).flatMap((block,index)=>(block.isTable?block.tableColumns:[block]).map((field,column)=>({
@@ -305,7 +305,7 @@
         input.setSelectionRange?.(selection.start,selection.end,selection.direction);input.scrollTop=selection.scrollTop;input.scrollLeft=selection.scrollLeft;return true;},
       focus:field=>fieldCurrent(field) && (ct ? host.ctFocusTarget(false,field?.id) : inputFor(field)?.focus?.()),
       insert:(field,text)=>fieldCurrent(field) && (ct ? insert(host,host.ctCurrentUnit?.fields.find(value=>value.id===field.id),text) : host.insertTranslationText(field.metadata.blockIndex,text,{columnIndex:field.metadata.columnIndex || 0})),
-      edit:(field,text)=>{if(!fieldCurrent(field))return false;if(ct){const actual=host.ctCurrentUnit?.fields.find(value=>value.id===field.id);if(actual&&!host.ctBusy && !host.ctHistoryViewer){host.ctValues[field.id]=String(text);host.ctEdited(actual);}}
+      edit:(field,text)=>{if(!fieldCurrent(field))return false;if(ct){const actual=host.ctCurrentUnit?.fields.find(value=>value.id===field.id);if(actual&&!host.ctBusy && !host.ctHistoryViewer){(host.ctInputValues || host.ctValues)[field.id]=String(text);host.ctEdited(actual);}}
         else if(!host.editorTranslationReadOnly){field.metadata.field.translation=String(text);host.refreshEditorBlockHLter(field.metadata.blockIndex);host.queueEditorDraft?.();}},
     };
     return {id,get context(){return context(host);},get fields(){return getFields();},actions,

@@ -749,7 +749,7 @@ test('ClientText status chips default Unchanged off and use OR matching with sco
     const complete=namedUnit('ID1'),missing=namedUnit('ID2','Blank',''),outdated=namedUnit('ID3','Review','Translation',true),
         {app,mixin}=listHarness({ctUnits:[complete,missing,outdated],ctSelection:complete.id,_ctUnitIndex:new Map([complete,missing,outdated].map(value=>[value.id,value]))});
     app.ctSelectedFilters=mixin.data().ctSelectedFilters;
-    assert.deepEqual(Array.from(app.ctSelectedFilters),['missing','saved','revised','outdated','error','warning']);
+    assert.deepEqual(Array.from(app.ctSelectedFilters),['missing','saved','revised','outdated','error','warning','mtl']);
     assert.deepEqual(Array.from(app.ctRows,row=>row.id),[missing.id,outdated.id]);
     app.ctSelectedFilters.push('unchanged');assert.deepEqual(Array.from(app.ctRows,row=>row.id),[complete.id,missing.id,outdated.id]);
     app.ctSelectedFilters=['unchanged'];assert.deepEqual(Array.from(app.ctRows,row=>row.id),[complete.id]);

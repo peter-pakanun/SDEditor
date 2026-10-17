@@ -18,7 +18,7 @@
   // v20 fences proof-producing pages/workers and retires baseline tree caches.
   // v21 fences pages/workers unaware of immutable on-demand SD source caches.
   // Fence older writers that can coalesce local and online Dropped lifecycles.
-  const DB_VERSION = 22;
+  const DB_VERSION = 23;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
   const tmListeners = new Set();
@@ -230,7 +230,8 @@
         // ClientTextStore need not be loaded in the SD-only worker to fence old writers.
         for (const name of ['clienttext_workspaces','clienttext_assets','clienttext_units','clienttext_saved',
           'clienttext_drafts','clienttext_history','clienttext_outbox','clienttext_receipts','clienttext_requests','clienttext_memory','clienttext_memory_history',
-          'clienttext_original_caches','clienttext_original_assets','clienttext_original_units']) {
+          'clienttext_original_caches','clienttext_original_assets','clienttext_original_units',
+          'clienttext_mtl_candidates','clienttext_mtl_reviews','clienttext_mtl_meta','clienttext_mtl_outbox','clienttext_mtl_receipts']) {
           const store = db.objectStoreNames.contains(name) ? req.transaction.objectStore(name) : db.createObjectStore(name, { keyPath:'key' });
           if (!store.indexNames.contains('by_scope')) store.createIndex('by_scope','scope');
           if (name === 'clienttext_workspaces' && !store.indexNames.contains('by_account')) store.createIndex('by_account','accountId');

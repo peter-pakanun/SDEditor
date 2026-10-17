@@ -166,8 +166,8 @@ function formatPageRange(total, page, pageSize) {
   return `${first}–${last} of ${count}`;
 }
 
-const config = Vue.defineComponent({
-  mixins: [window.PrivateMediaUI?.mixin || {}, window.ClientTextSkillCardUI?.mixin || {}, window.KeywordPopups?.mixin || {}, window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}],
+  const config = Vue.defineComponent({
+  mixins: [window.PrivateMediaUI?.mixin || {}, window.ClientTextSkillCardUI?.mixin || {}, window.KeywordPopups?.mixin || {}, window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.ClientTextMtlUI?.mixin || {}, window.MtlConnectionUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -264,6 +264,8 @@ const config = Vue.defineComponent({
       autoOpenNextFile: true,
       filterShortcutCtrlD: false,
       autocompleteShortcut: 'ctrl-space',
+      mtlShortcut: 'disabled',
+      mtlConsentVersion: '',
       dictionaryDefaultGameScope: 'all',
       uiDensity: 'compact',
 
@@ -500,6 +502,8 @@ const config = Vue.defineComponent({
   watch: {
     settingsDialogVisible(visible) {
       if (visible) {
+        this.ctMtlLoadCapabilities?.();
+        this.mtlConnectionLoad?.();
         this._settingsReturnFocus = document.activeElement;
         this._settingsBodyOverflow = document.body.style.overflow;
         document.body.style.overflow = 'hidden';
@@ -559,6 +563,8 @@ const config = Vue.defineComponent({
     autocompleteShortcut() {
       this.saveSettings();
     },
+    mtlShortcut() { this.saveSettings(); },
+    mtlConsentVersion() { this.saveSettings(); },
     dictionaryDefaultGameScope() {
       this.saveSettings();
     },
@@ -7620,6 +7626,8 @@ const config = Vue.defineComponent({
         autoOpenNextFile: this.autoOpenNextFile,
         filterShortcutCtrlD: this.filterShortcutCtrlD,
         autocompleteShortcut: this.autocompleteShortcut,
+        mtlShortcut: this.mtlShortcut,
+        mtlConsentVersion: this.mtlConsentVersion,
         dictionaryDefaultGameScope: this.dictionaryEntryScope(this.dictionaryDefaultGameScope),
         uiDensity: this.uiDensity,
         gamePreviewFrame: this.gamePreviewFrame,
@@ -7717,6 +7725,8 @@ const config = Vue.defineComponent({
         autoOpenNextFile: this.autoOpenNextFile,
         filterShortcutCtrlD: this.filterShortcutCtrlD,
         autocompleteShortcut: this.autocompleteShortcut,
+        mtlShortcut: this.mtlShortcut,
+        mtlConsentVersion: this.mtlConsentVersion,
         dictionaryDefaultGameScope: this.dictionaryEntryScope(this.dictionaryDefaultGameScope),
         uiDensity: this.uiDensity,
         gamePreviewFrame: this.gamePreviewFrame,
@@ -7766,6 +7776,8 @@ const config = Vue.defineComponent({
       if (typeof settings.hideSourceInPreviewPanel !== 'undefined') this.hideSourceInPreviewPanel = !!settings.hideSourceInPreviewPanel;
       if (typeof settings.inlineEditor !== 'undefined') this.inlineEditor = !!settings.inlineEditor;
       if (typeof settings.highlightDict !== 'undefined') this.highlightDict = !!settings.highlightDict;
+      this.mtlShortcut=['disabled','f8','ctrl-alt-f8'].includes(settings.mtlShortcut)?settings.mtlShortcut:'disabled';
+      this.mtlConsentVersion=settings.mtlConsentVersion==='mtl-v1'?'mtl-v1':'';
       if (typeof settings.shiftEnterSave !== 'undefined') this.shiftEnterSave = !!settings.shiftEnterSave;
       if (typeof settings.autoOpenNextFile !== 'undefined') this.autoOpenNextFile = !!settings.autoOpenNextFile;
       if (typeof settings.filterShortcutCtrlD !== 'undefined') this.filterShortcutCtrlD = !!settings.filterShortcutCtrlD;

@@ -162,3 +162,14 @@
 .ctUploadPolicy textarea { display:block; width:100%; min-height:160px; margin:12px 0; font-family:monospace; box-sizing:border-box; }
 .ctUploadDialog > .versionActions { margin-top:20px; }
 @media(max-width:1150px) { .ctWorkspaceBody { grid-template-columns:170px minmax(0,1fr); }.ctWorkspaceBody.ctToolsOpen { grid-template-columns:170px minmax(0,1fr) clamp(360px,29vw,460px); } }
+.ctMtlDot {display:inline-block;width:7px;height:7px;flex:none;border-radius:50%;background:#67D4F1;}
+.ctMtlButton {font-size:12px;min-width:34px;display:inline-flex;align-items:center;justify-content:center;}
+.ctMtlButtonTarget {display:inline-flex;align-items:center;margin-left:auto;}
+.ctMtlButtonTarget + .fieldToolbarSeparator {margin-left:0;}
+.ctTarget.mtl .editorFieldFrame {outline:1px solid #67D4F1;outline-offset:-1px;}
+.ctMtlReview {display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;padding:5px 0;}
+.ctMtlReview small {flex-basis:100%;color:var(--ui-muted);}
+.ctMtlReview button {font-size:12px;padding:2px 7px;}
+.ctMtlRowIndicator {display:inline-flex;gap:4px;align-items:center;margin-right:6px;font-size:11px;}
+.statusPill.mtl,.filterChip.mtl {border-color:#67D4F1;}
+@media (prefers-reduced-motion:reduce) {.ctMtlButton .ctAudioSpinner {animation:none;}}

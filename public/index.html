@@ -159,7 +159,21 @@
               <select id="dictionaryDefaultGameScope" v-model="dictionaryDefaultGameScope"><option value="all">All</option><option value="poe1">PoE1</option><option value="poe2">PoE2</option></select>
               <small>Used when adding an entry manually or from autocomplete. Existing entries keep their game version.</small>
             </div>
+            <h3 class="settingsSubheading">MTL</h3>
+            <p class="settingsHelp">MTL translates one ClientText field through OpenAI using Sign in with ChatGPT. Generation needs a network connection, including in-memory workbook sessions. Suggestions require review and Save before they become translations.</p>
+            <p class="settingsHelp">{{ ctMtlCapabilities?.enabled ? 'MTL generation is available.' : 'MTL generation is unavailable.' }} Model: gpt-6-luna · reasoning: xhigh. Credentials are managed by the private backend.</p>
+            <div v-if="mtlConnectionAllowed" class="settingsField">
+              <strong>ChatGPT connection · Admin</strong>
+              <p v-if="mtlConnectionLoaded" class="settingsHelp">{{ mtlConnectionLabel }}<span v-if="!mtlConnectionState.enabled"> · Generation is disabled on the server.</span></p>
+              <p class="settingsHelp">Setup uses the SDEditor local sign-in helper and a protected server import. Credentials stay on the server. Disconnect removes this server's session; Revoke also asks ChatGPT to end the renewable session.</p>
+              <p v-if="mtlConnectionGuidance && mtlConnectionGuidance !== mtlConnectionError" class="settingsHelp">{{ mtlConnectionGuidance }}</p>
+              <app-notice v-if="mtlConnectionError" tone="warning" role="alert">{{ mtlConnectionError }}</app-notice>
+              <div class="settingsActions"><button v-if="!mtlConnectionLoaded || mtlConnectionError" @click="mtlConnectionLoad" :disabled="mtlConnectionBusy">Check connection</button><button @click="mtlConnectionAction('disconnect')" :disabled="!mtlConnectionCanDisconnect">Disconnect</button><button @click="mtlConnectionAction('revoke')" :disabled="!mtlConnectionCanRevoke">Revoke</button></div>
+            </div>
+            <label class="settingsToggle"><input type="checkbox" v-model="mtlConsentVersion" true-value="mtl-v1" false-value=""><span><strong>Allow MTL requests</strong><small>When I request MTL, send the selected English field and bounded relevant workbook context, Developer notes and approved glossary terms to OpenAI. Provider data handling follows the connected ChatGPT account and app terms. The workbook stays processed in this browser.</small></span></label>
+            <p class="settingsHelp">Unreviewed suggestions and edits stay separate. Export uses prior Saved or original translations. In-memory suggestions disappear when the local workbook session ends or the page reloads.</p>
             <h3 class="settingsSubheading">Keyboard shortcuts</h3>
+            <div class="settingsField"><label for="mtlShortcut">Translate current field with MTL</label><select id="mtlShortcut" v-model="mtlShortcut"><option value="disabled">Disabled</option><option value="f8">F8</option><option value="ctrl-alt-f8">Ctrl + Alt + F8</option></select><small>Only active while a ClientText translation field is focused.</small></div>
             <div class="settingsField">
               <label for="autocompleteShortcut">Open autocomplete</label>
               <select id="autocompleteShortcut" v-model="autocompleteShortcut"><option value="ctrl-space">Ctrl + Space</option><option value="ctrl-i">Ctrl + I</option><option value="disabled">Disabled</option></select>
@@ -485,11 +499,12 @@
           </nav>
           <fieldset id="ctFilterPanel" class="fileFilters" aria-label="File status filters" v-show="ctFiltersVisible" @keydown.esc.stop.prevent="ctFiltersVisible=false"><div class="fileFilterChoices">
             <label v-for="option in ctStatusFilterOptions" :key="option.key" class="filterChip" :class="[{selected:ctSelectedFilters.includes(option.key)},option.tone]"><input type="checkbox" v-model="ctSelectedFilters" :value="option.key"><span>{{ option.label }}</span></label>
-            <div class="filterSelectionActions"><button @click="ctSelectedFilters=ctStatusFilterOptions.map(option=>option.key)" :disabled="ctSelectedFilters.length===ctStatusFilterOptions.length">Select all</button><button @click="ctSelectedFilters=[]" :disabled="!ctSelectedFilters.length">Clear filters</button></div>
+            <div class="filterSelectionActions"><button @click="ctSelectedFilters=ctStatusFilterOptions.map(option=>option.key)" :disabled="ctStatusFilterOptions.every(option=>ctSelectedFilters.includes(option.key))">Select all</button><button @click="ctSelectedFilters=[]" :disabled="!ctSelectedFilters.length">Clear filters</button></div>
           </div></fieldset>
           <app-notice-stack class="workspaceNoticeStack">
             <workspace-alerts></workspace-alerts>
             <app-notice tone="info" v-if="ctOfflineTest" class="ctTestBanner" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Saves are temporary. Download workbooks to keep saved edits. Leaving the test or reloading clears this session.</app-notice>
+            <app-notice tone="error" v-if="ctMtlError" role="alert">{{ ctMtlError }}</app-notice>
             <app-notice tone="error" v-if="ctError" class="collaborationError" role="alert">{{ ctError }}</app-notice>
             <app-notice tone="info" v-if="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</app-notice>
           </app-notice-stack>
@@ -574,7 +589,7 @@
                   </tr></thead>
                   <tbody><tr v-for="unit in ctPageRows" :key="unit.id" :data-unit-id="unit.id" :tabindex="ctSelection===unit.id?0:-1" :aria-selected="ctSelection===unit.id" :aria-describedby="'ctFileTableKeyboardHelp'" :class="{selectedFileRow:ctSelection===unit.id,inlineFocusedRow:inlineEditor && !ctInlineClosed && ctSelection===unit.id,isMissing:ctStatus(unit).missing,isOutdated:ctStatus(unit).outdated,isRevised:ctStatus(unit).revised,hasChanges:ctStatus(unit).saved,diagnosticError:ctDiagnostics[unit.id]?.some(issue=>issue.severity==='error'),diagnosticWarning:ctDiagnostics[unit.id]?.some(issue=>issue.severity==='warning')}" @click="ctRowClick(unit,$event)" @dblclick="ctRowDoubleClick(unit,$event)" @keydown="ctRowKeydown(unit,$event)" @focusout="ctInlineFocusOut">
                     <td class="ctRowNumber" data-label="Row number">{{ ctSortValue(unit,'row') }}</td>
-                    <td class="fileIdentityCell"><button class="fileOpenButton ctID" tabindex="-1" @click.stop="ctSelect(unit,true,{saveInline:true})" v-tooltip="unit.role+' / '+unit.sheet+' / '+unit.recordId">{{ unit.recordId }}</button><small class="ctFilePath">{{ unit.role }} / {{ unit.sheet }}</small><small v-if="ctBrowseMode==='npcs'" class="ctNpcRecordFacts"><span>{{ ctNpcKindLabel(unit) }}</span><span v-if="ctNpcRelation(unit).label" class="ctNpcRelation" tabindex="0" v-tooltip="ctNpcRelation(unit).tooltip">{{ ctNpcRelation(unit).label }}</span></small><small v-if="ctBrowseMode==='convo'" class="ctNpcRecordFacts"><span>Conversation turn</span><span v-if="ctConvoRelation(unit).label" class="ctNpcRelation ctConvoRelation" tabindex="0" v-tooltip="ctConvoRelation(unit).tooltip">{{ ctConvoRelation(unit).label }}</span></small><ct-context :host="$root" :items="ctReferenceMetadata(unit)" compact row-bounded></ct-context><span v-if="ctStatus(unit).outdated" class="fileDroppedLabel">Outdated</span><span v-if="ctStatus(unit).revised" class="fileRevisedLabel">Revised</span><span v-if="ctDiagnostics[unit.id]?.some(issue=>issue.severity==='error')" class="fileDiagnosticLabel error">Error</span><span v-else-if="ctDiagnostics[unit.id]?.some(issue=>issue.severity==='warning')" class="fileDiagnosticLabel warning">Warning</span><div v-if="inlineEditor && !ctInlineClosed && ctSelection===unit.id && ctDraftBlocked" class="inlineFileActions" @click.stop><button @click="ctDiscardDraft" :disabled="ctBusy">Discard draft</button></div></td>
+                    <td class="fileIdentityCell"><button class="fileOpenButton ctID" tabindex="-1" @click.stop="ctSelect(unit,true,{saveInline:true})" v-tooltip="unit.role+' / '+unit.sheet+' / '+unit.recordId">{{ unit.recordId }}</button><small class="ctFilePath">{{ unit.role }} / {{ unit.sheet }}</small><small v-if="ctBrowseMode==='npcs'" class="ctNpcRecordFacts"><span>{{ ctNpcKindLabel(unit) }}</span><span v-if="ctNpcRelation(unit).label" class="ctNpcRelation" tabindex="0" v-tooltip="ctNpcRelation(unit).tooltip">{{ ctNpcRelation(unit).label }}</span></small><small v-if="ctBrowseMode==='convo'" class="ctNpcRecordFacts"><span>Conversation turn</span><span v-if="ctConvoRelation(unit).label" class="ctNpcRelation ctConvoRelation" tabindex="0" v-tooltip="ctConvoRelation(unit).tooltip">{{ ctConvoRelation(unit).label }}</span></small><ct-context :host="$root" :items="ctReferenceMetadata(unit)" compact row-bounded></ct-context><span v-if="ctMtlUnitIds.has(unit.id)" class="ctMtlRowIndicator" title="MTL needs review"><span class="ctMtlDot" aria-hidden="true"></span>MTL</span><span v-if="ctStatus(unit).outdated" class="fileDroppedLabel">Outdated</span><span v-if="ctStatus(unit).revised" class="fileRevisedLabel">Revised</span><span v-if="ctDiagnostics[unit.id]?.some(issue=>issue.severity==='error')" class="fileDiagnosticLabel error">Error</span><span v-else-if="ctDiagnostics[unit.id]?.some(issue=>issue.severity==='warning')" class="fileDiagnosticLabel warning">Warning</span><div v-if="inlineEditor && !ctInlineClosed && ctSelection===unit.id && ctDraftBlocked" class="inlineFileActions" @click.stop><button @click="ctDiscardDraft" :disabled="ctBusy">Discard draft</button></div></td>
                     <td data-label="English" class="inlineSourceCell"><ct-fields v-if="inlineEditor && !ctEditor && !ctInlineClosed && ctSelection===unit.id" :host="$root" side="source"></ct-fields><span v-else class="inlineReadText ctReadPreview" lang="en" :title="ctListText(unit,'source')">{{ ctListText(unit,'source') }}</span></td>
                     <td class="translationTr inlineTranslationCell" :data-label="ctWorkspace.scope.language+' translation'"><ct-fields v-if="inlineEditor && !ctEditor && !ctInlineClosed && ctSelection===unit.id" ref="ctEditorRegion" :host="$root" side="translation"></ct-fields><template v-else><span class="inlineReadText ctReadPreview" :lang="translationEditorBcp47" :title="ctListText(unit,'target')">{{ ctListText(unit,'target') }}</span><small v-for="field in ctFieldsFor(unit).filter(field=>field.kind==='gender')" :key="field.id" class="ctMetadataValue">Gender: {{ ctValuesFor(unit)[field.id] || 'Blank' }}</small></template></td>
                   </tr></tbody>
@@ -590,6 +605,7 @@
             <button class="collaborationVersion versionStatusName" @click="ctShowVersionChooser" aria-label="Versions" v-tooltip="ctWorkspace.metadata.version?.name+' · ClientText'">{{ ctWorkspace.metadata.version?.name }}</button>
             <a class="workspaceLoaded workspaceFilterLink" href="#ctSearchInput" @click.prevent="ctShowAllLoaded" v-tooltip="'Show all loaded IDs, including Unchanged. Clears search, sheet selection, and status filters.'"><strong>{{ ctCounts.total.toLocaleString() }}</strong> loaded IDs</a>
             <a class="statusPill missing workspaceFilterLink" href="#ctSearchInput" @click.prevent="ctFilterByStatus('missing', $event)" v-tooltip="'IDs with required blank fields.\nClick to show Missing. Ctrl+click to add Missing to the current filter.'"><span class="statusDot" aria-hidden="true"></span>Missing <strong>{{ ctCounts.missing }}</strong></a>
+            <a v-if="ctMtlCount" class="statusPill mtl workspaceFilterLink" href="#ctSearchInput" @click.prevent="ctFilterByStatus('mtl', $event)" :title="ctMtlCount+' IDs, '+ctMtlFieldCount+' fields with MTL needing review'"><span class="statusDot ctMtlDot" aria-hidden="true"></span>MTL <strong>{{ ctMtlCount }}</strong></a>
             <a class="statusPill outdated workspaceFilterLink" href="#ctSearchInput" @click.prevent="ctFilterByStatus('outdated', $event)" v-tooltip="'IDs with fields whose English needs review.\nClick to show Outdated. Ctrl+click to add Outdated to the current filter.'"><span class="statusDot" aria-hidden="true"></span>Outdated <strong>{{ ctCounts.outdated }}</strong></a>
             <a class="statusPill revised workspaceFilterLink" href="#ctSearchInput" @click.prevent="ctFilterByStatus('revised', $event)" v-tooltip="'Corrections to original translations outside this version\'s initial workload.\nClick to show Revised. Ctrl+click to add Revised to the current filter.'"><span class="statusDot" aria-hidden="true"></span>Revised <strong>{{ ctCounts.revised }}</strong></a>
             <a class="statusPill saved workspaceFilterLink" href="#ctSearchInput" @click.prevent="ctFilterByStatus('saved', $event)" v-tooltip="'IDs with saved translation changes.\nClick to show Saved. Ctrl+click to add Saved to the current filter.'"><span class="statusDot" aria-hidden="true"></span>Saved <strong>{{ ctCounts.saved }}</strong></a>
@@ -1461,6 +1477,10 @@
   <script src="clientTextConvoIndex.js"></script>
   <script src="contentAdapters.js"></script>
   <script src="clientTextStore.js"></script>
+  <script src="clientTextMtlState.js"></script>
+  <script src="clientTextMtlStore.js"></script>
+  <script src="clientTextMtlMemoryStore.js"></script>
+  <script src="clientTextMtlSync.js"></script>
   <script src="clientTextMemoryStore.js"></script>
   <script src="clientTextSync.js"></script>
   <script src="vendor/fast-xml-parser-5.11.2.min.js"></script>
@@ -1501,6 +1521,9 @@
   <script src="clientTextIdentities.js"></script>
   <script src="clientTextPortraits.js"></script>
   <script src="clientTextExportProgress.js"></script>
+  <script src="clientTextMtlContext.js"></script>
+  <script src="clientTextMtlUi.js"></script>
+  <script src="mtlConnectionUi.js"></script>
   <script src="clientTextUi.js"></script>
   <script src="editorSession.js"></script>
   <script src="tmUi.js"></script>

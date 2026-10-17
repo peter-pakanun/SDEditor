@@ -17,6 +17,16 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
+test('MTL preferences start without transmission consent or a hotkey and validate exact supported choices', () => {
+  assert.equal(Cloud.completeSettings({}).mtlConsentVersion, '');
+  assert.equal(Cloud.completeSettings({}).mtlShortcut, 'disabled');
+  for(const mtlShortcut of ['disabled','f8','ctrl-alt-f8']) assert.doesNotThrow(()=>Cloud.validateImport({mtlShortcut}));
+  for(const mtlConsentVersion of ['', 'mtl-v1']) assert.doesNotThrow(()=>Cloud.validateImport({mtlConsentVersion}));
+  for(const mtlShortcut of ['ctrl-s','f9',null,true]) assert.throws(()=>Cloud.validateImport({mtlShortcut}),/mtlShortcut is invalid/);
+  for(const mtlConsentVersion of ['true','mtl-v2',true]) assert.throws(()=>Cloud.validateImport({mtlConsentVersion}),/mtlConsentVersion is invalid/);
+  assert.deepEqual(Cloud.preferences({mtlConsentVersion:'mtl-v1',mtlShortcut:'f8',credential:'never copy'}),{mtlShortcut:'f8',mtlConsentVersion:'mtl-v1'});
+});
+
 test('clipboard defaults hidden and preserves an explicit visible preference', () => {
   assert.equal(Cloud.completeSettings({}).hideEditorClipboard, true);
   assert.equal(Cloud.completeSettings({ hideEditorClipboard: false }).hideEditorClipboard, false);

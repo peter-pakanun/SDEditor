@@ -3036,6 +3036,10 @@ test('late deferred acknowledgments and rejected drafts cannot mutate another wo
   ]) for (const rejected of [false, true]) await t.test(`${scope}: ${rejected ? 'rejected' : 'committed'}`, async () => {
     const h = await pendingDraftFixture(), { editor: e, calls, acknowledge, window } = h;
     await assertSaveReleased(h, () => e.editorSave());
+    // This case exercises a dispatched old-scope reply. Wait for dispatch
+    // instead of racing its timer with the deliberate scope replacement.
+    for (let turn = 0; turn < 100 && !calls.length; turn++) await pendingTick();
+    assert.equal(calls.length, 1, 'The old-scope command was dispatched before switching scope');
     change(e);
     const replacement = description(99, ['Current scope text', 'Second']);
     replacement.hasChanges = false; replacement.translations.German = ['German text', 'German second'];
