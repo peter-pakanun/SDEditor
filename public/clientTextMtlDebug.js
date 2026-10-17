@@ -30,9 +30,9 @@
             'response.reasoning_summary_part.added', 'response.reasoning_summary_part.done'];
         const known = (value, allowed) => typeof value === 'string' && [...allowed, 'missing', 'null', 'other'].includes(value) ? value : 'other';
         const result = {};
-        for (const field of ['events', 'outputItems', 'outputTextCharacters'])
+        for (const field of ['events', 'outputItems', 'outputTextCharacters', 'textDeltaEvents', 'textDoneEvents', 'contentPartDoneEvents', 'outputItemDoneEvents'])
             result[field] = Number.isSafeInteger(summary[field]) && summary[field] >= 0 && summary[field] <= 2 * 1024 * 1024 ? summary[field] : null;
-        for (const field of ['completedEventSeen', 'outputItemsTruncated', 'contentPartsTruncated']) result[field] = summary[field] === true;
+        for (const field of ['completedEventSeen', 'outputItemsTruncated', 'contentPartsTruncated', 'reconstructedOutput']) result[field] = summary[field] === true;
         for (const [field, allowed] of Object.entries({ eventKind: kinds, eventType: events, eventTypeKind: kinds, sseEventType: events,
             responseKind: kinds, responseStatus: ['completed', 'failed', 'in_progress', 'cancelled', 'queued', 'incomplete'], outputKind: kinds }))
             result[field] = known(summary[field], allowed);

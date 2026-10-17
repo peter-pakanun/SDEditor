@@ -118,7 +118,9 @@ test('selected debug presentation includes only bounded structural stream summar
         streamSummary:{events:4,completedEventSeen:true,eventKind:'object',eventType:'response.completed',eventTypeKind:'string',sseEventType:'response.completed',
             responseKind:'object',responseStatus:'missing',outputKind:'missing',outputItems:0,outputItemTypes:['message','synthetic private type'],
             contentTypes:['output_text'],textValueTypes:['string'],outputTextCharacters:22,outputItemsTruncated:false,contentPartsTruncated:false,
+            textDeltaEvents:0,textDoneEvents:2,contentPartDoneEvents:1,outputItemDoneEvents:0,reconstructedOutput:true,
             text:'synthetic raw output',delta:'synthetic partial translation',reasoning:'synthetic hidden reasoning',model:'synthetic-model',provider:'synthetic-provider',
+            reconstructedText:'synthetic raw reconstructed text',reconstructedReasoning:'synthetic hidden reconstructed reasoning',
             response:{output:'synthetic raw response'},headers:{Authorization:'synthetic secret'},url:'synthetic private endpoint'}}};
     const shown=JSON.parse(Debug.Dialog.computed.details.call({item:{record}}));
     assert.equal(shown.protocolCheck,'completion_output');assert.equal(shown.protocolExplanation,record.server.protocolExplanation);
@@ -126,9 +128,19 @@ test('selected debug presentation includes only bounded structural stream summar
     assert.equal(shown.streamSummary.responseStatus,'missing');assert.equal(shown.streamSummary.outputKind,'missing');
     assert.equal(shown.streamSummary.outputTextCharacters,22);assert.deepEqual(shown.streamSummary.outputItemTypes,['message','other']);
     assert.deepEqual(shown.streamSummary.contentTypes,['output_text']);assert.deepEqual(shown.streamSummary.textValueTypes,['string']);
+    assert.equal(shown.streamSummary.textDeltaEvents,0);assert.equal(shown.streamSummary.textDoneEvents,2);
+    assert.equal(shown.streamSummary.contentPartDoneEvents,1);assert.equal(shown.streamSummary.outputItemDoneEvents,0);assert.equal(shown.streamSummary.reconstructedOutput,true);
     assert.doesNotMatch(JSON.stringify(shown),/synthetic raw|synthetic partial|synthetic hidden|synthetic-model|synthetic-provider|synthetic secret|synthetic private/);
     const oversized=Debug.present({...record,server:{...record.server,streamSummary:{...record.server.streamSummary,events:Infinity,outputItemTypes:Array(30).fill('message')}}});
     assert.equal(oversized.streamSummary.events,null);assert.equal(oversized.streamSummary.outputItemTypes.length,16);
+    const counts=['textDeltaEvents','textDoneEvents','contentPartDoneEvents','outputItemDoneEvents'];
+    const zeros=Debug.present({...record,server:{...record.server,streamSummary:{...record.server.streamSummary,...Object.fromEntries(counts.map(field=>[field,0])),reconstructedOutput:false}}});
+    for(const field of counts)assert.equal(zeros.streamSummary[field],0);
+    assert.equal(zeros.streamSummary.reconstructedOutput,false);
+    for(const invalid of [-1,0.5,Infinity,2*1024*1024+1]){
+        const bounded=Debug.present({...record,server:{...record.server,streamSummary:{...record.server.streamSummary,...Object.fromEntries(counts.map(field=>[field,invalid]))}}});
+        for(const field of counts)assert.equal(bounded.streamSummary[field],null);
+    }
 });
 
 test('a proxy-masked generation failure reads the original job once and presents its validation failure without another POST',async()=>{
