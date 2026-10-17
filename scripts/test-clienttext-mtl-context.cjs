@@ -140,18 +140,18 @@ test('nearest 50 conversation neighbors exclude the target and keep original ord
     const result=build(selected,rows,{convoIndex:familyIndex(rows)});
     assert.equal(result.surrounding.entries.length,50);
     assert.deepEqual(ids(result),rows.slice(15,66).filter(row=>row!==selected).map(row=>row.recordId));
-    assert.deepEqual(result.surrounding.omitted,{entryLimit:30,contextBudget:0,untranslated:0,fieldLimit:0,worksheetCoordinates:0});
+    assert.deepEqual(result.surrounding.omitted,{entryLimit:30,contextBudget:0,untranslated:0,fieldLimit:0,worksheetCoordinates:0,existingReference:0});
     assert.equal(result.surrounding.truncated,true);
     assert.equal(new Set(result.surrounding.entries.map(row=>row.unitId)).size,50);
 });
 
 test('size pressure selects closest preceding turn on ties and omits whole source fields', () => {
     const rows=Array.from({length:7},(_,i)=>conversation('Line'+i,String(i).repeat(600))), selected=rows[3];
-    const result=build(selected,rows,{convoIndex:familyIndex(rows),contextLimit:2100});
+    const result=build(selected,rows,{convoIndex:familyIndex(rows),contextLimit:2500});
     assert.deepEqual(ids(result),['Line2']);
     assert.equal(result.surrounding.entries[0].fields[0].source,rows[2].fields[0].source);
     assert.equal(result.surrounding.omitted.contextBudget,5);
-    assert.ok(JSON.stringify(result).length<=2100);
+    assert.ok(JSON.stringify(result).length<=2500);
 });
 
 test('a singleton conversation uses verified explicit NPC relationships in its own worksheet', async () => {
@@ -286,7 +286,8 @@ test('surrounding rows and exact metadata references are deduplicated by full un
     const before=conversation('Before_A'), selected=conversation('Selected_A'), after=conversation('After_A');
     selected.metadata={Context:'Before_A',Other:'Before_A',Self:'Selected_A'};
     const result=build(selected,[before,selected,after,before],{convoIndex:familyIndex([before,selected,after])});
-    assert.deepEqual(ids(result),['Before_A','After_A']);assert.deepEqual(result.references,[]);
+    assert.deepEqual(ids(result),['After_A']);assert.deepEqual(result.references.map(row=>row.recordId),['Before_A']);
+    assert.equal(result.surrounding.omitted.existingReference,1);assert.equal(result.surrounding.omitted.contextBudget,0);
     const json=JSON.stringify(result), again=build(selected,[before,selected,after,before],{convoIndex:familyIndex([before,selected,after])});
     assert.equal(JSON.stringify(again),json);
 });
@@ -339,7 +340,7 @@ test('immutable worksheet coordinates preserve adjacency through an ID-sorted st
 test('worksheet row distance determines proximity independently of array and ID order', () => {
     const before=atRow(conversation('Z','b'.repeat(600)),9),selected=atRow(conversation('A','target'),10),
         farther=atRow(conversation('M','m'.repeat(600)),40),rows=[farther,selected,before];
-    const result=build(selected,rows,{convoIndex:familyIndex(rows),contextLimit:2100});
+    const result=build(selected,rows,{convoIndex:familyIndex(rows),contextLimit:2500});
     assert.deepEqual(ids(result),['Z']);
     assert.equal(result.surrounding.entries[0].position,'before');
     assert.equal(result.surrounding.omitted.contextBudget,1);
@@ -514,4 +515,145 @@ test('keyword field caps remain unchanged when trusted translations are attached
     assert.equal(result.keywords[0].fields.length,8);
     assert.deepEqual(result.keywords[0].fields.map(field=>field.translation),popup.fields.slice(0,8).map(field=>field.target));
     assert.ok(!JSON.stringify(result).includes('Translation 8'));
+});
+
+function dialogueVariants(recordId, sheet = 'NPCTalkDialogueTextAudio') {
+    const value=unit(recordId,sheet,'Synthetic dialogue'),base=value.fields[0],row=base.targetCell.match(/\d+$/)[0];
+    base.id=JSON.stringify(['Text',null]);base.target='Original dialogue translation';
+    value.fields.push(...S.CLASS_FORMS.map((form,index)=>({...base,id:JSON.stringify(['Text',form]),kind:'form',form,group:'Text',
+        target:'',required:false,originalMissing:false,targetCell:String.fromCharCode(68+index)+row})));
+    return value;
+}
+
+test('empty inherited class variants are removed before surrounding field and text limits', () => {
+    const selected=dialogueVariants('Selected'),neighbors=Array.from({length:10},(_,i)=>dialogueVariants('Neighbor'+i));
+    for(const value of neighbors)for(const field of value.fields)field.source='Synthetic dialogue '.repeat(16);
+    const rows=freeze([...neighbors.slice(0,5),selected,...neighbors.slice(5)]),before=JSON.stringify(rows),
+        result=build(selected,rows,{convoIndex:familyIndex(rows)});
+    assert.equal(result.surrounding.availableEntries,10);assert.equal(result.surrounding.selectedEntries,10);
+    assert.equal(result.surrounding.omitted.contextBudget,0);assert.equal(result.surrounding.omitted.fieldLimit,0);
+    assert.ok(result.surrounding.entries.every(row=>row.fields.length===1 && row.fields[0].fieldId===neighbors[0].fields[0].id));
+    const trimmed=rows.map(value=>({...value,fields:value.fields.slice(0,1)})),trimmedTarget=trimmed.find(value=>value.id===selected.id),
+        expected=build(trimmedTarget,trimmed,{convoIndex:familyIndex(trimmed)});
+    assert.deepEqual(result,expected,'blank forms cost no extra context characters or field slots');
+    assert.equal(JSON.stringify(rows),before);
+});
+
+test('distinct variant source text, separate source cells and trusted original or Saved translations retain exact identities', () => {
+    const selected=dialogueVariants('Selected'),neighbor=dialogueVariants('Neighbor'),fields=neighbor.fields;
+    fields[2].source='A genuinely distinct class source';
+    fields[3].sourceCell=fields[3].sourceCell.replace('B','Z');
+    fields[4].target='Approved class translation';
+    fields[6].target=fields[0].target;
+    fields[7].target='STALE SECRET';fields[7].outdated=true;
+    fields[9].target='NONEXISTENT';fields[10].required=true;fields[10].originalMissing=true;
+    fields[11].originalMissing=true;fields[12].target='Cleared original translation';
+    const saved={[neighbor.id]:{saved:true,values:{[fields[5].id]:'Saved class translation',[fields[8].id]:'CONFLICT SECRET',
+        [fields[11].id]:'Corrected class translation',[fields[12].id]:''},conflicts:[{fieldId:fields[8].id}]}},
+        rows=freeze([neighbor,selected]),result=build(selected,rows,{saved,convoIndex:familyIndex(rows)}),projected=result.surrounding.entries[0].fields;
+    assert.deepEqual(projected.map(field=>field.fieldId),[0,2,3,4,5,6,11].map(index=>fields[index].id));
+    assert.equal(projected[1].source,'A genuinely distinct class source');assert.equal(projected[1].translation,undefined);
+    assert.equal(projected[2].source,fields[0].source);assert.equal(projected[2].translation,undefined);
+    assert.equal(projected[3].translation,'Approved class translation');assert.equal(projected[3].translationOrigin,'original-workbook');
+    assert.equal(projected[4].translation,'Saved class translation');assert.equal(projected[4].translationOrigin,'saved');
+    assert.equal(projected[5].translation,fields[0].target,'a trusted explicit variant remains even when its translation equals the base');
+    assert.equal(projected[6].translation,'Corrected class translation');assert.doesNotMatch(JSON.stringify(result),/SECRET/);
+});
+
+test('a form-only source retains one representative and preserves the requested form identity', () => {
+    const selected=dialogueVariants('Selected'),neighbor=dialogueVariants('Neighbor');
+    selected.fields=selected.fields.slice(1);neighbor.fields=neighbor.fields.slice(1);
+    const field=selected.fields.at(-1),result=Context.create({unit:selected,field,units:[neighbor,selected],convoIndex:familyIndex([neighbor,selected])});
+    assert.equal(result.initial.identity.fieldId,field.id);assert.equal(result.initial.identity.form,field.form);
+    assert.deepEqual(result.initial.surrounding.entries[0].fields.map(item=>[item.fieldId,item.form,item.source]),[[field.id,field.form,field.source]]);
+    const requested=result.lookup({recordId:'Neighbor'}).results[0];
+    assert.equal(requested.fields.length,1);assert.equal(requested.fields[0].fieldId,field.id);assert.equal(requested.fields[0].form,field.form);
+});
+
+test('the field cap preserves a useful target-matching variant while keeping source field order', () => {
+    const selected=dialogueVariants('Selected'),neighbor=dialogueVariants('Neighbor');
+    for(const field of neighbor.fields)field.target='Approved '+(field.form || 'base');
+    const field=selected.fields.at(-1),context=Context.create({unit:selected,field,units:[neighbor,selected],convoIndex:familyIndex([neighbor,selected])}),
+        expected=[...neighbor.fields.slice(0,7),neighbor.fields.at(-1)].map(item=>item.id);
+    assert.deepEqual(context.initial.surrounding.entries[0].fields.map(item=>item.fieldId),expected);
+    assert.equal(context.initial.surrounding.omitted.fieldLimit,5);
+    assert.equal(context.initial.surrounding.entries[0].fields.at(-1).translation,'Approved '+field.form);
+    assert.deepEqual(context.lookup({recordId:'Neighbor'}).results[0].fields.map(item=>item.fieldId),expected);
+});
+
+test('missing optional form metadata deduplicates only unambiguous shared sources', () => {
+    const selected=dialogueVariants('Selected'),neighbor=dialogueVariants('Neighbor');
+    for(const field of neighbor.fields){delete field.group;delete field.sourceCell;}
+    const reduced=build(selected,[neighbor,selected],{convoIndex:familyIndex([neighbor,selected])});
+    assert.deepEqual(reduced.surrounding.entries[0].fields.map(field=>field.fieldId),[neighbor.fields[0].id]);
+    neighbor.fields=neighbor.fields.slice(0,3);for(const field of neighbor.fields)delete field.name;
+    const unknown=build(selected,[neighbor,selected],{convoIndex:familyIndex([neighbor,selected])});
+    assert.equal(unknown.surrounding.entries[0].fields.length,3,'missing source names and coordinates cannot prove inheritance');
+    for(const field of neighbor.fields)field.name='Text';neighbor.fields[0].sourceCell='B2';neighbor.fields[1].sourceCell='Z2';
+    for(const field of neighbor.fields)field.targetCell='C2';
+    const ambiguous=build(selected,[neighbor,selected],{convoIndex:familyIndex([neighbor,selected])});
+    assert.equal(ambiguous.surrounding.entries[0].fields.length,3,'an unknown coordinate cannot merge two explicitly distinct source cells');
+});
+
+test('distinct named source groups are not collapsed merely because the source text is identical', () => {
+    const selected=dialogueVariants('Selected'),neighbor=dialogueVariants('Neighbor');neighbor.fields=neighbor.fields.slice(0,2);
+    neighbor.fields[1].name='Other field';neighbor.fields[1].group='Other field';
+    const result=build(selected,[neighbor,selected],{convoIndex:familyIndex([neighbor,selected])});
+    assert.deepEqual(result.surrounding.entries[0].fields.map(field=>field.fieldId),neighbor.fields.map(field=>field.id));
+});
+
+test('keyword and exact-reference projections omit empty inherited forms but retain approved variant translations', () => {
+    const selected=unit('Selected','ClientStrings','Use [Spark|spark].'),popup=dialogueVariants('Spark','KeywordPopups'),last=popup.fields.at(-1),
+        saved={[popup.id]:{saved:true,values:{[last.id]:'Approved keyword class translation'}}};
+    for(const reference of [false,true]) {
+        selected.metadata=reference?{Context:'Spark'}:{};
+        const context=Context.create({unit:selected,field:selected.fields[0],units:[selected,popup],saved}),
+            rows=reference?context.initial.references:context.initial.keywords;
+        assert.equal(rows.length,1);assert.deepEqual(rows[0].fields.map(field=>field.fieldId),[popup.fields[0].id,last.id]);
+        assert.equal(rows[0].fields[0].translation,popup.fields[0].target);
+        assert.equal(rows[0].fields[1].translation,'Approved keyword class translation');assert.equal(rows[0].fields[1].translationOrigin,'saved');
+        assert.equal(rows[0].fields[1].form,last.form);
+        const requested=context.lookup({recordId:'Spark'}).results[0];
+        assert.deepEqual(requested.fields.map(field=>field.fieldId),[popup.fields[0].id,last.id]);
+    }
+});
+
+test('large surrounding workloads cannot crowd out direct keywords, references, glossary, core rules or lookup diagnostics', () => {
+    const selected=atRow(unit('Selected','ClientStrings','Use [SyntheticAlpha|alpha] and [SyntheticBeta|beta] with TargetTerm.'),502),
+        alpha=keyword('SyntheticAlpha'),beta=keyword('SyntheticBeta'),actor=unit('Data/Actors/Synthetic','Characters','Synthetic reference source'),
+        neighbors=Array.from({length:1000},(_,i)=>atRow(unit('Nearby'+i,'ClientStrings','Nearby English '.repeat(12)),i+3));
+    selected.developerNotes='Direct developer guidance.';selected.metadata={Speaker:actor.recordId};
+    for(const row of neighbors)row.fields[0].target='Nearby approved translation '.repeat(8);
+    const saved={[alpha.id]:{saved:true,values:{[alpha.fields[0].id]:'Saved keyword title'}}},
+        dictionary=[{_id:'synthetic-term',find:'TargetTerm',replace:'Approved term',gameScope:'poe2'}],options={saved,dictionary,scope:{game:'poe2'}},
+        result=build(selected,[...neighbors,selected,actor,alpha,beta],options),direct=build(selected,[selected,actor,alpha,beta],options);
+    for(const key of ['notes','metadata','references','keywords','glossary','unavailable','evidenceRules'])assert.deepEqual(result[key],direct[key],key);
+    assert.deepEqual(result.keywordLookup,{requested:2,matched:2,missing:0,ambiguous:0,selfReferences:0});
+    assert.equal(result.keywords[0].fields[0].translation,'Saved keyword title');
+    assert.equal(result.omitted.keywords,0);assert.equal(result.omitted.keywordTranslations,0);
+    assert.equal(result.omitted.references,0);assert.equal(result.omitted.glossary,0);assert.equal(result.omitted.unavailable,0);
+    assert.ok(result.surrounding.selectedEntries>0);assert.ok(result.surrounding.selectedEntries<50);
+    assert.ok(result.surrounding.omitted.contextBudget>0);
+    assert.ok(JSON.stringify(result).length<=Context.LIMITS.context);
+    assert.ok(Buffer.byteLength(JSON.stringify(result))<=Context.LIMITS.contextBytes);assert.ok(valueCount(result)<=Context.LIMITS.contextEntries);
+});
+
+test('lookup summaries distinguish missing, ambiguous and budget-omitted keywords when detailed warnings cannot fit', () => {
+    const selected=unit('Selected','ClientStrings','[SyntheticLoaded|loaded] [SyntheticMissing|missing] [SyntheticAmbiguous|ambiguous]'),
+        loaded=keyword('SyntheticLoaded'),one=keyword('SyntheticAmbiguous'),two=keyword('SyntheticAmbiguous');
+    two.sheet='OtherKeywordPopups';two.id=JSON.stringify(['normal',two.sheet,two.recordId]);
+    const result=build(selected,[selected,loaded,one,two],{contextLimit:100});
+    assert.deepEqual(result.keywordLookup,{requested:3,matched:1,missing:1,ambiguous:1,selfReferences:0});
+    assert.deepEqual(result.keywords,[]);assert.deepEqual(result.unavailable,[]);
+    assert.equal(result.omitted.keywords,1);assert.equal(result.omitted.keywordTranslations,2);assert.equal(result.omitted.unavailable,4);
+    assert.equal(result.evidenceRules.length,2);
+});
+
+test('a genuinely oversized direct keyword is reported as a budget omission and its source is not truncated', () => {
+    const selected=unit('Selected','ClientStrings','[SyntheticLarge|large]'),popup=keyword('SyntheticLarge');
+    popup.fields[0].source='Synthetic source '.repeat(2000);
+    const result=build(selected,[selected,popup]);
+    assert.deepEqual(result.keywordLookup,{requested:1,matched:1,missing:0,ambiguous:0,selfReferences:0});
+    assert.deepEqual(result.keywords,[]);assert.equal(result.omitted.keywords,1);
+    assert.equal(popup.fields[0].source,'Synthetic source '.repeat(2000));
 });

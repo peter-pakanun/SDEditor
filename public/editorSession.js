@@ -149,7 +149,7 @@
     return output.sort((a,b)=>a.start-b.start || b.end-a.end).reduce((all,range)=>{if(!all.length || range.start>=all[all.length-1].end)all.push(range);return all;},[]);
   }
   function insert(host, field, replacement, options={}) {
-    if(!field || typeof replacement!=='string' || host.ctBusy || !host.ctActive || host.ctHistoryViewer)return false;
+    if(!field || typeof replacement!=='string' || host.ctBusy || !host.ctActive || host.ctHistoryViewer || host.ctMtlBusy?.(field))return false;
     const scope=key(host,false),unit=host.ctCurrentUnit,input=options.input || host.ctDictionaryTarget?.(field.id);
     if(!unit?.fields.includes(field) || !input || input.isConnected===false || input.composing || input.readOnly
       || input.dataset?.ctTarget && input.dataset.ctTarget!==field.id || input.dataset?.ctSource)return false;
@@ -183,12 +183,13 @@
     const value=()=>source ? String(sourceText) : String((host.ctInputValues || host.ctValues)[fieldId] ?? '');
     const list=()=>ranges(host,field,value(),source),descriptor={id:fieldId,isMultiline:true,
       get english(){return source ? value() : String(field.source ?? '');},get translation(){return value();},
-      set translation(text){if(valid() && !host.ctBusy && !host.ctHistoryViewer)(host.ctInputValues || host.ctValues)[fieldId]=applyRawInput(host,field,text);},get readonly(){return source || !valid() || host.ctBusy || host.ctHistoryViewer;},
+      set translation(text){if(valid() && !host.ctBusy && !host.ctHistoryViewer && !host.ctMtlBusy?.(field))(host.ctInputValues || host.ctValues)[fieldId]=applyRawInput(host,field,text);},get readonly(){return source || !valid() || host.ctBusy || host.ctHistoryViewer || !!host.ctMtlBusy?.(field);},
       get placeholder(){return source?'English':field.kind==='form' && !field.required?'Optional translation':'Translation';},
       get lang(){return source?'en':host.translationEditorBcp47;},
       get dataAttrs(){const issues=diagnostics();
         return source ? {'data-ct-source':fieldId,'aria-label':field.name+' English'}
         : {'data-ct-target':fieldId,id:'ctfield-'+field.targetCell,'aria-label':field.name+(field.form?' '+(host.ctClassVariantLabel?.(field) ?? field.form):''),
+          'aria-busy':host.ctMtlBusy?.(field)||undefined,'aria-description':host.ctMtlBusy?.(field)?'MTL is generating a provisional translation. This field is read-only. Use Stop translation to cancel.':undefined,
           title:issues.map(issue=>issue.message).join('\n') || undefined,'aria-invalid':issues.some(issue=>(issue.level || issue.severity)==='error') || undefined,
           'aria-autocomplete':'list','aria-controls':'sharedEditorAutocompleteList','aria-expanded':host.ctCompletion?.fieldId===fieldId,
           'aria-activedescendant':host.ctCompletion?.fieldId===fieldId && host.ctCompletion?.items?.length?'sharedEditorAutocompleteOption-'+(host.ctCompletion.selectedIndex || 0):undefined};}};
@@ -200,15 +201,15 @@
       return [...(root.ClientTextState?.diagnose(field,text) || []),...common,
         ...(manualCurrent ? host.ctDiagnostics?.[unit?.id] || [] : []).filter(issue=>issue.fieldId===fieldId && ['clienttext-consistency','inconsistent-translation','dictionary-terminology'].includes(issue.code))];
     };
-    const controller={field:descriptor,get ready(){return valid();},get diagnostics(){return diagnosticPresentation(diagnostics()).diagnostics;},
+    const controller={field:descriptor,get ready(){return valid();},get mtlProgress(){return !source && valid()?host.ctMtlProgressFor?.(field)||null:null;},get diagnostics(){return diagnosticPresentation(diagnostics()).diagnostics;},
       get diagnosticPresentation(){return diagnosticPresentation(diagnostics());},get highlight(){return source ? renderRanges(value(),list()) : renderAnnotatedRanges(value(),[
       ...list().map(range=>({...range,classes:['tagRange',...(range.kind==='keyword'?['vocab']:[])]})),
       ...diagnostics().map(issue=>({...issue,classes:['diagnosticRange',(issue.level || issue.severity)==='error'?'diagError':'diagWarning']})),
     ]);},highlightAttrs:{},
-      input(event){if(!valid() || host.ctBusy || host.ctHistoryViewer || event.isComposing || event.keyCode===229)return;
+      input(event){if(!valid() || host.ctBusy || host.ctHistoryViewer || host.ctMtlBusy?.(field) || event.isComposing || event.keyCode===229)return;
         (host.ctInputValues || host.ctValues)[fieldId]=applyRawInput(host,field,event.target.value,event.inputType,event.target);host.ctEdited(field);host.ctFormattingSelectionChanged?.(field,event);host.ctResizeField(event.target);host.ctSuggest?.(field,event);},
       focus(event){if(!valid())return;host.ctFocusedField=fieldId;if(source)host.ctClearFormattingSelection?.();else host.ctFormattingSelectionChanged?.(field,event);host.ctCompletionSelectionChanged?.(field,event);},
-      keydown(event){if(!valid())return;host.ctTargetKeydown?.(field,event);},
+      keydown(event){if(!valid() || !source && host.ctMtlBusy?.(field))return;host.ctTargetKeydown?.(field,event);},
       selection(event){if(valid()){if(!source)host.ctFormattingSelectionChanged?.(field,event);host.ctCompletionSelectionChanged?.(field,event);}},
       blur(){/* The shared popup is part of the same editor focus surface. */},
       scroll(event){const overlay=event.target.parentElement?.querySelector?.('.HLter'),content=overlay?.querySelector?.('.editorHighlightContent') || overlay;

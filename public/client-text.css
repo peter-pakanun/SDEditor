@@ -174,18 +174,27 @@
 .ctMtlDebugBody p {margin:10px 0;}
 .ctMtlDebugMode {font-weight:600;color:var(--ui-accent);}
 .ctMtlDebugBody pre {white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--ui-border);border-radius:4px;background:var(--color-element-alt);padding:12px;font-size:12px;user-select:text;}
+.ctMtlDebugSectionTitle {display:flex;align-items:center;gap:8px;}.ctMtlDebugSectionTitle small {color:var(--ui-muted);}
+.ctMtlCopyButton {display:inline-flex;align-items:center;justify-content:center;padding:3px;}.ctMtlCopyButton svg {width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.5;}
 .ctMtlButtonTarget + .fieldToolbarSeparator {margin-left:0;}
-.ctMtlProgressTarget {display:inline-flex;align-items:center;gap:2px;}
-.ctMtlProgressTarget:focus-visible {outline:2px solid var(--ui-accent);outline-offset:2px;border-radius:4px;}
-.ctMtlLiveButton {font-size:11px;padding:2px 5px;}
-.ctMtlProgressPopup {position:fixed;z-index:3400;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;width:420px;max-width:calc(100vw - 16px);max-height:min(400px,80vh);padding:12px;border:1px solid var(--ui-border);border-radius:7px;box-shadow:0 8px 28px #0005;background:var(--color-element);color:var(--color-font);font-size:12px;}
-.ctMtlProgressPopup header {display:flex;align-items:center;gap:10px;}
-.ctMtlProgressPopup header strong {margin-right:auto;}
-.ctMtlProgressPopup header button {font-size:16px;line-height:1;padding:2px 5px;}
-.ctMtlProgressPopup p {margin:0;}
-.ctMtlProvisionalLabel {font-weight:600;color:var(--ui-accent);}
-.ctMtlProgressPopup pre {box-sizing:border-box;min-height:48px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;margin:0;padding:10px;border:1px solid var(--ui-border);border-radius:4px;background:var(--color-element-alt);font:inherit;line-height:1.5;}
-.ctMtlProgressHelp {font-size:11px;color:var(--ui-muted);line-height:1.4;}
+.ctMtlButtonTarget:focus-visible {outline:2px solid var(--ui-accent);outline-offset:2px;border-radius:4px;}
+.ctMtlInlineOverlay {position:absolute;inset:0;z-index:2;box-sizing:border-box;overflow:auto;background:var(--color-element-alt);color:var(--color-font);font:inherit;}
+.ctMtlGenerating > :is(textarea,input) {opacity:0;}
+.ctMtlGenerating > .HLter {visibility:hidden;}
+.ctMtlStreamText {box-sizing:border-box;min-height:100%;margin:0;padding:var(--padding-top) var(--padding-left);white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;font:inherit;line-height:inherit;}
+.ctMtlStreamText:focus-visible {outline:2px solid var(--ui-accent);outline-offset:-2px;}
+.ctMtlSkeleton {box-sizing:border-box;height:100%;display:flex;flex-direction:column;gap:5px;padding:8px 10px;overflow:hidden;}
+.ctMtlSkeleton i {display:block;flex:none;height:5px;width:82%;border-radius:3px;background:var(--ui-accent);opacity:.2;animation:ctMtlGlow 1.8s ease-in-out infinite alternate;}
+.ctMtlSkeleton i:nth-child(2) {width:64%;animation-delay:.2s;}.ctMtlSkeleton i:nth-child(3) {width:43%;animation-delay:.4s;}
+@keyframes ctMtlGlow {to{opacity:.45;}}
+@media (prefers-reduced-motion:reduce) {.ctMtlSkeleton i {animation:none;opacity:.3;}}
+.mtlLimitsPanel {margin:14px 0;padding:10px;border:1px solid var(--ui-border);border-radius:5px;}
+.mtlLimitsPanel summary {font-weight:600;cursor:pointer;}.mtlLimitsPanel > :not(summary) {margin-top:10px;}
+.mtlLimitsTableWrap {overflow:auto;}.mtlLimitsTable {width:100%;border-collapse:collapse;font-size:12px;}
+.mtlLimitsTable :is(th,td) {padding:7px 8px;border-bottom:1px solid var(--ui-border);text-align:left;vertical-align:middle;}
+.mtlLimitsTable small {display:block;color:var(--ui-muted);}.mtlLimitsTable input {box-sizing:border-box;width:90px;}
+.mtlLimitsPanel .settingsActions small {color:var(--ui-muted);line-height:1.4;}
+.mtlLimitsPanel .settingsActions button[aria-disabled="true"] {opacity:.5;cursor:default;}
 .ctTarget.mtl .editorFieldFrame {outline:1px solid #67D4F1;outline-offset:-1px;}
 .ctMtlReview {display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;padding:5px 0;}
 .ctMtlReview small {flex-basis:100%;color:var(--ui-muted);}

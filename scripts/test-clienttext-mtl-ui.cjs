@@ -42,6 +42,44 @@ function debugHarness(){
     app.cloudUser={...app.cloudUser,role:'admin',isAdmin:true};
     return h;
 }
+function debugDialogHarness(record){
+    const h=debugHarness();h.app.ctMtlDebugWindow={record};
+    const dialog={...Debug.Dialog.data(),host:h.app,$refs:{}};
+    Object.defineProperty(dialog,'item',{get:()=>h.app.ctMtlDebugWindow});
+    for(const[name,method]of Object.entries(Debug.Dialog.methods))dialog[name]=method.bind(dialog);
+    return{...h,dialog};
+}
+
+test('Admin copy actions use the complete displayed sanitized prompt/context and never hidden transport fields',async()=>{
+    const original=Object.getOwnPropertyDescriptor(global,'navigator'),copied=[],record={status:'completed',server:{context:{note:'Context '.repeat(6000),accessToken:'private-secret'},
+        providerRequest:{model:'hidden-provider-value',reasoning:{effort:'hidden-effort'},instructions:'Prompt '.repeat(6000),input:[{role:'user',content:'Authorized source'}]},rawResponse:'hidden-raw-value'}};
+    Object.defineProperty(global,'navigator',{configurable:true,value:{clipboard:{writeText:async text=>copied.push(text)}}});
+    const h=debugDialogHarness(record);
+    try{
+        for(const section of ['prompt','context']){assert.equal(await h.dialog.copySection(section),true);assert.equal(copied.at(-1),Debug.sectionText(record,section));assert.equal(h.dialog.copyMessage[section],'Copied');}
+        assert.ok(copied[0].length>30000);assert.ok(copied[1].length>30000);assert.doesNotMatch(copied.join(''),/private-secret|hidden-provider-value|hidden-effort|hidden-raw-value/);
+        assert.match(copied[1],/\n  "note"/);h.app.cloudUser.role='manager';assert.equal(await h.dialog.copySection('context'),false);assert.equal(copied.length,2);
+    }finally{h.dialog.resetCopy();if(original)Object.defineProperty(global,'navigator',original);else delete global.navigator;}
+});
+
+test('clipboard failure selects the displayed section for manual copy and never reports success',async()=>{
+    const previousNavigator=Object.getOwnPropertyDescriptor(global,'navigator'),previousDocument=global.document,previousSelection=global.getSelection;
+    let selected,focused=false;const h=debugDialogHarness({status:'preview',snapshot:{context:{note:'Readable context'}}}),field={focus:options=>{assert.deepEqual(options,{preventScroll:true});focused=true;}};
+    h.dialog.$refs.contextText=[field];Object.defineProperty(global,'navigator',{configurable:true,value:{clipboard:{writeText:async()=>{throw new Error('Synthetic clipboard denial');}}}});
+    global.document={createRange:()=>({selectNodeContents:value=>selected=value})};global.getSelection=()=>({removeAllRanges(){},addRange(){}});
+    try{assert.equal(await h.dialog.copySection('context'),false);assert.equal(selected,field);assert.equal(focused,true);assert.equal(h.dialog.copyMessage.context,'');assert.match(h.dialog.copyError.context,/Could not copy automatically.*Ctrl\+C/);}
+    finally{h.dialog.resetCopy();if(previousNavigator)Object.defineProperty(global,'navigator',previousNavigator);else delete global.navigator;global.document=previousDocument;global.getSelection=previousSelection;}
+});
+
+test('copy completion is fenced after account/context changes and repeated copy does not duplicate an active write',async()=>{
+    const original=Object.getOwnPropertyDescriptor(global,'navigator'),wait=deferred();let writes=0;
+    Object.defineProperty(global,'navigator',{configurable:true,value:{clipboard:{writeText:()=>{writes++;return wait.promise;}}}});
+    const h=debugDialogHarness({status:'preview',snapshot:{context:{note:'Scoped context'}}});
+    try{
+        const pending=h.dialog.copySection('context');assert.equal(await h.dialog.copySection('context'),false);assert.equal(writes,1);
+        h.app.cloudSignedIn=false;h.dialog.resetCopy();wait.resolve();assert.equal(await pending,false);assert.deepEqual(h.dialog.copyMessage,{});
+    }finally{h.dialog.resetCopy();if(original)Object.defineProperty(global,'navigator',original);else delete global.navigator;}
+});
 function pollingHarness(){
     const h=harness();h.app.ctMtlCapabilities={enabled:true,delivery:'poll-v1'};
     h.app.ctMtlRequestWait=async()=>{};
@@ -124,6 +162,11 @@ test('Stop confirms cancellation once and removes preview without candidates or 
     const first=h.app.ctMtlCancel(h.field),second=h.app.ctMtlCancel(h.field);assert.equal(await second,false);assert.equal(await first,true);
     assert.equal(await pending,false);assert.equal(cancels,1);assert.deepEqual(h.app.ctMtlLive,{});assert.deepEqual(h.mtl.list(h.scope),[]);
     assert.equal(h.app.ctMtlGenerations[0].status,'failed');assert.match(h.app.ctMtlError,/Translation stopped/);assert.equal(h.app.ctDraftDirty,false);
+    assert.equal(h.mtl.getGenerations(h.scope)[0].suppressed,true);
+    h.mtl.putCandidate(h.scope,candidate(h.original,body.requestId,body.baseTargetHash));h.app.ctMtlCandidates=h.mtl.list(h.scope);
+    assert.equal(h.app.ctMtlCandidate(h.field),null,'A server result delivered after Stop waits for explicit review');
+    h.app.ctMtlReset();h.app._ctMtlDescriptors=[descriptor];h.app.ctMtlGenerations=h.mtl.getGenerations(h.scope);h.app.ctMtlCandidates=h.mtl.list(h.scope);
+    assert.equal(h.app.ctMtlCandidate(h.field),null,'Stop suppression survives workspace reload');
 });
 
 test('pending polling recovers after reload by GET only and authorization loss stops further polls',async()=>{
@@ -540,6 +583,36 @@ test('Accept refuses malformed structure and rechecks scope/access/ordinary muta
     const persist=h.app.ctMtlPersistReview,wait=deferred();h.app.ctMtlPersistReview=async(...args)=>{await wait.promise;return persist(...args);};
     const pending=h.app.ctMtlAccept(h.field);h.app.cloudUser.assignmentVersion++;wait.resolve();
     assert.equal(await pending,false);assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');
+});
+
+test('MTL explicit review actions cannot change a generating field, including Accept after its storage await',async()=>{
+    const h=harness();await h.put();const name=JSON.stringify([h.original.id,h.field.id]),values=structuredClone(h.app.ctValues),reviews=structuredClone(h.app.ctReviewed);
+    h.app.ctMtlRequests={[name]:'running'};
+    for(const action of ['ctMtlShow','ctMtlAccept','ctMtlDismiss'])assert.equal(await h.app[action](h.field),false,action);
+    assert.deepEqual(h.app.ctValues,values);assert.deepEqual(h.app.ctReviewed,reviews);assert.equal(h.app.ctDraftDirty,false);
+    h.app.ctMtlRequests={};const wait=deferred(),persist=h.app.ctMtlPersistReview;
+    h.app.ctMtlPersistReview=async(...args)=>{await wait.promise;return persist(...args);};
+    const pending=h.app.ctMtlAccept(h.field);await settle();h.app.ctMtlRequests={[name]:'running'};wait.resolve();
+    assert.equal(await pending,false);assert.deepEqual(h.app.ctValues,values);assert.deepEqual(h.app.ctReviewed,reviews);
+    assert.equal(h.ordinaryEdits(),0);assert.deepEqual(h.app.ctMtlAcceptances(),[]);
+});
+
+test('request activity changes its unit guard even when generation completes before a pending action resumes',async()=>{
+    const h=harness();assert.equal(h.app.ctMtlUnitRequestVersion(h.original),0);
+    assert.equal(await h.app.ctMtlGenerate(h.field),true);const version=h.app.ctMtlUnitRequestVersion(h.original);assert.ok(version>0);
+    assert.equal(h.app.ctMtlBusy(h.field),false);h.app.ctMtlNoteRequest({id:'other-unit'});assert.equal(h.app.ctMtlUnitRequestVersion(h.original),version);
+    h.app.ctMtlReset();h.app.ctMtlNoteRequest(h.original);assert.ok(h.app.ctMtlUnitRequestVersion(h.original)>version);
+});
+
+test('starting MTL moves focus off editor action buttons before disabling them, without taking outside focus',()=>{
+    const previous=global.document,h=harness(),button={tagName:'BUTTON'},outside={tagName:'BUTTON'},calls=[];
+    global.document={activeElement:button};h.app.ctEditorElement=()=>({contains:value=>value===button});
+    h.app.ctDictionaryTarget=id=>({focus:options=>calls.push({id,options})});
+    try{
+        h.app.ctMtlFocusBeforeRequest(h.field);assert.deepEqual(calls,[{id:h.field.id,options:{preventScroll:true}}]);
+        global.document.activeElement=outside;h.app.ctMtlFocusBeforeRequest(h.field);assert.equal(calls.length,1);
+        global.document.activeElement={tagName:'TEXTAREA'};h.app.ctMtlFocusBeforeRequest(h.field);assert.equal(calls.length,1);
+    }finally{global.document=previous;}
 });
 test('only own selected language and Manager/Admin can generate; consent and provider stay gated',async()=>{
     const h=harness();h.app.cloudUser.language='German';assert.equal(h.app.ctMtlCanGenerate(h.field),false);

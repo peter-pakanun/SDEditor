@@ -31,6 +31,17 @@ function harness(text='First\r\nSecond\r\nThird',source='Fire [ColdDamage|Cold] 
         $nextTick:callback=>ticks.push(callback)};
     return {session,host,field,unit,input,window,calls,ticks,copied};
 }
+
+test('generating MTL keeps the original native value read-only and rejects every field edit path',()=>{
+    const h=harness('Original {0}'),progress={text:'Provisional {0}',phase:'receiving'};let busy=true;
+    h.host.ctMtlBusy=()=>busy;h.host.ctMtlProgressFor=()=>progress;
+    const controller=h.session.fieldController(h.host,h.field),source=h.session.fieldController(h.host,h.field,h.field.source);
+    assert.equal(controller.field.readonly,true);assert.equal(controller.mtlProgress,progress);assert.equal(source.mtlProgress,null);
+    assert.equal(controller.field.translation,'Original {0}');assert.equal(controller.field.dataAttrs['aria-busy'],true);
+    controller.field.translation='Changed {0}';controller.input({target:{value:'Typed {0}'}});controller.keydown({key:'x'});
+    assert.equal(h.session.insert(h.host,h.field,'Pasted'),false);assert.equal(h.host.ctValues.text,'Original {0}');assert.deepEqual(h.calls,[]);
+    busy=false;assert.equal(controller.field.readonly,false);assert.equal(controller.field.dataAttrs['aria-busy'],undefined);
+});
 test('highlight ranges escape raw text and attributes, reject invalid overlap, and preserve supplied offsets',()=>{
     const {session}=harness(),text='<tag> & "quote" \'note\' [Keyword]',start=text.indexOf('[Keyword]'),ranges=[
         {start,end:text.length,className:'hl" onclick="unsafe'},

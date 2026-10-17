@@ -170,6 +170,24 @@
               <app-notice v-if="mtlConnectionError" tone="warning" role="alert">{{ mtlConnectionError }}</app-notice>
               <div class="settingsActions"><button v-if="!mtlConnectionLoaded || mtlConnectionError" @click="mtlConnectionLoad" :disabled="mtlConnectionBusy">Check connection</button><button @click="mtlConnectionAction('disconnect')" :disabled="!mtlConnectionCanDisconnect">Disconnect</button><button @click="mtlConnectionAction('revoke')" :disabled="!mtlConnectionCanRevoke">Revoke</button></div>
             </div>
+            <details v-if="mtlLimitsAllowed" class="mtlLimitsPanel" @toggle="mtlLimitsToggle($event)">
+              <summary>MTL limits and usage · Admin</summary>
+              <p class="settingsHelp">Per-user limits apply separately to each account. Your usage below is for the signed-in Admin<span v-if="mtlLimitsState"> ({{ mtlLimitsState.usage.user.id }})</span>. Global totals include all accounts.</p>
+              <p v-if="mtlLimitsLoading && !mtlLimitsState" class="settingsHelp" role="status">Loading limits and usage…</p>
+              <p v-if="mtlLimitsUnsupported" class="settingsHelp">Limits and usage are unavailable on this server version.</p>
+              <app-notice v-if="mtlLimitsLoadError" tone="warning" role="alert">{{ mtlLimitsLoadError }}</app-notice>
+              <app-notice v-if="mtlLimitsSaveError" tone="warning" role="alert">{{ mtlLimitsSaveError }}</app-notice>
+              <template v-if="mtlLimitsState">
+                <p class="settingsHelp">Daily resets use {{ mtlLimitsState.usage.timezone }}. Weeks start {{ mtlLimitsState.usage.weekStartsOn }}. Counts include reserved attempts, including failed or stopped attempts.</p>
+                <div class="mtlLimitsTableWrap"><table class="mtlLimitsTable"><thead><tr><th scope="col">Usage scope</th><th scope="col">Window</th><th scope="col">Used / current limit</th><th scope="col">New limit</th><th scope="col">Reset</th></tr></thead><tbody>
+                  <tr v-for="row in mtlLimitsRows" :key="row.key"><th scope="row">{{ row.scope }}</th><td>{{ row.window }}<small>{{ row.unit }}</small></td><td>{{ mtlLimitsBucket(row).used }} / {{ mtlLimitsBucket(row).limit }}</td><td><input type="number" step="1" inputmode="numeric" :min="mtlLimitsState.bounds[row.key].min" :max="mtlLimitsState.bounds[row.key].max" v-model.number="mtlLimitsDraft[row.key]" :aria-label="row.scope+' · '+row.unit+' limit'" :data-mtl-limit="row.key" :disabled="mtlLimitsSaving || mtlLimitsPending"></td><td>{{ mtlLimitsResetText(row) }}</td></tr>
+                </tbody></table></div>
+                <p v-if="mtlLimitsValidation" class="settingsHelp" role="alert">{{ mtlLimitsValidation }}</p>
+                <p v-if="mtlLimitsDirty && mtlLimitsDraftRevision !== mtlLimitsState.revision" class="settingsHelp" role="alert">Limits changed on the server while you were editing. Compare the current limits with your edits before saving.</p>
+                <div class="settingsActions"><button type="button" @click="mtlLimitsSave" :aria-disabled="!mtlLimitsCanSave" :aria-busy="mtlLimitsSaving || undefined">{{ mtlLimitsSaving ? 'Saving limits…' : mtlLimitsPending ? 'Retry Save limits' : 'Save limits' }}</button><small>Edits take effect only after Save. Saving does not reset usage or cancel active requests.</small></div>
+              </template>
+              <button v-if="mtlLimitsLoadError" type="button" @click="mtlLimitsLoad(true)" :disabled="mtlLimitsLoading || mtlLimitsSaving">Reload limits and usage</button>
+            </details>
             <label class="settingsToggle"><input type="checkbox" v-model="mtlConsentVersion" true-value="mtl-v1" false-value=""><span><strong>Allow MTL requests</strong><small>Send the selected English field and relevant workbook context to an external translation service when I request MTL. Review the data-sharing details below.</small></span></label>
             <details class="settingsHelp"><summary>MTL data sharing and privacy</summary><p>MTL sends the selected English field and bounded relevant workbook context, Developer notes and approved glossary terms to an external translation service. Data handling follows the connected service account and applicable service and app terms. Workbook parsing and export stay in this browser. Suggestions require human review and Save before they replace the prior saved or original translation.</p></details>
             <p class="settingsHelp">Unreviewed suggestions and edits stay separate. Export uses prior Saved or original translations. In-memory suggestions disappear when the local workbook session ends or the page reloads.</p>
@@ -1528,6 +1546,7 @@
   <script src="clientTextMtlUi.js"></script>
   <script src="clientTextMtlDebug.js"></script>
   <script src="mtlConnectionUi.js"></script>
+  <script src="mtlLimitsUi.js"></script>
   <script src="clientTextUi.js"></script>
   <script src="editorSession.js"></script>
   <script src="tmUi.js"></script>

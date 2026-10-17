@@ -34,7 +34,7 @@ const metadata={connected:connection(),'generation-disabled':connection({enabled
 const app=Vue.createApp({
  mixins:[MtlConnectionUI.mixin],
  data(){return{cloudSignedIn:true,cloudProfileId:'synthetic-admin',cloudUser:{id:'synthetic-admin',role:'admin',isAdmin:true,assignmentVersion:1},
- privateMediaEpoch:1,ctMtlCapabilities:{enabled:true},mtlConsentVersion:''};},
+ privateMediaEpoch:1,ctMtlCapabilities:{enabled:true},mtlConsentVersion:'',mtlLimitsAllowed:false};},
  methods:{
   fixtureConfigure(mode='connected'){
    this.mtlConnectionReset();this.cloudSignedIn=true;this.cloudProfileId='synthetic-admin';

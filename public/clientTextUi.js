@@ -831,7 +831,7 @@
             ctDictionaryUse(word,alt,ctx=this.ctContext(),unitId=this.ctSelection,dictionary=this.dictionary) {
                 if(!this.ctDictionaryContextCurrent(ctx,unitId,dictionary) || !this.ctDictionaryReady || !dictionary.includes(word) || alt && !word.alts?.includes(alt))return false;
                 const field=this.ctCurrentUnit?.fields.find(field=>field.id===this.ctFocusedField),input=this.ctDictionaryTarget(field?.id),replacement=(alt || word).replace;
-                if(!field || field.kind==='gender' || !input || input.isConnected===false || typeof replacement!=='string')return false;
+                if(!field || field.kind==='gender' || this.ctMtlBusy?.(field) || !input || input.isConnected===false || typeof replacement!=='string')return false;
                 if(root.EditorSession)return root.EditorSession.insert(this,field,replacement,{input});
                 const text=(this.ctInputValues || this.ctValues)[field.id],start=input.selectionStart,end=input.selectionEnd;
                 if(typeof text!=='string' || input.value!==text || !Number.isInteger(start) || !Number.isInteger(end) || start<0 || end<start || end>text.length)return false;
@@ -1905,10 +1905,19 @@
                 if(!target || active && active!==input && active!==target && active!==root.document?.body && active!==root.document?.documentElement)return true;
                 target.focus?.({preventScroll:true});target.setSelectionRange?.(caret,caret,'none');this.ctResizeField(target);return true;
             },
-            ctMarkReviewed(field) { if(this.ctMtlCandidate?.(field))return;this.ctReviewed[field.id] = this.ctReviewHash(field); this.ctDraftStageFailure=null;this.ctDraftDirty = true; this.ctQueueDraft(); },
-            ctChooseAlternative(choice, side) { const field = this.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId); this.ctValues[choice.fieldId] = side === 'local' ? choice.local : choice.upstream ?? choice.remote; this.ctChoices = this.ctChoices.filter(item=>item!==choice); if(field)this.ctEdited(field); },
+            ctMarkReviewed(field) { if(this.ctBusy || this.ctHistoryViewer || this.ctMtlBusy?.(field) || this.ctMtlCandidate?.(field))return false;this.ctReviewed[field.id] = this.ctReviewHash(field); this.ctDraftStageFailure=null;this.ctDraftDirty = true; this.ctQueueDraft(); },
+            ctChoiceDisabled(choice) {
+                const field=this.ctCurrentUnit?.fields.find(field=>field.id===choice?.fieldId);
+                return !this.ctActive || this.ctBusy || this.ctHistoryViewer || !field || !!this.ctMtlBusy?.(field);
+            },
+            ctChooseAlternative(choice, side) {
+                if(this.ctChoiceDisabled(choice) || !this.ctChoices.includes(choice) || !['local','remote'].includes(side))return false;
+                const field=this.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId);
+                this.ctValues[field.id]=side==='local'?choice.local:choice.upstream??choice.remote;
+                this.ctChoices=this.ctChoices.filter(item=>item!==choice);this.ctEdited(field);return true;
+            },
             ctCompleteForm(field, event) {
-                if(event.isComposing || event.keyCode===229)return;
+                if(this.ctMtlBusy?.(field) || event.isComposing || event.keyCode===229)return;
                 if(event.key==='Escape'){if(this.ctCompletion){event.preventDefault();event.stopPropagation?.();}this.ctCloseCompletion();return;}
                 const plain=!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
                 if(this.ctCompletion && !this.ctCompletionValid(field,event.target))this.ctCloseCompletion();
@@ -2018,7 +2027,7 @@
             },
             ctSuggest(field,event,options={}) {
                 this.ctCloseCompletion();this._ctDictionaryReturn=null;
-                if(!this.ctActive || this.ctBusy || this.ctHistoryViewer || event.isComposing || event.keyCode===229 || field.kind==='gender')return false;
+                if(!this.ctActive || this.ctBusy || this.ctHistoryViewer || this.ctMtlBusy?.(field) || event.isComposing || event.keyCode===229 || field.kind==='gender')return false;
                 const current=this.ctCurrentUnit?.fields.find(item=>item.id===field.id),input=event.target,text=(this.ctInputValues || this.ctValues)[field.id];
                 const caret=input?.selectionStart,selectionEnd=input?.selectionEnd;
                 if(!current || current.source!==field.source || current.kind!==field.kind || typeof text!=='string'
@@ -2037,6 +2046,7 @@
                     selectionStart:caret,selectionEnd,start,end,items,allItems:items.slice(),filter:'',selectedIndex:0};this.ctSyncCompletionSelection();return true;
             },
             ctApplyCompletion(field,item,input) {
+                if(this.ctMtlBusy?.(field)){this.ctCloseCompletion();return false;}
                 const completion=this.ctCompletion,target=input || this._ctCompletionInput;
                 const entry=item?.dictEntryId ? (this.getDictionaryEntryById ? this.getDictionaryEntryById(item.dictEntryId)
                     : (this.dictionary || []).find(word=>String(word._id)===String(item.dictEntryId))) : null;
@@ -2411,29 +2421,34 @@
             },
             async ctLoadMemory(ctx=this.ctContext()) {if(!this.ctCurrent(ctx) || !this.ctWorkspace)return;try{const memory=await this.ctStorage(ctx.scope).getMemory?.(ctx.scope);if(this.ctCurrent(ctx))this.ctMemory=raw(memory?.units || []);}catch(error){if(this.ctCurrent(ctx))this.ctError=error.message;}},
             async ctApplyMemory(match) {
-                const field=this.ctPreviewField;if(!field || !match || typeof match.target!=='string' || this.ctBusy || this.ctHistoryViewer)return false;
+                const field=this.ctPreviewField;if(!field || !match || typeof match.target!=='string' || this.ctBusy || this.ctHistoryViewer || this.ctMtlBusy?.(field))return false;
                 const ctx=this.ctContext(),unit=this.ctCurrentUnit,value=(this.ctInputValues || this.ctValues)[field.id],selection=this._ctSelectRun,target=match.target,
                     current=()=>!match.id || this.ctMemoryResults?.some(candidate=>candidate.id===match.id && candidate.target===target);
                 if(!current())return false;
                 if(String(value || '').trim() && value!==target && !await this.appConfirm('Replace this entry’s draft with the selected TM translation?',{title:'Use TM translation?',confirmLabel:'Replace translation',danger:false}))return false;
                 if(!this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || this._ctSelectRun!==selection || this.ctPreviewField!==field || (this.ctInputValues || this.ctValues)[field.id]!==value
-                    || this.ctBusy || this.ctHistoryViewer || match.target!==target || !current())return false;
+                    || this.ctBusy || this.ctHistoryViewer || this.ctMtlBusy?.(field) || match.target!==target || !current())return false;
                 const input=this.ctDictionaryTarget(field.id);
                 if(input && root.EditorSession)return root.EditorSession.insert(this,field,target,{input,whole:true});
                 (this.ctInputValues || this.ctValues)[field.id]=target;this.ctEdited(field);this.ctFocusTarget(false,field.id);return true;
             },
+            ctHistoryRestoreBlocked(unit=this.ctCurrentUnit) {
+                return !this.ctActive || this.ctBusy || !unit || unit.fields.some(field=>!!this.ctMtlBusy?.(field));
+            },
             async ctRestoreHistory(entry, side = 'after') {
-                if (this.ctBusy || !['before', 'after'].includes(side) || !this.ctHistoryEntryCurrent(entry) || !entry[side].available) return false;
+                if (this.ctHistoryRestoreBlocked() || !['before', 'after'].includes(side) || !this.ctHistoryEntryCurrent(entry) || !entry[side].available) return false;
                 const ctx = this.ctContext(), unit = this.ctCurrentUnit, snapshot = entry[side];
-                const editor = JSON.stringify([this.ctValues, this.ctReviewed]);
+                const editor = JSON.stringify([this.ctValues, this.ctReviewed]),requestVersion=this.ctMtlUnitRequestVersion?.(unit)||0,
+                    current=()=>this.ctCurrent(ctx)&&this.ctCurrentUnit===unit&&!this.ctHistoryRestoreBlocked(unit)
+                        &&(this.ctMtlUnitRequestVersion?.(unit)||0)===requestVersion&&this.ctHistoryEntryCurrent(entry)
+                        &&JSON.stringify([this.ctValues,this.ctReviewed])===editor;
                 if(!String(ctx.scope.groupId).startsWith('local:') && !this.ctPolicy?.clientTextSaveOrigins?.includes('restore')){
                     this.ctHistoryError='The API must support ClientText restores before restoring this revision.';return false;
                 }
                 if(!await this.appConfirm('Restore this revision? A new saved revision will be created.',{title:'Restore saved revision?',confirmLabel:'Restore revision'}))return false;
-                if(!this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || !this.ctHistoryEntryCurrent(entry) || JSON.stringify([this.ctValues,this.ctReviewed])!==editor)return false;
-                if (!await this.ctFlushDraft() || !this.ctCurrent(ctx) || this.ctCurrentUnit !== unit || !this.ctHistoryEntryCurrent(entry)
-                    || JSON.stringify([this.ctValues, this.ctReviewed]) !== editor) return false;
-                await this.ctMtlUnderlyingReplaced?.(unit);if(!this.ctCurrent(ctx) || this.ctCurrentUnit!==unit || JSON.stringify([this.ctValues,this.ctReviewed])!==editor)return false;
+                if(!current())return false;
+                if (!await this.ctFlushDraft() || !current()) return false;
+                await this.ctMtlUnderlyingReplaced?.(unit);if(!current())return false;
                 this.ctValues = Object.fromEntries(unit.fields.map(field => [field.id,
                     typeof snapshot.values[field.id] === 'string' ? snapshot.values[field.id] : String(this.ctValues[field.id] ?? field.target ?? '')]));
                 this.ctReviewed = Object.fromEntries(Object.entries(snapshot.reviewed).filter(([id, hash]) => unit.fields.some(field => field.id === id && this.ctReviewHash(field) === hash)));
@@ -3289,7 +3304,7 @@
             <template v-if="side !== 'translation'">
                 <section v-if="host.ctNotes().length" class="ctDeveloperNotes editBlock"><strong>Developer notes</strong><pre v-for="(note,index) in host.ctNotes()" :key="index">{{ note }}</pre></section>
             </template>
-            <template v-if="side !== 'source'"><section v-for="(choice,index) in host.ctChoices" :key="index" class="ctDeveloperNotes editBlock"><strong>Translation choice · {{ host.ctHistoryFieldLabel(host.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId) || {name:choice.fieldId}) }}</strong><p>Incoming translation remains active. Choose the text to keep.</p><pre>{{ choice.upstream ?? choice.remote }}</pre><button @click="host.ctChooseAlternative(choice,'remote')">Keep incoming</button><pre>{{ choice.local }}</pre><button @click="host.ctChooseAlternative(choice,'local')">Use previous saved text</button></section></template>
+            <template v-if="side !== 'source'"><section v-for="(choice,index) in host.ctChoices" :key="index" class="ctDeveloperNotes editBlock"><strong>Translation choice · {{ host.ctHistoryFieldLabel(host.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId) || {name:choice.fieldId}) }}</strong><p>Incoming translation remains active. Choose the text to keep.</p><pre>{{ choice.upstream ?? choice.remote }}</pre><button :disabled="host.ctChoiceDisabled(choice)" @click="host.ctChooseAlternative(choice,'remote')">Keep incoming</button><pre>{{ choice.local }}</pre><button :disabled="host.ctChoiceDisabled(choice)" @click="host.ctChooseAlternative(choice,'local')">Use previous saved text</button></section></template>
             </div></div>
             <section v-for="group in host.ctFieldGroups" :key="group.key" class="ctBlock editBlock" :class="{inlineFileBlock:side !== 'both',ctFormBlock:group.forms}" :data-field-group="group.key" :data-inline-block="side !== 'both' ? 'field:'+group.key : undefined" :data-inline-side="side === 'source' ? 'english' : side === 'translation' ? 'translation' : undefined"><div :class="{inlineBlockNatural:side !== 'both'}">
                 <h3 v-if="side === 'both'">{{ group.name }}</h3>
@@ -3349,8 +3364,8 @@
             </template>
             <editor-native-field v-else :controller="host.ctFieldController(field)" kind="translation" :key="host.ctSelection+':'+field.id" :compact="compact"></editor-native-field>
             </component>
-            <div v-if="host.ctMtlPendingCandidate?.(field) || host.ctMtlAccepted?.(field)" class="ctMtlReview" data-inline-focus-surface @click.capture="host.ctMtlReviewFocus(field,$event)"><span class="ctMtlDot" aria-hidden="true"></span><span>MTL · {{ host.ctMtlAccepted?.(field) ? 'Accepted draft · Save to apply' : 'Needs review' }}</span><template v-if="host.ctMtlCandidate?.(field)"><button type="button" @click="host.ctMtlAccept(field)" :disabled="host.ctBusy" title="Use as a reviewed draft. Save applies this text.">Accept</button><button type="button" @click="host.ctMtlDismiss(field)" :disabled="host.ctBusy">Dismiss</button><small>Save and export use the underlying translation until you accept this text.</small></template><template v-else-if="host.ctMtlAccepted?.(field)"><button type="button" @click="host.ctMtlUndoAccept(field)" :disabled="host.ctBusy">Undo accept</button></template><template v-else><button type="button" @click="host.ctMtlShow(field)" :disabled="host.ctBusy">Review MTL</button><button type="button" @click="host.ctMtlDismiss(field)" :disabled="host.ctBusy">Dismiss</button></template><button v-if="host.ctMtlRecoveryReviews?.(field)?.length" type="button" @click="host.ctMtlRecoverReview(field)" :disabled="host.ctBusy">Recover my review</button></div>
-            <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated || diagnosticPresentation.warningCount || diagnosticPresentation.errorCount" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" :disabled="!!host.ctMtlCandidate?.(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button><editor-diagnostic-meta :presentation="diagnosticPresentation"></editor-diagnostic-meta></div>
+            <div v-if="host.ctMtlPendingCandidate?.(field) || host.ctMtlAccepted?.(field)" class="ctMtlReview" data-inline-focus-surface @click.capture="host.ctMtlReviewFocus(field,$event)"><span class="ctMtlDot" aria-hidden="true"></span><span>MTL · {{ host.ctMtlAccepted?.(field) ? 'Accepted draft · Save to apply' : 'Needs review' }}</span><template v-if="host.ctMtlCandidate?.(field)"><button type="button" @click="host.ctMtlAccept(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field)" title="Use as a reviewed draft. Save applies this text.">Accept</button><button type="button" @click="host.ctMtlDismiss(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field)">Dismiss</button><small>Save and export use the underlying translation until you accept this text.</small></template><template v-else-if="host.ctMtlAccepted?.(field)"><button type="button" @click="host.ctMtlUndoAccept(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field)">Undo accept</button></template><template v-else><button type="button" @click="host.ctMtlShow(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field)">Review MTL</button><button type="button" @click="host.ctMtlDismiss(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field)">Dismiss</button></template><button v-if="host.ctMtlRecoveryReviews?.(field)?.length" type="button" @click="host.ctMtlRecoverReview(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field)">Recover my review</button></div>
+            <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated || diagnosticPresentation.warningCount || diagnosticPresentation.errorCount" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || !!host.ctMtlCandidate?.(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button><editor-diagnostic-meta :presentation="diagnosticPresentation"></editor-diagnostic-meta></div>
             <div v-for="(issue,index) in diagnosticPresentation.notes" :key="index" :class="issue.kind === 'consistency' ? 'consistencyWarning' : 'terminologyWarning'" role="note">{{ issue.message }}</div>
         </div>` };
     const comparisonMixin=root.ClientTextComparisons?.mixin;

@@ -45,6 +45,7 @@
                     },
                     set(_, property, text) {
                         const field = host.ctCurrentUnit?.fields.find(field => field.id === property);
+                        if (field && host.ctMtlBusy(field)) return true;
                         if (!field || !host.ctMtlEdited(field, String(text ?? ''))) host.ctValues[property] = text;
                         return true;
                     },
@@ -76,6 +77,18 @@
         watch: { ctMtlRequestScopeKey: { flush: 'sync', handler() { this.ctMtlAbortRequests(); } } },
         beforeUnmount() { this.ctMtlReset(); },
         methods: {
+            ctMtlUnitRequestVersion(unit=this.ctCurrentUnit) { return this._ctMtlUnitRequestVersions?.get(unit?.id)||0; },
+            ctMtlNoteRequest(unit) {
+                const versions=this._ctMtlUnitRequestVersions ||= raw(new Map());
+                versions.set(unit.id,this._ctMtlRequestSerial=(this._ctMtlRequestSerial||0)+1);
+            },
+            ctMtlFocusBeforeRequest(field) {
+                const active=root.document?.activeElement;
+                // Pointer Translate can retain focus on a choice/Restore button
+                // that the request is about to disable. Avoid a blur to body and
+                // its unrelated inline autosave before applying the read-only lock.
+                if(active?.tagName==='BUTTON'&&this.ctEditorElement?.()?.contains(active))this.ctDictionaryTarget?.(field.id)?.focus({preventScroll:true});
+            },
             ctMtlAbortRequests() {
                 for (const job of this._ctMtlJobs?.values() || []) job.controller.abort();
                 this._ctMtlJobs?.clear(); this.ctMtlLive = {}; this.ctMtlRequests = {};
@@ -108,9 +121,16 @@
             async ctMtlCancel(field) {
                 const job = this._ctMtlJobs?.get(key(this.ctSelection, field?.id));
                 if (!job?.current?.() || !job.cancel || job.cancelling) return false;
-                job.cancelling = true; this.ctMtlProgressUpdate(job, {phase:'cancelling'});
+                job.cancelling = true; job.cancelledByUser = true; this.ctMtlProgressUpdate(job, {phase:'cancelling'});
+                const generation=this.ctMtlGenerations.find(value=>value.requestId===job.requestId);
+                if(generation){generation.suppressed=true;this.ctMtlRevision++;}
+                // A validated server result can win the cancellation race and
+                // arrive later through sync. Keep it behind explicit Review.
+                const marker=Promise.resolve().then(()=>this.ctMtlStorage({scope:job.scope}).putGeneration(job.scope,{requestId:job.requestId,suppressed:true}));
+                marker.catch(()=>{});
                 try {
                     const response = await job.cancel();
+                    await marker;
                     if (!job.current()) return false;
                     job.cancelResponse = response; job.wake?.(); return true;
                 } catch (error) {
@@ -171,6 +191,7 @@
                 this.ctMtlAbortRequests();
                 this._ctMtlRun = null; this._ctMtlSync?.stop?.(); this._ctMtlSync = null;
                 this._ctMtlJobs = raw(new Map()); this._ctMtlEditMutations = raw(new Map()); this._ctMtlReviewQueues = raw(new Map());
+                this._ctMtlUnitRequestVersions=raw(new Map());
                 this._ctMtlStoredReviews=raw(new Map());this._ctMtlRecoveryRun=null;
                 this._ctMtlDescriptors = raw([]); this._ctMtlSuppressed = raw(new Set()); this._ctMtlAcceptanceClaims = {};
                 this._ctMtlSyncError='';this._ctMtlSyncRun=null;
@@ -402,11 +423,11 @@
             },
             async ctMtlRecoverReview(field) {
                 const recovery=this.ctMtlRecoveryReviews(field)[0],ctx=this.ctContext(),unit=this.ctCurrentUnit,candidate=this.ctMtlPendingCandidate(field);
-                if(!recovery||!candidate||this.ctBusy||this.ctHistoryViewer||!permissions(this,ctx))return false;
+                if(!recovery||!candidate||this.ctBusy||this.ctHistoryViewer||this.ctMtlBusy(field)||!permissions(this,ctx))return false;
                 const run=this._ctMtlRecoveryRun={},capturedAccess=access(this),name=key(unit.id,field.id),
                     mutation=this._ctMtlEditMutations?.get(name)||0,value=this.ctMtlFieldValue(field),store=this.ctMtlStorage(ctx);
                 const current=()=>this._ctMtlRecoveryRun===run&&this.ctCurrent(ctx)&&this.ctCurrentUnit===unit&&access(this)===capturedAccess
-                    &&permissions(this,ctx)&&this.ctMtlPendingCandidate(field)?.id===candidate.id&&this.ctMtlPendingCandidate(field)?.revision===candidate.revision
+                    &&permissions(this,ctx)&&!this.ctMtlBusy(field)&&this.ctMtlPendingCandidate(field)?.id===candidate.id&&this.ctMtlPendingCandidate(field)?.revision===candidate.revision
                     &&M.rawSourceHash(field.source)===recovery.rawSourceHash&&(this._ctMtlEditMutations?.get(name)||0)===mutation
                     &&this.ctMtlFieldValue(field)===value;
                 try{
@@ -439,7 +460,7 @@
                 this.ctMtlReviews = reviews; this.ctMtlRevision++;
             },
             async ctMtlShow(field) {
-                const candidate = this.ctMtlPendingCandidate(field); if (!candidate || this.ctBusy||this.ctHistoryViewer) return false;
+                const candidate = this.ctMtlPendingCandidate(field); if (!candidate || this.ctBusy||this.ctHistoryViewer||this.ctMtlBusy(field)) return false;
                 const ctx = this.ctContext(), name = key(this.ctSelection, field.id), before = this.ctMtlReviews[name];
                 if (this.ctMtlAccepted(field)) return false;
                 // An edited older generation remains recoverable. Opening a new generation is an explicit action.
@@ -451,7 +472,7 @@
                 await this.ctMtlPersistReview(ctx, this.ctSelection, field.id, review); return true;
             },
             async ctMtlAccept(field) {
-                const candidate = this.ctMtlCandidate(field); if (!candidate || this.ctBusy||this.ctHistoryViewer || !permissions(this, this.ctContext())) return false;
+                const candidate = this.ctMtlCandidate(field); if (!candidate || this.ctBusy||this.ctHistoryViewer || this.ctMtlBusy(field) || !permissions(this, this.ctContext())) return false;
                 const ctx = this.ctContext(), unit = this.ctCurrentUnit, name = key(unit.id, field.id), text = this.ctMtlFieldValue(field), check = M.validate(field, text);
                 if (!check.valid) { this.ctMtlError = check.errors[0]?.message || 'Review the MTL translation before accepting it.'; return false; }
                 const old = this.ctMtlReviews[name], previous = String(this.ctValues[field.id] ?? ''), mutation = this._ctMtlEditMutations?.get(name) || 0,
@@ -461,7 +482,7 @@
                     previousDraft: old?.previousDraft || { values: copy(this.ctValues), reviewed: copy(this.ctReviewed), dirty: !!this.ctDraftDirty } };
                 try {
                     await this.ctMtlPersistReview(ctx, unit.id, field.id, review);
-                    if (!this.ctCurrent(ctx) || this.ctCurrentUnit !== unit || this.ctMtlCandidate(field)?.id !== candidate.id
+                    if (!this.ctCurrent(ctx) || this.ctCurrentUnit !== unit || this.ctMtlBusy(field) || this.ctMtlCandidate(field)?.id !== candidate.id
                         || this.ctMtlFieldValue(field) !== text || String(this.ctValues[field.id] ?? '') !== previous
                         || (this._ctMtlEditMutations?.get(name) || 0) !== mutation || capturedAccess !== access(this) || !permissions(this, ctx)) return false;
                     this.ctMtlReviews = { ...this.ctMtlReviews, [name]: review }; this.ctMtlRevision++;
@@ -486,14 +507,14 @@
             async ctMtlUndoAccept(field) {
                 const ctx = this.ctContext(), unit = this.ctCurrentUnit, name = key(unit?.id,field?.id), before = this.ctMtlReviews[name],
                     candidate = this.ctMtlCandidates.find(value=>value.id===before?.candidateId), capturedAccess = access(this),descriptor=this.ctMtlDescriptor(unit);
-                if (!this.ctMtlAccepted(field) || this.ctBusy||this.ctHistoryViewer || !permissions(this,ctx) || !candidate || typeof before.previousValue !== 'string'
+                if (!this.ctMtlAccepted(field) || this.ctBusy||this.ctHistoryViewer || this.ctMtlBusy(field) || !permissions(this,ctx) || !candidate || typeof before.previousValue !== 'string'
                     ||candidate.unitId!==unit.id||candidate.fieldId!==field.id||candidate.rawSourceHash!==M.rawSourceHash(field.source)
                     ||candidate.assetHash!==descriptor?.assetHash||candidate.parserVersion!==descriptor?.parserVersion) return false;
                 const text = String(this.ctValues[field.id] ?? ''), mutation = this._ctMtlEditMutations?.get(name) || 0,
                     review = {...before,text,dirty:true,acceptedDraft:false,suppressed:false,opened:true};
                 try {
                     await this.ctMtlPersistReview(ctx,unit.id,field.id,review);
-                    if (!this.ctCurrent(ctx) || this.ctCurrentUnit !== unit || this.ctMtlReviews[name] !== before
+                    if (!this.ctCurrent(ctx) || this.ctCurrentUnit !== unit || this.ctMtlBusy(field) || this.ctMtlReviews[name] !== before
                         || String(this.ctValues[field.id] ?? '') !== text || (this._ctMtlEditMutations?.get(name) || 0) !== mutation
                         || capturedAccess !== access(this) || !permissions(this,ctx)) return false;
                     this.ctMtlReviews = {...this.ctMtlReviews,[name]:review};
@@ -505,7 +526,7 @@
                 } catch(error) { if(this.ctCurrent(ctx))this.ctMtlError=error.message;return false; }
             },
             ctMtlUnderlyingReplaced(unit = this.ctCurrentUnit) {
-                if (!unit || unit !== this.ctCurrentUnit) return;
+                if (!unit || unit !== this.ctCurrentUnit || unit.fields.some(field=>this.ctMtlBusy(field))) return;
                 const ctx = this.ctContext();this._ctMtlAcceptanceClaims ||= {};delete this._ctMtlAcceptanceClaims[unit.id];
                 this._ctMtlSuppressed ||= raw(new Set());const reviews={...this.ctMtlReviews};
                 for(const field of unit.fields){
@@ -527,11 +548,11 @@
             },
             async ctMtlDismiss(field) {
                 const candidate = this.ctMtlPendingCandidate(field), ctx = this.ctContext();
-                if (!candidate || this.ctBusy||this.ctHistoryViewer || !permissions(this, ctx)) return false;
+                if (!candidate || this.ctBusy||this.ctHistoryViewer || this.ctMtlBusy(field) || !permissions(this, ctx)) return false;
                 if (this.ctMtlAccepted(field)) return false;
                 try {
                     await this.ctMtlStorage(ctx).dismiss(ctx.scope, candidate, { mutationId: id() });
-                    if (!this.ctCurrent(ctx)) return false;
+                    if (!this.ctCurrent(ctx) || this.ctMtlBusy(field)) return false;
                     this.ctMtlCandidates = raw(await this.ctMtlStorage(ctx).list(ctx.scope)); if (!this.ctCurrent(ctx)) return false;
                     const name = key(candidate.unitId, field.id), reviews = { ...this.ctMtlReviews }; delete reviews[name]; this.ctMtlReviews = reviews;
                     if (this._ctMtlAcceptanceClaims?.[candidate.unitId]) this._ctMtlAcceptanceClaims[candidate.unitId] = this._ctMtlAcceptanceClaims[candidate.unitId].filter(claim => claim.fieldId !== field.id);
@@ -580,7 +601,7 @@
                 const client = this._cloud, capturedAccess = access(this), controller = new AbortController(), name = key(unit.id,field.id),
                     jobs = this._ctMtlJobs ||= raw(new Map()), job = { requestId:generation.requestId, controller, name, startedAt:Date.now(), client, scope:copy(ctx.scope) },
                     mutation = this._ctMtlEditMutations?.get(name) || 0;
-                jobs.set(name,job); this.ctMtlRequests = {...this.ctMtlRequests,[name]:generation.requestId};
+                jobs.set(name,job); this.ctMtlNoteRequest(unit);this.ctMtlFocusBeforeRequest(field);this.ctMtlRequests = {...this.ctMtlRequests,[name]:generation.requestId};
                 const current = () => jobs.get(name) === job && !controller.signal.aborted && this.ctCurrent(ctx) && this.ctActive
                     && client === this._cloud && capturedAccess === access(this) && permissions(this,ctx)
                     && this._ctUnitIndex?.get(unit.id) === unit && M.rawSourceHash(field.source) === generation.rawSourceHash;
@@ -591,7 +612,7 @@
                     if (!current()) throw stale();
                     if (this.ctMtlCapabilities?.delivery === 'poll-v1' && !response.candidate) response = await this.ctMtlPoll(job, response);
                     if (response.candidate) return await this.ctMtlAdoptCandidate(ctx,unit,field,response.candidate,generation,current,
-                        () => (this._ctMtlEditMutations?.get(name) || 0) !== mutation);
+                        () => job.cancelledByUser || (this._ctMtlEditMutations?.get(name) || 0) !== mutation);
                     const status = response.request?.status || response.job?.status || response.status;
                     if (['failed','cancelled','expired','interrupted'].includes(status) || response.errorCode === 'MTL_RESULT_EXPIRED') {
                         await this.ctMtlStorage(ctx).putGeneration(ctx.scope,{requestId:generation.requestId,status:'failed'});
@@ -639,6 +660,8 @@
                     previous = String(this.ctValues[field.id] ?? ''), capturedSource = M.rawSourceHash(field.source), controller = new AbortController(), requestId = id();
                 const asynchronous = this.ctMtlCapabilities?.delivery === 'poll-v1',
                     job = { requestId, controller, name, startedAt:Date.now(), client, scope:copy(ctx.scope) }, jobs = this._ctMtlJobs ||= raw(new Map()); jobs.set(name, job);
+                this.ctMtlNoteRequest(unit);
+                this.ctMtlFocusBeforeRequest(field);
                 let sent = false, generation, confirmedFailure = false;
                 this.ctMtlRequests = { ...this.ctMtlRequests, [name]: requestId };
                 const current = () => jobs.get(name) === job && !controller.signal.aborted && this.ctCurrent(ctx) && this.ctActive
@@ -677,8 +700,8 @@
                     }
                     if (!current()) throw stale();
                     if (asynchronous && !response.candidate) response = await this.ctMtlPoll(job, response);
-                    this.ctMtlProgressUpdate(job, { phase:'validating' });
-                    const adopted = await this.ctMtlAdoptCandidate(ctx,unit,field,response.candidate,generation,current,()=>(mutations.get(name)||0)!==mutation);
+                    if(!job.cancelledByUser)this.ctMtlProgressUpdate(job, { phase:'validating' });
+                    const adopted = await this.ctMtlAdoptCandidate(ctx,unit,field,response.candidate,generation,current,()=>job.cancelledByUser || (mutations.get(name)||0)!==mutation);
                     if (current()) this.ctMtlDebugFinish?.(field, requestId);
                     return adopted;
                 } catch (error) {

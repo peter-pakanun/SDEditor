@@ -6,6 +6,8 @@ Generation uses a separately configured external translation service. Settings a
 
 Generation needs a network connection in every editing mode. An in-memory workbook session is a storage choice and does not make translation available offline. A cached online workspace retains its online identity while disconnected.
 
+While generating, the field is read-only and a subtle glowing skeleton covers its original text. Incoming provisional text replaces the skeleton directly in the field; it stays separate from the native draft, candidates, history, TM and exports. Reduced-motion settings disable the glow. Click the spinning Translate button, or focus it and press Enter or Space, to stop. The original draft reappears immediately; editing resumes when the request ends. An unconfirmed stop leaves an actionable warning and continues checking the same request. A completed result that wins a stop race stays behind explicit Review.
+
 Admins can view nonsecret connection status and disconnect or revoke the server session in Settings. Changing that connection requires an Admin sign-in from the last five minutes. Setup uses a dedicated local SDEditor sign-in followed by a protected server import; no hosted one-click connection is offered. Renewable credentials live in a separate encrypted backend database, with its encryption key stored outside that database and excluded from content backups.
 
 All MTL controls, connection guidance and errors use neutral wording. The **MTL data sharing and privacy** details beside consent explain which context is sent to an external translation service, the applicable account/service terms and the human review requirement. The prior saved or original translation remains in use until explicit acceptance and Save.
@@ -13,6 +15,8 @@ All MTL controls, connection guidance and errors use neutral wording. The **MTL 
 An Admin-only information button next to Translate opens a movable, read-only request dialog. Before translation it shows a clearly labeled context preview without making an inference request. After translation, **Prompt and context** shows selected fields from the actual executed prompt, bounded context, response, structural validation, timing and safe error codes. This is not a full transport-body view: connection configuration is omitted. Quoted workbook, prompt and response text remains accurate. Follow-up lookups are currently disabled; diagnostics say so explicitly. Drag the header or focus it and use arrow keys to move the dialog. Escape closes it and returns focus to the button.
 
 Server diagnostics are captured only for an Admin's own request, checked against current Admin authorization, original workspace/language permissions and the same signed-in session. They stay in bounded process memory for up to ten minutes and never enter candidates, history, backups or logs. Browser details clear on logout or account, language, workspace, source or selected-record changes. Text is escaped and credential-like values are redacted; transport headers, credentials, raw provider errors and reasoning are excluded. Opening or reopening the dialog does not consume translation quota or invoke the provider. Expired details cannot be reconstructed from durable work.
+
+Prompt and Context have separate copy icons. Each copies the complete displayed, sanitized section as readable JSON. A successful copy briefly says **Copied**. If automatic copying fails, the section is selected for manual Ctrl+C and a clear failure message appears.
 
 ## Review and Save
 
@@ -38,7 +42,9 @@ Exports read ordinary Saved records and verified original workbook cells. Unacce
 
 ## Host limits
 
-The host reserves usage atomically before inference. Defaults are one active job per account, two across the process, five new jobs per minute per account, 50 per day and 250 per week per account, and 100 per day and 500 per week for the configured subscription. Day and Monday-start week boundaries use `Asia/Bangkok`. Identical retries count as the same job. Provider rounds are counted separately and capped at three. Source/context/output size and elapsed-time limits are also enforced. Operators can configure these limits in the private backend.
+The host reserves usage atomically before inference. Defaults are one active job per account, two across the process, five new jobs per minute per account, 50 per day and 250 per week per account, and 100 per day and 500 per week for the configured subscription. Day and Monday-start week boundaries use `Asia/Bangkok`. Identical retries count as the same job. Provider rounds are counted separately and capped at three. Source/context/output size and elapsed-time limits are also enforced.
+
+Admins can expand **MTL limits and usage** in Settings to edit the seven request and concurrency limits. Values change only after explicit **Save limits**. Server-counted usage is shown as used/current limit, with rolling-minute releases, calendar reset times and active/max concurrency. Per-user usage belongs to the signed-in Admin; connection totals include all accounts using the configured connection, and server concurrency includes all accounts. The panel refreshes every five seconds while open and preserves unsaved edits. Saving limits does not reset counters or cancel active requests. Conflicts preserve the Admin's edits beside current server limits; an uncertain Save retries its original body and mutation ID. Older APIs show an unsupported message.
 
 Uncertain requests retain their identity for recovery. Checking a request or replaying a save receipt does not request another generation. A failed or interrupted job does not automatically start another provider call.
 

@@ -290,6 +290,7 @@
                 return {
                     get open() { return host.ctComparisonState(field, side).open; }, get side() { return side; },
                     get disabled() { return host.ctBusy || !valid(); }, get formatting() { return field.kind !== 'gender'; },
+                    get restoreDisabled() { return this.disabled || !!host.ctHistoryRestoreBlocked?.(unit); },
                     get mtl() { return side==='translation' && !!root.ClientTextMtlState?.eligible(field); },
                     get mtlBusy() { return !!host.ctMtlBusy?.(field); },
                     get mtlDisabled() { return this.disabled || !host.ctMtlCanGenerate?.(field); },
@@ -301,7 +302,7 @@
                     get mtlShortcut() { return host.mtlShortcut==='f8'?'F8':host.mtlShortcut==='ctrl-alt-f8'?'Control+Alt+F8':undefined; },
                     generate: () => valid() && host.ctMtlGenerate?.(field),
                     get tone() { const status=host.ctFieldStatus(field);return side==='source' ? '' : status.outdated ? 'outdated' : status.missing ? 'missing' : ''; },
-                    get formattingDisabled() { return side === 'source' || this.disabled; },
+                    get formattingDisabled() { return side === 'source' || this.disabled || this.mtlBusy; },
                     styleActive: style => side === 'translation' && valid() && host.ctStyleActive(field, style),
                     get reference() { return host.ctComparisonReference(field, side); }, get choices() { return host.ctComparisonChoices(field, side); },
                     get groups() { return [...new Set(this.choices.map(value => value.group))]; },
@@ -321,7 +322,7 @@
                     options: (name, value) => { if (valid()) host[name === 'characters' ? 'ctHistoryCharacters' : 'ctHistoryWhitespace'] = value; },
                     olderVersions: () => valid() && host.ctLoadOlderComparisonVersion(), olderHistory: () => valid() && host.ctLoadComparisonHistory(),
                     details: (entry, part) => { if (valid()) host.ctComparisonDetailsKey = entry.key + ':' + part; },
-                    restore: (entry, part) => valid() && host.ctRestoreHistory(entry, part)
+                    restore: (entry, part) => valid() && !host.ctHistoryRestoreBlocked?.(unit) && host.ctRestoreHistory(entry, part)
                 };
             }
         }

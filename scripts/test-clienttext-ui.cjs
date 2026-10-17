@@ -2904,6 +2904,57 @@ test('history restore cancellation and late confirmation cannot replace a newer 
     }
 });
 
+test('explicit choices and source review are blocked only for the generating field; record restores block on any field',()=>{
+    const {app,original}=harness(),active=original.fields[0],other={...active,id:'other-field',name:'Other',sourceCell:'B3',targetCell:'C3'};
+    original.fields.push(other);app.ctValues[other.id]='Other draft';let queued=0;app.ctQueueDraft=()=>queued++;
+    app.ctMtlBusy=field=>field?.id===active.id;
+    const blocked={fieldId:active.id,local:'Previous',upstream:'Incoming'},available={fieldId:other.id,local:'Other previous',upstream:'Other incoming'};
+    app.ctChoices=[blocked,available];const values=clone(app.ctValues),reviews=clone(app.ctReviewed);
+    assert.equal(app.ctChoiceDisabled(blocked),true);assert.equal(app.ctChoiceDisabled(available),false);
+    for(const side of ['local','remote'])assert.equal(app.ctChooseAlternative(blocked,side),false);
+    assert.equal(app.ctMarkReviewed(active),false);assert.deepEqual(clone(app.ctValues),values);assert.deepEqual(clone(app.ctReviewed),reviews);
+    assert.equal(app.ctChoices.length,2);assert.equal(queued,0);assert.equal(app.ctDraftDirty,false);
+    assert.equal(app.ctHistoryRestoreBlocked(),true);assert.equal(app.ctFieldToolbar(other,'translation').restoreDisabled,true);
+    assert.equal(app.ctChooseAlternative(available,'local'),true);assert.equal(app.ctValues[other.id],'Other previous');assert.equal(app.ctChoices.length,1);
+    assert.equal(app.ctValues[active.id],values[active.id]);assert.equal(queued,1);
+    other.kind='form';other.form='StrFourb';app.ctMtlBusy=field=>field?.id===other.id;
+    assert.equal(app.ctChoiceDisabled(blocked),false,'An unaffected field stays editable');
+    assert.equal(app.ctFieldToolbar(active,'translation').restoreDisabled,true,'A hidden variant request still blocks whole-record restore');
+});
+
+test('history restore cannot alter drafts, choices or Saved work when MTL starts before or during its awaits',async()=>{
+    for(const stage of ['before','confirm','confirm-completed','checkpoint','detach']){
+        const f=fixture(),{app,original}=enableHistory(harness()),mtl=require('../public/clientTextMtlUi.js').mixin.methods,
+            entered=deferred(),held=deferred();let busy=false,confirmed=0,checkpoints=0,replaced=0,saves=0;
+        await f.store.import(scope,{units:[original],assets:[asset]});
+        const saved=await f.store.save(scope,original.id,{jobId:'before-history-'+stage,values:{[fieldId]:'Committed before restore'},reviewed:{}});
+        app.ctSaved={[original.id]:saved.saved};app.ctValues={[fieldId]:'Original ordinary draft'};app.ctReviewed={};app.ctDraftDirty=true;
+        app.ctChoices=[{fieldId,local:'Preserved choice',upstream:'Incoming choice'}];
+        app._ctStore={...f.store,async listHistory(){return[{id:'entry',unitId:original.id,after:{values:{[fieldId]:'Historical replacement'},reviewed:{}}}];}};
+        await app.ctLoadHistory();const entry=app.ctHistory[0];app.ctMtlBusy=()=>busy;
+        app.ctMtlUnitRequestVersion=mtl.ctMtlUnitRequestVersion.bind(app);app.ctMtlNoteRequest=mtl.ctMtlNoteRequest.bind(app);
+        app.appConfirm=async()=>{confirmed++;if(stage.startsWith('confirm')){entered.resolve();return held.promise;}return true;};
+        app.ctFlushDraft=async()=>{checkpoints++;if(stage==='checkpoint'){entered.resolve();return held.promise;}return true;};
+        app.ctMtlUnderlyingReplaced=async()=>{replaced++;if(stage==='detach'){entered.resolve();return held.promise;}};
+        app.ctSave=async()=>{saves++;return true;};
+        const before=JSON.stringify([app.ctValues,app.ctReviewed,app.ctChoices,app.ctSaved,app.ctDraftDirty]),
+            durable=JSON.stringify([await f.store.getSaved(scope),await f.store.listHistory(scope,original.id),await f.store.getOutbox(scope)]);
+        if(stage==='before')busy=true;
+        const pending=app.ctRestoreHistory(entry);
+        if(stage!=='before'){
+            await entered.promise;busy=true;app.ctMtlNoteRequest(original);
+            if(stage==='confirm-completed')busy=false;
+            held.resolve(true);
+        }
+        assert.equal(await pending,false,stage);assert.equal(saves,0,stage+': restore never saves while generation intervenes');
+        assert.equal(JSON.stringify([app.ctValues,app.ctReviewed,app.ctChoices,app.ctSaved,app.ctDraftDirty]),before,stage+': editor snapshot is unchanged');
+        assert.equal(JSON.stringify([await f.store.getSaved(scope),await f.store.listHistory(scope,original.id),await f.store.getOutbox(scope)]),durable,stage+': durable Saved/history/outbox are unchanged');
+        if(stage==='before'){assert.equal(confirmed,0);assert.equal(checkpoints,0);assert.equal(replaced,0);}
+        if(stage.startsWith('confirm')){assert.equal(checkpoints,0);assert.equal(replaced,0);}
+        if(stage==='checkpoint')assert.equal(replaced,0);
+    }
+});
+
 test('history restore requires the shared API capability but local restore uses the same confirmed save command',async()=>{
     for(const policy of [{}, {clientTextSaveOrigins:['save']}]){
         const {app,original}=enableHistory(harness({ctPolicy:policy}));

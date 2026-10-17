@@ -157,7 +157,7 @@
       },
     },
     template: `
-      <div class="textHL editorTextField" :class="{ multiline: field.isMultiline }">
+      <div class="textHL editorTextField" :class="{ multiline: field.isMultiline,ctMtlGenerating:!source && !!controller.mtlProgress && controller.mtlProgress.phase!=='cancelling' }">
         <template v-if="source">
           <input ref="nativeInput" v-if="!field.isMultiline" type="text" v-bind="field.dataAttrs" :value="nativeValue" :placeholder="field.placeholder || 'English'" :lang="field.lang || 'en'" :spellcheck="field.spellcheck" readonly tabindex="-1" v-on="events">
           <textarea ref="nativeInput" v-else v-bind="field.dataAttrs" :value="nativeValue" :placeholder="field.placeholder || 'English'" :lang="field.lang || 'en'" :spellcheck="field.spellcheck" readonly tabindex="-1" :rows="compact ? 1 : 3" v-on="events"></textarea>
@@ -167,6 +167,7 @@
           <textarea ref="nativeInput" v-else v-bind="field.dataAttrs" :class="{ multilineField: !compact }" :value="nativeValue" :placeholder="field.placeholder || 'Translation'" :lang="field.lang" :spellcheck="field.spellcheck" :readonly="field.readonly" :rows="compact ? 1 : 4" v-on="events"></textarea>
         </template>
         <div ref="highlightOverlay" v-if="controller.ready" class="HLter" data-editor-native-overlay :class="{ noPointer: !source }" v-bind="controller.highlightAttrs" @mousemove="source && controller.tooltip?.($event)" @mouseout="source && controller.hideTooltip?.()" @mouseleave="controller.hideTooltip?.()" @click="source && controller.sourceClick?.($event)"><div ref="highlightContent" class="editorHighlightContent" v-html="controller.highlight"></div></div>
+        <ct-mtl-progress v-if="!source && controller.mtlProgress && controller.mtlProgress.phase!=='cancelling'" :state="controller.mtlProgress"></ct-mtl-progress>
       </div>
     `,
   };
@@ -840,17 +841,23 @@
   const FieldToolbar = {
     name: 'EditorFieldToolbar', props: { controller: { type: Object, required: true } },
     components: { 'app-notice': Notice },
+    watch:{'controller.mtlBusy'(value,previous){if(!value && previous && global.document?.activeElement===this.$refs.mtlTarget)this.$nextTick(()=>this.$refs.mtlButton?.focus({preventScroll:true}));}},
     methods:{closeMenu(){this.controller.closeMenu();this.$nextTick(()=>this.$refs.menuButton?.focus({preventScroll:true}));},toolbarKeydown(event){if(event.key==='Escape' && event.target.closest('.editorFieldToolbar,.editorFieldComparisonControls,.fieldHistoryMenu')){event.preventDefault();event.stopPropagation();this.closeMenu();}},generateMtl(event){
-      // Disabling the focused native button blurs it to body. Keep keyboard
-      // focus in its stable wrapper before generation can disable the button.
-      if(event.currentTarget===global.document?.activeElement)event.currentTarget.parentElement.focus({preventScroll:true});
-      this.controller.generate();
+      if(this.controller.mtlBusy){
+        // Cancellation may disable the spinner. Keep keyboard focus in its
+        // stable toolbar wrapper until it becomes Translate again.
+        if(event.currentTarget===global.document?.activeElement)event.currentTarget.parentElement.focus({preventScroll:true});
+        this.controller.cancelMtl();
+      }else{
+        if(event.currentTarget===global.document?.activeElement)event.currentTarget.parentElement.focus({preventScroll:true});
+        this.controller.generate();
+      }
     }},
     template: `<div class="editorFieldTools" :data-comparison-side="controller.side" data-inline-focus-surface @click.stop @dblclick.stop @keydown="toolbarKeydown($event)">
       <div class="editorFieldFrame" :class="controller.tone"><slot></slot>
       <div class="editorFieldToolbar" role="group" :aria-label="controller.side === 'source' ? 'English field tools' : 'Translation field tools'">
         <template v-if="controller.formatting"><button v-for="style in ['b','i','u']" :key="style" type="button" :class="['fieldStyleButton','fieldStyle-'+style,{active:controller.styleActive(style)}]" @pointerdown.prevent="controller.capture()" @click="controller.format(style)" :disabled="controller.formattingDisabled" :aria-pressed="controller.styleActive(style)" :aria-label="({b:'Bold',i:'Italic',u:'Underline'})[style]" :aria-keyshortcuts="'Control+'+style" :title="({b:'Bold',i:'Italic',u:'Underline'})[style]+' · Ctrl+'+style.toUpperCase()">{{ style.toUpperCase() }}</button></template>
-        <span v-if="controller.mtl" class="ctMtlButtonTarget" :title="controller.mtlProgress ? undefined : controller.mtlHint" :tabindex="controller.mtlDisabled ? 0 : -1"><ct-mtl-progress :state="controller.mtlProgress" @cancel="controller.cancelMtl()"><button type="button" class="ctMtlButton" :disabled="controller.mtlDisabled || controller.mtlBusy" @pointerdown.prevent @click="generateMtl($event)" :aria-busy="controller.mtlBusy" :aria-label="controller.mtlHint" :aria-keyshortcuts="controller.mtlShortcut"><span v-if="controller.mtlBusy" class="ctAudioSpinner" aria-hidden="true"></span><span v-else aria-hidden="true">A↔あ</span></button></ct-mtl-progress><button v-if="controller.mtlDebug" type="button" class="ctMtlDebugButton" title="MTL request details · Admin" aria-label="MTL request details · Admin" @click="controller.debugMtl($event)">ⓘ</button></span>
+        <span v-if="controller.mtl" ref="mtlTarget" class="ctMtlButtonTarget" :title="controller.mtlBusy ? (controller.mtlProgress?.phase==='cancelling' ? 'Stopping translation' : 'Stop translation') : controller.mtlHint" tabindex="-1"><button ref="mtlButton" type="button" class="ctMtlButton" :disabled="controller.mtlBusy ? !controller.mtlProgress?.canCancel : controller.mtlDisabled" @pointerdown.prevent @click="generateMtl($event)" :aria-busy="controller.mtlBusy" :aria-label="controller.mtlBusy ? (controller.mtlProgress?.phase==='cancelling' ? 'Stopping translation' : 'Stop translation') : controller.mtlHint" :aria-keyshortcuts="controller.mtlBusy ? undefined : controller.mtlShortcut"><span v-if="controller.mtlBusy" class="ctAudioSpinner" aria-hidden="true"></span><span v-else aria-hidden="true">A↔あ</span></button><button v-if="controller.mtlDebug" type="button" class="ctMtlDebugButton" title="MTL request details · Admin" aria-label="MTL request details · Admin" @click="controller.debugMtl($event)">ⓘ</button></span>
         <span class="fieldToolbarSeparator" role="separator" aria-orientation="vertical"></span>
         <button type="button" class="fieldDiffButton" :class="{active:controller.open}" @click="controller.toggle()" :disabled="controller.disabled" :aria-expanded="controller.open" :aria-label="controller.side === 'source' ? 'Compare English source' : 'Compare translation'" :title="controller.side === 'source' ? 'Compare an earlier English source with this version' : 'Compare a revision with the current draft'"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2.6 7.4M3 4v7h7M12 7v5l3 2"/></svg></button>
         <button ref="menuButton" type="button" class="fieldHistoryMenuButton" :class="{active:controller.menuOpen}" @click="controller.menu()" :disabled="controller.disabled" :aria-expanded="controller.menuOpen" aria-label="Comparison options and revision history" title="Comparison options and revision history"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9.5 2-.6 2.4-1.8 1-2.4-.7-2.5 4.3 1.8 1.7v2l-1.8 1.7 2.5 4.3 2.4-.7 1.8 1 .6 2.4h5l.6-2.4 1.8-1 2.4.7 2.5-4.3-1.8-1.7v-2l1.8-1.7-2.5-4.3-2.4.7-1.8-1-.6-2.4Z"/><circle cx="12" cy="12" r="3"/></svg></button>
@@ -865,7 +872,7 @@
         <button v-if="controller.moreVersions" type="button" @click="controller.olderVersions()" :disabled="controller.busy">{{ controller.busy ? 'Preparing earlier original…' : 'Load earlier version' }}</button>
         <button v-if="controller.moreHistory" type="button" @click="controller.olderHistory()" :disabled="controller.busy">Load older history</button>
         <p>Restoring creates a saved revision of the whole record.</p>
-        <div class="fieldHistoryEntries"><article v-for="entry in controller.entries" :key="entry.key" class="ctHistoryEvent"><p>{{ controller.label(entry) }}</p><small>{{ entry.action }}</small><div class="ctHistoryActions"><template v-for="part in ['before','after']" :key="part"><span v-if="!entry[part].available" class="fieldDiffUnavailable">{{ part }} revision unavailable</span><button type="button" @click="controller.details(entry,part)" :disabled="!entry[part].available">Details {{ part }}</button><button type="button" @click="controller.restore(entry,part)" :disabled="controller.disabled || !entry[part].available">Restore {{ part }}</button></template></div></article><p v-if="!controller.entries.length">No saved history for this record.</p></div>
+        <div class="fieldHistoryEntries"><article v-for="entry in controller.entries" :key="entry.key" class="ctHistoryEvent"><p>{{ controller.label(entry) }}</p><small>{{ entry.action }}</small><div class="ctHistoryActions"><template v-for="part in ['before','after']" :key="part"><span v-if="!entry[part].available" class="fieldDiffUnavailable">{{ part }} revision unavailable</span><button type="button" @click="controller.details(entry,part)" :disabled="!entry[part].available">Details {{ part }}</button><button type="button" @click="controller.restore(entry,part)" :disabled="controller.restoreDisabled || controller.disabled || !entry[part].available">Restore {{ part }}</button></template></div></article><p v-if="!controller.entries.length">No saved history for this record.</p></div>
         <div class="fieldHistoryDetails"><article v-for="row in controller.detailRows" :key="row.id"><strong>{{ row.name }}{{ row.removed ? ' · Removed field' : '' }}</strong><label>English changes</label><pre class="ctInlineDiff"><span v-for="(part,index) in row.source" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ controller.display(part.value) }}</span></pre><label>Translation changes</label><pre class="ctInlineDiff"><span v-for="(part,index) in row.target" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ controller.display(part.value) }}</span></pre></article><template v-if="controller.detailNotes"><strong>Developer notes</strong><pre class="ctInlineDiff"><span v-for="(part,index) in controller.detailNotes" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ controller.display(part.value) }}</span></pre></template></div>
       </section>
     </div>`

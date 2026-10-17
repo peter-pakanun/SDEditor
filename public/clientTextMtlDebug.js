@@ -66,6 +66,10 @@
             elapsedMs: server?.elapsedMs ?? record.elapsedMs, error: server?.error || record.error };
         return redact(Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)));
     }
+    function sectionText(record,section){
+        if(!['prompt','context'].includes(section))return '';
+        const value=present(record)[section];return value===undefined?'':JSON.stringify(value,null,2);
+    }
     const mixin = {
         data: () => ({ ctMtlDebugWindow: null, ctMtlDebugRecords: raw({}) }),
         computed: {
@@ -142,15 +146,45 @@
         },
     };
     const Dialog = {
-        props: ['host'], data: () => ({ x: 24, y: 24, dragging: false }),
-        computed: { item() { return this.host.ctMtlDebugWindow; }, details() { return JSON.stringify(present(this.item.record), null, 2); } },
+        props: ['host'], data: () => ({ x: 24, y: 24, dragging: false,copyBusy:{},copyMessage:{},copyError:{} }),
+        computed: { item() { return this.host.ctMtlDebugWindow; },
+            promptText(){return sectionText(this.item.record,'prompt');},contextText(){return sectionText(this.item.record,'context');},
+            details() { const value=present(this.item.record);delete value.prompt;delete value.context;return JSON.stringify(value,null,2); } },
+        watch:{item(){this.resetCopy();}},
         mounted() {
             this._resize = () => this.place(); window.addEventListener('resize', this._resize);
             this._observer = new ResizeObserver(this._resize); this._observer.observe(this.$refs.dialog);
             this.place(true); this.$refs.close.focus({ preventScroll: true });
         },
-        beforeUnmount() { this.finishDrag(); window.removeEventListener('resize', this._resize); this._observer.disconnect(); },
+        beforeUnmount() { this.resetCopy();this.finishDrag(); window.removeEventListener('resize', this._resize); this._observer.disconnect(); },
         methods: {
+            resetCopy(){for(const timer of Object.values(this._copyTimers||{}))clearTimeout(timer);this._copyTimers={};this._copyRuns={};this.copyBusy={};this.copyMessage={};this.copyError={};},
+            async copySection(section){
+                if(!['prompt','context'].includes(section)||!allowed(this.host)||this.copyBusy[section])return false;
+                const item=this.item,origin=this.host.ctMtlDebugOrigin;
+                if(!item?.record)return false;
+                const text=sectionText(item.record,section);
+                if(!text)return false;
+                const run={},runs=this._copyRuns||={};runs[section]=run;clearTimeout(this._copyTimers?.[section]);
+                const current=()=>runs[section]===run&&this._copyRuns===runs&&allowed(this.host)&&this.item===item&&this.host.ctMtlDebugOrigin===origin;
+                this.copyBusy={...this.copyBusy,[section]:true};this.copyMessage={...this.copyMessage,[section]:''};this.copyError={...this.copyError,[section]:''};
+                try{
+                    if(!root.navigator?.clipboard?.writeText)throw new Error('Clipboard unavailable');
+                    await root.navigator.clipboard.writeText(text);if(!current())return false;
+                    this.copyMessage={...this.copyMessage,[section]:'Copied'};
+                    (this._copyTimers||={})[section]=setTimeout(()=>{if(current())this.copyMessage={...this.copyMessage,[section]:''};},1400);
+                    return true;
+                }catch(_){
+                    if(!current())return false;
+                    const reference=this.$refs[section+'Text'],field=Array.isArray(reference)?reference[0]:reference;let selected=false;
+                    try{if(field&&root.document?.createRange&&root.getSelection){
+                        field.focus({preventScroll:true});const range=root.document.createRange();range.selectNodeContents(field);
+                        const selection=root.getSelection();selection?.removeAllRanges();selection?.addRange(range);selected=!!selection;
+                    }}catch(_){}
+                    this.copyError={...this.copyError,[section]:selected?'Could not copy automatically. Press Ctrl+C to copy the selected '+section+'.':'Could not copy automatically. Select the '+section+' and press Ctrl+C.'};
+                    return false;
+                }finally{if(current())this.copyBusy={...this.copyBusy,[section]:false};}
+            },
             place(center = false) {
                 const bounds = this.$refs.dialog.getBoundingClientRect(), clamp = (value, max) => Math.max(8, Math.min(value, max));
                 this.x = clamp(center ? (innerWidth - bounds.width) / 2 : this.x, innerWidth - bounds.width - 8);
@@ -187,9 +221,15 @@
             <p v-else>{{ item.record.server?.providerRequest ? 'Selected fields from the executed request and server validation.' : 'Browser submission; an executed server prompt has not been confirmed.' }}</p>
             <p>Read-only. Sensitive values are redacted. Server details expire after ten minutes; browser details clear when the account, workspace, language, source or selected record changes.</p>
             <p v-if="item.loading" role="status">Loading request details…</p><p v-if="item.error" role="alert">{{ item.error }}</p>
-            <h4>Prompt and context</h4><pre tabindex="0" aria-label="Selected request fields">{{ details }}</pre>
+            <h4>Prompt and context</h4>
+            <section v-for="section in ['prompt','context']" :key="section" class="ctMtlDebugSection">
+              <div class="ctMtlDebugSectionTitle"><strong>{{ section === 'prompt' ? 'Prompt' : 'Context' }}</strong><button v-if="section === 'prompt' ? promptText : contextText" type="button" class="ctMtlCopyButton" :aria-label="'Copy '+section" :title="'Copy '+section" :aria-disabled="copyBusy[section] || undefined" @pointerdown.stop @click.stop="copySection(section)"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 8h12v13H8zM4 16H2V2h13v2"/></svg></button><small role="status" aria-live="polite">{{ copyMessage[section] }}</small></div>
+              <pre v-if="section === 'prompt' ? promptText : contextText" :ref="section+'Text'" tabindex="0" :aria-label="section === 'prompt' ? 'Displayed MTL prompt' : 'Displayed MTL context'">{{ section === 'prompt' ? promptText : contextText }}</pre>
+              <p v-else>{{ section === 'prompt' ? 'An executed prompt is available after Translate is used.' : 'Context is unavailable.' }}</p><p v-if="copyError[section]" role="alert">{{ copyError[section] }}</p>
+            </section>
+            <h4>Request and response</h4><pre tabindex="0" aria-label="Selected request fields">{{ details }}</pre>
           </div>
         </section></teleport>`,
     };
-    return { mixin, Dialog, allowed, redact, present };
+    return { mixin, Dialog, allowed, redact, present, sectionText };
 });

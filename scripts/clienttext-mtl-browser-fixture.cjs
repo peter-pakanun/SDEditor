@@ -54,8 +54,22 @@ const options={
   ctRefreshLayout(){},ctFocusRow(){},ctSync(){},ctMtlSync(){},ctClearDraftStageFailure(){},ctRememberDraftStageFailure(){},
   ctDictionaryTarget(id=this.ctFocusedField){return [...document.querySelectorAll('[data-ct-target]')].find(input=>input.dataset.ctTarget===id);},
   ctEditorElement(){return document.querySelector('#fixture-editor');},appConfirm:async()=>true,
+  fixtureExplicitActions(){
+   const unit=this.ctCurrentUnit,field=unit.fields[0],snapshot={available:true,unit:JSON.parse(JSON.stringify(unit)),values:{[field.id]:'Historical replacement {0}'},reviewed:{}};
+   this.ctChoices=[{fieldId:field.id,local:'Previous saved {0}',upstream:'Incoming choice {0}'}];
+   this.ctHistory=[{key:'synthetic-restore',id:'synthetic-restore',unitId:unit.id,context:this.ctContext(),createdAt:1,action:'save',actor:{name:'Synthetic'},before:snapshot,after:snapshot}];
+   this.ctPolicy={clientTextSaveOrigins:['restore']};this._fixtureConfirmCalls=0;this._fixtureRestoreSaves=0;this._fixtureReplacements=0;
+   this._fixtureOriginalConfirm=this.appConfirm;this._fixtureOriginalSave=this.ctSave;this._fixtureOriginalRestore=this.ctRestoreHistory;this._fixtureOriginalReplace=this.ctMtlUnderlyingReplaced;
+   this.appConfirm=async()=>{this._fixtureConfirmCalls++;return true;};
+   this.ctSave=(...args)=>{this._fixtureRestoreSaves++;return this._fixtureOriginalSave(...args);};
+   this.ctMtlUnderlyingReplaced=(...args)=>{this._fixtureReplacements++;return this._fixtureOriginalReplace(...args);};
+   this.ctRestoreHistory=(...args)=>(this._fixtureRestoreTask=this._fixtureOriginalRestore(...args));
+  },
+  fixtureFinishExplicitActions(){this.appConfirm=this._fixtureOriginalConfirm;this.ctSave=this._fixtureOriginalSave;this.ctRestoreHistory=this._fixtureOriginalRestore;this.ctMtlUnderlyingReplaced=this._fixtureOriginalReplace;this.ctChoices=[];this.ctHistory=[];},
+  async fixtureEditSnapshot(){const scope=this.ctWorkspace.scope;return JSON.stringify([this.ctValues,this.ctReviewed,this.ctChoices,this.ctSaved,this.ctDraftDirty,
+   await this._fixtureStore.getSaved(scope),await this._fixtureStore.listHistory(scope,this.ctSelection),await this._fixtureStore.getOutbox?.(scope)]);},
   async configure(mode){
-   clearTimeout(this._ctDraftTimer);this.ctMtlReset();this._fixtureStore?.dispose?.();
+   clearTimeout(this._ctDraftTimer);this.ctMtlReset();this.ctResetComparisons();this._fixtureStore?.dispose?.();
    this.fixtureMode=mode;this.cloudSignedIn=true;this.ctActive=false;this.ctBusy=false;this.ctError='';this.ctValues={};this.ctReviewed={};this.ctSaved=Vue.markRaw({});
    this.ctDraftDirty=false;this.ctDraftStageFailure=null;this._ctDraftHeads=new Map();this._ctDraftRevision=null;this._ctEditRevision=0;
    this._ctSaveJob=null;this._ctEpoch=(this._ctEpoch||0)+1;this._ctSelectRun={};this.ctVariantSelections={};
@@ -71,23 +85,23 @@ const options={
    this.ctSelection=units[0].id;this.ctValues=ClientTextState.valuesFor(units[0]);this.ctFocusedField=units[0].fields[0].id;
    this.ctActive=true;this.ctEditor=false;this.ctMtlCapabilities={enabled:true};this._ctMtlDescriptors=Vue.markRaw(seed.descriptors);
    this._fixtureJobs=new Map();this._fixtureReleases=[];this._fixtureDefer=false;this._fixtureAsync=false;this._fixtureStarts=0;this._fixtureCancels=0;this._fixturePollErrors=0;
-   this._fixtureCancelDefer=false;this._fixtureCancelReleases=[];
+   this._fixtureCancelDefer=false;this._fixtureCancelReleases=[];this._fixtureCancelFailures=0;
    this._cloud=Vue.markRaw({request:async(path,init={})=>{
     if(path==='/v1/mtl/capabilities')return{enabled:true};
     if(path.startsWith('/v1/admin/mtl/requests/'))return{diagnostics:{providerRequest:{model:'synthetic-connection-config',instructions:'Synthetic executed prompt <img src=x onerror="window.__debugXss=true">',input:[{role:'user',content:'Synthetic context'}]},context:{accessToken:'synthetic-secret'},upstreamResponse:{contentType:'text/event-stream; charset=utf-8',hasBody:true,readableBody:true,bodyUsed:false,bodyLocked:false,redirected:false,responseType:'cors'},lookup:{enabled:false,rounds:[]},validation:'passed',elapsedMs:12}};
     if(this._fixtureAsync){
      const snapshot=()=>({requestId:this._fixtureLive.body.requestId,status:this._fixtureLive.status,scope:{...scope,local:mode==='memory'},pollAfterMs:250,
        progress:{revision:this._fixtureLive.revision,phase:this._fixtureLive.phase,translation:this._fixtureLive.text,provisional:true},errorCode:this._fixtureLive.errorCode});
-     if(path.endsWith('/cancellations')){this._fixtureCancels++;if(this._fixtureCancelDefer)await new Promise(resolve=>this._fixtureCancelReleases.push(resolve));
+     if(path.endsWith('/cancellations')){this._fixtureCancels++;if(this._fixtureCancelFailures>0){this._fixtureCancelFailures--;throw new TypeError('Synthetic stop interruption');}if(this._fixtureCancelDefer)await new Promise(resolve=>this._fixtureCancelReleases.push(resolve));
       this._fixtureLive.status='failed';this._fixtureLive.errorCode='MTL_CANCELLED';return snapshot();}
      if(init.method==='POST'){
-      this._fixtureStarts++;this._fixtureLive={body:init.body,status:'running',text:'First {0}',revision:1,phase:'generating'};return snapshot();
+      this._fixtureStarts++;this._fixtureLive={body:init.body,status:'running',text:'',revision:1,phase:'connecting'};return snapshot();
      }
      if(path.startsWith('/v1/mtl/requests/')){
       if(this._fixturePollErrors>0){this._fixturePollErrors--;throw new TypeError('Synthetic polling interruption');}
       if(!this._fixtureLive.complete)return snapshot();
       const body=this._fixtureLive.body;return{candidate:{id:'candidate-'+body.requestId,requestId:body.requestId,unitId:body.unitId,fieldId:body.fieldId,role:body.role,
-       assetHash:body.assetHash,parserVersion:body.parserVersion,sourceHash:body.sourceHash,rawSourceHash:body.rawSourceHash,generatedText:'Generated {0}',
+       assetHash:body.assetHash,parserVersion:body.parserVersion,sourceHash:body.sourceHash,rawSourceHash:body.rawSourceHash,generatedText:this._fixtureLive.generatedText||'Generated {0}',
        revision:1,status:'pending',createdAt:Date.now(),baseTargetHash:body.baseTargetHash}};
      }
     }
@@ -118,7 +132,7 @@ vue.component('ct-fields',ClientTextUI.fieldsComponent);vue.component('ct-target
 vue.component('editor-native-field',EditorComponents.NativeField);vue.component('editor-field-toolbar',EditorComponents.FieldToolbar);
 vue.component('editor-diagnostic-meta',EditorComponents.DiagnosticMeta);vue.component('app-notice',EditorComponents.Notice);
 vue.component('ct-mtl-debug-dialog',ClientTextMtlDebug.Dialog);
-vue.component('ct-mtl-progress',ClientTextMtlProgress.Preview);
+vue.component('ct-mtl-progress',ClientTextMtlProgress.Overlay);
 app=vue.mount('#app');window.__mtlApp=app;
 document.addEventListener('keydown',event=>app.ctKey(event));await app.configure('memory');window.__mtlReady=true;
 })().catch(error=>{window.__mtlError=String(error.stack||error);console.error(error);});`;
@@ -190,11 +204,24 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             await page.locator('.ctMtlDebugButton').click();await page.waitForFunction(()=>!!window.__mtlApp.ctMtlDebugWindow?.record.server);
             assert.match(await page.locator('.ctMtlDebugDialog').textContent(),/Selected fields from the executed request and server validation/);
             await auditCopy();
-            const selected=JSON.parse(await page.locator('.ctMtlDebugDialog pre').textContent());assert.equal(selected.model,undefined);assert.equal(selected.provider,undefined);
+            const selected=JSON.parse(await page.locator('.ctMtlDebugDialog pre[aria-label="Selected request fields"]').textContent());assert.equal(selected.model,undefined);assert.equal(selected.provider,undefined);
             assert.deepEqual(selected.upstreamResponse,{contentType:'text/event-stream; charset=utf-8',hasBody:true,readableBody:true,bodyUsed:false,bodyLocked:false,redirected:false,responseType:'cors'});
-            assert.equal(selected.prompt.instructions,'Synthetic executed prompt <img src=x onerror="window.__debugXss=true">');
+            assert.equal(JSON.parse(await page.locator('.ctMtlDebugDialog pre[aria-label="Displayed MTL prompt"]').textContent()).instructions,'Synthetic executed prompt <img src=x onerror="window.__debugXss=true">');
             assert.equal(await page.locator('.ctMtlDebugDialog img').count(),0,'Request text is escaped');
             assert.equal(await page.evaluate(()=>window.__debugXss),undefined);assert.doesNotMatch(await page.locator('.ctMtlDebugDialog').textContent(),/synthetic-secret/);
+            await page.evaluate(()=>{window.__fixtureCopied=[];Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.__fixtureCopied.push(text);}}});});
+            const beforeCopy=await page.locator('.ctMtlDebugDialog').boundingBox(),selectedBeforeCopy=await page.evaluate(()=>window.__mtlApp.ctSelection);
+            for(const section of ['prompt','context']){
+                const text=await page.locator('.ctMtlDebugDialog pre[aria-label="Displayed MTL '+section+'"]').textContent(),button=page.getByRole('button',{name:'Copy '+section,exact:true});
+                await button.focus();await button.press('Enter');await page.waitForFunction(()=>window.__fixtureCopied.length>0);
+                assert.equal(await page.evaluate(()=>window.__fixtureCopied.at(-1)),text,'Copy uses full displayed '+section);
+                assert.equal(await button.evaluate(node=>node===document.activeElement),true,'Keyboard copy retains focus');
+            }
+            assert.deepEqual(await page.locator('.ctMtlDebugDialog').boundingBox(),beforeCopy,'Copy controls do not drag the dialog');
+            await page.evaluate(()=>{navigator.clipboard.writeText=async()=>{throw new Error('Synthetic clipboard denial');};});
+            await page.getByRole('button',{name:'Copy context',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.ctMtlDebugDialog [role="alert"]')?.textContent.includes('Could not copy automatically'));
+            assert.equal(await page.evaluate(()=>getSelection().toString()),await page.locator('.ctMtlDebugDialog pre[aria-label="Displayed MTL context"]').textContent());
+            assert.equal(await page.evaluate(()=>window.__mtlApp.ctSelection),selectedBeforeCopy);assert.equal(await page.evaluate(()=>window.__mtlApp.ctInlineClosed),false,'Copy actions preserve the inline editor');
             for(const theme of ['light','grey','dark','modern-dark']){
                 await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
                 await page.screenshot({path:join(outDir,mode+'-debug-'+theme+'.png'),fullPage:true});
@@ -238,7 +265,7 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             if(mode==='idb')assert.ok(savedMemory>0,'Only authored saved text teaches durable TM');
             else assert.equal(savedMemory,0,'Disposable local work never writes durable TM');
             await page.evaluate(()=>{window.__mtlApp._fixtureDefer=true;});await page.locator('.ctMtlButton').click();
-            await page.waitForFunction(()=>window.__mtlApp._fixtureReleases.length===1);await target().fill('New ordinary {0}');
+            await page.waitForFunction(()=>window.__mtlApp._fixtureReleases.length===1);await target().evaluate(input=>{const app=window.__mtlApp,field=app.ctCurrentUnit.fields[0];app.ctValues[field.id]='New ordinary {0}';app.ctEdited(field);});
             await page.evaluate(()=>{window.__mtlApp._fixtureReleases.shift()();window.__mtlApp._fixtureDefer=false;});
             await page.waitForFunction(()=>!Object.keys(window.__mtlApp.ctMtlRequests).length);
             assert.equal((await snapshot()).visible,'New ordinary {0}','Late generation preserves typed ordinary content');
@@ -262,94 +289,98 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             await page.waitForFunction(()=>window.__mtlApp.snapshot().candidates===0);await page.waitForTimeout(30);
             assert.equal(await page.evaluate(()=>window.__mtlApp.ctInlineClosed),false,'Dismiss preserves inline editor');
             assert.equal((await snapshot()).underlying,'Unconfirmed ordinary {0}');assert.equal(await target().evaluate(node=>node===document.activeElement),true,'Dismiss returns focus to the stable field');
-            await page.evaluate(async mode=>{const app=window.__mtlApp;await app.configure(mode);app._fixtureAsync=true;app.ctMtlCapabilities={enabled:true,delivery:'poll-v1'};},mode);
-            await target().focus();await page.locator('.ctMtlButton').click();
-            await page.waitForFunction(()=>window.__mtlApp._fixtureStarts===1&&!!window.__mtlApp.ctMtlProgressFor(window.__mtlApp.ctCurrentUnit.fields[0])?.text);
-            await page.locator('.ctMtlButtonTarget').hover();await page.waitForSelector('.ctMtlProgressPopup');
-            assert.match(await page.locator('.ctMtlProgressPopup').textContent(),/Receiving translation[\s\S]*First \{0\}/);
-            assert.equal(await target().inputValue(),'Confirmed {0}','Provisional text stays outside the native editor');
-            assert.equal(await page.evaluate(()=>window.__mtlApp.exportTarget()),'Confirmed {0}','Provisional text cannot export');
-            assert.equal((await snapshot()).candidates,0,'Provisional text is not a candidate');
-            await page.locator('.ctMtlLiveButton').focus();await page.locator('.ctMtlLiveButton').press('Enter');
-            assert.equal(await page.locator('.ctMtlProgressPopup').getAttribute('role'),'dialog');
-            assert.equal(await page.locator('.ctMtlProgressPopup pre').evaluate(node=>node===document.activeElement),true,'Keyboard Live opens a readable preview');
-            await page.evaluate(()=>{const job=window.__mtlApp._fixtureLive;job.revision++;job.text='Readable <img src=x onerror="window.__progressXss=true"> {0}\nNext \\ line';});
-            await page.waitForFunction(()=>document.querySelector('.ctMtlProgressPopup pre')?.textContent.includes('Readable <img'));
-            assert.equal(await page.locator('.ctMtlProgressPopup img').count(),0);assert.equal(await page.evaluate(()=>window.__progressXss),undefined);
-            assert.match(await page.locator('.ctMtlProgressPopup pre').textContent(),/\nNext \\ line/,'Readable decoded text preserves newlines and literal slashes');
-            for(const theme of ['light','grey','dark','modern-dark']){
-                await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
-                await page.screenshot({path:join(outDir,mode+'-live-'+theme+'.png'),fullPage:true});
+            for(const full of [false,true]){
+                await page.evaluate(async ({mode,full})=>{const app=window.__mtlApp;await app.configure(mode);app.ctEditor=full;app._fixtureAsync=true;app.ctMtlCapabilities={enabled:true,delivery:'poll-v1'};},{mode,full});
+                const memoryBeforeProgress=await page.evaluate(()=>window.__mtlApp.memoryCount());
+                await target().fill('Original draft {0}');await target().focus();await page.locator('.ctMtlButton').click();
+                await page.waitForSelector('.ctMtlSkeleton');await page.waitForFunction(()=>Object.values(window.__mtlApp.ctMtlLive).some(value=>value.canCancel));assert.equal(await target().getAttribute('readonly'),'');
+                assert.equal(await page.locator('.ctMtlLiveButton,.ctMtlProgressPopup').count(),0,'No additional progress button or popup');
+                assert.equal(await target().inputValue(),'Original draft {0}','Skeleton never replaces the native draft value');
+                await target().press('x');assert.equal(await target().inputValue(),'Original draft {0}','Generating field is read-only');
+                assert.equal(await page.locator('.fieldStyleButton:enabled').count(),0,'Formatting cannot change the generating field');
+                await page.emulateMedia({reducedMotion:'reduce'});
+                assert.equal(await page.locator('.ctMtlSkeleton i').first().evaluate(node=>getComputedStyle(node).animationName),'none');
+                await page.emulateMedia({reducedMotion:'no-preference'});
+                for(const theme of ['light','grey','dark','modern-dark']){
+                    await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
+                    await page.screenshot({path:join(outDir,mode+'-'+(full?'full':'inline')+'-skeleton-'+theme+'.png'),fullPage:true});
+                }
+                assert.equal(await page.evaluate(()=>window.__mtlApp.exportTarget()),'Confirmed {0}','Provisional work cannot export');
+                await page.evaluate(()=>{const job=window.__mtlApp._fixtureLive;job.revision++;job.phase='generating';job.text='Readable <img src=x onerror="window.__progressXss=true"> {0}\nNext \\ line';});
+                await page.waitForSelector('.ctMtlStreamText');assert.equal(await page.locator('.ctMtlSkeleton').count(),0);
+                assert.equal(await page.locator('.ctMtlInlineOverlay img').count(),0);assert.equal(await page.evaluate(()=>window.__progressXss),undefined);
+                assert.match(await page.locator('.ctMtlStreamText').textContent(),/\nNext \\ line/);assert.equal(await target().inputValue(),'Original draft {0}');
+                assert.equal((await snapshot()).candidates,0);assert.equal(await page.evaluate(()=>window.__mtlApp.memoryCount()),memoryBeforeProgress);
+                for(const theme of ['light','grey','dark','modern-dark']){
+                    await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
+                    await page.screenshot({path:join(outDir,mode+'-'+(full?'full':'inline')+'-stream-'+theme+'.png'),fullPage:true});
+                }
+                await page.evaluate(()=>{window.__mtlApp._fixturePollErrors=1;});
+                await page.waitForFunction(()=>Object.values(window.__mtlApp.ctMtlLive).some(value=>value.phase==='reconnecting'));
+                assert.match(await page.locator('.ctMtlStreamText').textContent(),/Readable/);
+                await page.waitForFunction(()=>Object.values(window.__mtlApp.ctMtlLive).some(value=>value.phase==='receiving'));
+                assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureStarts),1,'Reconnect uses the existing request');
+                await page.evaluate(()=>{window.__mtlApp._fixtureCancelDefer=true;document.body.style.minHeight='1800px';window.scrollTo(0,30);});
+                const beforeStop=await page.evaluate(()=>({scroll:window.scrollY,selection:window.__mtlApp.ctSelection,field:window.__mtlApp.ctFocusedField}));
+                const stop=page.getByRole('button',{name:'Stop translation',exact:true});await stop.focus();await stop.press('Enter');
+                await page.waitForFunction(()=>window.__mtlApp._fixtureCancels===1);assert.equal(await page.locator('.ctMtlInlineOverlay').count(),0,'Stop reveals the original draft immediately');
+                assert.equal(await target().inputValue(),'Original draft {0}');assert.equal(await page.locator('.ctMtlButton').isDisabled(),true);
+                assert.equal(await page.evaluate(()=>document.activeElement===document.body),false,'Keyboard Stop retains toolbar focus');
+                await page.keyboard.press('Enter');await page.locator('.ctMtlButton').evaluate(node=>node.click());await page.waitForTimeout(300);
+                assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureCancels),1,'Repeated Stop sends one cancellation');
+                await page.evaluate(()=>{window.__mtlApp._fixtureCancelReleases.shift()();window.__mtlApp._fixtureCancelDefer=false;});
+                await page.waitForFunction(()=>!Object.keys(window.__mtlApp.ctMtlRequests).length);await page.waitForFunction(()=>document.querySelector('.ctMtlButton')===document.activeElement);
+                assert.equal(await target().getAttribute('readonly'),null);assert.equal((await snapshot()).candidates,0);
+                assert.deepEqual(await page.evaluate(()=>({scroll:window.scrollY,selection:window.__mtlApp.ctSelection,field:window.__mtlApp.ctFocusedField})),beforeStop);
+                assert.equal(await page.evaluate(()=>window.__mtlApp.ctInlineClosed),false);await page.evaluate(()=>{document.body.style.minHeight='';window.scrollTo(0,0);});
+                await page.locator('.ctMtlButton').click();await page.waitForSelector('.ctMtlSkeleton');await page.waitForFunction(()=>Object.values(window.__mtlApp.ctMtlLive).some(value=>value.canCancel));await page.evaluate(()=>{window.__mtlApp._fixtureCancelFailures=1;});
+                await page.getByRole('button',{name:'Stop translation',exact:true}).click();
+                await page.waitForFunction(()=>window.__mtlApp.ctMtlError.includes('stop request could not be confirmed'));
+                assert.equal(await target().getAttribute('readonly'),'','Unconfirmed cancellation keeps the active field read-only');
+                await page.getByRole('button',{name:'Stop translation',exact:true}).click();await page.waitForFunction(()=>!Object.keys(window.__mtlApp.ctMtlRequests).length);
+                assert.equal(await target().getAttribute('readonly'),null);assert.equal(await target().inputValue(),'Original draft {0}');
+                await page.locator('.ctMtlButton').click();await page.waitForSelector('.ctMtlSkeleton');await page.waitForFunction(()=>Object.values(window.__mtlApp.ctMtlLive).some(value=>value.canCancel));
+                await page.evaluate(()=>{const job=window.__mtlApp._fixtureLive;job.revision++;job.phase='generating';job.text='Generated {0}';job.complete=true;});
+                await page.waitForFunction(()=>window.__mtlApp.snapshot().visible==='Generated {0}');
+                assert.equal(await target().getAttribute('readonly'),null);assert.equal(await page.locator('.ctMtlInlineOverlay').count(),0);
+                assert.equal((await snapshot()).underlying,'Original draft {0}');assert.equal(await page.evaluate(()=>window.__mtlApp.exportTarget()),'Confirmed {0}');
+                assert.equal(await page.getByRole('button',{name:'Accept',exact:true}).count(),1,'Validated completion enters usual review');
+                await page.getByRole('button',{name:'Dismiss',exact:true}).click();await page.waitForFunction(()=>window.__mtlApp.snapshot().candidates===0);
+                await page.locator('.ctMtlButton').click();await page.waitForSelector('.ctMtlSkeleton');await page.waitForFunction(()=>Object.values(window.__mtlApp.ctMtlLive).some(value=>value.canCancel));
+                await page.evaluate(()=>{const job=window.__mtlApp._fixtureLive;job.generatedText='Invalid missing token';job.complete=true;});
+                await page.waitForFunction(()=>!Object.keys(window.__mtlApp.ctMtlRequests).length);
+                assert.equal(await target().getAttribute('readonly'),null);assert.equal(await target().inputValue(),'Original draft {0}');assert.equal((await snapshot()).candidates,0);
+                await page.evaluate(()=>window.__mtlApp.fixtureExplicitActions());
+                const beforeExplicit=await page.evaluate(()=>window.__mtlApp.fixtureEditSnapshot());
+                await page.locator('.ctTarget .fieldHistoryMenuButton').click();
+                await page.locator('.ctMtlButton').click();await page.waitForFunction(()=>Object.values(window.__mtlApp.ctMtlLive).some(value=>value.canCancel));
+                assert.equal(await page.getByRole('button',{name:'Use previous saved text',exact:true}).isDisabled(),true);
+                assert.equal(await page.getByRole('button',{name:'Keep incoming',exact:true}).isDisabled(),true);
+                assert.equal(await page.getByRole('button',{name:'Restore after',exact:true}).isDisabled(),true);
+                assert.equal(await page.getByRole('button',{name:'Restore before',exact:true}).isDisabled(),true);
+                assert.deepEqual(await page.evaluate(async()=>{const app=window.__mtlApp,field=app.ctCurrentUnit.fields[0];return[app.ctChooseAlternative(app.ctChoices[0],'local'),app.ctMarkReviewed(field),await app.ctRestoreHistory(app.ctHistory[0])];}),[false,false,false]);
+                assert.equal(await page.evaluate(()=>window.__mtlApp.fixtureEditSnapshot()),beforeExplicit,'Busy explicit actions cannot mutate draft, choices, Saved work, history or outbox');
+                assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureConfirmCalls),0);assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureRestoreSaves),0);
+                await page.getByRole('button',{name:'Stop translation',exact:true}).click();await page.waitForFunction(()=>!Object.keys(window.__mtlApp.ctMtlRequests).length);
+                assert.equal(await target().inputValue(),'Original draft {0}');assert.equal(await page.getByRole('button',{name:'Use previous saved text',exact:true}).isEnabled(),true);
+                assert.equal(await page.getByRole('button',{name:'Restore after',exact:true}).isEnabled(),true);
+                for(const finishBeforeConfirm of [false,true]){
+                    await page.evaluate(()=>{const app=window.__mtlApp;app._fixtureRestoreConfirm=null;app.appConfirm=()=>{app._fixtureConfirmCalls++;return new Promise(resolve=>app._fixtureRestoreConfirm=resolve);};});
+                    await page.getByRole('button',{name:'Restore after',exact:true}).click();await page.waitForFunction(()=>typeof window.__mtlApp._fixtureRestoreConfirm==='function');
+                    await page.locator('.ctMtlButton').click();await page.waitForFunction(()=>Object.values(window.__mtlApp.ctMtlLive).some(value=>value.canCancel));
+                    if(finishBeforeConfirm){await page.getByRole('button',{name:'Stop translation',exact:true}).click();await page.waitForFunction(()=>!Object.keys(window.__mtlApp.ctMtlRequests).length);}
+                    assert.equal(await page.evaluate(async()=>{const app=window.__mtlApp;app._fixtureRestoreConfirm(true);return await app._fixtureRestoreTask;}),false,'Generation beginning during confirmation invalidates Restore');
+                    if(!finishBeforeConfirm){await page.getByRole('button',{name:'Stop translation',exact:true}).click();await page.waitForFunction(()=>!Object.keys(window.__mtlApp.ctMtlRequests).length);}
+                    assert.equal(await page.evaluate(()=>window.__mtlApp.fixtureEditSnapshot()),beforeExplicit,'Late confirmation leaves the original draft and durable Saved work unchanged');
+                    assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureRestoreSaves),0);assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureReplacements),0);
+                    assert.equal(await target().getAttribute('readonly'),null);assert.equal(await target().inputValue(),'Original draft {0}');
+                }
+                await page.evaluate(()=>window.__mtlApp.fixtureFinishExplicitActions());
+                await page.locator('.ctMtlButton').click();await page.waitForSelector('.ctMtlSkeleton');await page.waitForFunction(()=>Object.values(window.__mtlApp.ctMtlLive).some(value=>value.canCancel));
+                await page.evaluate(()=>{window.__mtlApp.cloudSignedIn=false;});await page.waitForFunction(()=>!Object.keys(window.__mtlApp.ctMtlRequests).length);
+                assert.equal(await page.locator('.ctMtlInlineOverlay').count(),0);assert.equal(await target().getAttribute('readonly'),null);assert.equal(await target().inputValue(),'Original draft {0}');
+                results.push({mode,editor:full?'full':'inline',themes:4,stream:['skeleton','read-only','escaped text','reduced motion','reconnect same request','keyboard spinner cancellation','repeated cancellation','cancel failure/retry','draft restored','validated completion','invalid completion','choice/review/restore guards','pending confirmation guard','completed-during-confirmation guard','Saved/history/outbox unchanged','logout clears'],exports:'original until Accept and Save'});
             }
-            await page.setViewportSize({width:920,height:650});
-            await page.waitForFunction(()=>{const box=document.querySelector('.ctMtlProgressPopup').getBoundingClientRect();return box.left>=7&&box.top>=7&&box.right<=913&&box.bottom<=643;});
-            await page.setViewportSize({width:1440,height:1000});
-            await page.locator('.ctMtlProgressPopup pre').press('Escape');assert.equal(await page.locator('.ctMtlProgressPopup').count(),0);
-            assert.equal(await page.locator('.ctMtlLiveButton').evaluate(node=>node===document.activeElement),true,'Escape returns to Live');
-            for(let attempt=0;attempt<24;attempt++){
-                await page.setViewportSize({width:1440,height:1000});await page.locator('.ctMtlButtonTarget').hover();
-                await page.locator('.ctMtlLiveButton').focus();await page.locator('.ctMtlLiveButton').press('Enter');
-                await page.setViewportSize({width:920+attempt%3*80,height:650+attempt%2*60});
-                await page.locator('.ctMtlProgressPopup pre').press('Escape');await page.waitForTimeout(150);
-                assert.equal(await page.locator('.ctMtlProgressPopup').count(),0,mode+': resize/Escape '+attempt+' remains dismissed under the stationary pointer');
-                await page.setViewportSize({width:1440,height:1000});await page.waitForTimeout(30);
-                assert.equal(await page.locator('.ctMtlProgressPopup').count(),0,mode+': layout after Escape '+attempt+' does not reopen a tooltip');
-                assert.equal(await page.locator('.ctMtlLiveButton').getAttribute('aria-expanded'),'false');
-                assert.equal(await page.locator('.ctMtlLiveButton').evaluate(node=>node===document.activeElement),true,'Repeated Escape restores keyboard focus');
-            }
-            await page.mouse.move(30,500);await page.locator('.ctMtlButtonTarget').hover();await page.waitForSelector('.ctMtlProgressPopup');
-            assert.equal(await page.locator('.ctMtlProgressPopup').getAttribute('role'),'tooltip','Fresh pointer departure and re-entry reopens the hover preview');
-            await page.locator('.ctMtlLiveButton').press('Escape');await page.waitForTimeout(150);assert.equal(await page.locator('.ctMtlProgressPopup').count(),0);
-            await page.keyboard.press('Tab');await page.keyboard.press('Shift+Tab');await page.waitForSelector('.ctMtlProgressPopup');
-            assert.equal(await page.locator('.ctMtlLiveButton').evaluate(node=>node===document.activeElement),true,'A fresh keyboard visit remains accessible');
-            assert.equal(await page.locator('.ctMtlProgressPopup').getAttribute('role'),'tooltip');
-            await page.locator('.ctMtlLiveButton').press('Escape');await page.waitForTimeout(150);assert.equal(await page.locator('.ctMtlProgressPopup').count(),0);
-            await page.locator('.ctMtlLiveButton').click();assert.equal(await page.locator('.ctMtlProgressPopup').getAttribute('role'),'dialog','A deliberate click reopens the pinned preview');
-            await page.locator('.ctMtlProgressPopup pre').press('Escape');await page.waitForTimeout(150);assert.equal(await page.locator('.ctMtlProgressPopup').count(),0);
-            await page.locator('.ctMtlLiveButton').press('Enter');await page.evaluate(()=>{window.__mtlApp._fixturePollErrors=1;});
-            await page.waitForFunction(()=>document.querySelector('.ctMtlProgressPopup')?.textContent.includes('Waiting for connection'));
-            assert.match(await page.locator('.ctMtlProgressPopup pre').textContent(),/Readable/,'An interruption preserves the last provisional text');
-            await page.waitForFunction(()=>document.querySelector('.ctMtlProgressPopup')?.textContent.includes('Receiving translation'));
-            assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureStarts),1,'Reconnect never starts another inference');
-            await page.evaluate(()=>{window.__mtlApp._fixtureLive.complete=true;});
-            await page.waitForFunction(()=>window.__mtlApp.snapshot().visible==='Generated {0}');
-            assert.equal(await page.locator('.ctMtlProgressPopup').count(),0);assert.equal(await page.evaluate(()=>window.__mtlApp.ctInlineClosed),false);
-            assert.equal(await target().inputValue(),'Generated {0}');assert.equal(await page.evaluate(()=>window.__mtlApp.exportTarget()),'Confirmed {0}');
-            await page.getByRole('button',{name:'Dismiss',exact:true}).click();await page.waitForFunction(()=>window.__mtlApp.snapshot().candidates===0);
-            await page.locator('.ctMtlButton').click();await page.waitForFunction(()=>window.__mtlApp._fixtureStarts===2);
-            await page.locator('.ctMtlLiveButton').focus();await page.locator('.ctMtlLiveButton').press('Enter');
-            await page.evaluate(()=>{window.__mtlApp._fixtureCancelDefer=true;document.body.style.minHeight='1800px';window.scrollTo(0,60);});
-            const beforeStop=await page.evaluate(()=>({scroll:window.scrollY,selection:window.__mtlApp.ctSelection,field:window.__mtlApp.ctFocusedField,
-                start:document.querySelector('textarea[data-ct-target]').selectionStart,end:document.querySelector('textarea[data-ct-target]').selectionEnd}));
-            const stop=page.getByRole('button',{name:'Stop translation',exact:true});await stop.focus();await stop.press('Enter');
-            await page.waitForFunction(()=>window.__mtlApp._fixtureCancels===1);
-            assert.equal(await stop.count(),1,'Stop remains mounted while cancellation is pending');assert.equal(await stop.isDisabled(),true);
-            assert.equal(await page.locator('.ctMtlProgressPopup pre').evaluate(node=>node===document.activeElement),true,'Keyboard Stop focuses the stable preview before disabling');
-            await page.keyboard.press('Enter');await page.keyboard.press('Enter');await stop.evaluate(node=>node.click());
-            await page.waitForTimeout(350);assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureCancels),1,'Repeated keyboard/click activation cannot cancel twice');
-            assert.equal(await stop.count(),1,'A pending poll also retains the disabled Stop button');assert.equal(await stop.isDisabled(),true);
-            await page.evaluate(()=>{window.__mtlApp._fixtureCancelReleases.shift()();window.__mtlApp._fixtureCancelDefer=false;});
-            await page.waitForFunction(()=>!Object.keys(window.__mtlApp.ctMtlRequests).length);
-            await page.waitForFunction(()=>document.querySelector('.ctMtlButton')===document.activeElement);
-            assert.equal(await page.locator('.ctMtlProgressPopup').count(),0);assert.equal(await page.evaluate(()=>window.__mtlApp.ctInlineClosed),false,'Keyboard Stop preserves the inline editor');
-            assert.deepEqual(await page.evaluate(()=>({scroll:window.scrollY,selection:window.__mtlApp.ctSelection,field:window.__mtlApp.ctFocusedField,
-                start:document.querySelector('textarea[data-ct-target]').selectionStart,end:document.querySelector('textarea[data-ct-target]').selectionEnd})),beforeStop,'Stop preserves viewport, selected field, row and native selection');
-            assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureCancels),1);assert.equal((await snapshot()).candidates,0);assert.equal(await target().inputValue(),'Confirmed {0}');
-            await page.evaluate(()=>{document.body.style.minHeight='';window.scrollTo(0,0);});
-            await page.locator('.ctMtlButton').click();await page.waitForFunction(()=>window.__mtlApp._fixtureStarts===3);
-            await page.locator('.ctMtlLiveButton').click();await target().fill('Typed while receiving {0}');
-            await page.evaluate(()=>{window.__mtlApp._fixtureLive.complete=true;});await page.waitForFunction(()=>!Object.keys(window.__mtlApp.ctMtlRequests).length);
-            assert.equal(await target().inputValue(),'Typed while receiving {0}','Completion preserves typing during progress');
-            assert.equal(await page.getByRole('button',{name:'Review MTL',exact:true}).count(),1);assert.equal(await page.evaluate(()=>window.__mtlApp.exportTarget()),'Confirmed {0}');
-            await page.evaluate(async mode=>{const app=window.__mtlApp;await app.configure(mode);app._fixtureAsync=true;app.ctMtlCapabilities={enabled:true,delivery:'poll-v1'};},mode);
-            await page.locator('.ctMtlButton').click();await page.waitForFunction(()=>window.__mtlApp._fixtureStarts===1);await page.locator('.ctMtlLiveButton').click();
-            await page.evaluate(()=>{window.__mtlApp.cloudSignedIn=false;});
-            await page.waitForFunction(()=>!Object.keys(window.__mtlApp.ctMtlLive).length);assert.equal(await page.locator('.ctMtlProgressPopup').count(),0);
-            assert.equal((await snapshot()).candidates,0);assert.equal(await target().inputValue(),'Confirmed {0}');
-            results.push({mode,themes:4,inputRoutes:['typing','paste','format','autocomplete','TM'],exports:'original before Save, accepted after Save',raceGuards:true,
-                debug:['admin-only','read-only preview','actual request','drag','keyboard move','escape focus','resize','escaped','redacted','role reset'],inlineStable:['pointer Translate','keyboard Translate','async result','debug dialog','Accept','Dismiss','draft','selection'],
-                escapeDismissal:{resizeAttempts:24,reopens:0,hoverReentry:true,keyboardReentry:true,click:true},
-                progress:['live text','escaped','keyboard preview','escape focus','four themes','resize','reconnect same ID','provisional excluded from export','final validation','keyboard Stop focus','repeated Stop','Stop preserves viewport/selection','typing fence','logout clears']});
         }
         assert.deepEqual(external,[],'No external request is made');assert.deepEqual(errors,[],'Real native controls render without page errors');
         const report={passed:true,results,externalRequests:external,pageErrors:errors};writeFileSync(join(outDir,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
