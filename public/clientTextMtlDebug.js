@@ -174,7 +174,7 @@
             ctMtlDebugBegin(field, body, timing) {
                 if (!allowed(this)) return;
                 const record = { requestId: body.requestId, origin: this.ctMtlDebugOrigin, submittedAt: Date.now(),
-                    snapshot: {...this.ctMtlDebugSnapshot(field, body.context), inferenceSettings: body.inferenceSettings ? {...body.inferenceSettings} : {version:'mtl-inference-settings-v1',model:'gpt-6-luna',effort:'xhigh'}}, status: 'submitted', server: null,
+                    snapshot: {...this.ctMtlDebugSnapshot(field, body.context), inferenceSettings: body.inferenceSettings ? {...body.inferenceSettings} : {version:'mtl-inference-settings-v1',model:'gpt-6.1-sol',effort:'medium'}}, status: 'submitted', server: null,
                     ...(timing ? {browserTiming:timing.snapshot()} : {}) };
                 this.ctMtlDebugRecords = raw({ ...this.ctMtlDebugRecords, [field.id]: record });
                 if (this.ctMtlDebugWindow?.fieldId === field.id) this.ctMtlDebugWindow = { ...this.ctMtlDebugWindow, record };

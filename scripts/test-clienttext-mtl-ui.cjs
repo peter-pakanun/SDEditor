@@ -933,9 +933,9 @@ function modelSettingsHarness(){
         {model:'gpt-6-luna',efforts:['high','xhigh','max']},{model:'gpt-6.1-sol',efforts:['low','medium','high','xhigh','max']}]}}:generate(path,options);
     return h;
 }
-test('model settings are pinned-Admin-only, session-local and never silently replace Luna/xhigh',async()=>{
+test('model settings are pinned-Admin-only, session-local and preserve the Sol/medium default and explicit choices',async()=>{
     const h=modelSettingsHarness(),{app,field}=h;assert.equal(app.ctMtlSettingsAllowed,true);assert.equal(app.ctMtlSettingsCapture(),undefined);
-    await app.ctMtlSettingsToggle(field);assert.deepEqual(app.ctMtlSettingsSelected(),ModelSettings.DEFAULT);assert.equal(app.ctMtlSettingsCapture(),undefined);
+    await app.ctMtlSettingsToggle(field);assert.deepEqual(app.ctMtlSettingsSelected(),{version:'mtl-inference-settings-v1',model:'gpt-6.1-sol',effort:'medium'});assert.equal(app.ctMtlSettingsCapture(),undefined);
     assert.equal(app.ctMtlSettingsChoose('model','gpt-6.1-sol'),true);assert.equal(app.ctMtlSettingsChoose('effort','low'),true);
     const selected=app.ctMtlSettingsCapture();assert.deepEqual(selected,{version:'mtl-inference-settings-v1',model:'gpt-6.1-sol',effort:'low'});
     selected.effort='max';assert.equal(app.ctMtlSettingsCapture().effort,'low');
@@ -958,7 +958,7 @@ test('each panel opening rechecks account availability; failed and unavailable c
     await app.ctMtlSettingsToggle(field);app._cloud.request=async()=>{throw new Error('synthetic private token');};assert.equal(await app.ctMtlSettingsToggle(field),false);
     assert.doesNotMatch(app.ctMtlSettingsError,/private token/);assert.equal(app.ctMtlSettingsCapture(),undefined);assert.deepEqual(app.ctMtlSettingsSelected(),ModelSettings.DEFAULT);
     assert.throws(()=>ModelSettings.catalog({version:'mtl-inference-settings-v1',models:[{model:'gpt-6-astra',efforts:['high']}]}));
-    assert.throws(()=>ModelSettings.settings({...ModelSettings.DEFAULT,effort:'low'}));
+    assert.throws(()=>ModelSettings.settings({...ModelSettings.DEFAULT,model:'gpt-6-luna',effort:'low'}));
 });
 test('Translate freezes the Admin selection before tone/context awaits and debug retains the captured request',async()=>{
     const h=modelSettingsHarness(),{app,field}=h;await app.ctMtlSettingsToggle(field);app.ctMtlSettingsChoose('model','gpt-6.1-sol');app.ctMtlSettingsChoose('effort','low');
@@ -976,4 +976,13 @@ test('ordinary and reset-to-default generation omit overrides; candidates retain
     const normalized=M.normalizeCandidate(value);assert.deepEqual(normalized.inferenceSettings,value.inferenceSettings);
     assert.throws(()=>M.mergeCandidate(normalized,{...value,inferenceSettings:{...value.inferenceSettings,effort:'high'},effort:'high'}),{code:'MTL_CANDIDATE_CHANGED'});
     assert.throws(()=>M.normalizeCandidate({...value,inferenceSettings:{...value.inferenceSettings,accessToken:'synthetic'}}));
+});
+
+test('Admin request diagnostics capture the Sol/medium default without changing explicit Luna requests',()=>{
+    const {app,field}=debugHarness();
+    app.ctMtlDebugBegin(field,{requestId:'default-model',context:{}});
+    assert.deepEqual(app.ctMtlDebugRecords[field.id].snapshot.inferenceSettings,{version:'mtl-inference-settings-v1',model:'gpt-6.1-sol',effort:'medium'});
+    const explicit={version:'mtl-inference-settings-v1',model:'gpt-6-luna',effort:'xhigh'};
+    app.ctMtlDebugBegin(field,{requestId:'explicit-model',context:{},inferenceSettings:explicit});
+    explicit.effort='max';assert.equal(app.ctMtlDebugRecords[field.id].snapshot.inferenceSettings.effort,'xhigh');
 });

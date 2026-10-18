@@ -232,6 +232,9 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             const beforeSettings=await page.evaluate(()=>window.__mtlApp.snapshot());
             await page.locator('.ctMtlSettingsButton').click();await page.waitForFunction(()=>!window.__mtlApp.ctMtlSettingsLoading);
             const settingsBar=page.getByRole('region',{name:'Translation model settings'});
+            assert.equal(await settingsBar.getByLabel('Model',{exact:true}).inputValue(),'gpt-6.1-sol');
+            assert.equal(await settingsBar.getByLabel('Reasoning',{exact:true}).inputValue(),'medium');
+            assert.match(await settingsBar.textContent(),/Default: Sol \/ medium\./);
             await settingsBar.getByLabel('Model',{exact:true}).selectOption('gpt-6.1-sol');await settingsBar.getByLabel('Reasoning',{exact:true}).selectOption('low');
             assert.equal(await settingsBar.getByRole('checkbox',{name:'Fast · unavailable'}).isDisabled(),true);
             assert.deepEqual(await page.evaluate(()=>window.__mtlApp.ctMtlSettingsCapture()),{version:'mtl-inference-settings-v1',model:'gpt-6.1-sol',effort:'low'});
@@ -243,6 +246,7 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             assert.deepEqual(await page.evaluate(()=>window.__mtlApp.snapshot()),beforeSettings,'Opening model controls does not edit or save the draft');
             await settingsBar.getByLabel('Reasoning',{exact:true}).press('Escape');assert.equal(await settingsBar.count(),0);assert.equal(await page.locator('.ctMtlSettingsButton').evaluate(node=>node===document.activeElement),true,'Escape restores settings-button focus');
             await page.evaluate(()=>window.__mtlApp.ctMtlSettingsDefault());
+            assert.deepEqual(await page.evaluate(()=>window.__mtlApp.ctMtlSettingsSelected()),{version:'mtl-inference-settings-v1',model:'gpt-6.1-sol',effort:'medium'});
             await page.locator('.ctMtlDebugButton').click();
             assert.match(await page.locator('.ctMtlDebugDialog').textContent(),/Preview · not executed/);
             assert.equal(await page.getByRole('button',{name:'Copy response',exact:true}).count(),0,'Absent response has no copy action');

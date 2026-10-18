@@ -81,7 +81,7 @@ Admins can expand **Timings (ms)** in **MTL request details** to inspect browser
 
 ## Admin model settings
 
-A gear beside Translate opens a model-settings bar for the configured Admin. It applies only to that Admin's next requests in the current sign-in. The default stays **Luna / xhigh** until an explicit choice. **Use default** removes the override. Opening the bar checks the connected account's available models; unavailable metadata leaves an actionable message. Account, client, role and assignment changes clear or fence choices.
+A gear beside Translate opens a model-settings bar for the configured Admin. It applies only to that Admin's next requests in the current sign-in. The default is **Sol / medium** for every role. Existing explicit Admin choices remain in effect until changed or reset. **Use default** removes the override. Opening the bar checks the connected account's available models; unavailable metadata leaves an actionable message. Account, client, role and assignment changes clear or fence choices.
 
 Allowed choices are GPT-6.1 Sol at low/medium/high/xhigh/max, or GPT-6 Luna at high/xhigh/max, intersected with account availability. Translate captures the choice before context preparation; later changes do not alter running requests, retries or review evidence. Managers and Translators have no model-setting controls or override permission. Nothing changes ordinary review, Save, source validation or exported translations.
 
