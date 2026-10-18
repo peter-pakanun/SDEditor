@@ -10,6 +10,35 @@
     const allowed=(host,scope=host.ctWorkspace?.scope)=>!!host.ctActive&&host.cloudSignedIn===true&&!!host._cloud&&!host._cloud.destroyed
         &&String(host.cloudUser?.id)===String(scope?.accountId)&&String(host.cloudProfileId)===String(scope?.accountId)
         &&host.lang===scope?.language&&(host.cloudUser?.role==='manager'||host.cloudUser?.role==='admin'&&host.cloudUser.isAdmin===true||host.cloudUser?.role==='translator'&&host.cloudUser.language===scope.language);
+    function accessIssue(host){
+        if(allowed(host))return '';
+        const scope=host.ctWorkspace?.scope,user=host.cloudUser;
+        if(!host.ctActive||!scope)return 'Open a ClientText workspace to edit shared tone notes.';
+        if(host.cloudSignedIn!==true||!host._cloud||host._cloud.destroyed)return 'Sign in with access to this language to read or edit shared tone notes.';
+        if(String(user?.id)!==String(scope.accountId)||String(host.cloudProfileId)!==String(scope.accountId))
+            return 'This workbook is open under another account or a guest profile. Reopen it under your signed-in account to edit shared tone notes.';
+        if(host.lang!==scope.language){
+            const test=String(scope.groupId||'').startsWith('local:test:');
+            return `Workbook language: ${scope.language}. Selected language: ${host.lang||'not selected'}. Choose ${scope.language} in Settings before reopening ${test?'this test':'this workbook'} to edit shared tone notes.${test?' Changing language closes the current test.':''}`;
+        }
+        return user?.role==='translator'?'Shared tone notes are available only in your assigned language. Select that language or ask an administrator to check your assignment.'
+            :'This account does not have permission to edit shared tone notes. Ask an administrator to check your role.';
+    }
+    function loadError(error){
+        const status=Number(error?.status||error?.statusCode),code=error?.code;
+        const reason=code==='BRANCH_NOT_FOUND'?'This workbook branch is unavailable on the server. Reopen an available branch or ask an administrator to check it.'
+            :status===401?'Your session expired. Sign in again, then reopen Tone notes.'
+            :status===403?'The server denied access to shared tone notes. Check your selected language and account assignment, or ask an administrator to check your access.'
+            :[404,501].includes(status)?'Shared tone notes need a server update. Ask an administrator to update the API, then retry loading.'
+            :status===400?'The server rejected the tone-note identity or workspace scope. Reopen this workbook; if it persists, ask an administrator to check frontend/API compatibility.'
+            :status===429?'Shared tone-note requests are temporarily limited. Wait briefly, then retry loading.'
+            :status>=500?'The shared tone-note service is unavailable. Retry loading when the server is available.'
+            :error?.name==='AbortError'?'The shared tone-note request timed out or was interrupted. Retry loading.'
+            :error instanceof TypeError&&/^Invalid shared tone-note response\.|^Tone-note response is unavailable\.|^Shared tone-note response identifies another scope\./.test(error.message)
+                ?'The server returned an incompatible shared tone-note response. Ask an administrator to check frontend/API compatibility, then retry loading.'
+                :'Shared tone notes could not be loaded. Check your connection, then retry loading.';
+        return reason+' Your draft is unchanged.';
+    }
     const offline=()=>root.navigator?.onLine===false;
     const scopeKey=scope=>JSON.stringify([scope.accountId,scope.game,scope.branchId,scope.language]);
     function endpoint(scope,key,history=false,cursor=''){
@@ -34,6 +63,14 @@
         data(){return{ctToneWindow:null,ctToneRecords:{},ctToneRevision:0,ctToneOffline:offline()};},
         computed:{
             ctToneAllowed(){return allowed(this);},
+            ctToneState(){
+                const value=this.ctToneCurrent,issue=accessIssue(this);if(issue)return issue;
+                if(this.ctToneError(value))return this.ctToneError(value);
+                if(value?.saving)return 'Saving shared note…';
+                if(value?.pending)return 'The previous save is awaiting confirmation. Retry Save note before editing again.';
+                if(!value?.loaded)return value?.loading?'Loading shared note…':'The shared note has not been loaded. Retry loading to enable editing.';
+                return '';
+            },
             ctToneFenceKey(){return JSON.stringify([this.ctActive,this.ctWorkspace?.scope,this.ctSelection,this.lang,this.gameVersion,this.branchId,access(this)]);},
             ctToneIdentities(){
                 this.ctRevision;const units=this.ctUnits,unit=this.ctCurrentUnit,workspace=this.ctWorkspace,cache=this._ctToneIdentityCache;
@@ -112,8 +149,7 @@
                         responseScope(response,capture.scope);
                         if(!own(response,'note'))throw new TypeError('Tone-note response is unavailable.');
                         this.ctTonePublish(value,note(response.note,capture.scope,identityKey));value.loadError='';return true;
-                    }catch(error){if(capture.current()&&!run.controller.signal.aborted){value.verified=false;value.loadError=[404,501].includes(error.status||error.statusCode)
-                        ?'Shared tone notes need a server update.': 'Shared tone notes could not be loaded. Your draft is unchanged.';}return false;}
+                    }catch(error){if(capture.current()&&!run.controller.signal.aborted){value.verified=false;value.loadError=loadError(error);}return false;}
                     finally{if(runs.get(key)===run){runs.delete(key);if(this._ctToneRuns===runs)value.loading=false;}}
                 })();run.promise=operation;return operation;
             },
@@ -213,17 +249,15 @@
             <div class="settingsBody settingsPanel">
               <label v-if="host.ctToneIdentities.length>1" class="settingsField">Character<select :value="host.ctToneWindow.identityKey" @change="host.ctToneSelect"><option v-for="entry in host.ctToneIdentities" :key="entry.key" :value="entry.key">{{ entry.name }} · {{ entry.path }}</option></select></label>
               <h3 v-else>{{ identity?.name }}</h3><p class="ctToneIdentity">{{ identity?.path }}</p>
-              <p v-if="!host.ctToneAllowed" role="alert">Sign in with access to this language to read or edit shared tone notes.</p>
-              <p v-if="value.loading && !value.loaded" role="status">Loading shared note…</p>
-              <p v-if="host.ctToneError(value)" role="alert">{{ host.ctToneError(value) }}</p>
+              <p v-if="host.ctToneState" id="ct-tone-state" :role="host.ctToneError(value) || !host.ctToneAllowed ? 'alert' : 'status'">{{ host.ctToneState }}</p>
               <label for="ct-tone-text">Tone and forms of address</label>
-              <textarea id="ct-tone-text" ref="text" rows="5" :value="value.draft" @input="host.ctToneEdited($event.target.value)" :placeholder="host.ctTonePlaceholder" :disabled="!host.ctToneAllowed || !value.loaded || value.saving || !!value.pending" :aria-invalid="host.ctToneCount>300 || undefined" aria-describedby="ct-tone-counter ct-tone-help"></textarea>
+              <textarea id="ct-tone-text" ref="text" rows="5" :value="value.draft" @input="host.ctToneEdited($event.target.value)" :placeholder="host.ctTonePlaceholder" :disabled="!host.ctToneAllowed || !value.loaded || value.saving || !!value.pending" :aria-invalid="host.ctToneCount>300 || undefined" aria-describedby="ct-tone-counter ct-tone-help ct-tone-state"></textarea>
               <p id="ct-tone-counter" :class="{ctToneInvalid:host.ctToneCount>300}" aria-live="polite">{{ host.ctToneCount }} / 300 characters</p>
               <p id="ct-tone-help" class="settingsHelp">Saved notes are sent to the translation service when you request MTL. Clearing a saved note creates a history revision. Unsaved edits remain in this tab until sign-out or reload.</p>
               <p v-if="value.saved?.revision">Revision {{ value.saved.revision }} · {{ value.saved.author?.name || 'Contributor' }} · {{ host.ctToneDate(value.saved.updatedAt) }}</p>
               <section v-if="value.conflict" class="ctToneConflict" aria-label="Latest shared note"><strong>Latest shared note · Revision {{ value.conflict.revision }}</strong><pre>{{ value.conflict.text || '(cleared)' }}</pre><button type="button" @click="host.ctToneResolveConflict(false)">Use latest</button><button type="button" @click="host.ctToneResolveConflict(true)">Keep my draft</button></section>
               <details v-if="host.ctToneAllowed" :open="value.historyOpen" @toggle="host.ctToneHistoryToggle"><summary>Revision history</summary><p v-if="value.historyLoading && !value.historyLoaded" role="status">Loading history…</p><p v-if="value.historyError" role="alert">{{ value.historyError }}</p><p v-if="value.historyLoaded && !value.history.length">No revisions yet.</p><ol class="ctToneHistory"><li v-for="entry in value.history" :key="entry.revision"><strong>Revision {{ entry.revision }} · {{ entry.author?.name || 'Contributor' }}</strong><time>{{ host.ctToneDate(entry.updatedAt) }}</time><pre>{{ entry.text || '(cleared)' }}</pre></li></ol><button v-if="value.nextCursor || value.historyError" type="button" :disabled="value.historyLoading" @click="host.ctToneLoadHistory(host.ctToneWindow.identityKey,!!value.nextCursor)">{{ value.nextCursor ? 'Load more' : 'Load history' }}</button></details>
-            </div><footer class="settingsFooter"><button v-if="value.loadError && !value.pending" type="button" @click="host.ctToneLoad(host.ctToneWindow.identityKey)" :disabled="!host.ctToneAllowed || value.loading || value.saving">Retry loading</button><button ref="save" class="settingsActionPrimary" type="button" :aria-disabled="!host.ctToneCanSave" :aria-busy="value.saving || undefined" @click="host.ctToneSave()">{{ value.saving ? 'Saving…' : value.pending ? 'Retry Save note' : 'Save note' }}</button></footer>
+            </div><footer class="settingsFooter"><button v-if="(!value.loaded || value.loadError) && !value.pending && host.ctToneAllowed" type="button" @click="host.ctToneLoad(host.ctToneWindow.identityKey)" :disabled="value.loading || value.saving">Retry loading</button><button ref="save" class="settingsActionPrimary" type="button" :aria-disabled="!host.ctToneCanSave" :aria-busy="value.saving || undefined" @click="host.ctToneSave()">{{ value.saving ? 'Saving…' : value.pending ? 'Retry Save note' : 'Save note' }}</button></footer>
           </section></div></teleport>`
     };
     return{mixin,Button,Dialog,allowed,note,endpoint};

@@ -9,7 +9,7 @@ let nextWorksheetRow = 2;
 function unit(recordId, sheet = 'ClientStrings', source = 'A [Spark|spark] for a Scout') {
     const row = nextWorksheetRow++;
     return { id: JSON.stringify(['normal', sheet, recordId]), recordId, sheet, role: 'normal', metadata: {}, developerNotes: '',
-        fields: [{ id: 'text', name: 'Text', kind: 'text', source, target: 'UNSENT TARGET', sourceCell:'B'+row, targetCell:'C'+row }] };
+        fields: [{ id: 'text', name: 'Text', kind: 'text', source, target: source.includes('[Spark|spark]') ? '[Spark|spark] UNSENT TARGET' : 'UNSENT TARGET', sourceCell:'B'+row, targetCell:'C'+row }] };
 }
 test('context includes exact immutable references and labels speaker evidence precisely', () => {
     const selected = unit('Line'), actor = unit('Data/Actors/Scout', 'Characters', 'Scout'), keyword = unit('Spark', 'KeywordPopups', 'A small flash.');
@@ -134,24 +134,24 @@ test('known conversation chooses its own loaded rows in workbook order, includin
     assert.equal(JSON.stringify(rows),before);
 });
 
-test('nearest 50 conversation neighbors exclude the target and keep original order', () => {
+test('nearest two conversation neighbors exclude the target and keep original order', () => {
     const rows=Array.from({length:81},(_,i)=>conversation('Line'+i,'x')), selected=rows[40];
     for(const row of rows)row.fields[0].target='';
     const result=build(selected,rows,{convoIndex:familyIndex(rows)});
-    assert.equal(result.surrounding.entries.length,50);
-    assert.deepEqual(ids(result),rows.slice(15,66).filter(row=>row!==selected).map(row=>row.recordId));
-    assert.deepEqual(result.surrounding.omitted,{entryLimit:30,contextBudget:0,untranslated:0,fieldLimit:0,worksheetCoordinates:0,existingReference:0});
+    assert.equal(result.surrounding.entries.length,2);
+    assert.deepEqual(ids(result),rows.slice(39,42).filter(row=>row!==selected).map(row=>row.recordId));
+    assert.deepEqual(result.surrounding.omitted,{entryLimit:78,contextBudget:0,untranslated:0,fieldLimit:0,worksheetCoordinates:0,existingReference:0,incompatibleField:0,protectedStructure:0,irrelevant:0});
     assert.equal(result.surrounding.truncated,true);
-    assert.equal(new Set(result.surrounding.entries.map(row=>row.unitId)).size,50);
+    assert.equal(new Set(result.surrounding.entries.map(row=>row.unitId)).size,2);
 });
 
 test('size pressure selects closest preceding turn on ties and omits whole source fields', () => {
     const rows=Array.from({length:7},(_,i)=>conversation('Line'+i,String(i).repeat(600))), selected=rows[3];
-    const result=build(selected,rows,{convoIndex:familyIndex(rows),contextLimit:2500});
+    const result=build(selected,rows,{convoIndex:familyIndex(rows),contextLimit:3500});
     assert.deepEqual(ids(result),['Line2']);
     assert.equal(result.surrounding.entries[0].fields[0].source,rows[2].fields[0].source);
-    assert.equal(result.surrounding.omitted.contextBudget,5);
-    assert.ok(JSON.stringify(result).length<=2500);
+    assert.equal(result.surrounding.omitted.contextBudget,1);
+    assert.ok(JSON.stringify(result).length<=3500);
 });
 
 test('a singleton conversation uses verified explicit NPC relationships in its own worksheet', async () => {
@@ -197,13 +197,13 @@ test('blank, contradictory or multi-NPC identity evidence cannot select a fallba
 });
 
 test('entries without known conversations use translated neighbors from the exact sheet and role', () => {
-    const before=unit('Before'), selected=unit('Selected'), blank=unit('Blank'), after=unit('After'),
-        wrongSheet=unit('WrongSheet','Characters'), wrongRole=unit('WrongRole'), audio=unit('Audio'), emptySource=unit('Empty');
+    const before=unit('Before','ClientStrings','Synthetic matching source'), selected=unit('Selected','ClientStrings','Synthetic matching source'), blank=unit('Blank','ClientStrings','Synthetic matching source'), after=unit('After','ClientStrings','Synthetic matching source'),
+        wrongSheet=unit('WrongSheet','Characters'), wrongRole=unit('WrongRole','ClientStrings','Synthetic matching source'), audio=unit('Audio','ClientStrings','Synthetic matching source'), emptySource=unit('Empty','ClientStrings','Synthetic matching source');
     blank.fields[0].target=' ';wrongRole.role='gender';audio.fields[0].source='[NOAUDIO]';emptySource.fields[0].source='';
     before.fields[0].target='Existing before';after.fields[0].target='Existing after';selected.metadata={Context:'Selected'};
     const result=build(selected,[before,wrongSheet,selected,blank,wrongRole,audio,emptySource,after,after]);
     assert.equal(result.surrounding.mode,'same-sheet-translated');
-    assert.equal(result.surrounding.reason,'no-known-conversation');
+    assert.equal(result.surrounding.reason,'relevant-compatible-translations');
     assert.deepEqual(ids(result),['Before','After']);
     assert.equal(result.surrounding.omitted.untranslated,1);
     assert.equal(result.surrounding.entries[0].fields[0].translation,'Existing before');
@@ -211,19 +211,19 @@ test('entries without known conversations use translated neighbors from the exac
     assert.ok(!result.references.some(row=>row.unitId===selected.id));
 });
 
-test('same-sheet adjacency reaches translated neighbors beyond untranslated rows before applying the 50-entry cap', () => {
+test('relevance selection reaches trusted rows beyond untranslated rows before applying the two-entry cap', () => {
     const rows=Array.from({length:101},(_,i)=>unit('Line'+i,'ClientStrings','x')),selected=rows[50];
     for(let i=0;i<rows.length;i++)rows[i].fields[0].target=i>=30 && i<=70?'':'t';
     const result=build(selected,rows);
-    assert.deepEqual(ids(result),[...rows.slice(5,30),...rows.slice(71,96)].map(row=>row.recordId));
+    assert.deepEqual(ids(result),[rows[29],rows[71]].map(row=>row.recordId));
     assert.equal(result.surrounding.omitted.untranslated,40);
-    assert.equal(result.surrounding.omitted.entryLimit,10);
+    assert.equal(result.surrounding.omitted.entryLimit,58);
     assert.equal(result.surrounding.omitted.contextBudget,0);
 });
 
 test('same-sheet pairs use only scoped Saved or current original translations, never MTL review overlays or drafts', () => {
-    const selected=unit('Selected'), original=unit('Original'), savedRow=unit('Saved'), blankSave=unit('BlankSave'),
-        draftOnly=unit('DraftOnly'), stale=unit('Stale'), reviewed=unit('Reviewed'), conflicted=unit('Conflicted'), incomplete=unit('Incomplete');
+    const selected=unit('Selected','ClientStrings','Synthetic matching source'), original=unit('Original','ClientStrings','Synthetic matching source'), savedRow=unit('Saved','ClientStrings','Synthetic matching source'), blankSave=unit('BlankSave','ClientStrings','Synthetic matching source'),
+        draftOnly=unit('DraftOnly','ClientStrings','Synthetic matching source'), stale=unit('Stale','ClientStrings','Synthetic matching source'), reviewed=unit('Reviewed','ClientStrings','Synthetic matching source'), conflicted=unit('Conflicted','ClientStrings','Synthetic matching source'), incomplete=unit('Incomplete','ClientStrings','Synthetic matching source');
     original.fields[0].target='Original pair';savedRow.fields[0].target='';draftOnly.fields[0].target='';
     stale.fields[0].outdated=true;reviewed.fields[0].outdated=true;incomplete.fields[0].originalMissing=true;
     const rows=freeze([original,savedRow,blankSave,draftOnly,selected,stale,reviewed,conflicted,incomplete]),
@@ -234,15 +234,16 @@ test('same-sheet pairs use only scoped Saved or current original translations, n
     for (const snapshot of [saved,new Map(Object.entries(saved))]) {
         const result=build(selected,rows,{saved:snapshot,drafts:{[draftOnly.id]:{values:{text:'DRAFT SECRET'}}},
             candidates:[{unitId:draftOnly.id,translation:'MTL SECRET'}],reviewBuffers:{[original.id]:'REVIEW SECRET'}});
-        assert.deepEqual(ids(result),['Original','Saved','Reviewed']);
-        assert.deepEqual(result.surrounding.entries.map(row=>row.fields[0].translation),['Original pair','Saved pair','Reviewed pair']);
-        assert.deepEqual(result.surrounding.entries.map(row=>row.fields[0].translationOrigin),['original-workbook','saved','saved']);
+        assert.deepEqual(ids(result),['Original','Saved']);
+        assert.deepEqual(result.surrounding.entries.map(row=>row.fields[0].translation),['Original pair','Saved pair']);
+        assert.deepEqual(result.surrounding.entries.map(row=>row.fields[0].translationOrigin),['original-workbook','saved']);
+        assert.equal(build(selected,[selected,reviewed],{saved:snapshot}).surrounding.entries[0].fields[0].translation,'Reviewed pair');
         assert.ok(!JSON.stringify(result).includes('SECRET'));
     }
 });
 
 test('Saved-false state cannot promote a draft and an outdated original is not trusted context', () => {
-    const selected=unit('Selected'), neighbor=unit('Neighbor');neighbor.fields[0].target='Original pair';
+    const selected=unit('Selected','ClientStrings','Synthetic matching source'), neighbor=unit('Neighbor','ClientStrings','Synthetic matching source');neighbor.fields[0].target='Original pair';
     const saved={[neighbor.id]:{saved:false,values:{text:'NOT SAVED'}}};
     assert.equal(build(selected,[neighbor,selected],{saved}).surrounding.entries[0].fields[0].translation,'Original pair');
     neighbor.fields[0].outdated=true;
@@ -259,7 +260,7 @@ test('known conversation keeps source when a neighbor translation is unreviewed 
 });
 
 test('partial or missing indexes use only loaded rows and never introduce stale index source', () => {
-    const selected=unit('Selected'), neighbor=unit('Neighbor'), external=unit('External','NPCs','NOT LOADED');
+    const selected=unit('Selected','ClientStrings','Synthetic matching source'), neighbor=unit('Neighbor','ClientStrings','Synthetic matching source'), external=unit('External','NPCs','NOT LOADED');
     const npcIndex={memberships:new Map([[selected.id,new Map([['npc',{kind:'dialogue'}]])]]),
         groupByKey:new Map([['npc',{npcUnits:[external]}]])};
     const result=build(selected,[null,{id:'broken'},neighbor,selected],{npcIndex,convoIndex:{memberships:new Map()}});
@@ -270,15 +271,14 @@ test('partial or missing indexes use only loaded rows and never introduce stale 
 });
 
 test('same-sheet partial workbook handles absent translations and only sends paired fields', () => {
-    const selected=unit('Selected'), neighbor=unit('Neighbor'), untranslated=unit('Untranslated');
+    const selected=unit('Selected','ClientStrings','Synthetic matching source'), neighbor=unit('Neighbor','ClientStrings','Synthetic matching source'), untranslated=unit('Untranslated','ClientStrings','Synthetic matching source');
     delete untranslated.fields[0].target;
     neighbor.fields.push({id:'empty',name:'Empty',kind:'text',source:'Untranslated source',target:''},
         {id:'gender',name:'Gender',kind:'gender',source:'English gender',target:'Gender target'},
         {id:'form',name:'Name',kind:'form',form:'StrFour',source:'Form source',target:'Form translation'});
     const result=build(selected,[untranslated,neighbor,selected]);
     assert.deepEqual(ids(result),['Neighbor']);
-    assert.deepEqual(result.surrounding.entries[0].fields.map(row=>row.fieldId),['text','form']);
-    assert.equal(result.surrounding.entries[0].fields[1].form,'StrFour');
+    assert.deepEqual(result.surrounding.entries[0].fields.map(row=>row.fieldId),['text']);
     assert.equal(result.surrounding.omitted.untranslated,1);
 });
 
@@ -296,8 +296,8 @@ test('field caps and server text, UTF-8 and structural budgets include selection
     const rows=Array.from({length:65},(_,i)=>({id:'u'+i,recordId:String(i),sheet:'N',role:'n',metadata:{},fields:
         Array.from({length:9},(_,j)=>({id:String(j),name:'',kind:'text',source:'x',target:'',sourceCell:'B'+(i+2),targetCell:'C'+(i+2)}))})),selected=rows[32];
     const result=build(selected,rows,{convoIndex:familyIndex(rows)});
-    assert.ok(result.surrounding.entries.length<50);
-    assert.ok(result.surrounding.omitted.contextBudget>0);
+    assert.ok(result.surrounding.entries.length<=2);
+    assert.ok(result.surrounding.omitted.entryLimit>0);
     assert.equal(result.surrounding.omitted.fieldLimit,result.surrounding.entries.length);
     assert.ok(result.surrounding.entries.every(row=>row.fields.length===8));
     assert.ok(JSON.stringify(result).length<=Context.LIMITS.context);
@@ -340,7 +340,7 @@ test('immutable worksheet coordinates preserve adjacency through an ID-sorted st
 test('worksheet row distance determines proximity independently of array and ID order', () => {
     const before=atRow(conversation('Z','b'.repeat(600)),9),selected=atRow(conversation('A','target'),10),
         farther=atRow(conversation('M','m'.repeat(600)),40),rows=[farther,selected,before];
-    const result=build(selected,rows,{convoIndex:familyIndex(rows),contextLimit:2500});
+    const result=build(selected,rows,{convoIndex:familyIndex(rows),contextLimit:3500});
     assert.deepEqual(ids(result),['Z']);
     assert.equal(result.surrounding.entries[0].position,'before');
     assert.equal(result.surrounding.omitted.contextBudget,1);
@@ -530,7 +530,7 @@ test('empty inherited class variants are removed before surrounding field and te
     for(const value of neighbors)for(const field of value.fields)field.source='Synthetic dialogue '.repeat(16);
     const rows=freeze([...neighbors.slice(0,5),selected,...neighbors.slice(5)]),before=JSON.stringify(rows),
         result=build(selected,rows,{convoIndex:familyIndex(rows)});
-    assert.equal(result.surrounding.availableEntries,10);assert.equal(result.surrounding.selectedEntries,10);
+    assert.equal(result.surrounding.availableEntries,10);assert.equal(result.surrounding.selectedEntries,2);
     assert.equal(result.surrounding.omitted.contextBudget,0);assert.equal(result.surrounding.omitted.fieldLimit,0);
     assert.ok(result.surrounding.entries.every(row=>row.fields.length===1 && row.fields[0].fieldId===neighbors[0].fields[0].id));
     const trimmed=rows.map(value=>({...value,fields:value.fields.slice(0,1)})),trimmedTarget=trimmed.find(value=>value.id===selected.id),
@@ -632,8 +632,8 @@ test('large surrounding workloads cannot crowd out direct keywords, references, 
     assert.equal(result.keywords[0].fields[0].translation,'Saved keyword title');
     assert.equal(result.omitted.keywords,0);assert.equal(result.omitted.keywordTranslations,0);
     assert.equal(result.omitted.references,0);assert.equal(result.omitted.glossary,0);assert.equal(result.omitted.unavailable,0);
-    assert.ok(result.surrounding.selectedEntries>0);assert.ok(result.surrounding.selectedEntries<50);
-    assert.ok(result.surrounding.omitted.contextBudget>0);
+    assert.equal(result.surrounding.selectedEntries,0);assert.equal(result.surrounding.omitted.irrelevant,999);
+    assert.equal(result.surrounding.omitted.contextBudget,0);
     assert.ok(JSON.stringify(result).length<=Context.LIMITS.context);
     assert.ok(Buffer.byteLength(JSON.stringify(result))<=Context.LIMITS.contextBytes);assert.ok(valueCount(result)<=Context.LIMITS.contextEntries);
 });
@@ -656,4 +656,88 @@ test('a genuinely oversized direct keyword is reported as a budget omission and 
     assert.deepEqual(result.keywordLookup,{requested:1,matched:1,missing:0,ambiguous:0,selfReferences:0});
     assert.deepEqual(result.keywords,[]);assert.equal(result.omitted.keywords,1);
     assert.equal(popup.fields[0].source,'Synthetic source '.repeat(2000));
+});
+
+test('relevance ranks protected keyword overlap before exact metadata, fuzzy text and proximity, independently of editor filters',()=>{
+    const selected=atRow(unit('Selected','ActiveSkills','Gain [SyntheticAlpha|alpha] power when you strike a foe.'),50),
+        shared=atRow(unit('SharedKeyword','ActiveSkills','[SyntheticAlpha|alpha]'),90),
+        metadata=atRow(unit('SharedMetadata','ActiveSkills','A completely different sentence.'),80),
+        similar=atRow(unit('Similar','ActiveSkills','Gain power when you strike a foe.'),49),
+        unrelated=atRow(unit('Unrelated','ActiveSkills','Open the options menu.'),51);
+    selected.metadata={SkillType:'SyntheticExact'};metadata.metadata={SkillType:'SyntheticExact'};
+    shared.fields[0].target='[SyntheticAlpha|approved alpha]';
+    const rows=[selected,unrelated,similar,metadata,shared], options={visibleUnits:[similar],filters:{search:'Similar',saved:false}},
+        result=build(selected,rows,options),reversed=build(selected,[...rows].reverse(),options);
+    assert.deepEqual(ids(result),['SharedMetadata','SharedKeyword']);assert.deepEqual(result,reversed);
+    const scores=result.surrounding.entries.map(row=>row.relevance);
+    assert.equal(scores[0].metadataMatches,1);assert.equal(scores[0].keywordOverlap,0);
+    assert.equal(scores[1].keywordOverlap,1);assert.equal(scores[1].metadataMatches,0);
+    assert.equal(result.surrounding.omitted.irrelevant,1);assert.equal(result.surrounding.omitted.entryLimit,1);
+    assert.equal(result.surrounding.selectionOrder,'keyword-overlap-metadata-text-proximity');
+    assert.equal(Context.exampleScore(selected,selected.fields[0],shared,shared.fields[0]).keywordOverlap,1);
+});
+
+test('fuzzy matching and field compatibility reject unrelated same-sheet rows and choose the closest equal-score row deterministically',()=>{
+    const selected=atRow(unit('Selected','ActiveSkills','Release a blazing wave of fire at nearby enemies.'),50),
+        similar=atRow(unit('Fuzzy','ActiveSkills','Release a blazing wave of frost at nearby enemies.'),80),
+        preceding=atRow(unit('Before','ActiveSkills','Release a blazing wave of fire at nearby enemies.'),49),
+        following=atRow(unit('After','ActiveSkills','Release a blazing wave of fire at nearby enemies.'),51),
+        wrongField=atRow(unit('WrongField','ActiveSkills',selected.fields[0].source),48),
+        unrelated=atRow(unit('Unrelated','ActiveSkills','Open settings to change your account.'),47);
+    wrongField.fields[0].name='Name';
+    const rows=[selected,similar,following,unrelated,wrongField,preceding],result=build(selected,rows);
+    assert.deepEqual(ids(result),['Before','After']);assert.equal(result.surrounding.omitted.incompatibleField,1);
+    assert.equal(result.surrounding.omitted.irrelevant,1);
+    const fuzzy=build(selected,[selected,similar]);assert.deepEqual(ids(fuzzy),['Fuzzy']);
+    assert.ok(fuzzy.surrounding.entries[0].relevance.textSimilarity>=350);
+    assert.equal(Context.exampleScore(selected,selected.fields[0],similar,similar.fields[0]).textSimilarity,
+        Context.exampleScore({...selected}, {...selected.fields[0],source:selected.fields[0].source.toUpperCase()},similar,similar.fields[0]).textSimilarity);
+});
+
+test('trusted examples use the existing validator for complex keyword grammar and reject added tags, raw variable changes and broken syntax',()=>{
+    const selected=unit('Selected','ActiveSkills','Gain power.'),valid=unit('Valid','ActiveSkills','[Skill::{0}|Name {1}] grants [Skill<gemlevel={2}>|power].'),
+        injected=unit('Injected','ActiveSkills','Gain power.'),variable=unit('Variable','ActiveSkills','Gain @{0}% power.'),
+        broken=unit('Broken','ActiveSkills','Gain power.'),literal=unit('Literal','ActiveSkills','Gain\\npower.'),style=unit('Style','ActiveSkills','Gain power.'),
+        spaced=unit('Spaced','ActiveSkills','[SyntheticKeyword|power]');
+    selected.metadata={Type:'Synthetic'};for(const row of [valid,injected,variable,broken,literal,style,spaced])row.metadata={Type:'Synthetic'};
+    valid.fields[0].target='[Skill::{0}|Nom {1}] donne [Skill<gemlevel={2}>|pouvoir].';
+    injected.fields[0].target='Gain [Consume|power].';variable.fields[0].target='Gain {0}% power.';
+    broken.fields[0].target='Gain [power.';literal.fields[0].target='Gain\npower.';style.fields[0].target='<italic>{Gain power.}';
+    spaced.fields[0].target='[ SyntheticKeyword|power]';
+    const result=build(selected,[selected,injected,variable,broken,literal,valid,style,spaced]);
+    assert.deepEqual(ids(result),['Valid','Style']);assert.equal(result.surrounding.omitted.protectedStructure,5);
+    assert.equal(result.surrounding.entries[0].fields[0].translation,valid.fields[0].target);
+    assert.ok(!JSON.stringify(result.surrounding.entries).includes('Consume'));
+});
+
+test('keywords and their whole approved definitions survive pressure from developer notes, references and optional examples',()=>{
+    const selected=unit('Selected','ActiveSkills','Use [SyntheticPriority|priority].'),popup=keyword('SyntheticPriority'),
+        related=unit('SyntheticRelated','Characters','Unrelated biography '.repeat(200)),neighbor=unit('Neighbor','ActiveSkills',selected.fields[0].source);
+    selected.developerNotes='Long optional notes '.repeat(220);selected.metadata={Context:related.recordId};
+    popup.fields[1].source='A useful exact keyword definition. '.repeat(16);
+    const saved={[popup.id]:{saved:true,values:{[popup.fields[1].id]:'Whole approved keyword definition. '.repeat(12)}}},
+        options={contextLimit:4200,saved},alone=build(selected,[selected,popup],options),result=build(selected,[related,neighbor,selected,popup],options);
+    assert.deepEqual(result.keywords,alone.keywords);assert.equal(result.omitted.keywords,0);assert.equal(result.omitted.keywordTranslations,0);
+    assert.equal(result.keywords[0].fields[1].source,popup.fields[1].source);
+    assert.equal(result.keywords[0].fields[1].translation,saved[popup.id].values[popup.fields[1].id]);
+    assert.equal(result.omitted.notes,1);assert.ok(JSON.stringify(result).length<=4200);
+    assert.ok(Object.keys(result).indexOf('keywords')<Object.keys(result).indexOf('surrounding'));
+});
+
+test('glossary matches the selected source and direct keyword definitions, without substring or unrelated-reference expansion',()=>{
+    const selected=unit('Selected','ActiveSkills','Lifetime [SyntheticKeyword|power].'),popup=keyword('SyntheticKeyword'),actor=unit('Actor','Characters','UnrelatedBiographyTerm');
+    selected.metadata={Context:'Actor'};popup.fields[1].source='UsefulDefinitionTerm';
+    const dictionary=[['life','Life'],['definition','UsefulDefinitionTerm'],['unrelated','UnrelatedBiographyTerm']]
+        .map(([id,find])=>({_id:id,find,replace:'Approved '+id})),result=build(selected,[selected,popup,actor],{dictionary});
+    assert.deepEqual(result.glossary.map(row=>row.id),['definition']);
+});
+
+test('a conversation preserves adjacent source turns while excluding structurally invalid example translations',()=>{
+    const before=atRow(conversation('Before_A','First turn.'),9),selected=atRow(conversation('Selected_A','Second turn.'),10),after=atRow(conversation('After_A','Third turn.'),11);
+    before.fields[0].target='First [Consume|turn].';after.fields[0].target='';
+    const rows=[after,selected,before],result=build(selected,rows,{convoIndex:familyIndex(rows)});
+    assert.deepEqual(ids(result),['Before_A','After_A']);assert.equal(result.surrounding.omitted.protectedStructure,1);
+    assert.ok(result.surrounding.entries.every(row=>row.fields[0].translation===undefined));
+    assert.equal(result.roleHints?.speaker?.identityKey,undefined);assert.equal(result.roleHints?.listener?.identityKey,undefined);
+    assert.equal(result.surrounding.selectionOrder,'conversation-proximity-preceding-on-ties');
 });

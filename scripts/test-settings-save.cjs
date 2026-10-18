@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const Cloud = require('../public/cloudSync.js');
+const Dictionary = require('../public/dictionarySync.js');
 
 const plain = value => JSON.parse(JSON.stringify(value));
 function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
@@ -24,6 +26,159 @@ function harness() {
     });
   return { e, writes, downloads, timers, listeners, context, window, config };
 }
+
+function startupState() {
+  const entries = [{ _id: 'fire', find: 'Fire', replace: 'Fire target', alts: [], tlnote: '' },
+    { _id: 'ice', find: 'Ice', replace: 'Ice target', alts: [], tlnote: '' }];
+  const dictionary = { entries, base: { revision: 2, entries: plain(entries), tombstones: ['removed'] },
+    conflicts: [], revision: 2, localVersion: 1, syncedLocalVersion: 1, pendingResolution: null };
+  const settings = Cloud.completeSettings({ lang: 'Thai', theme: 'grey' });
+  const profile = { settings, clipboard: 'Clipboard', dictionaries: { Thai: dictionary }, settingsBase: { revision: 3, settings: plain(settings) },
+    recovery: [{ reason: 'Keep recovery', dictionaries: { Thai: { entries: [{ find: 'Frozen', replace: 'Recovery target' }] } } }], unassignedDictionary: null };
+  return { version: 1, activeProfile: 'guest', auth: null, profiles: { guest: profile, other: plain(profile) },
+    legacyRecovery: { dictionary: [{ find: 'Legacy', replace: 'Legacy target' }] } };
+}
+
+function startupHarness(store, legacy) {
+  const h = harness(), { e, context, window, config } = h;
+  window.CloudSync = Cloud; window.DictionarySync = Dictionary;
+  context.document.addEventListener = () => {};
+  vm.runInContext('offlineStoreReady = false', context);
+  const pendingWatchers = [];
+  const importing = e.importSettings;
+  e.importSettings = function (settings) {
+    const previous = Object.fromEntries(Object.keys(config.watch).map(key => [key, this[key]]));
+    importing.call(this, settings);
+    for (const [key, watcher] of Object.entries(config.watch)) {
+      if (this[key] !== previous[key]) pendingWatchers.push(() => (typeof watcher === 'function' ? watcher : watcher.handler).call(this, this[key], previous[key]));
+    }
+  };
+  e.$nextTick = async callback => { while (pendingWatchers.length) pendingWatchers.shift()(); callback?.(); };
+  e.scheduleDictionaryDiagnosticScan = () => {};
+  e.checkMultipleInstances = e.startMultiInstanceCheck = e.updateDocumentTitle = () => {};
+  e.finishStartup = async () => { e.startupReady = true; await e.$nextTick(); };
+  window.OfflineStore = { isAvailable: () => true, migrateFromLocalStorageIfNeeded: async () => {},
+    getSettings: async () => plain(legacy), setSettings: async value => h.writes.push(plain(value)),
+    getHybridState: async () => plain(store.state), updateHybridState: async update => {
+      const next = update(plain(store.state));
+      if (store.nextError) { const error = store.nextError; store.nextError = null; throw error; }
+      if (store.gate) { const gate = store.gate; store.gate = null; gate.entered.resolve(); await gate.release.promise; }
+      store.state = plain(next); store.writes.push(plain(next)); return plain(next);
+    } };
+  e.initializeCloud = async () => {
+    e._cloudApplying = true; e._cloudInitializing = true;
+    try {
+      e._cloud = new Cloud.Client({ store: window.OfflineStore, merge: Dictionary, apiBase: 'http://fixture.invalid', fetch() { throw new Error('Unexpected network request'); } });
+      e._cloud.schedule = () => {};
+      await e._cloud.initialize(legacy);
+      await e.cloudApply(e._cloud.snapshot());
+      await e.$nextTick();
+    } finally { e._cloudApplying = false; e._cloudInitializing = false; }
+  };
+  h.start = () => config.mounted.call(e);
+  return h;
+}
+
+function startupStore(state = startupState()) { return { state: plain(state), writes: [] }; }
+function startupLegacy(state) { const profile = state.profiles[state.activeProfile]; return { ...plain(profile.settings),
+  dictionary: plain(profile.dictionaries[profile.settings.lang]?.entries || []), editorClipboard: profile.clipboard }; }
+
+test('unchanged startup hydration and the second reload write neither settings nor the hybrid profile', async () => {
+  const store = startupStore(), original = plain(store.state), legacy = startupLegacy(store.state);
+  for (let reload = 0; reload < 2; reload++) {
+    const h = startupHarness(store, legacy); await h.start();
+    assert.equal(h.e.startupReady, true); assert.equal(h.e.pendingSettingsSaves, 0);
+    assert.equal(h.writes.length, 0, 'Hydration watchers must settle before persistence is enabled.');
+    assert.equal(store.writes.length, 0, 'A durable matching profile must not be rewritten.');
+    assert.deepEqual(store.state, original, 'Other profiles, merge bases and recovery copies survive unchanged.');
+  }
+});
+
+test('startup normalizes missing defaults, duplicate IDs, notes and alternate IDs once and retains generated identities', async () => {
+  const store = startupStore();
+  store.state.profiles.guest.settings = { lang: 'Thai', theme: 'grey', editorRegexes: [] };
+  store.state.profiles.guest.dictionaries.Thai.entries = [{ _id: 'duplicate', find: 'Fire', replace: 'Target', tlnote: 12,
+    alts: [{ find: 'Flame' }], gameScope: 'all' }, { _id: 'duplicate', find: 'Ice', replace: 'Cold' }, { find: 'Light', replace: 'Bright' }];
+  const original = plain(store.state), legacy = startupLegacy(store.state), h = startupHarness(store, legacy);
+  await h.start();
+  assert.equal(h.writes.length, 0); assert.equal(store.writes.length, 1);
+  const normalized = plain(store.state.profiles.guest), entries = normalized.dictionaries.Thai.entries;
+  assert.deepEqual(normalized.settings, Cloud.completeSettings(original.profiles.guest.settings));
+  assert.equal(new Set(entries.map(entry => entry._id)).size, 3); assert.ok(entries.every(entry => entry._id));
+  assert.equal(entries[0].tlnote, '12'); assert.ok(entries[0].alts[0]._id); assert.equal(entries[0].alts[0].replace, 'Target');
+  assert.equal(Object.hasOwn(entries[0], 'gameScope'), false);
+  assert.deepEqual(normalized.recovery, original.profiles.guest.recovery);
+  assert.deepEqual(normalized.dictionaries.Thai.base, original.profiles.guest.dictionaries.Thai.base);
+  assert.deepEqual(store.state.profiles.other, original.profiles.other); assert.deepEqual(store.state.legacyRecovery, original.legacyRecovery);
+  const reload = startupHarness(store, legacy); await reload.start();
+  assert.equal(reload.writes.length, 0); assert.equal(store.writes.length, 1);
+  assert.deepEqual(store.state.profiles.guest, normalized); assert.deepEqual(plain(reload.e.dictionary), entries);
+});
+
+test('real restored preference, clipboard and Dictionary edits still commit through the normal queue', async () => {
+  const store = startupStore(), h = startupHarness(store, startupLegacy(store.state)); await h.start();
+  h.e.theme = 'dark'; h.e.editorClipboard = 'Edited clipboard'; h.e.dictionary[0].replace = 'Edited target';
+  assert.equal(await h.e.saveRestoredSettings(), true); assert.equal(store.writes.length, 1);
+  assert.equal(store.state.profiles.guest.settings.theme, 'dark'); assert.equal(store.state.profiles.guest.clipboard, 'Edited clipboard');
+  assert.equal(store.state.profiles.guest.dictionaries.Thai.entries[0].replace, 'Edited target'); assert.equal(h.e.pendingSettingsSaves, 0);
+});
+
+test('explicit ordinary saves still await a local commit even when the settings match the restored profile', async () => {
+  const store = startupStore(), h = startupHarness(store, startupLegacy(store.state)); await h.start();
+  assert.equal(store.writes.length, 0);
+  assert.equal(await h.e.saveSettings(), true); assert.equal(store.writes.length, 1); assert.equal(h.e.pendingSettingsSaves, 0);
+});
+
+test('restored settings use the normal durable save when the client has no comparison helper', async () => {
+  const store = startupStore(), h = startupHarness(store, startupLegacy(store.state)); await h.start();
+  h.e._cloud.matchesLocalSettings = undefined;
+  h.e.editorClipboard = 'Fallback edit';
+  assert.equal(await h.e.saveRestoredSettings(), true);
+  assert.equal(store.writes.length, 1); assert.equal(store.state.profiles.guest.clipboard, 'Fallback edit');
+  assert.equal(h.e.pendingSettingsSaves, 0);
+});
+
+test('failed startup normalization remains queued and protected until the same generated IDs become durable', async () => {
+  const store = startupStore(); delete store.state.profiles.guest.dictionaries.Thai.entries[0]._id;
+  const original = plain(store.state); store.nextError = new Error('Storage full');
+  const h = startupHarness(store, startupLegacy(store.state)); await h.start();
+  const generatedId = h.e.dictionary[0]._id;
+  assert.ok(generatedId); assert.equal(store.writes.length, 0); assert.deepEqual(store.state, original);
+  assert.equal(h.e.pendingSettingsSaves, 1); assert.match(h.e.cloudStorageError, /Storage full/); assert.ok(h.listeners.has('beforeunload'));
+  assert.equal(await h.e.saveRestoredSettings(), true);
+  assert.equal(store.writes.length, 1); assert.equal(store.state.profiles.guest.dictionaries.Thai.entries[0]._id, generatedId);
+  assert.equal(h.e.pendingSettingsSaves, 0); assert.equal(h.e.cloudStorageError, ''); assert.equal(h.listeners.has('beforeunload'), false);
+});
+
+test('a matching restored UI still awaits an active save and a newer queued edit before reporting durability', async () => {
+  const store = startupStore(), h = startupHarness(store, startupLegacy(store.state)); await h.start();
+  const gate = store.gate = { entered: deferred(), release: deferred() };
+  h.e.editorClipboard = 'First edit'; const active = h.e.saveSettings(); await gate.entered.promise;
+  h.e.editorClipboard = 'Clipboard'; let completed = false;
+  const restoring = h.e.saveRestoredSettings().then(result => { completed = true; return result; });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(completed, false); assert.equal(h.e.pendingSettingsSaves, 2);
+  gate.release.resolve(); assert.equal(await active, true); assert.equal(await restoring, true);
+  assert.equal(store.writes.length, 2); assert.equal(store.state.profiles.guest.clipboard, 'Clipboard'); assert.equal(h.e.pendingSettingsSaves, 0);
+});
+
+test('skipping an unchanged restore preserves another tab\'s newer durable edits and genuine later edits still merge', async () => {
+  const store = startupStore(), h = startupHarness(store, startupLegacy(store.state)); await h.start();
+  store.state.profiles.guest.dictionaries.Thai.entries[1].tlnote = 'Other tab note';
+  const remote = plain(store.state);
+  assert.equal(await h.e.saveRestoredSettings(), true); assert.equal(store.writes.length, 0); assert.deepEqual(store.state, remote);
+  h.e.dictionary[0].replace = 'This tab edit'; assert.equal(await h.e.saveRestoredSettings(), true);
+  assert.equal(store.writes.length, 1);
+  assert.equal(store.state.profiles.guest.dictionaries.Thai.entries.find(entry => entry._id === 'fire').replace, 'This tab edit');
+  assert.equal(store.state.profiles.guest.dictionaries.Thai.entries.find(entry => entry._id === 'ice').tlnote, 'Other tab note');
+  assert.deepEqual(store.state.profiles.guest.recovery, remote.profiles.guest.recovery);
+});
+
+test('an unchanged restored UI cannot skip a queued operation captured in another account epoch', async () => {
+  const store = startupStore(), original = plain(store.state), h = startupHarness(store, startupLegacy(store.state)); await h.start();
+  h.e.scheduleSettingsSave(); h.e._cloud.epoch++;
+  assert.equal(await h.e.saveRestoredSettings(), false); assert.equal(store.writes.length, 0); assert.deepEqual(store.state, original);
+  assert.ok(h.e.pendingSettingsSaves); assert.match(h.e.cloudStorageError, /account or language changed/);
+});
 
 test('clipboard defaults hidden and its visibility and text survive save, export, and import', async () => {
   const { e, writes, downloads, config } = harness();

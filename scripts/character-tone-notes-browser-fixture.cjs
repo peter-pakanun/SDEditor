@@ -20,6 +20,7 @@ const app=Vue.createApp({mixins:[ClientTextToneNotesUI.mixin],data(){return{ctAc
  methods:{ctContext(){return{scope:detach(this.ctWorkspace.scope),epoch:this._fixtureEpoch};},ctCurrent(ctx){return ctx.epoch===this._fixtureEpoch&&JSON.stringify(ctx.scope)===JSON.stringify(this.ctWorkspace.scope);},
  async configure(role='translator'){
   this.ctToneReset(true);this._fixtureEpoch=(this._fixtureEpoch||0)+1;this.cloudSignedIn=true;this.cloudUser={id:'synthetic-account',role,language:'Thai',isAdmin:role==='admin',assignmentVersion:1};
+  this.ctCurrentUnit=line;this.ctUnits=[line,npc(P,'First guard'),npc(Q,'Second guard')];
   this.ctSelection='line';this.lang='Thai';this.ctWorkspace.scope={accountId:'synthetic-account',game:'poe2',branchId:'default',language:'Thai',versionId:'synthetic-v1',groupId:'local:synthetic'};
   this.ordinary=field.target;this._fixtureNotes=new Map();this._fixtureHistory=new Map();this._fixtureReceipts=new Map();this._fixtureRequests=[];this._fixtureMode='normal';this._fixtureDefer=false;this._fixtureReleases=[];
   this._cloud=Vue.markRaw({epoch:1,request:async(path,options={})=>{
@@ -29,6 +30,8 @@ const app=Vue.createApp({mixins:[ClientTextToneNotesUI.mixin],data(){return{ctAc
     current=()=>this._fixtureNotes.get(identityKey)||{identityKey,text:'',revision:0},reply=appliedRevision=>({scope:ClientTextToneNotes.scope(this.ctWorkspace.scope),note:detach(current()),...(appliedRevision?{appliedRevision}:{})});
    if(options.method!=='PUT'){
     if(this._fixtureMode==='read-error')throw new TypeError('Synthetic read interruption');
+    if(this._fixtureMode==='read-denied')throw Object.assign(new Error('Synthetic private response must stay hidden'),{status:403,code:'LANGUAGE_FORBIDDEN'});
+    if(this._fixtureMode==='branch-missing')throw Object.assign(new Error('Synthetic private response must stay hidden'),{status:404,code:'BRANCH_NOT_FOUND'});
     if(url.pathname.endsWith('/history'))return{scope:ClientTextToneNotes.scope(this.ctWorkspace.scope),identityKey,entries:detach(this._fixtureHistory.get(identityKey)||[]),nextCursor:null};
     return reply();
    }
@@ -90,11 +93,28 @@ window.__toneApp=app.mount('#app');window.__toneApp.configure().then(()=>window.
         await text().focus();await text().dispatchEvent('keydown',{key:'Escape',isComposing:true,bubbles:true});assert.equal(await page.locator('.ctToneDialog').count(),1);
         await text().press('Escape');assert.equal(await page.getByRole('button',{name:'Character tone notes',exact:true}).evaluate(node=>node===document.activeElement),true);assert.equal(await page.evaluate(()=>document.body.style.overflow),'');
         assert.equal(await page.locator('#ordinary').inputValue(),'Original translation {0}');checks.push('all themes/resized desktop; IME safe Escape; return focus; ordinary translation unchanged');
+        await page.setViewportSize({width:1440,height:1000});
         for(const role of ['translator','manager','admin']){
             await page.evaluate(role=>window.__toneApp.configure(role),role);await open();assert.equal(await text().isEnabled(),true);await text().press('Escape');
         }
+        await page.evaluate(async()=>{const app=window.__toneApp;await app.configure('admin');app.ctCurrentUnit={...app.ctCurrentUnit,sheet:'NPCs',recordId:'Metadata/NPC/Synthetic/First',metadata:{}};app.ctUnits=[app.ctCurrentUnit];app.cloudUser.language='German';});
+        await open();assert.equal(await text().isEnabled(),true);assert.equal(await text().inputValue(),'');
+        await text().fill('Synthetic Admin guidance');await page.screenshot({path:join(outDir,'tone-admin-local-partial-1440.png'),fullPage:true});
+        await save().click();await page.waitForFunction(()=>window.__toneApp.ctToneCurrent.saved?.revision===1);
+        await text().press('Escape');checks.push('configured Admin can edit and save an absent note from a local partial workbook in another selected language');
+        for(const [mode,message]of [['read-denied',/server denied access/i],['branch-missing',/branch is unavailable/i]]){
+            await page.evaluate(async mode=>{await window.__toneApp.configure('admin');window.__toneApp._fixtureMode=mode;},mode);
+            await page.getByRole('button',{name:'Character tone notes',exact:true}).click();
+            await page.waitForFunction(()=>!!window.__toneApp.ctToneCurrent?.loadError&&!window.__toneApp.ctToneCurrent.loading);
+            assert.equal(await text().isDisabled(),true);assert.match(await page.locator('#ct-tone-state').innerText(),message);
+            assert.doesNotMatch(await page.locator('.ctToneDialog').innerText(),/private response must stay hidden/);
+            await page.screenshot({path:join(outDir,'tone-admin-'+mode+'-1440.png'),fullPage:true});
+            await page.evaluate(()=>window.__toneApp._fixtureMode='normal');await page.getByRole('button',{name:'Retry loading',exact:true}).click();
+            await page.waitForFunction(()=>window.__toneApp.ctToneCurrent?.loaded);assert.equal(await text().isEnabled(),true);await text().press('Escape');
+        }
+        checks.push('denied and missing-branch reads explain the disabled editor; Retry loading enables an absent note without a write');
         await page.evaluate(()=>{window.__toneApp.cloudUser={id:'synthetic-account',role:'translator',language:'German',assignmentVersion:1};});
-        await page.getByRole('button',{name:'Character tone notes',exact:true}).click();assert.equal(await text().isDisabled(),true);assert.match(await page.locator('.ctToneDialog').innerText(),/Sign in with access/);
+        await page.getByRole('button',{name:'Character tone notes',exact:true}).click();assert.equal(await text().isDisabled(),true);assert.match(await page.locator('.ctToneDialog').innerText(),/assigned language/);
         await page.getByRole('button',{name:'Close tone notes'}).click();await page.evaluate(()=>window.__toneApp.configure());await open();await text().fill('Private draft');
         await page.evaluate(()=>{window.__toneApp.cloudSignedIn=false;});await page.waitForSelector('.ctToneDialog',{state:'detached'});assert.equal(await page.evaluate(()=>Object.keys(window.__toneApp.ctToneRecords).length),0);
         checks.push('assigned-language permissions; Manager/Admin access; logout fences and clears private drafts');

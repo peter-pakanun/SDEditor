@@ -6,10 +6,10 @@
     'use strict';
     const base='/v1/admin/mtl/limits',copy=value=>JSON.parse(JSON.stringify(value));
     const rows=Object.freeze([
-        {key:'userMinute',scope:'Your Admin account',window:'Rolling minute',unit:'requests / 60 seconds',group:'user',bucket:'minute'},
-        {key:'userDay',scope:'Your Admin account',window:'Day',unit:'requests / day',group:'user',bucket:'day'},
-        {key:'userWeek',scope:'Your Admin account',window:'Week',unit:'requests / week',group:'user',bucket:'week'},
-        {key:'userConcurrency',scope:'Your Admin account',window:'Active',unit:'concurrent requests',group:'user',bucket:'concurrency'},
+        {key:'userMinute',scope:'Per user',window:'Rolling minute',unit:'requests / 60 seconds',group:'user',bucket:'minute'},
+        {key:'userDay',scope:'Per user',window:'Day',unit:'requests / day',group:'user',bucket:'day'},
+        {key:'userWeek',scope:'Per user',window:'Week',unit:'requests / week',group:'user',bucket:'week'},
+        {key:'userConcurrency',scope:'Per user',window:'Active',unit:'concurrent requests',group:'user',bucket:'concurrency'},
         {key:'subscriptionDay',scope:'All accounts · MTL connection',window:'Day',unit:'requests / day',group:'shared',bucket:'day'},
         {key:'subscriptionWeek',scope:'All accounts · MTL connection',window:'Week',unit:'requests / week',group:'shared',bucket:'week'},
         {key:'concurrency',scope:'All accounts · server',window:'Active',unit:'concurrent requests',group:'service',bucket:'concurrency'},

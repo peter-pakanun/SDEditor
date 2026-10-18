@@ -1581,18 +1581,36 @@
             async ctActivate(scope, metadata, initializationSession) {
                 const owner=this.ctRequestScope();if(scope.accountId!==owner.accountId || scope.game!==owner.game || scope.branchId!==owner.branchId)return false;
                 const test=String(scope.groupId).startsWith('local:test:');
+                if(!String(scope.groupId).startsWith('local:') && this.cloudSignedIn && !this.cloudCanAccessAllLanguages && scope.language!==this.cloudUser?.language)return false;
                 const store=this.ctStorage(scope);
                 const openingKey=this.managedCatalogScope,openingEpoch=this._ctEpoch || 0;
                 const initialization=this.ctBeginInitialization('Opening cached ClientText workspace',initializationSession,
-                    ['Preserving unsaved edits','Loading cached translations','Preparing context references','Preparing Dictionary matches','Opening ClientText workspace']);
-                let ctx;
+                    ['Preserving unsaved edits','Selecting workbook language','Loading cached translations','Preparing context references','Preparing Dictionary matches','Opening ClientText workspace']);
+                let ctx,openingOwns,openingCurrent;
                 try{
                 if(!await this.ctInitializationStep('Preserving unsaved edits',async()=>{if(!await this.ctFlushDraft())return false;await this.ctFlushCommentDraft();return true;},initialization)
                     || openingKey!==this.managedCatalogScope || openingEpoch!==(this._ctEpoch || 0))return false;
-                this.ctFence(test ? scope.groupId : null); this._ctAbort=new AbortController();const signal=this._ctAbort.signal;
+                this.ctFence(test ? scope.groupId : null);const controller=this._ctAbort=new AbortController(),signal=controller.signal;
+                const selectedEpoch=this._ctEpoch || 0;
+                openingOwns=()=>openingKey===this.managedCatalogScope && selectedEpoch===(this._ctEpoch || 0) && this._ctAbort===controller;
+                openingCurrent=()=>openingOwns() && !signal.aborted;
+                // Identify an incoming temporary session before language watchers
+                // run, so they do not list/migrate unrelated durable SD drafts.
+                // Its contents and editor remain unloaded until selection settles.
                 this.ctWorkspace = { scope: copy(scope), metadata: metadata || {} };
-                ctx = this.ctContext();const current=()=>this.ctCurrent(ctx) && !signal.aborted,check=()=>{if(!current())throw Object.assign(new Error('ClientText opening was cancelled or superseded.'),{stale:true,name:'AbortError'});};
-                if(!test)this.lang=scope.language;
+                this.ctBusy=true;this.ctError='';
+                await this.ctInitializationStep('Selecting workbook language',async()=>{
+                    const changed=this.lang!==scope.language;
+                    if(changed)this.lang=scope.language;
+                    // Flush language watchers while the outgoing workspace is
+                    // closed, then settle its personal Dictionary/settings scope
+                    // before any incoming workspace reads or activation.
+                    await this.$nextTick?.();const switched=await this._cloudLanguageSwitch;
+                    if(!openingCurrent())throw Object.assign(new Error('ClientText opening was cancelled or superseded.'),{stale:true,name:'AbortError'});
+                    if(this.lang!==scope.language || changed && switched===false)throw new Error('Could not select the workbook language. Check Settings, then open the workbook again.');
+                },initialization);
+                if(!openingCurrent())return false;
+                ctx = this.ctContext();const current=()=>openingCurrent() && this.ctCurrent(ctx) && this.lang===scope.language,check=()=>{if(!current())throw Object.assign(new Error('ClientText opening was cancelled or superseded.'),{stale:true,name:'AbortError'});};
                 this.ctBusy = true; this.ctError = '';
                 this._collaboration?.disconnect(); this._collaboration = null; this._collabKey = '';
                 this.clearEditorToolsFile?.();
@@ -1615,7 +1633,7 @@
                     },initialization);
                     await this.ctInitializationStep('Preparing Dictionary matches',async()=>{await this.$nextTick?.();check();if(!test){await this._cloudLanguageSwitch;check();await this.ensureDictionarySnapshot?.();check();}},initialization);
                     await this.ctInitializationStep('Opening ClientText workspace',async()=>{
-                    check();this.ctActive = true; if(!test)this.lang = scope.language; this.versionChooserVisible = false; this.editorVisible = false;
+                    check();this.ctActive = true; this.versionChooserVisible = false; this.editorVisible = false;
                     if(test){this._ctTestTool=this.ctTool;this._ctTestFilters=this.ctSelectedFilters.slice();this.ctTool='lookup';this.ctSelectedFilters=[...statusFilters.map(item=>item.key),'mtl'];}
                     const memory=()=>{if(this.ctCurrent(ctx) && this.ctActive)return this.ctLoadMemory(ctx);};
                     if(this.queueWorkspaceBackground)this.queueWorkspaceBackground('clienttext-memory',memory);else setTimeout(memory,0);
@@ -1631,8 +1649,13 @@
                     }
                     await this.$nextTick?.();check();this.ctRefreshLayout();return true;
                     },initialization);return true;
-                } catch (error) { if ((!ctx && openingKey===this.managedCatalogScope || ctx && this.ctCurrent(ctx)) && !error.stale && error.name!=='AbortError') this.ctError = error.message; return false; }
-                finally { if (ctx && this.ctCurrent(ctx)) this.ctBusy = false;this.ctFinishInitialization(initialization); }
+                } catch (error) {
+                    if ((!ctx && (openingCurrent ? openingCurrent() : openingKey===this.managedCatalogScope) || ctx && this.ctCurrent(ctx)) && !error.stale && error.name!=='AbortError') this.ctError = error.message;
+                    // Keep the pending identity for the importer to recover its
+                    // exact originals after a failed language selection.
+                    return false;
+                }
+                finally { if (openingOwns?.() && (!ctx || this.ctCurrent(ctx))) this.ctBusy = false;this.ctFinishInitialization(initialization); }
             },
             async ctOpenCached(row) { const scope = this._ctStore.normalizeScope(row.scope || row); return this.ctActivate(scope, row.metadata || row); },
             async ctSync(ctx = this.ctContext()) {

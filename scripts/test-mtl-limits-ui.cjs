@@ -14,6 +14,8 @@ test('limits load is read-only and current server counters remain independent of
     const h=harness();assert.equal(h.requests.length,0);assert.equal(await h.app.mtlLimitsLoad(),true);
     assert.equal(h.requests[0].path,'/v1/admin/mtl/limits');assert.equal(h.requests[0].options.method,undefined);
     assert.equal(h.app.mtlLimitsState.usage.user.day.used,12);assert.equal(h.app.mtlLimitsState.usage.shared.day.used,40);
+    const userRows=h.app.mtlLimitsRows.filter(row=>row.group==='user');assert.equal(userRows.length,4);
+    for(const row of userRows)assert.equal(row.scope,'Per user','Configured per-user limits are not labeled as Admin-only limits');
     h.app.mtlLimitsDraft.userDay=75;assert.equal(h.app.mtlLimitsDirty,true);await h.app.mtlLimitsLoad();
     assert.equal(h.app.mtlLimitsDraft.userDay,75);assert.equal(h.app.mtlLimitsState.usage.user.day.limit,50);assert.equal(h.app.mtlLimitsState.usage.user.day.used,12);
     assert.equal(h.requests.every(value=>!value.options.body),true);

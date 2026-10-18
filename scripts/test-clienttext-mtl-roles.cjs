@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {readFileSync} = require('node:fs');
 const vm = require('node:vm');
 const Context = require('../public/clientTextMtlContext.js');
+const MtlState = require('../public/clientTextMtlState.js');
 const S = require('../public/clientTextState.js');
 const N = require('../public/clientTextNpcIndex.js');
 const Catalog = require('../public/clientTextPortraitCatalog.js');
@@ -245,9 +246,45 @@ test('tone evidence is retained before optional surrounding rows and keeps omiss
         neighbors=Array.from({length:70},(_,i)=>line('Nearby'+i,{},i+100,'C'.repeat(1200))),units=[selected,hero,...neighbors],
         convoIndex={memberships:new Map([selected,...neighbors].map(value=>[value.id,{familyKey:'F'}]))};
     const result=await build(selected,units,{convoIndex}); assert.ok(profile(result,A));
-    assert.ok(result.surrounding.omitted.contextBudget>0); assert.equal(result.omitted.roleHints,0); assert.equal(result.omitted.toneProfiles,0); bounds(result);
+    assert.equal(result.surrounding.selectedEntries,2);assert.equal(result.surrounding.omitted.entryLimit,68);
+    assert.equal(result.omitted.roleHints,0); assert.equal(result.omitted.toneProfiles,0); bounds(result);
     const tight=await build(selected,[selected,hero],{contextLimit:1500});
     assert.equal(tight.roleHints,undefined); assert.equal(tight.omitted.roleHints,1); assert.equal(tight.omitted.toneProfiles,1); bounds(tight);
+});
+
+test('voice and introduction evidence never includes a translation that adds protected structure absent from its own English',async()=>{
+    const actor=npc(P,'Synthetic Scout'),selected=line('Selected',{Speaker:P},30),bad=line('Bad',{Speaker:P},29,'Synthetic voice.'),
+        hero=character(A,'Synthetic Mage','An authored introduction.','An authored [Consume|introduction].');
+    bad.fields[0].target='Synthetic [Consume|voice].';
+    const result=await build(selected,[selected,actor,bad]);
+    assert.equal(result.toneContext.voiceExamples[0].translation,undefined);
+    assert.equal(result.toneContext.voiceExamples[0].translationOmitted,'protected-structure');
+    const heroLine=line('Hero',{Speaker:A}),profileResult=await build(heroLine,[heroLine,hero]);
+    assert.equal(profile(profileResult,A).translation,undefined);
+    assert.equal(profile(profileResult,A).translationOmitted,'protected-structure');
+});
+
+test('clipped profile and voice pairs are validated after clipping and keep only structurally compatible translated excerpts',async()=>{
+    for(const kind of ['profile','voice'])for(const displaced of [true,false]){
+        const source=(displaced?'s'.repeat(400):'')+'[SyntheticTag|source] '+'s'.repeat(400),
+            target='[SyntheticTag|localized] '+'t'.repeat(400),
+            selected=line('Selected',{Speaker:kind==='profile'?A:P},30),
+            original=kind==='profile'?character(A,'Synthetic Mage',source,target):line('Voice',{Speaker:P},29,source);
+        if(kind==='voice')original.fields[0].target=target;
+        const originalField=kind==='profile'?original.fields.find(value=>value.name==='Description'):original.fields[0];
+        assert.equal(MtlState.validate(originalField,target).valid,true,'the complete immutable pair is valid');
+        const result=await build(selected,kind==='profile'?[selected,original]:[selected,npc(P,'Synthetic Scout'),original]),
+            excerpt=kind==='profile'?profile(result,A):result.toneContext.voiceExamples[0];
+        assert.equal(excerpt.sourceTruncated,true);assert.ok(textSize(excerpt)<=(kind==='profile'?600:200));
+        if(displaced){
+            assert.equal(excerpt.translation,undefined,kind);
+            assert.equal(excerpt.translationOmitted,'protected-structure-after-clipping');
+        }else{
+            assert.ok(excerpt.translation,kind);assert.equal(excerpt.translationTruncated,true);
+            assert.equal(MtlState.validate({...originalField,source:excerpt.source},excerpt.translation).valid,true,kind);
+        }
+        bounds(result);
+    }
 });
 
 test('full and inline UI filters, pagination, variant selection and view rows cannot change roles or sourced tone',async()=>{
@@ -264,10 +301,13 @@ test('full and inline UI filters, pagination, variant selection and view rows ca
 });
 
 test('browser factory uses the existing loaded public catalog without a Node require or API workbook parse',()=>{
-    const sandbox={ClientTextState:S,DictionaryScope,ClientTextPortraitCatalog:Catalog,TextEncoder}; vm.createContext(sandbox);
+    const sandbox={ClientTextState:S,ClientTextMtlState:MtlState,DictionaryScope,ClientTextPortraitCatalog:Catalog,TextEncoder}; vm.createContext(sandbox);
     vm.runInContext(readFileSync(require.resolve('../public/clientTextMtlContext.js'),'utf8'),sandbox);
-    const selected=line('Selected',{Speaker:A}),hero=character(A,'Synthetic Mage'),result=sandbox.ClientTextMtlContext.build({unit:selected,field:selected.fields[0],units:[selected,hero],scope:{game:'poe2'}});
+    const selected=line('Selected',{Speaker:A}),hero=character(A,'Synthetic Mage'),neighbor=line('Neighbor',{},29);
+    neighbor.fields[0].target='Approved nearby dialogue.';
+    const result=sandbox.ClientTextMtlContext.build({unit:selected,field:selected.fields[0],units:[selected,hero,neighbor],scope:{game:'poe2'}});
     assert.equal(result.roleHints.speaker.status,'resolved'); assert.equal(result.toneContext.profiles.length,1);
+    assert.equal(result.surrounding.entries[0].fields[0].translation,'Approved nearby dialogue.');
 });
 
 test('row-specific merged artwork suppresses participant conventions before portrait deduplication',async()=>{
@@ -275,7 +315,7 @@ test('row-specific merged artwork suppresses participant conventions before port
     const first=npc(P,'Synthetic First'),second=npc(Q,'Synthetic Second'),units=[selected,first,second],
         npcIndex=await N.buildNpcIndex(units,{yield:async()=>{}}),parentKey=[...npcIndex.groupByKey.keys()].find(k=>npcIndex.groupByKey.get(k).npcUnits.includes(first)),
         convoIndex={memberships:new Map([[selected.id,{familyKey:'Synthetic',parentKey}]])},
-        sandbox={ClientTextState:S,DictionaryScope,TextEncoder,ClientTextPortraitCatalog:{games:{poe2:{characters:{},npcs:{[P]:['one','Synthetic First'],[Q]:['two','Synthetic Second']},
+        sandbox={ClientTextState:S,ClientTextMtlState:MtlState,DictionaryScope,TextEncoder,ClientTextPortraitCatalog:{games:{poe2:{characters:{},npcs:{[P]:['one','Synthetic First'],[Q]:['two','Synthetic Second']},
             overrides:{OverrideLine:{id:'one',npcs:[Q]}}}}}};
     vm.createContext(sandbox);vm.runInContext(readFileSync(require.resolve('../public/clientTextMtlContext.js'),'utf8'),sandbox);
     const result=sandbox.ClientTextMtlContext.build({unit:selected,field:selected.fields[0],units,npcIndex,convoIndex,scope:{game:'poe2'}});
@@ -406,7 +446,7 @@ test('missing or wrong-game catalogs preserve unresolved roles while loaded NPC 
     assert.equal(Object.hasOwn(Catalog.games.poe1.npcs,path),false);
     const wrongGame=await build(selected,[selected],{scope:{game:'poe1'}});assert.equal(wrongGame.roleHints.speaker.status,'unknown');
     for(const catalog of [undefined,{games:{poe2:{characters:{},npcs:{}}}}]) {
-        const sandbox={ClientTextState:S,DictionaryScope,TextEncoder,ClientTextPortraitCatalog:catalog};vm.createContext(sandbox);
+        const sandbox={ClientTextState:S,ClientTextMtlState:MtlState,DictionaryScope,TextEncoder,ClientTextPortraitCatalog:catalog};vm.createContext(sandbox);
         vm.runInContext(readFileSync(require.resolve('../public/clientTextMtlContext.js'),'utf8'),sandbox);
         const args={unit:selected,field:selected.fields[0],units:[selected],scope:{game:'poe2'}},result=sandbox.ClientTextMtlContext.build(args);
         assert.equal(result.roleHints.speaker.status,'unknown');assert.equal(key(result,'speaker'),undefined);

@@ -455,12 +455,15 @@ function formatPageRange(total, page, pageSize) {
       // The startup cache is only a first-paint hint; local settings remain authoritative.
       if (settings) this.importSettings(settings);
       else this.theme = 'light';
-
+      this.ensureDictionaryIds();
+      // Hydration watchers must settle while persistence is still disabled.
+      // Otherwise they queue a legacy settings write just before Cloud restores
+      // the authoritative local profile, even on an unchanged reload.
+      await this.$nextTick();
 
       this.needsInitialSettings = !this.lang;
       offlineStoreReady = true;
       this.offlineStoreReady = true;
-      this.ensureDictionaryIds();
       document.addEventListener('keydown', this.handleKeydown);
 
       try { await prepare('Restoring account and Dictionary', () => this.initializeCloud(settings)); }
@@ -470,7 +473,7 @@ function formatPageRange(total, page, pageSize) {
         this.cloudStorageError = 'Could not initialize local backup storage. Reload to retry: ' + error.message;
         return;
       }
-      await prepare('Saving restored settings', () => this.saveSettings());
+      await prepare('Saving restored settings', () => this.saveRestoredSettings());
       this.updateDocumentTitle();
     } finally {
       this.finishWorkspaceInitialization?.(initialization);
@@ -7702,6 +7705,14 @@ function formatPageRange(total, page, pageSize) {
       };
       this._settingsSaveDrain = drain().finally(() => { this._settingsSaveDrain = null; });
       return this._settingsSaveDrain;
+    },
+    async saveRestoredSettings() {
+      // This startup-only comparison uses the profile already read by CloudSync.
+      // Do not skip queued edits or change ordinary saves' cross-tab merge path.
+      const settings = this.settingsSavePayload();
+      if (typeof Vue.toRaw === 'function') settings.dictionary = Vue.toRaw(settings.dictionary);
+      if (!this.pendingSettingsSaves && !this._settingsSaveDrain && this._cloud?.matchesLocalSettings?.(settings)) return true;
+      return this.saveSettings();
     },
     async saveSettings() {
       if (this._cloudApplying) return true;

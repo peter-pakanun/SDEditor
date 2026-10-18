@@ -108,7 +108,8 @@ test('API accepts priority keyword translations and durable omission counts unde
     const accepted=validation.mtlRequestInput(body);bounds(context,body);
     assert.equal(accepted.context.keywordLookup.matched,1);assert.equal(accepted.context.omitted.keywords,0);
     assert.equal(accepted.context.omitted.keywordTranslations,0);assert.equal(accepted.context.keywords[0].fields[0].translation,'Saved priority title');
-    assert.ok(accepted.context.surrounding.omitted.contextBudget>0);assert.equal(accepted.context.evidenceRules.length,2);
+    assert.equal(accepted.context.surrounding.omitted.irrelevant,1000);assert.equal(accepted.context.surrounding.selectedEntries,0);
+    assert.equal(accepted.context.evidenceRules.length,2);
 });
 
 test('API accepts optional role hints and sourced profiles with unchanged context and request limits',options,async()=>{
@@ -145,7 +146,7 @@ test('API preserves bounded role/tone omission provenance under a large surround
         context=Context.build({unit:selected,field:selected.fields[0],units:[selected,actor,...rows],convoIndex,scope:{game:'poe2'}}),body=request(selected,context,validation);
     assert.equal(context.omitted.roleHints,0); assert.equal(context.omitted.toneProfiles,0);
     assert.equal(context.toneContext.profiles[0].sourceTruncated,true); assert.equal(context.toneContext.profiles[0].translationTruncated,true);
-    assert.ok(context.surrounding.omitted.contextBudget>0); assert.equal(context.surrounding.omitted.entryLimit,20);
+    assert.equal(context.surrounding.selectedEntries,2); assert.equal(context.surrounding.omitted.entryLimit,68);
     assert.deepEqual(validation.mtlRequestInput(body).context,context);bounds(context,body);
 });
 

@@ -103,17 +103,27 @@ async function monitor(page, enabled) {
             window.__offlineTestRequests = [];
             window.__offlineTestReadOnlyCatalogRequests = [];
             window.__offlineTestReadOnlyMediaRequests = [];
+            window.__offlineTestLanguageUnreadRequests = [];
+            window.__offlineTestOpenedGroup = '';
         }
     }, enabled);
 }
 async function assertLocal(page, label, exited = false) {
+    if(exited)await page.evaluate(async()=>{const app=window.__offlineTestApp;await app.$nextTick();await app.loadEditorDrafts();});
     const activity = await page.evaluate(() => ({
         indexedDb: window.__offlineTestWrites,
         browserStorage: window.__offlineTestStorageWrites,
         requests: window.__offlineTestRequests
     }));
     if (exited) activity.requests = activity.requests.filter(path => !/^\/v1\/comments\/unread\?game=poe2$/.test(path));
-    assert.deepEqual(activity, { indexedDb: [], browserStorage: [], requests: [] }, label + ': the test session writes no durable data or cloud requests');
+    // Selecting the confirmed workbook language is a personal settings write,
+    // completed while no workbook is active. Workbook data stays in memory.
+    activity.indexedDb=activity.indexedDb.filter(record=>!(record.selectingWorkbookLanguage && record.names.length===1 && record.names[0]==='kv'
+        && record.puts.length && record.puts.every(value=>value.store==='kv'&&value.key==='hybrid_v1')));
+    if(exited)activity.indexedDb=activity.indexedDb.filter(record=>!(record.restoringDraftScopeKey
+        && record.names.length===3 && ['translation_drafts','baseline_files','storage_migrations'].every(name=>record.names.includes(name))
+        && record.puts.length && record.puts.every(value=>value.store==='storage_migrations'&&value.key===record.restoringDraftScopeKey)));
+    assert.deepEqual(activity, { indexedDb: [], browserStorage: [], requests: [] }, label + ': only pre-load language settings may persist; workbook data and authoring requests stay local');
     const catalogReads=await page.evaluate(()=>window.__offlineTestReadOnlyCatalogRequests||[]);
     for(const request of catalogReads)assert.deepEqual(request,{path:'/v1/skill-card-catalogs/poe2/v1',method:'GET'},
         label+': only the existing protected read-only catalog uses the explicit synthetic stub');
@@ -124,6 +134,8 @@ async function assertLocal(page, label, exited = false) {
             ||request.kind==='audio'&&request.path==='/audio/poe2db?path='+encodeURIComponent(audioReference.toLowerCase()),
             label+': only exact validated workbook portraits and the generated fixture clip are permitted');
     }
+    for(const request of await page.evaluate(()=>window.__offlineTestLanguageUnreadRequests||[]))
+        assert.deepEqual(request,{path:'/v1/comments/unread?game=poe2',method:'GET'},label+': language selection permits only the ordinary read-only unread count before activation');
 }
 async function saved(page, unitId, fieldId, target) {
     await page.waitForFunction(({ unitId, fieldId, target }) => {
@@ -219,7 +231,13 @@ async function run() {
             IDBDatabase.prototype.transaction = function (names, mode, ...rest) {
                 const tx = transaction.call(this, names, mode, ...rest);
                 if (window.__offlineTestMonitoring && mode === 'readwrite') {
-                    tx.__offlineTestWriteRecord = { database: this.name, names: Array.from(typeof names === 'string' ? [names] : names), stack: new Error().stack, puts: [] };
+                    const vm=window.__offlineTestApp,expected=window.__offlineTestExpectedLanguage,
+                        pending=vm?.ctWorkspace?.scope,sdScope=vm?.editorDraftScope?.('');
+                    tx.__offlineTestWriteRecord = { database: this.name, names: Array.from(typeof names === 'string' ? [names] : names), stack: new Error().stack, puts: [],
+                        selectingWorkbookLanguage:!!expected && vm?.lang===expected && !vm.ctActive && vm.ctBusy && !vm.ctUnits.length
+                            && String(pending?.groupId||'').startsWith('local:test:') && pending.language===expected,
+                        restoringDraftScopeKey:window.__offlineTestOpenedGroup && !vm.ctActive && !vm.ctWorkspace && !sdScope?.groupId
+                            ? JSON.stringify(['drafts',sdScope.profile,sdScope.game,sdScope.branchId||'default',sdScope.language]) : '' };
                     window.__offlineTestWrites.push(tx.__offlineTestWriteRecord);
                 }
                 return tx;
@@ -293,6 +311,11 @@ async function run() {
                             if(window.__offlineTestMonitoring)window.__offlineTestReadOnlyMediaRequests.push({path,method:'GET',kind:'audio'});
                             return fetch(location.origin+path,{method:'GET',signal:options.signal,cache:'no-store',credentials:'omit'});
                         }
+                    }
+                    if(path==='/v1/comments/unread?game=poe2'&&String(options.method||'GET').toUpperCase()==='GET'
+                        && window.__offlineTestExpectedLanguage && !vm.ctActive && String(vm.ctWorkspace?.scope.groupId||'').startsWith('local:test:')){
+                        if(window.__offlineTestMonitoring)window.__offlineTestLanguageUnreadRequests.push({path,method:'GET'});
+                        return{total:0,files:[]};
                     }
                     if (window.__offlineTestMonitoring) window.__offlineTestRequests.push(String(path));
                     if (String(path).startsWith('/v1/comments/unread?')) return { total: 0, files: [] };
@@ -386,7 +409,6 @@ async function run() {
         results.push('Version-screen workbook drops open offline Current workbooks with inferred language/roles, theme-safe drag feedback and no durable/cloud side effects');
         let layoutChecked = false;
         async function openTest(files, previousFiles = [], hiddenPreviousFiles = [], viaDrop = false) {
-            const selectedLanguage = await page.evaluate(() => window.__offlineTestApp.lang);
             if (viaDrop) {
                 const dataTransfer = await droppedFiles(files);
                 await versions.dispatchEvent('drop', { dataTransfer });await dataTransfer.dispose();
@@ -434,6 +456,8 @@ async function run() {
                     await upload.screenshot({ path: join(disposableFolder, 'workbook-version-selection.png') });
                 }
             }
+            const workbookLanguage=await current.locator('.ctUploadFiles tbody tr').first().locator('select').first().inputValue();
+            await page.evaluate(language=>window.__offlineTestExpectedLanguage=language,workbookLanguage);
             await upload.getByRole('button', { name: 'Open', exact: true }).click();
             await page.waitForFunction(() => {
                 const vm = window.__offlineTestApp;
@@ -446,7 +470,10 @@ async function run() {
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctError), '');
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctOfflineTest), true);
             assert.match(await workspace.textContent(), /In-memory test/);
-            assert.equal(await page.evaluate(() => window.__offlineTestApp.lang), selectedLanguage, 'Opening a test preserves the selected language');
+            assert.equal(await page.evaluate(() => window.__offlineTestApp.lang), workbookLanguage, 'Opening selects the confirmed workbook language before activation');
+            assert.equal(await page.evaluate(() => {const app=window.__offlineTestApp;return app._cloud.state.profiles[app._cloud.state.activeProfile].settings.lang;}),workbookLanguage,
+                'Personal language settings settle before the test becomes active');
+            await page.evaluate(()=>{window.__offlineTestExpectedLanguage=null;window.__offlineTestOpenedGroup=window.__offlineTestApp.ctWorkspace.scope.groupId;});
             if(hiddenPreviousFiles.length)assert.equal(await page.evaluate(async()=>!!(await window.__offlineTestApp.ctStorage(window.__offlineTestApp.ctWorkspace.scope).getMetadata(window.__offlineTestApp.ctWorkspace.scope)).previousScope),false,
                 'Unchecked retained history workbooks are excluded from the in-memory version');
         }
@@ -986,7 +1013,7 @@ async function run() {
         assert.equal(await offline.getByRole('button', { name: 'Test Sheet Offline', exact: true }).count(), 1, 'Admin has an offline test button');
         await monitor(page, true);
         await openTest([{ name: 'Thai.xlsm', mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12', buffer: normal }]);
-        assert.equal(await page.evaluate(() => window.__offlineTestApp.lang), 'French', 'A different test team never changes account language settings');
+        assert.equal(await page.evaluate(() => window.__offlineTestApp.lang), 'Thai', 'A different test team selects its language before activation');
         assert.equal(await page.evaluate(() => window.__offlineTestApp.ctWorkspace.scope.language), 'Thai');
         assert.equal(await workspace.getByRole('columnheader', { name: 'Thai translation', exact: true }).count(), 1, 'Test table uses the workbook team language');
         await assertLocal(page, 'Admin testing a different language');
@@ -1001,7 +1028,43 @@ async function run() {
         await assertLocal(page, 'Admin Gender-only session', true);
         await monitor(page, false);
         results.push('Manager, Admin, Translator, and Guest access is local-only; Gender-only tests remain local');
-        results.push('Different test language preserves account language; importer, list and full editor fit all four themes at 1440px and 1100px');
+        results.push('Confirmed test language is selected before loading; only pre-load personal language settings persist; importer, list and full editor fit all four themes at 1440px and 1100px');
+        await bootstrap('admin','German');await monitor(page,true);
+        await page.evaluate(()=>{const app=window.__offlineTestApp;app._fixtureSelectLanguage=app._cloud.selectLanguage;
+            app._cloud.selectLanguage=async()=>{throw new Error('Synthetic language settings interruption');};});
+        await offline.getByRole('button',{name:'Test Sheet Offline',exact:true}).click();
+        await upload.getByRole('region',{name:'Current workbooks',exact:true}).locator('input[type=file]').first()
+            .setInputFiles([{name:'French.xlsm',mimeType:'application/vnd.ms-excel.sheet.macroEnabled.12',buffer:normal}]);
+        await page.evaluate(()=>window.__offlineTestExpectedLanguage='French');await upload.getByRole('button',{name:'Open',exact:true}).click();
+        await page.waitForFunction(()=>{const app=window.__offlineTestApp;return !app.ctUploading&&!app.ctBusy&&!app.workspaceInitializationActive&&!!app.ctUploadError;});
+        assert.deepEqual(await page.evaluate(()=>{const app=window.__offlineTestApp;return{language:app.lang,active:app.ctActive,stores:app._ctTestStores.size,
+            files:app.ctUploadFiles.map(value=>value.file.name),error:app.ctUploadError};}),
+            {language:'German',active:false,stores:0,files:['French.xlsm'],error:'Could not select the workbook language. Check Settings, then open the workbook again.'});
+        await assertLocal(page,'Failed language selection retains originals without loading or persisting workbook work');
+        await page.evaluate(()=>{const app=window.__offlineTestApp;app._cloud.selectLanguage=app._fixtureSelectLanguage;delete app._fixtureSelectLanguage;
+            window.__offlineTestExpectedLanguage=null;app.ctCloseUpload();});await monitor(page,false);
+        results.push('Failed personal language selection restores the prior language, keeps selected originals, and disposes the unopened temporary workbook');
+        await bootstrap('admin','German');
+        await page.evaluate(()=>{const app=window.__offlineTestApp;app._fixtureSelectLanguage=app._cloud.selectLanguage;app._fixtureLanguageStarted=false;
+            app._cloud.selectLanguage=async function(...args){app._fixtureLanguageStarted=true;await new Promise(resolve=>app._fixtureLanguageRelease=resolve);
+                return app._fixtureSelectLanguage.apply(this,args);};});
+        await offline.getByRole('button',{name:'Test Sheet Offline',exact:true}).click();
+        await upload.getByRole('region',{name:'Current workbooks',exact:true}).locator('input[type=file]').first()
+            .setInputFiles([{name:'French.xlsm',mimeType:'application/vnd.ms-excel.sheet.macroEnabled.12',buffer:normal}]);
+        await upload.getByRole('button',{name:'Open',exact:true}).click();
+        await page.waitForFunction(()=>{const app=window.__offlineTestApp;return app._fixtureLanguageStarted&&app.ctBusy&&!app.ctActive;});
+        await page.evaluate(()=>{const app=window.__offlineTestApp,store=app.ctStorage(app.ctWorkspace.scope),getUnits=store.getUnits;app._fixtureIncomingReads=0;
+            store.getUnits=(...args)=>{app._fixtureIncomingReads++;return getUnits.apply(store,args);};});
+        await page.locator('.workspaceInitializationHeadingActions').getByRole('button',{name:'Cancel',exact:true}).click();
+        assert.equal(await page.evaluate(()=>window.__offlineTestApp._ctAbort.signal.aborted),true);
+        await page.evaluate(()=>window.__offlineTestApp._fixtureLanguageRelease());
+        await page.waitForFunction(()=>{const app=window.__offlineTestApp;return !app.ctBusy&&!app.ctUploading&&!app.workspaceInitializationActive;});
+        assert.deepEqual(await page.evaluate(()=>{const app=window.__offlineTestApp;return{active:app.ctActive,reads:app._fixtureIncomingReads,
+            stores:app._ctTestStores.size,files:app.ctUploadFiles.map(value=>value.file.name),notice:app.ctNotice,error:app.ctError};}),
+            {active:false,reads:0,stores:0,files:['French.xlsm'],notice:'Cancelled. Saved work is retained.',error:''});
+        await page.evaluate(()=>{const app=window.__offlineTestApp;app._cloud.selectLanguage=app._fixtureSelectLanguage;delete app._fixtureSelectLanguage;
+            delete app._fixtureLanguageRelease;app.ctCloseUpload();});
+        results.push('Cancel during held language selection clears busy/preparation, performs no incoming workbook reads, retains originals and disposes the unopened session');
         if (realHintWorkbook) {
             console.log('Validating supplied Thai localisation hints through Test Sheet Offline…');
             mkdirSync(disposableFolder, { recursive: true });

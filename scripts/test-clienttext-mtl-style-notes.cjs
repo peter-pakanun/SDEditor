@@ -191,7 +191,8 @@ test('keyword translations keep priority and shared notes pack before optional s
     keyword.fields[0].target='Approved keyword translation.';
     const result=await build(selected,units,{convoIndex,toneNotes:snapshot([note('character:'+A,'a'.repeat(300)),note('character:'+B,'b'.repeat(300))])});
     assert.equal(result.keywords[0].fields[0].translation,'Approved keyword translation.');assert.equal(styleNotes(result).length,2);
-    assert.equal(result.omitted.styleNotes,0);assert.ok(result.surrounding.omitted.contextBudget>0);bounds(result);
+    assert.equal(result.omitted.styleNotes,0);assert.equal(result.surrounding.selectedEntries,2);
+    assert.equal(result.surrounding.omitted.entryLimit,68);bounds(result);
 });
 
 test('context budget omissions retain note diagnostics without exceeding existing limits',async()=>{

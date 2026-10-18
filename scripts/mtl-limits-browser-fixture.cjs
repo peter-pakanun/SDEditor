@@ -55,6 +55,10 @@ app.component('app-notice',EditorComponents.Notice);window.__limitsApp=app.mount
         const configure=(mode='normal',role='admin')=>page.evaluate(({mode,role})=>window.__limitsApp.configure(mode,role),{mode,role});
         const open=async()=>{await page.locator('.mtlLimitsPanel summary').click();await page.waitForFunction(()=>window.__limitsApp.mtlLimitsState||window.__limitsApp.mtlLimitsUnsupported||window.__limitsApp.mtlLimitsLoadError);};
         assert.equal((await snapshot()).requests.length,0,'Closed panel does not request quotas');await open();assert.equal(await input('userDay').inputValue(),'50');
+        assert.equal(await page.getByRole('rowheader',{name:'Per user',exact:true}).count(),4);
+        assert.equal(await input('userDay').getAttribute('aria-label'),'Per user · requests / day limit');
+        assert.match(await page.locator('.mtlLimitsPanel > .settingsHelp').first().textContent(),/Per-user limits apply separately to each account\. Your usage below is for the signed-in Admin/);
+        checks.push('Per user row and input labels; signed-in Admin usage explained separately');
         assert.match(await page.locator('.mtlLimitsPanel').textContent(),/synthetic-admin/);assert.match(await page.locator('.mtlLimitsPanel').textContent(),/12 \/ 50/);
         assert.match(await page.locator('.mtlLimitsPanel').textContent(),/40 \/ 100/);assert.match(await page.locator('.mtlLimitsPanel').textContent(),/Asia\/Bangkok/);
         assert.equal(await save().isDisabled(),true);await input('userDay').fill('75');assert.equal(await save().isEnabled(),true);

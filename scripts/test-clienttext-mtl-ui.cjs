@@ -111,7 +111,7 @@ function pollingHarness(){
 }
 
 test('submitted context uses scoped saved neighboring translations and excludes active provisional text',()=>{
-    const h=harness(),neighbor=makeUnit('Neighbor source {0}','Workbook neighbor {0}');
+    const h=harness(),neighbor=makeUnit('Hello neighbor {0}','Workbook neighbor {0}');
     neighbor.id='synthetic-neighbor';neighbor.recordId='Neighbor';neighbor.fields[0].sourceCell='B3';neighbor.fields[0].targetCell='C3';h.app.ctUnits=[neighbor,h.original];
     h.app.ctSaved={[neighbor.id]:{saved:true,values:{[h.field.id]:'Authored neighbor {0}'}}};
     h.app.ctValues[h.field.id]='Unsaved selected {0}';h.app.ctMtlLive={synthetic:{text:'Unvalidated provisional {0}'}};

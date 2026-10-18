@@ -159,6 +159,50 @@ test('permission guards allow the assigned translator and cross-language configu
     }
 });
 
+test('configured Admin and Manager can edit an absent note from a local partial workbook in another selected language',async()=>{
+    for(const role of ['admin','manager'])for(const sheet of ['NPCs','NPCTextAudio']){
+        const h=harness();h.scope.groupId='local:partial-npc-export';h.app.ctUnits=[h.line];
+        if(sheet==='NPCs'){h.line.sheet=sheet;h.line.recordId=P;h.line.metadata={};h.line.fields[0].name='Name';}
+        Object.assign(h.app.cloudUser,{role,isAdmin:role==='admin',language:'German'});
+        assert.equal(h.app.ctToneIdentities.some(value=>value.key===K),true);
+        assert.equal(await h.app.ctToneOpen(K),true);assert.equal(h.app.ctToneAllowed,true);
+        assert.equal(h.app.ctToneCurrent.loaded,true);assert.equal(h.app.ctToneCurrent.saved.revision,0);assert.equal(h.app.ctToneState,'');
+        h.app.ctToneEdited('Synthetic explicit guidance');assert.equal(h.app.ctToneCanSave,true);assert.equal(await h.app.ctToneSave(),true);
+        assert.equal(h.records.get(K).text,'Synthetic explicit guidance');assert.equal(h.requests[0].body,undefined);
+    }
+});
+
+test('initial load failures explain the disabled editor safely and successful retry enables an absent note',async()=>{
+    for(const [status,code,message]of [[401,'SESSION_EXPIRED',/session expired/i],[403,'LANGUAGE_FORBIDDEN',/server denied access/i],
+        [404,'BRANCH_NOT_FOUND',/branch is unavailable/i],[404,undefined,/server update/i],[400,'MTL_TONE_NOTE_INVALID',/identity or workspace scope/i],
+        [429,undefined,/temporarily limited/i],[503,undefined,/service is unavailable/i],[undefined,undefined,/check your connection/i]]){
+        const h=harness();h.app._cloud.request=async()=>{throw Object.assign(new Error('Do not expose synthetic-private-payload'),{status,code});};
+        assert.equal(await h.app.ctToneOpen(K),false);assert.equal(h.app.ctToneAllowed,true);assert.equal(h.app.ctToneCurrent.loaded,false);
+        assert.equal(h.app.ctToneCanSave,false);assert.match(h.app.ctToneState,message);assert.doesNotMatch(h.app.ctToneState,/synthetic-private-payload/);
+        assert.deepEqual(h.app.ctToneNotesSnapshot([K]).entries,[]);
+        h.app._cloud.request=h.request;assert.equal(await h.app.ctToneLoad(K),true);assert.equal(h.app.ctToneState,'');
+        assert.equal(h.app.ctToneCurrent.loaded,true);assert.equal(h.app.ctToneCurrent.saved.revision,0);
+    }
+    const h=harness();h.app._cloud.request=async()=>({scope:N.scope(h.scope),note:{identityKey:K,text:'',revision:-1}});
+    assert.equal(await h.app.ctToneOpen(K),false);assert.match(h.app.ctToneState,/incompatible shared tone-note response/);
+    assert.equal(h.app.ctToneCurrent.loaded,false);assert.deepEqual(h.app.ctToneNotesSnapshot([K]).entries,[]);
+});
+
+test('disabled permission states identify account, language and role problems without issuing shared requests',async()=>{
+    for(const [change,message]of [[h=>h.app.cloudSignedIn=false,/Sign in with access/],
+        [h=>h.scope.accountId='guest',/guest profile/],[h=>h.app.lang='German',/Workbook language: Thai\. Selected language: German\./],
+        [h=>h.app.cloudUser.language='German',/assigned language/],[h=>Object.assign(h.app.cloudUser,{role:'admin',isAdmin:false}),/check your role/]]){
+        const h=harness();change(h);assert.equal(await h.app.ctToneOpen(K),false);assert.equal(h.app.ctToneAllowed,false);
+        assert.match(h.app.ctToneState,message);assert.equal(h.requests.length,0);assert.equal(h.app.ctToneCanSave,false);
+    }
+    const h=harness();h.scope.groupId='local:test:mismatch';h.app.lang='German';
+    Object.assign(h.app.cloudUser,{role:'admin',isAdmin:true});assert.equal(await h.app.ctToneOpen(K),false);
+    assert.match(h.app.ctToneState,/Workbook language: Thai\. Selected language: German\./);
+    assert.match(h.app.ctToneState,/Choose Thai in Settings before reopening this test/);
+    assert.match(h.app.ctToneState,/Changing language closes the current test\./);
+    assert.equal(h.app.lang,'German');assert.equal(h.scope.language,'Thai');assert.equal(h.requests.length,0);
+});
+
 test('offline editing has no false save or usable stale snapshot and performs no writes',async t=>{
     const original=Object.getOwnPropertyDescriptor(globalThis,'navigator');let online=true;
     Object.defineProperty(globalThis,'navigator',{configurable:true,value:{get onLine(){return online;}}});t.after(()=>{if(original)Object.defineProperty(globalThis,'navigator',original);else delete globalThis.navigator;});

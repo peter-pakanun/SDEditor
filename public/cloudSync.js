@@ -184,6 +184,12 @@
       }, ctx, notify);
       if (!this.permissionsCurrent(ctx, this.state, allowSelectedLanguageChange)) throw Object.assign(new Error('Account or language access changed'), { stale: true });
     }
+    matchesLocalSettings(payload) {
+      const profile = this.state?.profiles[this.state.activeProfile];
+      return !!profile && !this.localSaveCount && equal(profile.settings, preferences(payload))
+        && profile.clipboard === String(payload.editorClipboard || '')
+        && equal(profile.dictionaries[payload.lang]?.entries || [], payload.dictionary || []);
+    }
     saveLocal(payload, contextLanguage = payload.lang, { captured = false } = {}) {
       const requested = this.context();
       // UI saves already own a detached snapshot. Direct callers retain the

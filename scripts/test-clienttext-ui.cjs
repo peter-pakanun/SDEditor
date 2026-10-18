@@ -3713,8 +3713,74 @@ test('cached ClientText opening uses the shared initialization owner and skips w
     app._ctWorker={parseWorkbook(){throw Error('Cache hit must not parse');}};
     assert.equal(await app.ctActivate(scope,await f.store.getMetadata(scope)),true);
     assert.equal(dictionary.length,1);assert.equal(app.workspaceInitializationActive,false);assert.equal(app.ctInitializing,false);assert.equal(app.ctSheetFilter,'');
-    assert.deepEqual(app.workspaceInitializationRows.map(row=>row.label),['Preserving unsaved edits','Loading cached translations','Preparing context references','Preparing Dictionary matches','Opening ClientText workspace']);
+    assert.deepEqual(app.workspaceInitializationRows.map(row=>row.label),['Preserving unsaved edits','Selecting workbook language','Loading cached translations','Preparing context references','Preparing Dictionary matches','Opening ClientText workspace']);
     assert.equal(app.workspaceInitializationRows.every(row=>row.status==='done'),true);assert.equal(app.ctUnits[0].id,original.id);
+});
+test('cached and temporary workbooks select their language and settle watchers before incoming reads or activation',async()=>{
+    for(const temporary of [false,true]){
+        const selected={...scope,...(temporary?{groupId:'local:test:language',versionId:'local:test:version'}:{})},f=fixture(),started=deferred(),pending=deferred();
+        await f.store.import(selected,{units:[unit()],assets:[asset]});let reads=0,settled=false,language='German',watch=false;
+        const store={...f.store,async getUnits(captured,options){reads++;assert.equal(language,selected.language);assert.equal(settled,true);assert.equal(app.ctActive,false);return f.store.getUnits(captured,options);}},
+            {app,mixin}=initializationHarness({_ctStore:store,_ctTestStores:new Map(temporary?[[selected.groupId,store]]:[])});
+        Object.defineProperty(app,'lang',{get:()=>language,set:value=>{language=value;watch=true;}});
+        app.$nextTick=async()=>{if(watch){watch=false;mixin.watch.lang.call(app);assert.equal(app.ctActive,false);app._cloudLanguageSwitch=pending.promise;started.resolve();}};
+        const opening=app.ctActivate(selected,{});await started.promise;
+        assert.equal(app.lang,'Thai');assert.equal(app.ctActive,false);assert.equal(app.ctWorkspace.scope.language,'Thai');assert.equal(app.ctUnits.length,0);assert.equal(reads,0);
+        settled=true;pending.resolve(true);assert.equal(await opening,true);assert.equal(reads,1);assert.equal(app.ctActive,true);assert.equal(app.lang,'Thai');
+        assert.equal(app.ctWorkspace.scope.language,'Thai');assert.equal(app.ctBusy,false);
+    }
+});
+test('language selection failure prevents workspace reads and preserves its rolled-back preference',async()=>{
+    const {app,mixin}=initializationHarness({lang:'German'});let reads=0;
+    app._ctStore={async getUnits(){reads++;return[];},async getSaved(){reads++;return{};}};
+    app.$nextTick=async()=>{if(app.lang==='Thai'){mixin.watch.lang.call(app);app.lang='German';app._cloudLanguageSwitch=Promise.resolve(false);}};
+    assert.equal(await app.ctActivate(scope,{}),false);assert.equal(reads,0);assert.equal(app.lang,'German');assert.equal(app.ctWorkspace.scope.language,'Thai');
+    assert.equal(app.ctActive,false);assert.equal(app.ctBusy,false);assert.match(app.ctError,/Could not select the workbook language/);
+    assert.equal(app.workspaceInitializationActive,false);
+});
+test('draft preservation failure leaves the outgoing language and workspace intact',async()=>{
+    const {app}=initializationHarness({lang:'German'}),outgoing=app.ctWorkspace;let reads=0;
+    app.ctFlushDraft=async()=>false;app._ctStore={async getUnits(){reads++;return[];}};
+    assert.equal(await app.ctActivate(scope,{}),false);assert.equal(app.lang,'German');assert.equal(app.ctWorkspace,outgoing);
+    assert.equal(app.ctActive,true);assert.equal(reads,0);
+});
+test('cancellation during language selection cannot overwrite a newer account, preference or workspace',async()=>{
+    const {app}=initializationHarness({lang:'German'}),started=deferred(),pending=deferred();let reads=0;
+    app._ctStore={async getUnits(){reads++;return[];},async getSaved(){reads++;return{};}};
+    app.$nextTick=async()=>{if(app.ctBusy&&app.lang===scope.language){app._cloudLanguageSwitch=pending.promise;started.resolve();}};
+    const opening=app.ctActivate(scope,{});await started.promise;app.ctFence();app.managedCatalogScope='new-account';app.lang='Polish';
+    const replacement=app.ctWorkspace={scope:{...scope,accountId:'new-account',language:'Polish'}};app.ctBusy=true;
+    pending.resolve(true);assert.equal(await opening,false);assert.equal(reads,0);assert.equal(app.lang,'Polish');assert.equal(app.ctWorkspace,replacement);
+    assert.equal(app.ctBusy,true);assert.equal(app.ctError,'');
+});
+test('Cancel during language selection releases its own busy state without reading or activating the workbook',async()=>{
+    for(const temporary of [false,true]){
+        const selected={...scope,...(temporary?{groupId:'local:test:cancel-language',versionId:'local:test:version'}:{})},
+            store={async getUnits(){reads++;return[];},async getSaved(){reads++;return{};}},
+            {app}=initializationHarness({lang:'German',_ctStore:store,_ctTestStores:new Map(temporary?[[selected.groupId,store]]:[])}),
+            started=deferred(),pending=deferred();let reads=0;
+        app.$nextTick=async()=>{if(app.ctBusy&&app.lang===scope.language){app._cloudLanguageSwitch=pending.promise;started.resolve();}};
+        const opening=app.ctActivate(selected,{});await started.promise;assert.equal(app.ctBusy,true);app.ctCancel();
+        pending.resolve(true);assert.equal(await opening,false);assert.equal(reads,0);assert.equal(app.ctBusy,false);assert.equal(app.ctActive,false);
+        assert.equal(app.workspaceInitializationActive,false);assert.equal(app.ctInitializing,false);assert.equal(app.ctError,'');assert.match(app.ctNotice,/Cancelled/);
+    }
+});
+test('a superseding controller retains its busy state when the old language selection completes',async()=>{
+    const {app}=initializationHarness({lang:'German'}),started=deferred(),pending=deferred();let reads=0;
+    app._ctStore={async getUnits(){reads++;return[];}};app.$nextTick=async()=>{if(app.ctBusy&&app.lang===scope.language){app._cloudLanguageSwitch=pending.promise;started.resolve();}};
+    const opening=app.ctActivate(scope,{});await started.promise;app._ctAbort=new AbortController();app.ctBusy=true;
+    pending.resolve(true);assert.equal(await opening,false);assert.equal(reads,0);assert.equal(app.ctBusy,true);assert.equal(app.ctError,'');
+});
+test('a superseding controller also blocks old cached reads from publishing or clearing its busy state',async()=>{
+    const {app}=initializationHarness({lang:scope.language}),started=deferred(),pending=deferred();
+    app._ctStore={async getUnits(){started.resolve();await pending.promise;return[unit()];},async getSaved(){return{};}};
+    const opening=app.ctActivate(scope,{});await started.promise;app._ctAbort=new AbortController();app.ctBusy=true;pending.resolve();
+    assert.equal(await opening,false);assert.equal(app.ctActive,false);assert.equal(app.ctUnits.length,0);assert.equal(app.ctBusy,true);assert.equal(app.ctError,'');
+});
+test('an assigned Translator cannot select another language by activating an online cached workbook',async()=>{
+    const {app}=initializationHarness({lang:'German',cloudSignedIn:true,cloudCanAccessAllLanguages:false,cloudUser:{id:scope.accountId,role:'translator',language:'German'}});let reads=0;
+    app._ctStore={async getUnits(){reads++;return[];}};const outgoing=app.ctWorkspace;
+    assert.equal(await app.ctActivate(scope,{}),false);assert.equal(app.lang,'German');assert.equal(app.ctWorkspace,outgoing);assert.equal(reads,0);
 });
 test('late context reference preparation cannot publish an index into a replacement workspace',async()=>{
     const f=fixture(),original=unit();await f.store.import(scope,{units:[original],assets:[asset]});
@@ -4133,7 +4199,7 @@ test('offline test activation, drafts, save/history and exit use memory and rest
         _ctTestStores:new Map([[testScope.groupId,store]]),_ctStore:new Proxy({}, {get(){assert.fail('Test operation must not access durable storage');}})}),{app,mixin}=h;
     app.ensureDictionarySnapshot=()=>assert.fail('Test activation must not load/sync Dictionary');
     app.managedOnlineAvailable=true;app.cloudCanAccessAllLanguages=true;app._cloud={request(){assert.fail('Test operation must not request cloud data');}};
-    assert.equal(await app.ctActivate(testScope,metadata),true);assert.equal(app.lang,'Thai');assert.equal(app.ctOfflineTest,true);assert.ok(app._ctNpcIndex);assert.ok(app._ctConvoIndex);
+    assert.equal(await app.ctActivate(testScope,metadata),true);assert.equal(app.lang,'French');assert.equal(app.ctOfflineTest,true);assert.ok(app._ctNpcIndex);assert.ok(app._ctConvoIndex);
     assert.ok(app.ctSelectedFilters.includes('unchanged'));assert.equal(mixin.computed.ctDictionaryReady.call(app),false);
     for(const method of ['ctFlushDraft','ctLoadHistory','ctLoadMemory','ctFlushCommentDraft'])app[method]=mixin.methods[method].bind(app);
     await app.ctSelect(app.ctUnits[0],true);app.ctValues[fieldId]='Exact @ text\\n\r\n';app.ctDraftDirty=true;
