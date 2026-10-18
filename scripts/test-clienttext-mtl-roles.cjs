@@ -393,6 +393,63 @@ test('ambiguous browsing-group participants need exact family reference evidence
     assert.equal(key(verified,'speaker'),'character:'+A);
 });
 
+async function ambiguousRowCharacter({sheet='NPCTalkDialogueTextAudio',id='Synthetic_Spirit=NoLore',metadata={Character:A},extra=[],change=()=>{}}={}) {
+    const selected=unit(sheet,id,[field('Text','Synthetic selected dialogue.')],metadata),
+        first=npc(P,'Same Synthetic Name'),second=npc(Q,'Same Synthetic Name'),units=[selected,first,second,...extra],
+        npcIndex=await N.buildNpcIndex(units,{yield:async()=>{}}),parentKey=[...npcIndex.groupByKey].find(([,group])=>group.npcUnits.includes(first))[0],
+        family={familyKey:'Synthetic',parentKey,ambiguous:false,npcEvidence:{participants:[{key:parentKey,references:[P,Q]}],unresolved:[],ambiguous:[]}},
+        convoIndex={memberships:new Map([[selected.id,family]])};
+    change({selected,units,npcIndex,family,convoIndex});
+    return {selected,units,npcIndex,convoIndex,result:await build(selected,units,{npcIndex,convoIndex})};
+}
+
+test('one canonical row Character can tentatively speak despite only an ambiguous NPC group; condition suffixes never identify listeners',async()=>{
+    for(const sheet of ['NPCTalkDialogueTextAudio','NPCTalkDialogueTextAudio_Gender'])for(const suffix of ['', '=NoLore','=HasLore']){
+        const {result}=await ambiguousRowCharacter({sheet,id:'Synthetic_Spirit'+suffix,metadata:{Character:A,AudioFile:'UnrelatedSynthetic/clip.ogg'}});
+        assert.equal(result.roleHints.order.status,'suppressed');assert.equal(result.roleHints.order.reason,'ambiguous-npc-group-identity');
+        assert.deepEqual(result.roleHints.order.reasons,['ambiguous-npc-group-identity']);
+        assert.equal(result.roleHints.speaker.status,'suggested');assert.equal(key(result,'speaker'),'character:'+A);
+        assert.equal(result.roleHints.speaker.confidence,'heuristic');assert.equal(result.roleHints.speaker.priority,1);
+        assert.equal(result.roleHints.speaker.evidence[0].kind,'row-character-convention');
+        assert.equal(result.roleHints.speaker.evidence[0].rule,'single-canonical-character-speaks');
+        assert.equal(result.roleHints.speaker.evidence[0].independentOfParticipantOrder,true);
+        assert.equal(result.roleHints.listener.status,'unknown');assert.equal(key(result,'listener'),undefined);
+        if(suffix){assert.equal(result.roleHints.idSuffix.status,'condition');assert.equal(result.roleHints.idSuffix.identityKey,undefined);}
+        bounds(result);
+    }
+});
+
+test('row-character fallback rejects unresolved, conflicting, filtered, suffix-bearing and unverified evidence',async()=>{
+    const cases=[
+        {metadata:{}},{metadata:{Character:A+','+B}},{metadata:{Character:A+','+A}},{metadata:{Character:'Synthetic Mage'}},
+        {metadata:{Character:'Metadata/Characters/Unknown'}},{metadata:{Character:A,character:B}},
+        {metadata:{Character:A,NPC:P}},{metadata:{Character:A,npc:P}},{metadata:{Character:A,'Related Character':B}},
+        ...['Speaker','Speaking Character','Listener','Listening Character','Addressee'].flatMap(name=>['',P,'Unknown'].map(value=>({metadata:{Character:A,[name]:value}}))),
+        ...['Character Filter','Prohibited Character Filter'].flatMap(name=>['',A,B].map(value=>({metadata:{Character:A,[name]:value}}))),
+        ...['Unknown','IntFour','StrFour','Scout','NoLore=HasLore','', ' '.repeat(300)+'NoLore'].map(suffix=>({id:'Synthetic='+suffix})),
+        ...['NPCTextAudio','CharacterTextAudio','ClientStrings'].map(sheet=>({sheet})),
+        {change:({family})=>{family.ambiguous=true;}},{change:({family})=>{delete family.ambiguous;}},
+        {change:({family})=>{family.npcEvidence.unresolved=['Unknown'];}},
+        {change:({family})=>{family.npcEvidence.ambiguous=['Unknown'];}},
+        {change:({family})=>{family.npcEvidence.participants.push({key:'other',references:[]});}},
+        {change:({selected,npcIndex})=>npcIndex.memberships.set(selected.id,new Map([['another-group',{}]]))},
+        {extra:[npc(A,'Cross-table collision')]}
+    ];
+    for(const options of cases){
+        const {result}=await ambiguousRowCharacter(options);
+        assert.ok(!result.roleHints?.speaker.evidence?.some(value=>value.kind==='row-character-convention'),JSON.stringify(options));
+        assert.ok(!result.roleHints?.speaker.evidence?.some(value=>value.rule==='single-canonical-character-speaks'));
+    }
+});
+
+test('all order suppression reasons survive the first ambiguous-group failure and prevent the fallback',async()=>{
+    const {result}=await ambiguousRowCharacter({metadata:{Character:A+','+B+',Metadata/Characters/Unknown'}});
+    assert.equal(result.roleHints.order.reason,'ambiguous-npc-group-identity');
+    assert.deepEqual(result.roleHints.order.reasons,['ambiguous-npc-group-identity','unresolved-participant','unordered-reference-list']);
+    assert.equal(result.roleHints.speaker.status,'unknown');assert.equal(result.roleHints.listener.status,'unknown');
+    assert.ok(result.roleHints.unresolved.some(value=>value.reason==='identity-not-loaded-or-known'));
+});
+
 test('singleton conversation fallback matches exact NPC identity rather than its shared-name browsing group',async()=>{
     const first=npc(P,'Synthetic Guard'),second=npc(Q,'Synthetic Guard');first.fields.push(field('Short Name','First Guard'));
     const selected=line('Selected',{Speaker:P},30),own=line('Own',{Speaker:'First Guard'},29),other=line('Other',{Speaker:Q},31),

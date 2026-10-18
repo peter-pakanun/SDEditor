@@ -1,6 +1,6 @@
 'use strict';
 // Actual API serializers/storage against isolated in-memory SQLite. No config
-// loaders, environment files, HTTP authentication or provider calls are used.
+// loaders, environment files, HTTP authentication or live provider calls are used.
 const {test}=require('node:test'),assert=require('node:assert/strict'),{join}=require('node:path'),{pathToFileURL}=require('node:url');
 const {DatabaseSync}=require('node:sqlite'),N=require('../public/clientTextToneNotes.js'),UI=require('../public/clientTextToneNotesUi.js');
 const apiModule=()=>import(pathToFileURL(join(__dirname,'../../SDEditor-API/src/mtl-tone-notes.js')).href);
@@ -56,4 +56,50 @@ test('actual API stale conflicts and lost-ack replay preserve drafts and the ori
     assert.equal(await h.app.ctToneSave(),true);assert.equal(h.app.ctToneCurrent.draft,'My edit');assert.equal(h.app.ctToneCurrent.conflict.revision,2);
     assert.deepEqual(h.requests.filter(value=>value.body).map(value=>value.body),[body,body]);assert.deepEqual(h.app.ctToneNotesSnapshot([K]).entries,[]);
     h.app.ctToneResolveConflict(true);assert.equal(await h.app.ctToneSave(),true);assert.equal(h.app.ctToneCurrent.saved.revision,3);
+});
+
+test('a guarded canonical-character suggestion refreshes only its saved note and reaches actual API admission and fake provider input',async t=>{
+    const h=await fixture(t),S=require('../public/clientTextState.js'),Context=require('../public/clientTextMtlContext.js'),Npc=require('../public/clientTextNpcIndex.js'),
+        api=name=>import(pathToFileURL(join(__dirname,'../../SDEditor-API/src',name)).href),
+        {migrateMtlQuota}=await api('mtl-quota.js'),{createMtlService}=await api('mtl-service.js'),{createMtlProvider,MTL_PROMPT_VERSION}=await api('mtl-provider.js'),
+        character='Metadata/Characters/Dex/DexFourb',identityKey='character:'+character,
+        make=(sheet,recordId,source,metadata={})=>S.normalizeUnit({role:'normal',sheet,recordId,metadata,
+            fields:[{id:'text',name:sheet==='NPCs'?'Name':'Text',kind:'text',source,target:''}]}),
+        selected=make('NPCTalkDialogueTextAudio','Synthetic_Spirit_Dex4b=NoLore','Synthetic source {0}',{Character:character}),
+        first=make('NPCs','Metadata/NPC/Synthetic/First','Same Synthetic Name'),second=make('NPCs','Metadata/NPC/Synthetic/Second','Same Synthetic Name'),
+        units=[selected,first,second],npcIndex=await Npc.buildNpcIndex(units,{yield:async()=>{}}),parentKey=[...npcIndex.groupByKey.keys()][0],
+        convoIndex={memberships:new Map([[selected.id,{familyKey:'Synthetic',parentKey,ambiguous:false,
+            npcEvidence:{participants:[{key:parentKey,references:[first.recordId,second.recordId]}],unresolved:[],ambiguous:[]}}]])};
+    Object.assign(h.app,{ctCurrentUnit:selected,ctSelection:selected.id,ctUnits:units,_ctNpcIndex:npcIndex,_ctConvoIndex:convoIndex});
+    assert.equal(await h.app.ctToneOpen(identityKey),true);assert.equal(h.app.ctToneCurrent.saved.revision,0);
+    h.app.ctToneEdited('Synthetic saved voice guidance');assert.equal(await h.app.ctToneSave(),true);
+    h.app.ctToneEdited('PRIVATE UNSAVED GUIDANCE');h.requests.length=0;
+    const keys=N.roleKeys(h.app);assert.deepEqual(keys,[identityKey]);await h.app.ctToneNotesPrepare(keys);
+    assert.equal(h.requests.length,1);assert.equal(new URL(h.requests[0].path,'https://synthetic.invalid').searchParams.get('identityKey'),identityKey);
+    const context=Context.build({unit:selected,field:selected.fields[0],units,npcIndex,convoIndex,scope:h.scope,toneNotes:h.app.ctToneNotesSnapshot(keys)});
+    assert.equal(context.roleHints.speaker.status,'suggested');assert.equal(context.roleHints.listener.status,'unknown');
+    assert.deepEqual(context.roleHints.order.reasons,['ambiguous-npc-group-identity']);
+    assert.deepEqual(context.sharedToneNotes.entries,[{identityKey,revision:1,text:'Synthetic saved voice guidance',roles:['speaker']}]);
+    assert.ok(!JSON.stringify(context).includes('PRIVATE UNSAVED GUIDANCE'));assert.equal(h.app.ctToneCurrent.draft,'PRIVATE UNSAVED GUIDANCE');
+    migrateMtlQuota(h.db);let calls=0,wire;
+    const provider=createMtlProvider({config:{enabled:true},tokenProvider:async()=> 'synthetic-test-only',transport:async(_url,options)=>{
+        calls++;wire=JSON.parse(options.body);const text=JSON.stringify({translation:'Synthetic target {0}'}),
+            response={id:'resp_synthetic',status:'completed',output:[{type:'message',content:[{type:'output_text',text}]}]};
+        return new Response('data: '+JSON.stringify({type:'response.completed',response})+'\n\n',{headers:{'Content-Type':'text/event-stream'}});
+    }}),service=createMtlService({db:h.db,clock:()=>1800000000000,config:{enabled:true},provider,toneNotes:h.service}),
+        input={requestId:'synthetic-guarded-character',userId:'synthetic',consentVersion:'mtl-v2',scope:{...N.scope(h.scope),local:true},
+            source:selected.fields[0].source,field:{id:selected.fields[0].id,name:'Text',kind:'text'},context},authorize=async()=>{};
+    try{
+        const result=await service.generate(input,{authorize});assert.equal(calls,1);assert.equal(MTL_PROMPT_VERSION,'clienttext-mtl-v6');
+        assert.deepEqual(JSON.parse(wire.input[0].content).context.sharedToneNotes,context.sharedToneNotes);
+        assert.match(wire.instructions,/row-character-convention evidence is a tentative speaker suggestion/);
+        assert.match(wire.instructions,/Keep the listener unknown/);assert.equal(result.provenance.promptVersion,MTL_PROMPT_VERSION);
+        assert.deepEqual(result.provenance.sharedToneNotes.entries,[{identityKey,revision:1,roles:['speaker']}]);
+        h.service.save('synthetic',{scope:N.scope(h.scope),identityKey,text:'Synthetic peer guidance',baseRevision:1,mutationId:'synthetic-peer'});
+        assert.deepEqual(await service.generate(input,{authorize}),result);assert.equal(calls,1);
+        await assert.rejects(service.generate({...input,requestId:'synthetic-stale-guidance'},{authorize}),{code:'MTL_TONE_NOTES_CHANGED'});
+        const forged=structuredClone(context);forged.sharedToneNotes.entries[0].roles=['listener'];
+        await assert.rejects(service.generate({...input,requestId:'synthetic-forged-listener',context:forged},{authorize}),{code:'MTL_TONE_NOTE_INVALID'});
+        assert.equal(calls,1);assert.equal(h.db.prepare('SELECT COUNT(*) n FROM mtl_generation_jobs').get().n,1);
+    }finally{await service.shutdown();}
 });

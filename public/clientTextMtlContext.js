@@ -217,44 +217,46 @@
                 }
             }
         }
-        const participants = [], participantSet = new Set(); let unreliable = '';
+        const participants = [], participantSet = new Set(), unreliable = new Set();
+        const suppressOrder = reason => { if (reason) unreliable.add(reason); };
         const addActor = (actor, origin) => { if (actor && !participantSet.has(actor.key)) { participants.push({ actor, origin }); participantSet.add(actor.key); } };
         const family = options.convoIndex?.memberships?.get(unit.id), membership = options.npcIndex?.memberships?.get(unit.id), npcColumns = metadata.filter(([name]) => name === 'NPC'),
             characterColumns = metadata.filter(([name]) => name === 'Character');
-        if (family?.ambiguous || family?.npcEvidence?.unresolved?.length || family?.npcEvidence?.ambiguous?.length) unreliable = 'ambiguous-conversation-evidence';
+        if (family?.ambiguous || family?.npcEvidence?.unresolved?.length || family?.npcEvidence?.ambiguous?.length) suppressOrder('ambiguous-conversation-evidence');
         if (family?.parentKey && family.parentKey !== 'unassigned') {
             const references = family.npcEvidence?.participants?.find(value => value.key === family.parentKey)?.references,
                 parent = resolver.group(family.parentKey, references);
             if (parent.actor) addActor(parent.actor, 'conversation-context');
-            else unreliable ||= parent.reason;
+            else suppressOrder(parent.reason);
         }
         if (!family) {
             const members = [...(membership || [])];
-            if (members.length > 1) unreliable ||= 'unordered-npc-links';
+            if (members.length > 1) suppressOrder('unordered-npc-links');
             for (const [key, evidence] of members) {
                 const resolved = resolver.group(key, evidence?.references);
                 if (resolved.actor) addActor(resolved.actor, 'npc-index-context');
-                else unreliable ||= resolved.reason;
+                else suppressOrder(resolved.reason);
             }
         }
         for (const [columns, kind] of [[characterColumns, 'character-reference'], [npcColumns, 'npc-reference']]) {
             const resolvedKeys = new Set();
             for (const [, raw] of columns) for (const reference of referenceList(raw)) {
                 const resolved = resolver.resolve(reference, { names: false });
-                if (!resolved.actor) { unreliable ||= 'unresolved-participant'; unresolved('participant', kind, reference, resolved.reason); }
+                if (!resolved.actor) { suppressOrder('unresolved-participant'); unresolved('participant', kind, reference, resolved.reason); }
                 else { resolvedKeys.add(resolved.actor.key); addActor(resolved.actor, kind); }
             }
-            if (resolvedKeys.size > 1) unreliable ||= 'unordered-reference-list';
+            if (resolvedKeys.size > 1) suppressOrder('unordered-reference-list');
         }
-        if (participants.length > 2) unreliable ||= 'more-than-two-participants';
+        if (participants.length > 2) suppressOrder('more-than-two-participants');
         const artwork = new Map(), npcRefs = referenceList(unit.metadata?.NPC), override = unit.sheet.replace(/_Gender$/, '') === 'NPCTextAudio' ? registry.overrides?.[unit.recordId] : null;
         for (const { actor } of participants) for (const id of override?.npcs?.some(path => actor.references.includes(path) && npcRefs.includes(path)) ? [override.id] : actor.art) {
-            if (artwork.has(id) && artwork.get(id) !== actor.key) unreliable ||= 'merged-portrait-identities';
+            if (artwork.has(id) && artwork.get(id) !== actor.key) suppressOrder('merged-portrait-identities');
             artwork.set(id, actor.key);
         }
-        hints.order = { status: unreliable ? 'suppressed' : participants.length ? 'reliable' : 'unavailable',
+        hints.order = { status: unreliable.size ? 'suppressed' : participants.length ? 'reliable' : 'unavailable',
             kind: family?.parentKey && family.parentKey !== 'unassigned' ? 'conversation-context-then-row-references' : !family && membership?.size ? 'npc-index-then-row-references' : 'row-references',
-            participantKeys: participants.slice(0, 4).map(value => value.actor.key), ...(unreliable ? { reason: unreliable } : {}) };
+            participantKeys: participants.slice(0, 4).map(value => value.actor.key),
+            ...(unreliable.size ? { reason: [...unreliable][0], reasons: [...unreliable] } : {}) };
         for (const [name, raw] of metadata.filter(([name]) => /^(?:Prohibited )?Character Filter$/i.test(name)).slice(0, 4)) {
             const refs = referenceList(raw), keys = refs.map(reference => resolver.resolve(reference, { names: false }).actor?.key), complete = refs.length > 0 && refs.length <= 4 && keys.every(Boolean);
             hints.constraints.push({ field: name, kind: 'listener-constraint', ...rawEvidence(raw), identityKeys: keys.filter(Boolean).slice(0, 4), complete,
@@ -262,7 +264,7 @@
         }
         const proposals = participants.length === 2 ? { listener: participants[0].actor.key, speaker: participants[1].actor.key }
             : participants.length === 1 ? { speaker: participants[0].actor.key } : {};
-        let suppress = !!unreliable || suffixBlocksHeuristics || [...blocked].some(role => !hints[role].identityKey);
+        let suppress = !!unreliable.size || suffixBlocksHeuristics || [...blocked].some(role => !hints[role].identityKey);
         for (const [role, key] of Object.entries(proposals)) {
             if (hints[role].identityKey && hints[role].identityKey !== key) { suppress = true; conflict(role, 'portrait-convention-disagrees-with-stronger-role', key); }
             const opposite = role === 'speaker' ? 'listener' : 'speaker';
@@ -283,6 +285,28 @@
                 }
             }
         }
+        // A single canonical row Character is an independent, tentative speaker
+        // convention. An unresolved NPC variant group still cannot identify its
+        // listener or establish portrait order. Never discard another blocker.
+        const rowCharacters = metadata.filter(([name]) => /^Character$/i.test(name.trim())),
+            characterPath = rowCharacters.length === 1 && rowCharacters[0][0] === 'Character' ? clean(rowCharacters[0][1]).trim() : '',
+            rowActor = participants.length === 1 && participants[0].origin === 'character-reference' ? participants[0].actor : null;
+        if (/^NPCTalkDialogueTextAudio(?:_Gender)?$/.test(unit.sheet)
+            && family?.ambiguous === false && family.parentKey && family.parentKey !== 'unassigned'
+            && (family.npcEvidence?.participants?.length || 0) <= 1
+            && ![...(membership?.keys() || [])].some(key => key !== family.parentKey)
+            && unreliable.size === 1 && unreliable.has('ambiguous-npc-group-identity')
+            && !blocked.size && !hints.constraints.length && !hints.conflicts.length && !hints.unresolved.length
+            && hints.speaker.status === 'unknown' && hints.listener.status === 'unknown'
+            && (!hints.idSuffix || hints.idSuffix.status === 'condition' && !hints.idSuffix.truncated && /^(?:HasLore|NoLore)$/i.test(hints.idSuffix.raw.trim()))
+            && !metadata.some(([name]) => /^(?:NPC|Related ?Character|Speaker|Speaking Character|Listener|Listening Character|Addressee|(?:Prohibited )?Character Filter)$/i.test(name.trim()))
+            && characterPath.startsWith('Metadata/Characters/') && rowActor?.kind === 'character' && rowActor.key === 'character:' + characterPath
+            && wellFormed(rowActor.key) && !/[\u0000-\u001f\u007f-\u009f]/u.test(rowActor.key) && new TextEncoder().encode(rowActor.key).length <= 1024) {
+            hints.speaker = { status: 'suggested', identityKey: rowActor.key, confidence: 'heuristic', priority: 1,
+                evidence: [{ kind: 'row-character-convention', rule: 'single-canonical-character-speaks', field: 'Character',
+                    ...rawEvidence(characterPath), independentOfParticipantOrder: true, unresolvedNpcGroup: family.parentKey }] };
+            used.add(rowActor.key);
+        }
         for (const { actor } of participants.slice(0, 4)) used.add(actor.key);
         for (const key of [...used].slice(0, 6)) {
             const actor = actors.get(key);
@@ -291,7 +315,7 @@
                 ...(actor.recordId ? { recordId: actor.recordId } : { references: actor.references.slice(0, 4) }) });
         }
         if (!metadata.some(([name]) => roleColumns.speaker.test(name) || roleColumns.listener.test(name)) && !participants.length
-            && !hints.constraints.length && !hints.idSuffix && !hints.unresolved.length && !unreliable) return null;
+            && !hints.constraints.length && !hints.idSuffix && !hints.unresolved.length && !unreliable.size) return null;
         return { hints, actors, explicit };
     }
     function toneExcerpt(unit, field, saved, limit, allowTranslation = true) {

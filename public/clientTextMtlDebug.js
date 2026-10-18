@@ -73,6 +73,44 @@
         if(section==='request'){delete shown.prompt;delete shown.context;delete shown.response;return JSON.stringify(shown,null,2);}
         const value=shown[section];return value===undefined?'':JSON.stringify(value,null,2);
     }
+    // Start from the displayed selection, never the raw request/response. Extra
+    // transport or reasoning fields are excluded even in malformed diagnostics.
+    function downloadValue(value) {
+        if (Array.isArray(value)) return value.map(downloadValue).filter(item => item !== undefined);
+        if (!value || typeof value !== 'object') return value;
+        if (typeof value.type === 'string' && /^reasoning(?:[_-](?:text|content|summary(?:[_-](?:text|part))?))?$/i.test(value.type)) return undefined;
+        return Object.fromEntries(Object.entries(value).filter(([key]) => !/^(?:headers|requestheaders|responseheaders|authorization|proxyauthorization|cookie|setcookie|password|secret|credentials?|(?:access|refresh|id|session)?token|sessionid|x?apikey|reasoning(?:text|content|summary(?:text)?)?|encryptedcontent|raw(?:request|response|body))$/i.test(key.replace(/[_-]/g, '')))
+            .map(([key, item]) => [key, downloadValue(item)]).filter(([, item]) => item !== undefined));
+    }
+    function downloadBundle(record, { loading = false, error = '' } = {}) {
+        const shown = downloadValue(present(record)), pick = keys => {
+            const value = Object.fromEntries(keys.filter(key => shown[key] !== undefined).map(key => [key, shown[key]]));
+            return Object.keys(value).length ? value : undefined;
+        };
+        const request = { ...shown }; delete request.prompt; delete request.context; delete request.response;
+        const timing = Timing?.states(record), validation = pick(['validation','failureReason','failureStage','validationReason','protocolCheck','protocolExplanation','upstreamStatus','apiStatus','error']);
+        const sections = [
+            ['prompt','prompt.json',shown.prompt], ['context','context.json',shown.context], ['request','request.json',request],
+            ['response','response.json',shown.response], ['timing','timing.json',timing?.browser || timing?.api ? { ...timing, groups: Timing.groups(record) } : undefined],
+            ['inferenceSettings','inference-settings.json',shown.inferenceSettings],
+            ['validationError','validation-error.json',error ? { ...validation, diagnosticsError: redact(error) } : validation],
+            ['requestIdentity','request-identity.json',pick(['requestId','status','scope','unit','field','language','startedAt','sentAt','finishedAt','elapsedMs'])],
+        ];
+        const files = {}, manifest = { format: 'sdeditor-mtl-debug-v1', capturedAt: new Date().toISOString(), requestId: shown.requestId ?? null,
+            status: shown.status ?? null, diagnosticsLoading: loading === true,
+            note: 'Sanitized snapshot captured on Download all. Browser and API clocks are independent. Missing sections were not recorded in this snapshot; empty sections contain JSON null.',
+            sections: {}, missingSections: [] };
+        for (const [section, filename, value] of sections) {
+            const status = value === undefined ? 'missing' : value === null ? 'empty' : 'available';
+            manifest.sections[section] = { status, file: status === 'missing' ? null : filename };
+            if (status === 'missing') manifest.missingSections.push(section);
+            else files[filename] = JSON.stringify(value, null, 2) + '\n';
+        }
+        files['manifest.json'] = JSON.stringify(manifest, null, 2) + '\n';
+        const tag = typeof shown.requestId === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(shown.requestId) ? shown.requestId : record.status === 'preview' ? 'preview' : 'request';
+        return { filename: 'sdeditor-mtl-debug-' + tag + '.zip', files };
+    }
+    const downloadKey = item => JSON.stringify([item?.fieldId, item?.record?.requestId, item?.record?.submittedAt]);
     const mixin = {
         data: () => ({ ctMtlDebugWindow: null, ctMtlDebugRecords: raw({}) }),
         computed: {
@@ -184,23 +222,42 @@
         },
     };
     const Dialog = {
-        props: ['host'], data: () => ({ x: 24, y: 24, dragging: false,copyBusy:{},copyMessage:{},copyError:{} }),
+        props: ['host'], data: () => ({ x: 24, y: 24, dragging: false,copyBusy:{},copyMessage:{},copyError:{},downloadBusy:false,downloadMessage:'',downloadError:'' }),
         computed: { item() { return this.host.ctMtlDebugWindow; },
             promptText(){return sectionText(this.item.record,'prompt');},contextText(){return sectionText(this.item.record,'context');},
             timingGroups(){return Timing?.groups(this.item.record)||[];},
             timingState(){return Timing?.states(this.item.record)||{};},
             details() { return sectionText(this.item.record,'request'); },
             responseText() { return sectionText(this.item.record,'response'); } },
-        watch:{item(){this.resetCopy();}},
+        watch:{item(value,before){this.resetCopy();if(downloadKey(value)!==downloadKey(before))this.resetDownload();}},
         mounted() {
             this._resize = () => this.place(); window.addEventListener('resize', this._resize);
             this._observer = new ResizeObserver(this._resize); this._observer.observe(this.$refs.dialog);
             this.place(true); this.$refs.close.focus({ preventScroll: true });
         },
-        beforeUnmount() { this.resetCopy();this.finishDrag(); window.removeEventListener('resize', this._resize); this._observer.disconnect(); },
+        beforeUnmount() { this.resetCopy();this.resetDownload();this.finishDrag(); window.removeEventListener('resize', this._resize); this._observer.disconnect(); },
         methods: {
             timingValue(value){return Timing.format(value);},
             resetCopy(){for(const timer of Object.values(this._copyTimers||{}))clearTimeout(timer);this._copyTimers={};this._copyRuns={};this.copyBusy={};this.copyMessage={};this.copyError={};},
+            resetDownload(){this._downloadRun=null;this.downloadBusy=false;this.downloadMessage='';this.downloadError='';},
+            async downloadAll(){
+                const item=this.item,origin=this.host.ctMtlDebugOrigin;
+                if(!allowed(this.host)||!this.host.ctActive||!item?.record||this._downloadRun||item.record.origin!==undefined&&item.record.origin!==origin)return false;
+                const client=this.host._cloud,key=downloadKey(item),run=this._downloadRun={};
+                const current=()=>this._downloadRun===run&&allowed(this.host)&&this.host.ctActive&&this.host._cloud===client&&this.host.ctMtlDebugOrigin===origin&&!!this.item&&downloadKey(this.item)===key;
+                this.downloadBusy=true;this.downloadMessage='';
+                try{
+                    if(typeof root.JSZip!=='function'||typeof root.saveAs!=='function')throw new Error('ZIP download unavailable');
+                    const bundle=downloadBundle(item.record,item),zip=new root.JSZip(),encoder=new root.TextEncoder();
+                    // Encode whole JSON strings before ZIP streaming so a chunk
+                    // boundary cannot split a Unicode surrogate pair.
+                    for(const [filename,text]of Object.entries(bundle.files))zip.file(filename,encoder.encode(text));
+                    const blob=await zip.generateAsync({type:'blob',compression:'DEFLATE',compressionOptions:{level:5}});
+                    if(!current())return false;
+                    root.saveAs(blob,bundle.filename);this.downloadError='';this.downloadMessage='Download started.';return true;
+                }catch(_){if(current())this.downloadError='Could not prepare the ZIP. Try Download all again.';return false;}
+                finally{if(this._downloadRun===run){this._downloadRun=null;this.downloadBusy=false;}}
+            },
             async copySection(section){
                 if(!copySections.includes(section)||!allowed(this.host)||this.copyBusy[section])return false;
                 const item=this.item,origin=this.host.ctMtlDebugOrigin;
@@ -256,9 +313,11 @@
         },
         template: `<teleport to="body"><section ref="dialog" class="ctMtlDebugDialog" data-inline-focus-surface :class="{dragging}" :style="{left:x+'px',top:y+'px'}" role="dialog" aria-labelledby="ct-mtl-debug-title" @keydown.stop @keydown.esc.prevent="host.ctMtlDebugClose()">
           <header class="ctMtlDebugHeader" tabindex="0" aria-label="Move request details with arrow keys or drag" title="Drag to move · Arrow keys when focused" @keydown="moveKey" @pointerdown="startDrag" @pointermove="moveDrag" @pointerup="finishDrag" @pointercancel="finishDrag" @lostpointercapture="finishDrag">
-            <strong id="ct-mtl-debug-title">MTL request details · Admin</strong><button ref="close" type="button" aria-label="Close request details" @click="host.ctMtlDebugClose()">×</button>
+            <strong id="ct-mtl-debug-title">MTL request details · Admin</strong><div class="ctMtlDebugActions"><button type="button" class="ctMtlDebugDownload" title="Download all available request details as ZIP" :aria-disabled="downloadBusy || undefined" :aria-busy="downloadBusy || undefined" @pointerdown.stop @click.stop="downloadAll">Download all</button><button ref="close" type="button" aria-label="Close request details" @click="host.ctMtlDebugClose()">×</button></div>
           </header>
           <div class="ctMtlDebugBody"><p class="ctMtlDebugMode">{{ item.record.status === 'preparing' ? 'Browser preparation' : item.record.status === 'preview' ? 'Preview · not executed' : 'Submitted request · ' + item.record.status }}</p>
+            <p>Download all includes the sanitized details available now. Missing sections are listed in the ZIP manifest.</p>
+            <p v-if="downloadBusy || downloadMessage" role="status" aria-live="polite">{{ downloadBusy ? 'Preparing ZIP…' : downloadMessage }}</p><p v-if="downloadError" role="alert">{{ downloadError }}</p>
             <p v-if="item.record.status === 'preview'">Current field and bounded context only. No request has been sent. The exact server prompt appears after Translate is used.</p>
             <p v-else>{{ item.record.server?.providerRequest ? 'Selected fields from the executed request and server validation.' : item.record.browserTiming?.milestonesMs.postStart === null ? 'No request has been sent. Browser preparation timings are shown below.' : 'Browser submission; an executed server prompt has not been confirmed.' }}</p>
             <p>Read-only. Sensitive values are redacted. Server details expire after ten minutes; browser details clear when the account, workspace, language, source or selected record changes.</p>
@@ -287,5 +346,5 @@
           </div>
         </section></teleport>`,
     };
-    return { mixin, Dialog, allowed, redact, present, sectionText };
+    return { mixin, Dialog, allowed, redact, present, sectionText, downloadBundle };
 });

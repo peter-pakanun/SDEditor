@@ -172,6 +172,9 @@
 .ctMtlDebugHeader {display:flex;flex-shrink:0;align-items:center;justify-content:space-between;gap:16px;padding:10px 14px;border-bottom:1px solid var(--ui-border);cursor:grab;user-select:none;touch-action:none;}
 .ctMtlDebugDialog.dragging .ctMtlDebugHeader {cursor:grabbing;}
 .ctMtlDebugHeader button {font-size:20px;line-height:1;padding:2px 7px;}
+.ctMtlDebugActions {display:flex;align-items:center;gap:10px;flex-shrink:0;}
+.ctMtlDebugHeader .ctMtlDebugDownload {font-size:12px;line-height:1.4;padding:5px 8px;white-space:nowrap;}
+.ctMtlDebugDownload[aria-disabled="true"] {opacity:.6;cursor:wait;}
 .ctMtlDebugBody {min-height:0;overflow:auto;padding:0 14px 14px;}
 .ctMtlDebugBody p {margin:10px 0;}
 .ctMtlDebugMode {font-weight:600;color:var(--ui-accent);}
