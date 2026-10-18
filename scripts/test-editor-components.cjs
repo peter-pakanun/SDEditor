@@ -30,6 +30,69 @@ test('shared notices preserve severity semantics and explicit roles', () => {
   assert.match(Notice.template, /v-if="\$slots.actions" class="appNoticeActions"><slot name="actions">/);
 });
 
+test('notice dismissals belong to an occurrence and app scope, survive surface remounts and never clear owner state', async () => {
+  const localWindow = { document: { activeElement: null } }, watches = [];
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/editorComponents.js'), 'utf8'),
+    { window: localWindow, Vue: { reactive: value => value } });
+  const { Notice, revealNotice } = localWindow.EditorComponents;
+  const root = { ctNotice: 'Cancelled. Saved work is retained.', ctError: 'Save failed', ctWorkspace: { scope: { groupId: 'local:test:one' } },
+    ctSaved: { field: 'Saved target' }, ctValues: { field: 'Unsaved draft' }, ctBusy: true,
+    _ctAbort: { abort() { assert.fail('Closing a message cannot abort an operation'); } },
+    $watch(source, callback, options) { watches.push({ source, callback, options }); } };
+  const before = JSON.stringify(root);
+  const mount = key => {
+    const component = { $root: root, dismissal: null, $el: { closest: () => null, contains: () => false }, $nextTick: async () => {} };
+    Notice.watch.dismissKey.handler.call(component, key);
+    return component;
+  };
+  const first = mount('ctNotice'), error = mount('ctError');
+  await Notice.methods.dismiss.call(first);
+  assert.equal(first.dismissal.hidden, true);
+  assert.equal(error.dismissal.hidden, false, 'One message does not hide another');
+  assert.equal(JSON.stringify(root), before, 'Notice/error values, saved work, draft and operation state remain exact');
+  const remounted = mount('ctNotice');
+  assert.equal(remounted.dismissal, first.dismissal);
+  assert.equal(remounted.dismissal.hidden, true, 'Opening another editor surface does not reveal this same occurrence');
+  assert.equal(watches.length, 3, 'Each app owns one context watch and one watch per notice field');
+  assert.ok(watches.every(watch => watch.options.flush === 'sync'), 'Clear then repost in one Vue tick is still a new occurrence');
+  watches.find(watch => watch.source === 'ctNotice').callback();
+  assert.equal(first.dismissal.hidden, false, 'A cleared or changed message reveals the next occurrence');
+  await Notice.methods.dismiss.call(first); revealNotice(root, 'ctNotice');
+  assert.equal(first.dismissal.hidden, false, 'An explicit same-text operation notice can be posted again');
+  await Notice.methods.dismiss.call(first); await Notice.methods.dismiss.call(error);
+  const context = watches.find(watch => typeof watch.source === 'function');
+  const oldScope = context.source()[0]; root.ctWorkspace = { scope: { groupId: 'local:test:two' } };
+  assert.notEqual(context.source()[0], oldScope); context.callback();
+  assert.equal(first.dismissal.hidden, false); assert.equal(error.dismissal.hidden, false, 'A new test/workspace scope reveals notices');
+  assert.equal(mount('').dismissal, null, 'Other notices do not gain dismissal implicitly');
+  assert.match(Notice.template, /type="button" class="appNoticeClose" :aria-label="dismissLabel"/);
+  assert.match(Notice.template, /@keydown="dismissKeydown" @click\.stop="dismiss"/);
+});
+
+test('notice close buttons isolate native activation while preserving document and editor shortcuts', () => {
+  const stopped = [], prevented = [];
+  for (const event of [{ key: 'Enter' }, { key: ' ' }, { key: 's', ctrlKey: true }, { key: 's', metaKey: true },
+    { key: 'Enter', shiftKey: true }, { key: 'Enter', ctrlKey: true }, { key: 'F2' }, { key: 'Escape' }, { key: 'Tab' }]) {
+    window.EditorComponents.Notice.methods.dismissKeydown({ ...event,
+      stopPropagation: () => stopped.push(event), preventDefault: () => prevented.push(event) });
+  }
+  assert.deepEqual(stopped, [{ key: 'Enter' }, { key: ' ' }]);
+  assert.deepEqual(prevented, [], 'Native Enter/Space button activation and shortcut handlers keep their default behavior');
+});
+
+test('closing a focused notice restores focus to an enabled control with native focus reveal', async () => {
+  const focused = [], hidden = { getClientRects: () => [] }, disabled = { disabled: true }, inert = { closest: () => true };
+  const next = { disabled: false, closest: () => null, getClientRects: () => [{}], focus: (...args) => focused.push(args.length) };
+  window.document = { activeElement: {} }; window.getComputedStyle = () => ({ visibility: 'visible' });
+  const component = { dismissal: { hidden: false }, $nextTick: async () => {}, $el: {
+    contains: () => true, closest: selector => selector === '.appNoticeStack'
+      ? { querySelectorAll: () => [disabled, inert, { ...next, ...hidden }, next] } : null,
+  } };
+  await window.EditorComponents.Notice.methods.dismiss.call(component);
+  assert.equal(component.dismissal.hidden, true); assert.deepEqual(focused, [0], 'The browser can reveal a control clipped by the scrolling notice stack');
+  delete window.document; delete window.getComputedStyle;
+});
+
 test('notice stacks measure wrapping and overflow, expose keyboard access, and release observers on unmount', () => {
   const observed = [], disconnected = [], listeners = new Map(), emitted = [], localWindow = {};
   let notifyResize, boxHeight = 73.25;

@@ -8,6 +8,10 @@
     const teams = ['French', 'German', 'Spanish', 'Portuguese', 'Russian', 'Thai', 'Korean', 'Japanese', 'Simplified Chinese', 'Traditional Chinese', 'Turkish', 'Polish'];
     const copy = value => JSON.parse(JSON.stringify(value));
     const raw = value => root.Vue?.markRaw ? root.Vue.markRaw(value) : value;
+    // Explicit actions post a fresh occurrence even when their wording repeats.
+    // Background sync continues to update message fields without revealing an
+    // unchanged, manually dismissed status on every poll.
+    const postNotice = (host, key, message) => { host[key] = message; root.EditorComponents?.revealNotice(host, key); };
     const fileDrag = event => Array.from(event.dataTransfer?.types || []).includes('Files')
         || Array.from(event.dataTransfer?.files || []).length > 0;
     const unproxy = value => root.Vue?.toRaw ? root.Vue.toRaw(value) : value;
@@ -1572,7 +1576,7 @@
                 },initialization);
                 return metadata;
             },
-            ctCancel() { this._ctAbort?.abort(); this.ctNotice = 'Cancelled. Saved work is retained.'; },
+            ctCancel() { this._ctAbort?.abort(); postNotice(this, 'ctNotice', 'Cancelled. Saved work is retained.'); },
             async ctRefreshLocal() {
                 if (!this._ctStore) return;
                 const key = this.managedCatalogScope;
@@ -2133,13 +2137,16 @@
             },
             async ctSave(close = false, options = {}) {
                 if (this.ctBusy || this.ctBrowseBusy || !this.ctCurrentUnit) return false;
-                if(this.ctChoices.length){this.ctError='Choose between the retained alternatives before saving this ID.';return false;}
+                if(this.ctChoices.length){postNotice(this,'ctError','Choose between the retained alternatives before saving this ID.');return false;}
                 const ctx=this.ctContext(),unitId=this.ctSelection,scopeKey=root.ClientTextStore.scopeKey(ctx.scope),generation=this._ctBrowseGeneration || 0;
                 const store=this.ctStorage(ctx.scope);
                 const existing=this._ctSaveJob, retry=existing?.unitId===unitId && existing.scopeKey===scopeKey && existing.command;
                 // An uncertain commit must find its receipt with the exact old
                 // command before checkpointing any newer editor text.
-                if(!retry && !await this.ctFlushDraft())return false;
+                if(!retry && !await this.ctFlushDraft()){
+                    if(this.ctCurrent(ctx) && this.ctSelection===unitId && this.ctError)postNotice(this,'ctError',this.ctError);
+                    return false;
+                }
                 if(!this.ctCurrent(ctx)||this.ctSelection!==unitId)return false;
                 const job=existing?.unitId===unitId && existing.scopeKey===scopeKey ? existing : {unitId,scopeKey,id:uuid()};
                 this._ctSaveJob=job;this.ctBusy = true;let submittedSignature;
@@ -2167,7 +2174,7 @@
                 } catch (error) {
                     this.ctRememberDraftStageFailure(ctx,unitId,submittedSignature,'save');
                     if (this.ctCurrent(ctx)) {
-                        this.ctError = error.message;
+                        postNotice(this, 'ctError', error.message);
                         if(error.code==='DRAFT_CHANGED')this._ctSaveJob=null;
                         if(error.code==='UNIT_CHANGED'){
                             this._ctSaveJob=null; const latest=await store.getSaved(ctx.scope);
@@ -2216,7 +2223,7 @@
                 if(!options.attentionOnly)for(let index=hadEditor?anchor+direction:anchor;index>=0&&index<rows.length;index+=direction)candidates.push(rows[index].id);
                 if(options.attentionOnly && !candidates.length)return false;
                 if(options.inline && !candidates.some(id=>this._ctUnitIndex.has(id) && !this.ctUnitOccupied(id))){
-                    this.ctNotice='No available files in this direction.';return false;
+                    postNotice(this,'ctNotice','No available files in this direction.');return false;
                 }
                 const run=this._ctNavigationRun={},current=()=>this._ctNavigationRun===run && this.ctCurrent(ctx) && this.ctSelection===unitId
                     && generation===(this._ctBrowseGeneration || 0)
@@ -2246,7 +2253,7 @@
                         }
                         return true;
                     }
-                    this.ctNotice='No available files in this direction.';return false;
+                    postNotice(this,'ctNotice','No available files in this direction.');return false;
                 } finally {if(this._ctNavigationRun===run){this._ctNavigationRun=null;this.ctNavigationBusy=false;}}
             },
             async ctKey(event) {

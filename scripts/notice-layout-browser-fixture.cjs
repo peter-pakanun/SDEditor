@@ -32,12 +32,171 @@ async function frames(page) {
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
 
+async function checkDismissals(page) {
+  const testBanner = page.locator('.ctTestBanner:visible'), notice = page.locator('.ctListWorkspace .collaborationNotice:visible'),
+    error = page.locator('.ctListWorkspace .collaborationError:visible');
+  await page.evaluate(setErrors, false);
+  await page.evaluate(() => {
+    const vm = window.__noticeFixtureApp, unit = vm.ctUnits[0], field = unit.fields[0];
+    vm.ctSaved = { [unit.id]: { unitId: unit.id, revision: 1, values: { [field.id]: 'Saved synthetic target' }, reviewed: {} } };
+    vm.ctValues = { [field.id]: 'Unsaved synthetic draft' };
+    vm.ctError = 'Synthetic operation failed.'; vm.ctNotice = 'Cancelled. Saved work is retained.';
+    vm.ctBusy = true; vm.ctProgress = { phase: 'Synthetic work', completed: 1, total: 10 };
+    vm._ctAbort = new AbortController();
+  });
+  const state = () => page.evaluate(() => {
+    const vm = window.__noticeFixtureApp;
+    return JSON.stringify({ workspace: vm.ctWorkspace, units: vm.ctUnits, saved: vm.ctSaved, values: vm.ctValues,
+      selection: vm.ctSelection, busy: vm.ctBusy, progress: vm.ctProgress, notice: vm.ctNotice, error: vm.ctError,
+      aborted: vm._ctAbort.signal.aborted });
+  });
+  const before = await state();
+  await testBanner.getByRole('button', { name: 'Dismiss information message', exact: true }).click();
+  await notice.getByRole('button', { name: 'Dismiss information message', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  assert.equal(await page.locator('.ctTestBanner:visible').count(), 0);
+  assert.equal(await notice.count(), 0);
+  assert.equal(await error.count(), 1, 'Dismissing an information notice does not dismiss an independent error');
+  const closeError = error.getByRole('button', { name: 'Dismiss error message', exact: true });
+  assert.equal(await closeError.evaluate(element => document.activeElement === element && getComputedStyle(element).outlineStyle !== 'none'), true,
+    'Keyboard dismissal restores visible focus to the remaining notice close control');
+  await page.keyboard.press('Space'); await frames(page);
+  assert.equal(await error.count(), 0); assert.equal(await state(), before, 'All exact saved/draft/session/error/operation state survives closing banners');
+  assert.equal(await page.evaluate(() => document.activeElement?.matches('button, a[href], input, select, textarea') && document.activeElement.getClientRects().length > 0), true,
+    'Closing the last notice returns focus to a visible workspace control');
+  await page.evaluate(async () => { const vm = window.__noticeFixtureApp; vm.ctBusy = false; vm.ctProgress = null; vm.ctRevision++; await vm.$nextTick(); vm.ctEditor = true; });
+  await page.locator('.ctFullEditor').waitFor(); await frames(page);
+  assert.equal(await page.locator('.ctTestBanner:visible, .ctFullEditor .collaborationError:visible, .ctFullEditor .collaborationNotice:visible').count(), 0,
+    'Same dismissed occurrences stay hidden after unrelated renders and opening the full editor');
+  await page.evaluate(async () => { const vm = window.__noticeFixtureApp; vm.ctEditor = false; vm.ctNotice = ''; vm.ctNotice = 'Cancelled. Saved work is retained.'; });
+  await notice.waitFor();
+  await notice.getByRole('button', { name: 'Dismiss information message', exact: true }).click();
+  await page.evaluate(() => window.__noticeFixtureApp.ctCancel()); await notice.waitFor();
+  assert.equal(await notice.textContent(), 'Cancelled. Saved work is retained.', 'A repeated explicit Cancel posts the same notice again');
+  await notice.getByRole('button', { name: 'Dismiss information message', exact: true }).click();
+  await page.evaluate(() => { window.__noticeFixtureApp.ctNotice = 'A different synthetic notice.'; window.__noticeFixtureApp.ctError = 'A different synthetic failure.'; });
+  await notice.waitFor(); await error.waitFor();
+  await error.getByRole('button', { name: 'Dismiss error message', exact: true }).click();
+  await page.evaluate(() => { const vm = window.__noticeFixtureApp; vm.ctError = ''; vm.ctError = 'A different synthetic failure.'; });
+  await error.waitFor();
+  await page.evaluate(() => { const vm = window.__noticeFixtureApp; vm.ctWorkspace = { ...vm.ctWorkspace,
+    scope: { ...vm.ctWorkspace.scope, groupId: 'local:test:new-notice-session' } }; });
+  await testBanner.waitFor();
+  assert.ok((await testBanner.textContent()).includes('In-memory test'), 'A new temporary session shows its information banner');
+  await page.locator('.ctListWorkspace').screenshot({ path: join(__dirname, '../temp/notice-dismissal-session.png') });
+  // Clearing/reposting a message while its entire surface is absent is still
+  // observable by the app-owned synchronous watch.
+  await error.getByRole('button', { name: 'Dismiss error message', exact: true }).click();
+  await page.evaluate(async () => { const vm = window.__noticeFixtureApp; vm.ctActive = false; await vm.$nextTick();
+    vm.ctError = ''; vm.ctError = 'A different synthetic failure.'; await vm.$nextTick(); vm.ctActive = true; });
+  await error.waitFor();
+  console.log('Dismissal lifecycle passed: pointer, Enter/Space and focus; exact state preservation; independent/changed/cleared/repeated notices; list/full remounts; new test scope; absent-surface repost.');
+}
+
+async function checkExplicitPostsAndShortcuts(page) {
+  await page.evaluate(setErrors, false);
+  await page.evaluate(() => {
+    const vm = window.__noticeFixtureApp, field = vm.ctCurrentUnit.fields[0];
+    // Restore the real Save method after the layout-only fixture's IO stub.
+    vm.ctSave = window.ClientTextUI.mixin.methods.ctSave.bind(vm);
+    vm.ctChoices = [{ fieldId: field.id, local: 'Retained synthetic target', remote: 'Shared synthetic target' }];
+    vm.ctError = ''; vm.ctNotice = ''; vm.ctBusy = false; vm.ctBrowseBusy = false; vm.autoOpenNextFile = false;
+    window.__noticeShortcutEvents = [];
+    window.__noticeShortcutListener = event => {
+      if (event.code === 'KeyS' || event.key === 'F2') window.__noticeShortcutEvents.push({ code: event.code, prevented: event.defaultPrevented,
+        fromClose: event.target.classList.contains('appNoticeClose') });
+    };
+    document.addEventListener('keydown', window.__noticeShortcutListener);
+  });
+  const state = () => page.evaluate(() => { const vm = window.__noticeFixtureApp;
+    return JSON.stringify([vm.ctWorkspace, vm.ctSelection, vm.ctSaved, vm.ctValues, vm.ctChoices]); });
+  const before = await state(), save = page.locator('.ctFullEditor .ctEditorActionButtons').getByRole('button', { name: 'Save', exact: true }),
+    error = page.locator('.ctFullEditor .editorNotice .collaborationError:visible'),
+    banner = page.locator('.ctFullEditor .ctTestBanner:visible');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await save.click(); await error.waitFor();
+    assert.ok((await error.textContent()).includes('Choose between the retained alternatives'), 'The real Save action posts its retained-alternative error');
+    await error.getByRole('button', { name: 'Dismiss error message', exact: true }).click();
+    assert.equal(await error.count(), 0);
+  }
+  for (const shortcut of ['Control+s', 'Meta+s']) {
+    await banner.getByRole('button', { name: 'Dismiss information message', exact: true }).focus();
+    await page.keyboard.press(shortcut); await error.waitFor();
+    assert.equal(await banner.count(), 1, shortcut + ' on X reaches real Save without dismissing its banner');
+    await error.getByRole('button', { name: 'Dismiss error message', exact: true }).click();
+  }
+  assert.equal(await state(), before, 'Repeated explicit Save and Save shortcuts preserve retained alternatives and exact saved/draft data');
+  assert.deepEqual(await page.evaluate(() => window.__noticeShortcutEvents), [
+    { code: 'KeyS', prevented: true, fromClose: true }, { code: 'KeyS', prevented: true, fromClose: true },
+  ], 'Save shortcuts bubble from the focused X to the real document/editor handler');
+  await page.evaluate(() => {
+    const vm = window.__noticeFixtureApp;
+    vm.ctChoices = []; vm.ctValues = window.ClientTextState.valuesFor(vm.ctCurrentUnit); vm.ctError = ''; vm.ctNotice = '';
+    window.__noticeOriginalStorage = vm.ctStorage; window.__noticeOriginalFlushDraft = vm.ctFlushDraft;
+    vm.ctStorage = () => ({ async save() { throw new Error('Synthetic repeated Save failure'); } });
+  });
+  for (const phase of ['save', 'checkpoint']) {
+    await page.evaluate(phase => {
+      const vm = window.__noticeFixtureApp; vm._ctSaveJob = null;
+      vm.ctFlushDraft = phase === 'save' ? async () => true : async () => { vm.ctError = 'Synthetic repeated checkpoint failure'; return false; };
+    }, phase);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await save.click(); await error.waitFor();
+      assert.ok((await error.textContent()).includes(phase === 'save' ? 'Synthetic repeated Save failure' : 'Synthetic repeated checkpoint failure'));
+      const retryState = () => page.evaluate(() => { const vm = window.__noticeFixtureApp;
+        return JSON.stringify([vm._ctSaveJob, vm.ctDraftStageFailure, vm.ctValues, vm.ctSaved]); });
+      const pending = await retryState();
+      await error.getByRole('button', { name: 'Dismiss error message', exact: true }).click();
+      assert.equal(await retryState(), pending, 'Dismissing a repeated ' + phase + ' failure preserves its exact retry command and work');
+    }
+  }
+  await page.evaluate(() => { const vm = window.__noticeFixtureApp;
+    vm.ctStorage = window.__noticeOriginalStorage; vm.ctFlushDraft = window.__noticeOriginalFlushDraft;
+    vm._ctSaveJob = null; vm.ctDraftStageFailure = null; vm.ctError = '';
+  });
+  const fullNotice = page.locator('.ctFullEditor .editorNotice .collaborationNotice:visible');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await banner.getByRole('button', { name: 'Dismiss information message', exact: true }).focus();
+    await page.keyboard.press('F2'); await fullNotice.waitFor();
+    assert.ok((await fullNotice.textContent()).includes('No available files in this direction.'), 'Real full-editor navigation reposts its same-text boundary notice');
+    await fullNotice.getByRole('button', { name: 'Dismiss information message', exact: true }).click();
+  }
+  assert.equal(await page.evaluate(() => window.__noticeShortcutEvents.filter(event => event.code === 'F2' && event.prevented && event.fromClose).length), 2,
+    'F2 also reaches the real document/editor handler from X');
+  await banner.getByRole('button', { name: 'Dismiss information message', exact: true }).focus(); await page.keyboard.press('Enter');
+  assert.equal(await banner.count(), 0, 'Unmodified Enter still dismisses the focused X');
+  await page.evaluate(() => { const vm = window.__noticeFixtureApp; vm.ctEditor = false; vm.inlineEditor = true; });
+  const inlineNotice = page.locator('.ctListWorkspace .collaborationNotice:visible');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.equal(await page.evaluate(() => window.__noticeFixtureApp.ctNavigate(1)), false);
+    await inlineNotice.waitFor();
+    await inlineNotice.getByRole('button', { name: 'Dismiss information message', exact: true }).click();
+  }
+  // The real background method uses a synthetic failing transport; unchanged
+  // polls are the same failure occurrence and must stay manually dismissed.
+  await page.evaluate(async () => {
+    const vm = window.__noticeFixtureApp;
+    vm.ctPolicy = { ...vm.ctPolicy, clientTextStorageProtocols: ['clienttext-trusted-v1'] };
+    vm._ctSync = { async flush() { throw new Error('Unchanged synthetic background failure'); } };
+    await vm.ctSync();
+  });
+  const backgroundError = page.locator('.ctListWorkspace .collaborationError:visible'); await backgroundError.waitFor();
+  await backgroundError.getByRole('button', { name: 'Dismiss error message', exact: true }).click();
+  await page.evaluate(async () => { const vm = window.__noticeFixtureApp; await vm.ctSync(); await vm.ctSync(); }); await frames(page);
+  assert.equal(await backgroundError.count(), 0, 'Unchanged background failures do not repeatedly resurface');
+  await page.evaluate(() => { const vm = window.__noticeFixtureApp; vm._ctSync = null; vm.ctError = '';
+    document.removeEventListener('keydown', window.__noticeShortcutListener); });
+  console.log('Explicit occurrences/shortcuts passed with real Vue/application methods: repeated retained-alternative/failed/checkpoint Save, exact retry preservation, inline/full boundary navigation, Ctrl+S/Meta+S/F2 from focused X, native Enter, and unchanged background sync.');
+}
+
 async function run() {
   assert.ok(executablePath, 'Set FIXTURE_BROWSER_PATH to installed Edge/Chrome.');
   const serverApp = express();
   serverApp.get('/', (_req, res) => res.type('html').send(readFileSync(join(publicDir, 'index.html'), 'utf8')
     .replace('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', '/fixture/jszip.min.js')
-    .replace('https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js', existsSync(vueScriptPath) ? '/fixture/vue.global.prod.js' : 'https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js')));
+    .replace('https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js', '/fixture/vue.global.prod.js')
+    .replace(/<link\b[^>]*https:\/\/[^>]*>/g, '')
+    .replace(/<script src="https:\/\/cdnjs.cloudflare.com\/ajax\/libs\/jsdiff\/[^>]*><\/script>/, '')));
   serverApp.get('/fixture/vue.global.prod.js', (_req, res) => res.type('js').send(readFileSync(vueScriptPath)));
   serverApp.get('/fixture/jszip.min.js', (_req, res) => res.type('js').send(readFileSync(require.resolve('jszip/dist/jszip.min.js', { paths: [runtimeModules] }))));
   serverApp.get('/index.js', (_req, res) => res.type('js').send(readFileSync(join(publicDir, 'index.js'), 'utf8')
@@ -48,11 +207,14 @@ async function run() {
   const failures = [];
   let checked = 0;
   try {
+    assert.ok(existsSync(vueScriptPath), 'Set FIXTURE_VUE_PATH to a cached Vue build; this synthetic fixture never uses external network.');
     browser = await chromium.launch({ executablePath, headless: true, args: ['--disable-gpu'] });
-    const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const origin = 'http://127.0.0.1:' + server.address().port;
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     page = await context.newPage();
     page.on('pageerror', error => failures.push(error.message));
-    await page.goto('http://127.0.0.1:' + server.address().port + '/?testMode=1&lang=Thai', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.goto(origin + '/?testMode=1&lang=Thai', { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForFunction(() => !!window.__noticeFixtureApp);
     await page.evaluate(async () => {
       const vm = window.__noticeFixtureApp;
@@ -134,6 +296,11 @@ async function run() {
                   preview: preview && rect(preview), actions: actions && rect(actions),
                   scrollY, save: save && rect(save), saveHit: !!save?.contains(hit), saveHitElement: hit?.outerHTML.slice(0, 200),
                   noticeHeight: parseFloat(getComputedStyle(owner).getPropertyValue('--editor-notice-height')) || 0,
+                  closeGeometry: [...stack.querySelectorAll('.appNoticeClose')].filter(visible).every(button => {
+                    const box = button.getBoundingClientRect(), notice = button.closest('.appNotice'), content = notice.querySelector('.appNoticeContent').getBoundingClientRect(),
+                      actions = notice.querySelector('.appNoticeActions')?.getBoundingClientRect();
+                    return content.right <= box.left && (!actions || actions.right <= box.left) && box.right <= notice.getBoundingClientRect().right;
+                  }),
                   headerHit: !header || [...header.querySelectorAll('.workspaceActions button')].every(button => {
                     const box = button.getBoundingClientRect(); return button.disabled || button.contains(document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2));
                   }), viewport: { width: innerWidth, height: innerHeight } };
@@ -147,6 +314,7 @@ async function run() {
               assert.equal(geometry.tabIndex, 0, label + ': overflowing notice region is keyboard focusable');
               assert.equal(geometry.role, 'region', label + ': overflow scrolling has an accessible region');
               assert.equal(geometry.headerHit, true, label + ': workspace action buttons remain clickable');
+              assert.equal(geometry.closeGeometry, true, label + ': close controls reserve a right column without overlapping long messages or actions');
               if (surface === 'full') {
                 assert.ok(Math.abs(geometry.noticeHeight - geometry.stack.height) <= 2, label + ': measured notice height matches the shell offset');
                 assert.ok(geometry.sidebar.top >= geometry.stack.bottom - 1, label + ': file tools begin below notices');
@@ -195,7 +363,26 @@ async function run() {
         console.log(mode + '/' + surface + ': 24 notice layouts passed.');
       }
     }
+    await setSurface('clienttext', 'list'); await checkDismissals(page);
+    await setSurface('clienttext', 'full'); await checkExplicitPostsAndShortcuts(page);
     await setSurface('sd', 'list');
+    const longStack = page.locator('.workspace:visible .workspaceNoticeStack');
+    await longStack.locator('.appNoticeClose').last().click();
+    assert.equal(await longStack.evaluate(stack => {
+      const active = document.activeElement, box = active.getBoundingClientRect(), region = stack.getBoundingClientRect();
+      return stack.contains(active) && box.top >= region.top && box.bottom <= region.bottom && box.top >= 0 && box.bottom <= innerHeight;
+    }), true, 'Closing a message at the bottom of an overflowing stack reveals the new keyboard focus');
+    const localError = page.locator('.workspace:visible .appNotice').filter({ hasText: 'Could not finish saving your translations.' });
+    const retainedError = await page.evaluate(() => window.__noticeFixtureApp.localSaveError);
+    await localError.getByRole('button', { name: 'Dismiss error message', exact: true }).click();
+    assert.equal(await localError.isVisible(), false);
+    assert.equal(await page.evaluate(() => window.__noticeFixtureApp.localSaveError), retainedError, 'Dismissing a storage error preserves the failed save and retry state');
+    await page.evaluate(() => { window.__noticeFixtureApp.localSaveError = 'A different synthetic storage failure.'; }); await localError.waitFor();
+    const collaboration = page.locator('.workspace:visible .collaborationStatus');
+    await collaboration.getByRole('button', { name: 'Dismiss error message', exact: true }).click();
+    await page.evaluate(() => { window.__noticeFixtureApp.collaborationState.error = 'A different synthetic collaboration failure.'; });
+    await collaboration.waitFor();
+    assert.ok((await collaboration.textContent()).includes('A different synthetic collaboration failure.'), 'A changed collaboration error returns even when its general status label stays the same');
     await page.evaluate(() => window.__noticeFixtureApp.openSettings());
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true }); await settings.waitFor();
     assert.equal(await settings.evaluate(element => { const box = element.getBoundingClientRect(); return element.contains(document.elementFromPoint(box.left + 20, box.top + 20)); }), true, 'Settings appears above notices');

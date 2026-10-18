@@ -525,11 +525,11 @@
           </div></fieldset>
           <app-notice-stack class="workspaceNoticeStack">
             <workspace-alerts></workspace-alerts>
-            <app-notice tone="info" v-if="ctOfflineTest" class="ctTestBanner" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Saves are temporary. Download workbooks to keep saved edits. Leaving the test or reloading clears this session.</app-notice>
-            <app-notice tone="error" v-if="ctMtlError" role="alert">{{ ctMtlError }}</app-notice>
+            <app-notice tone="info" v-if="ctOfflineTest" dismiss-key="ctOfflineTest" class="ctTestBanner" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Saves are temporary. Download workbooks to keep saved edits. Leaving the test or reloading clears this session.</app-notice>
+            <app-notice tone="error" v-if="ctMtlError" dismiss-key="ctMtlError" role="alert">{{ ctMtlError }}</app-notice>
             <app-notice tone="warning" v-if="ctMtlDismissals.length" data-inline-focus-surface role="status">{{ ctMtlDismissals.length }} MTL dismissal upload(s) pending. {{ String(ctWorkspace?.scope?.groupId || '').startsWith('local:') ? 'Keep this tab and workbook session open; closing or reloading loses unsent dismissal requests.' : 'Exact dismissal requests are retained in this browser for retry.' }}<button type="button" @click="ctMtlRetryDismissals()" :disabled="ctBusy">Retry dismissal uploads</button></app-notice>
-            <app-notice tone="error" v-if="ctError" class="collaborationError" role="alert">{{ ctError }}</app-notice>
-            <app-notice tone="info" v-if="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</app-notice>
+            <app-notice tone="error" v-if="ctError" dismiss-key="ctError" class="collaborationError" role="alert">{{ ctError }}</app-notice>
+            <app-notice tone="info" v-if="ctNotice" dismiss-key="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</app-notice>
           </app-notice-stack>
         </template>
         <template #content>
@@ -643,9 +643,9 @@
       <editor-full-shell v-if="ctEditor" class="ctFull ctFullEditor" :controller="sharedEditorController" preview-host-id="ctFullEditorPreviewHost" sidebar-host-id="ctFullEditorSidebarHost">
         <template #notice>
           <workspace-alerts></workspace-alerts>
-          <app-notice tone="info" v-if="ctOfflineTest" class="ctTestBanner" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Saves are temporary. Download workbooks to keep saved edits. Leaving the test or reloading clears this session.</app-notice>
-          <app-notice tone="error" v-if="ctError" class="collaborationError" role="alert">{{ ctError }}</app-notice>
-          <app-notice tone="info" v-if="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</app-notice>
+          <app-notice tone="info" v-if="ctOfflineTest" dismiss-key="ctOfflineTest" class="ctTestBanner" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Saves are temporary. Download workbooks to keep saved edits. Leaving the test or reloading clears this session.</app-notice>
+          <app-notice tone="error" v-if="ctError" dismiss-key="ctError" class="collaborationError" role="alert">{{ ctError }}</app-notice>
+          <app-notice tone="info" v-if="ctNotice" dismiss-key="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</app-notice>
         </template>
           <div class="twoSided editorActions ctEditorActions"><h1>🧾 Translation</h1><div class="ctEditorActionButtons"><button @click="ctSave()" :disabled="ctBusy">Save</button><button class="btnPrimary" @click="ctSave(true)" :disabled="ctBusy">Save &amp; close</button><button v-if="ctDraftBlocked" @click="ctDiscardDraft" :disabled="ctBusy">Discard draft</button><button @click="ctCloseEditor" :disabled="ctBusy" title="Close the file (Esc); keep unsaved edits">Close</button></div></div>
           <h3 class="editorFileIdentity"><span>📁 Filepath: {{ ctCurrentUnit?.role }} / {{ ctCurrentUnit?.sheet }} / {{ ctCurrentUnit?.recordId }}</span></h3>
@@ -832,7 +832,7 @@
         <app-notice-stack v-if="!workspaceInitializationActive" class="workspaceNoticeStack">
           <workspace-alerts></workspace-alerts>
           <collaboration-warning></collaboration-warning>
-          <app-notice v-if="collaborationUserNotice" tone="info" class="collaborationFooterMessage" role="status">{{ collaborationUserNotice }}</app-notice>
+          <app-notice v-if="collaborationUserNotice" dismiss-key="collaborationUserNotice" tone="info" class="collaborationFooterMessage" role="status">{{ collaborationUserNotice }}</app-notice>
         </app-notice-stack>
       </template>
 
@@ -1017,10 +1017,10 @@
     <editor-full-shell :controller="sharedEditorController" preview-host-id="fullEditorPreviewHost" sidebar-host-id="fullEditorSidebarHost" v-if="editorVisible" v-show="!workspaceInitializationActive" :inert="workspaceInitializationActive" :aria-busy="editorLoading" aria-label="Translation editor" @keydown.esc="editorEsc" @keydown.shift.enter="editorShiftEnter">
         <template #notice>
           <workspace-alerts></workspace-alerts>
-          <app-notice tone="error" v-if="editorLoadError" class="collaborationError" role="alert">{{ editorLoadError }}</app-notice>
+          <app-notice tone="error" v-if="editorLoadError" dismiss-key="editorLoadError" class="collaborationError" role="alert">{{ editorLoadError }}</app-notice>
           <collaboration-warning></collaboration-warning>
-          <app-notice tone="info" v-if="collaborationEditorNotice" class="collaborationNotice" role="status">{{ collaborationEditorNotice }}</app-notice>
-          <app-notice v-if="consistencyResolutionNotice" tone="info" class="consistencyResolutionNotice" role="status">{{ consistencyResolutionNotice }}</app-notice>
+          <app-notice tone="info" v-if="collaborationEditorNotice" dismiss-key="collaborationUserNotice" class="collaborationNotice" role="status">{{ collaborationEditorNotice }}</app-notice>
+          <app-notice v-if="consistencyResolutionNotice" dismiss-key="consistencyResolutionNotice" tone="info" class="consistencyResolutionNotice" role="status">{{ consistencyResolutionNotice }}</app-notice>
         </template>
         <div class="twoSided editorActions">
           <h1 style="flex-grow: 1;">🧾 Translation <span v-if="managedStatusName && (managedActiveTeam?.ended || managedActiveVersion?.status === 'withdrawn')" class="editorVersionContext"><span v-if="managedActiveTeam?.ended" class="versionBadge ended" tabindex="0" v-tooltip="managedStatusTooltip" :aria-label="managedStatusTooltip">Ended</span><span v-if="managedActiveVersion?.status === 'withdrawn'" class="versionBadge withdrawn" tabindex="0" v-tooltip="managedStatusTooltip" :aria-label="managedStatusTooltip">Withdrawn</span></span></h1>
@@ -1560,7 +1560,7 @@
   <script src="editorSession.js"></script>
   <script src="tmUi.js"></script>
   <script type="text/x-template" id="collaboration-warning-template">
-    <app-notice v-if="$root.collaborationNeedsAttention" :tone="$root.collaborationState.error ? 'error' : 'warning'" class="collaborationStatus" role="alert" aria-label="Translation collaboration warning">
+    <app-notice v-if="$root.collaborationNeedsAttention" dismiss-key="collaborationWarningMessage" :tone="$root.collaborationState.error ? 'error' : 'warning'" class="collaborationStatus" role="alert" aria-label="Translation collaboration warning">
       <span class="collaborationConnection" :class="$root.collaborationConnectionTone" aria-hidden="true"></span>
       <a v-if="$root.collaborationDroppedReviewWarning" class="collaborationError collaborationDroppedReviewLink" href="#table" @click.prevent="$root.collaborationOpenDroppedConflicts">{{ $root.collaborationState.error || 'Conflicting dropped copies need review before these files can be shared.' }}</a>
       <span v-else-if="!$root.collaborationState.error">{{ $root.collaborationStatusLabel }}</span>
@@ -1571,27 +1571,27 @@
   </script>
   <script type="text/x-template" id="workspace-alerts-template">
     <div v-if="($root.storageMigrationMessage && !$root.workspaceInitializationActive) || $root.localSaveError || $root.dictionaryWorkerError || ($root.cloudStorageError && !$root.dictionaryPreparationOwnsStorageError) || $root.inlineDraftError || $root.deferredDraftSaveError" class="workspaceAlerts" role="group" aria-label="Workspace notices">
-      <app-notice v-if="$root.storageMigrationMessage && !$root.workspaceInitializationActive" tone="info" class="storageMigrationNotice" role="status" aria-atomic="true">
+      <app-notice v-if="$root.storageMigrationMessage && !$root.workspaceInitializationActive" dismiss-key="storageMigrationMessage" tone="info" class="storageMigrationNotice" role="status" aria-atomic="true">
         <span v-if="$root.storageMigrationBusy" class="browserWorkSpinner" aria-hidden="true"></span>
         <span>{{ $root.storageMigrationMessage }}</span>
       </app-notice>
-      <app-notice v-if="$root.localSaveError" tone="error" class="cloudStorageError" role="alert">
+      <app-notice v-if="$root.localSaveError" dismiss-key="localSaveError" tone="error" class="cloudStorageError" role="alert">
         <span>Could not finish saving your translations. Your edits remain in this tab. {{ $root.localSaveError }}</span>
         <template #actions><button @click="$root.retryPendingSaves">Retry saving</button><button @click="$root.downloadPendingSaves">Download pending edits</button></template>
       </app-notice>
-      <app-notice v-if="$root.dictionaryWorkerError" tone="error" class="cloudStorageError" role="alert">
+      <app-notice v-if="$root.dictionaryWorkerError" dismiss-key="dictionaryWorkerError" tone="error" class="cloudStorageError" role="alert">
         <span>Could not prepare Dictionary matches. {{ $root.dictionaryWorkerError }}</span>
         <template #actions><button @click="$root.retryDictionaryPreparation" :disabled="$root.dictionaryPreparationRetrying">Retry preparation</button></template>
       </app-notice>
-      <app-notice v-if="$root.cloudStorageError && !$root.dictionaryPreparationOwnsStorageError" tone="error" class="cloudStorageError" role="alert">
+      <app-notice v-if="$root.cloudStorageError && !$root.dictionaryPreparationOwnsStorageError" dismiss-key="cloudStorageError" tone="error" class="cloudStorageError" role="alert">
         <span>{{ $root.cloudStorageError }}</span>
         <template #actions><button @click="$root.saveSettings">Retry local save</button></template>
       </app-notice>
-      <app-notice v-if="$root.inlineDraftError" tone="error" class="cloudStorageError" role="alert">
+      <app-notice v-if="$root.inlineDraftError" dismiss-key="inlineDraftError" tone="error" class="cloudStorageError" role="alert">
         <span>{{ $root.inlineDraftError }}</span>
         <template #actions><button @click="$root.openDraftRecovery">Review retained edits</button></template>
       </app-notice>
-      <app-notice v-if="$root.deferredDraftSaveError" tone="error" class="cloudStorageError" role="alert">
+      <app-notice v-if="$root.deferredDraftSaveError" dismiss-key="deferredDraftSaveError" tone="error" class="cloudStorageError" role="alert">
         <span>{{ $root.deferredDraftSaveError }}</span>
         <template #actions>
           <button v-if="!$root.hasStagedDeletionReview || $root.hasDeferredDraftReview" @click="$root.openDraftRecovery">Review retained edits</button>

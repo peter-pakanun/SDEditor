@@ -2,6 +2,30 @@
 (function (global) {
   'use strict';
 
+  // Presentation-only, per app lifetime. Root watches also see cleared/replaced
+  // messages while their surface is unmounted; switching editors must not turn
+  // a dismissed occurrence back on. Nothing is written to workspace storage.
+  const noticeStates = new WeakMap();
+  function noticeState(root, key) {
+    if (!key) return null;
+    let states = noticeStates.get(root);
+    if (!states) {
+      states = new Map();
+      noticeStates.set(root, states);
+      root.$watch(() => [root.ctWorkspace?.scope, root.gameVersion, root.sourceIdentity,
+        root.lang, root.cloudProfileId, root.cloudUser?.id], () => {
+        for (const state of states.values()) state.hidden = false;
+      }, { flush: 'sync' });
+    }
+    if (!states.has(key)) {
+      const state = Vue.reactive({ hidden: false });
+      states.set(key, state);
+      root.$watch(key, () => { state.hidden = false; }, { flush: 'sync' });
+    }
+    return states.get(key);
+  }
+  function revealNotice(root, key) { const state = noticeStates.get(root)?.get(key); if (state) state.hidden = false; }
+
   // Notices stay in their owning surface. The stack bounds the occupied space
   // and publishes it so sticky editor controls can sit below the messages.
   const Notice = {
@@ -9,13 +33,39 @@
     props: {
       tone: { type: String, default: 'error', validator: value => ['error', 'warning', 'info', 'neutral'].includes(value) },
       role: { type: String, default: null },
+      dismissKey: { type: String, default: '' },
+    },
+    data() { return { dismissal: null }; },
+    watch: {
+      dismissKey: { immediate: true, handler(key) { this.dismissal = noticeState(this.$root, key); } },
     },
     computed: {
       noticeRole() { return this.role || (this.tone === 'error' || this.tone === 'warning' ? 'alert' : this.tone === 'info' ? 'status' : 'note'); },
+      dismissLabel() { return this.tone === 'error' ? 'Dismiss error message' : this.tone === 'warning' ? 'Dismiss warning message' : 'Dismiss information message'; },
     },
-    template: `<div class="appNotice" :class="'appNotice--' + tone" :role="noticeRole">
+    methods: {
+      dismissKeydown(event) {
+        if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && ['Enter', ' '].includes(event.key)) event.stopPropagation();
+      },
+      async dismiss() {
+        if (!this.dismissal) return;
+        const notice = this.$el, stack = notice.closest('.appNoticeStack'), owner = notice.closest('.editor, .workspace, .appRoot');
+        const moveFocus = notice.contains(global.document.activeElement);
+        this.dismissal.hidden = true;
+        await this.$nextTick();
+        if (!moveFocus) return;
+        const available = element => !element.disabled && !element.closest('[inert]') && element.getClientRects().length
+          && global.getComputedStyle(element).visibility !== 'hidden';
+        const next = [...(stack?.querySelectorAll('button, a[href], input, select, textarea, [tabindex="0"]') || [])].find(available)
+          || [...(owner?.querySelectorAll('button, a[href], input, select, textarea, [tabindex="0"]') || [])].find(available);
+        // Native focus also reveals a control clipped by a long notice stack.
+        next?.focus();
+      },
+    },
+    template: `<div v-show="!dismissal?.hidden" class="appNotice" :class="['appNotice--' + tone, { appNoticeDismissible: !!dismissKey }]" :role="noticeRole">
       <div class="appNoticeContent"><slot></slot></div>
       <div v-if="$slots.actions" class="appNoticeActions"><slot name="actions"></slot></div>
+      <button v-if="dismissKey" type="button" class="appNoticeClose" :aria-label="dismissLabel" :title="dismissLabel" @keydown="dismissKeydown" @click.stop="dismiss"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button>
     </div>`,
   };
   const NoticeStack = {
@@ -878,5 +928,5 @@
       </section>
     </div>`
   };
-  global.EditorComponents = { Notice, NoticeStack, FieldToolbar, NativeField, TextField, WorkspaceShell, FullEditorShell, Preview: SharedPreview, Assistance, DictionaryEntries, TranslationMemory, Lookup, Comments, History, Tools, Autocomplete, DiagnosticMeta, DiagnosticScan, AttentionNavigation };
+  global.EditorComponents = { Notice, NoticeStack, revealNotice, FieldToolbar, NativeField, TextField, WorkspaceShell, FullEditorShell, Preview: SharedPreview, Assistance, DictionaryEntries, TranslationMemory, Lookup, Comments, History, Tools, Autocomplete, DiagnosticMeta, DiagnosticScan, AttentionNavigation };
 })(typeof window !== 'undefined' ? window : globalThis);

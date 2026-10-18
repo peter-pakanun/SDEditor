@@ -96,6 +96,9 @@
         return !!(this.collaborationState.error || this.collaborationState.disconnected || this.collaborationConflicts.length
           || this.collaborationDroppedReviewPaths.length);
       },
+      collaborationWarningMessage() {
+        return JSON.stringify([this.collaborationState.error, this.collaborationStatusLabel, this.collaborationNeedsAttention]);
+      },
       collaborationConnectionTone() {
         return this.collaborationState.error ? 'error' : this.collaborationNeedsAttention ? 'warning'
           : this.collaborationState.connected ? 'connected' : '';

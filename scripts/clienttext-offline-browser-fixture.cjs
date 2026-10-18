@@ -407,7 +407,7 @@ async function run() {
         await assertLocal(page, 'Workbook drag and drop');
         await monitor(page, false);
         results.push('Version-screen workbook drops open offline Current workbooks with inferred language/roles, theme-safe drag feedback and no durable/cloud side effects');
-        let layoutChecked = false;
+        let layoutChecked = false, previousTestGroup = null, dismissedTestSessions = 0;
         async function openTest(files, previousFiles = [], hiddenPreviousFiles = [], viaDrop = false) {
             if (viaDrop) {
                 const dataTransfer = await droppedFiles(files);
@@ -470,6 +470,19 @@ async function run() {
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctError), '');
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctOfflineTest), true);
             assert.match(await workspace.textContent(), /In-memory test/);
+            const testBanner = workspace.locator('.ctTestBanner:visible'); await testBanner.waitFor();
+            const sessionState = () => page.evaluate(async () => {
+                const app = window.__offlineTestApp, scope = app.ctWorkspace.scope;
+                return JSON.stringify({ active: app.ctActive, scope, selection: app.ctSelection, values: app.ctValues, saved: app.ctSaved,
+                    busy: app.ctBusy, progress: app.ctProgress, error: app.ctError, notice: app.ctNotice, aborted: app._ctAbort?.signal.aborted,
+                    stored: await app.ctStorage(scope).getSaved(scope), drafts: await app.ctStorage(scope).getDraftSummaries(scope) });
+            });
+            const sessionBefore = await sessionState(), groupId = await page.evaluate(() => window.__offlineTestApp.ctWorkspace.scope.groupId);
+            assert.notEqual(groupId, previousTestGroup, 'Every new importer session has its own recovery/work scope');
+            await testBanner.getByRole('button', { name: 'Dismiss information message', exact: true }).click();
+            assert.equal(await workspace.locator('.ctTestBanner:visible').count(), 0, 'The temporary-session banner can be closed');
+            assert.equal(await sessionState(), sessionBefore, 'Closing the banner leaves the real imported in-memory store and operation/session state exact');
+            previousTestGroup = groupId; dismissedTestSessions++;
             assert.equal(await page.evaluate(() => window.__offlineTestApp.lang), workbookLanguage, 'Opening selects the confirmed workbook language before activation');
             assert.equal(await page.evaluate(() => {const app=window.__offlineTestApp;return app._cloud.state.profiles[app._cloud.state.activeProfile].settings.lang;}),workbookLanguage,
                 'Personal language settings settle before the test becomes active');
@@ -1456,6 +1469,8 @@ async function run() {
         }
         results.push('Ordinary New Version and Add Content retain separate Prepare and validate/Publish complete groups actions');
         assert.deepEqual(failures, [], 'No browser runtime errors');
+        assert.ok(dismissedTestSessions >= 2, 'At least two real importer sessions verify dismissal reset');
+        results.push(dismissedTestSessions + ' imported test sessions each show a fresh dismissible banner and preserve their exact memory-store/session state when it closes');
         console.log(JSON.stringify({ ok: true, results, permittedReadOnlyCatalogRequests:await page.evaluate(()=>window.__offlineTestReadOnlyCatalogRequests||[]),
             permittedReadOnlyMediaRequests:await page.evaluate(()=>window.__offlineTestReadOnlyMediaRequests||[]) }, null, 2));
     } catch (error) {
