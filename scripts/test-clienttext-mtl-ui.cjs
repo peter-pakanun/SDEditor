@@ -51,35 +51,56 @@ function debugDialogHarness(record){
     return{...h,dialog};
 }
 
-test('Admin copy actions use the complete displayed sanitized prompt/context and never hidden transport fields',async()=>{
+test('Admin copy actions use every complete displayed sanitized JSON section and never hidden transport fields',async()=>{
     const original=Object.getOwnPropertyDescriptor(global,'navigator'),copied=[],record={status:'completed',server:{context:{note:'Context '.repeat(6000),accessToken:'private-secret'},
+        source:'Request line\n'.repeat(3000)+'request-tail',response:{translation:'Response line\n'.repeat(3000)+'response-tail',reasoning:'hidden-response-reasoning',apiKey:'private-response-key'},
         providerRequest:{model:'hidden-provider-value',reasoning:{effort:'hidden-effort'},instructions:'Prompt '.repeat(6000),input:[{role:'user',content:'Authorized source'}]},rawResponse:'hidden-raw-value'}};
     Object.defineProperty(global,'navigator',{configurable:true,value:{clipboard:{writeText:async text=>copied.push(text)}}});
     const h=debugDialogHarness(record);
     try{
-        for(const section of ['prompt','context']){assert.equal(await h.dialog.copySection(section),true);assert.equal(copied.at(-1),Debug.sectionText(record,section));assert.equal(h.dialog.copyMessage[section],'Copied');}
-        assert.ok(copied[0].length>30000);assert.ok(copied[1].length>30000);assert.doesNotMatch(copied.join(''),/private-secret|hidden-provider-value|hidden-effort|hidden-raw-value/);
-        assert.match(copied[1],/\n  "note"/);h.app.cloudUser.role='manager';assert.equal(await h.dialog.copySection('context'),false);assert.equal(copied.length,2);
+        for(const section of ['prompt','context','request','response']){assert.equal(await h.dialog.copySection(section),true);assert.equal(copied.at(-1),Debug.sectionText(record,section));assert.equal(h.dialog.copyMessage[section],'Copied');assert.ok(copied.at(-1).length>30000);}
+        assert.doesNotMatch(copied.join(''),/private-secret|private-response-key|hidden-provider-value|hidden-effort|hidden-raw-value|hidden-response-reasoning/);
+        assert.match(copied[1],/\n  "note"/);assert.equal(JSON.parse(copied[2]).source,record.server.source);assert.deepEqual(JSON.parse(copied[3]),{translation:record.server.response.translation});
+        for(const key of ['prompt','context','response'])assert.equal(JSON.parse(copied[2])[key],undefined);
+        h.app.cloudUser.role='manager';for(const section of ['prompt','context','request','response'])assert.equal(await h.dialog.copySection(section),false);assert.equal(copied.length,4);
+    }finally{h.dialog.resetCopy();if(original)Object.defineProperty(global,'navigator',original);else delete global.navigator;}
+});
+
+test('an absent response has no copy action, while an explicit null response retains its JSON meaning',async()=>{
+    const original=Object.getOwnPropertyDescriptor(global,'navigator'),copied=[],h=debugDialogHarness({status:'preview',snapshot:{source:'Synthetic source'}});
+    Object.defineProperty(global,'navigator',{configurable:true,value:{clipboard:{writeText:async text=>copied.push(text)}}});
+    try{
+        assert.equal(Debug.sectionText(h.dialog.item.record,'response'),'');assert.equal(await h.dialog.copySection('response'),false);
+        assert.equal(await h.dialog.copySection('rawResponse'),false);assert.deepEqual(copied,[]);
+        h.app.ctMtlDebugWindow={record:{status:'failed',server:{response:null}}};
+        assert.equal(await h.dialog.copySection('response'),true);assert.deepEqual(copied,['null']);
     }finally{h.dialog.resetCopy();if(original)Object.defineProperty(global,'navigator',original);else delete global.navigator;}
 });
 
 test('clipboard failure selects the displayed section for manual copy and never reports success',async()=>{
     const previousNavigator=Object.getOwnPropertyDescriptor(global,'navigator'),previousDocument=global.document,previousSelection=global.getSelection;
-    let selected,focused=false;const h=debugDialogHarness({status:'preview',snapshot:{context:{note:'Readable context'}}}),field={focus:options=>{assert.deepEqual(options,{preventScroll:true});focused=true;}};
-    h.dialog.$refs.contextText=[field];Object.defineProperty(global,'navigator',{configurable:true,value:{clipboard:{writeText:async()=>{throw new Error('Synthetic clipboard denial');}}}});
+    let selected,focused;const h=debugDialogHarness({status:'completed',server:{source:'Readable request',context:{note:'Readable context'},providerRequest:{instructions:'Readable prompt',input:[]},response:{translation:'Readable response'}}});
     global.document={createRange:()=>({selectNodeContents:value=>selected=value})};global.getSelection=()=>({removeAllRanges(){},addRange(){}});
-    try{assert.equal(await h.dialog.copySection('context'),false);assert.equal(selected,field);assert.equal(focused,true);assert.equal(h.dialog.copyMessage.context,'');assert.match(h.dialog.copyError.context,/Could not copy automatically.*Ctrl\+C/);}
+    try{for(const unavailable of [false,true]){
+        Object.defineProperty(global,'navigator',{configurable:true,value:unavailable?{}:{clipboard:{writeText:async()=>{throw new Error('Synthetic clipboard denial');}}}});
+        for(const section of ['prompt','context','request','response']){
+            selected=null;focused=false;const field={focus:options=>{assert.deepEqual(options,{preventScroll:true});focused=true;}};h.dialog.$refs[section+'Text']=[field];
+            assert.equal(await h.dialog.copySection(section),false);assert.equal(selected,field);assert.equal(focused,true);assert.equal(h.dialog.copyMessage[section],'');assert.match(h.dialog.copyError[section],/Could not copy automatically.*Ctrl\+C/);
+        }
+    }}
     finally{h.dialog.resetCopy();if(previousNavigator)Object.defineProperty(global,'navigator',previousNavigator);else delete global.navigator;global.document=previousDocument;global.getSelection=previousSelection;}
 });
 
 test('copy completion is fenced after account/context changes and repeated copy does not duplicate an active write',async()=>{
-    const original=Object.getOwnPropertyDescriptor(global,'navigator'),wait=deferred();let writes=0;
-    Object.defineProperty(global,'navigator',{configurable:true,value:{clipboard:{writeText:()=>{writes++;return wait.promise;}}}});
-    const h=debugDialogHarness({status:'preview',snapshot:{context:{note:'Scoped context'}}});
-    try{
-        const pending=h.dialog.copySection('context');assert.equal(await h.dialog.copySection('context'),false);assert.equal(writes,1);
-        h.app.cloudSignedIn=false;h.dialog.resetCopy();wait.resolve();assert.equal(await pending,false);assert.deepEqual(h.dialog.copyMessage,{});
-    }finally{h.dialog.resetCopy();if(original)Object.defineProperty(global,'navigator',original);else delete global.navigator;}
+    const original=Object.getOwnPropertyDescriptor(global,'navigator');
+    try{for(const section of ['context','request','response'])for(const change of [h=>h.app.cloudSignedIn=false,h=>h.scope.language='German',h=>h.app.ctMtlDebugWindow=null]){
+        const wait=deferred();let writes=0;Object.defineProperty(global,'navigator',{configurable:true,value:{clipboard:{writeText:()=>{writes++;return wait.promise;}}}});
+        const h=debugDialogHarness({status:'completed',server:{context:{note:'Scoped context'},response:{translation:'Scoped response'}}});
+        try{
+            const pending=h.dialog.copySection(section);assert.equal(await h.dialog.copySection(section),false);assert.equal(writes,1);
+            change(h);h.dialog.resetCopy();wait.resolve();assert.equal(await pending,false);assert.deepEqual(h.dialog.copyMessage,{});
+        }finally{h.dialog.resetCopy();}
+    }}finally{if(original)Object.defineProperty(global,'navigator',original);else delete global.navigator;}
 });
 function pollingHarness(){
     const h=harness();h.app.ctMtlCapabilities={enabled:true,reviewArchive:true,consentVersion:'mtl-v2',delivery:'poll-v1'};
@@ -307,7 +328,7 @@ test('late diagnostics cannot return after account/language/source/context chang
 test('preview redacts embedded credential-like values and diagnostic template uses escaped text',()=>{
     const value=Debug.redact({refresh_token:'synthetic-secret',source:'Bearer synthetic-token accessToken="synthetic-value" sk-syntheticsecret123'});
     assert.doesNotMatch(JSON.stringify(value),/synthetic/);assert.doesNotMatch(Debug.Dialog.template,/v-html/);
-    assert.match(Debug.Dialog.template,/<pre[^>]*>\{\{ details \}\}<\/pre>/);
+    assert.match(Debug.Dialog.template,/<pre[^>]*>\{\{ section === 'request' \? details : responseText \}\}<\/pre>/);
 });
 
 test('all MTL settings use neutral wording and retain an honest accessible data-sharing disclosure',()=>{

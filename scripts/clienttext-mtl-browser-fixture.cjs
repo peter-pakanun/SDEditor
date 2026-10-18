@@ -245,6 +245,8 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             await page.evaluate(()=>window.__mtlApp.ctMtlSettingsDefault());
             await page.locator('.ctMtlDebugButton').click();
             assert.match(await page.locator('.ctMtlDebugDialog').textContent(),/Preview · not executed/);
+            assert.equal(await page.getByRole('button',{name:'Copy response',exact:true}).count(),0,'Absent response has no copy action');
+            assert.equal(await page.locator('pre[aria-label="Displayed MTL response"]').count(),0,'Preview does not invent a response JSON block');
             await page.locator('.ctMtlTimingPanel summary').click();assert.equal(await page.locator('.ctMtlTimingPanel table').count(),4);assert.match(await page.locator('.ctMtlTimingPanel').textContent(),/Unavailable/);
             await auditCopy();
             assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureJobs.size),0,'Preview never generates');
@@ -275,18 +277,41 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             assert.equal(JSON.parse(await page.locator('.ctMtlDebugDialog pre[aria-label="Displayed MTL prompt"]').textContent()).instructions,'Synthetic executed prompt <img src=x onerror="window.__debugXss=true">');
             assert.equal(await page.locator('.ctMtlDebugDialog img').count(),0,'Request text is escaped');
             assert.equal(await page.evaluate(()=>window.__debugXss),undefined);assert.doesNotMatch(await page.locator('.ctMtlDebugDialog').textContent(),/synthetic-secret/);
-            await page.evaluate(()=>{window.__fixtureCopied=[];Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.__fixtureCopied.push(text);}}});});
+            await page.evaluate(()=>{
+                const app=window.__mtlApp,item=app.ctMtlDebugWindow,server=item.record.server;
+                app.ctMtlDebugWindow={...item,record:{...item.record,server:{...server,source:'Synthetic request line\n'.repeat(3000)+'request-tail',
+                    providerRequest:{...server.providerRequest,instructions:server.providerRequest.instructions+'\nSynthetic prompt line\n'.repeat(3000)+'prompt-tail',reasoning:'synthetic-hidden-reasoning'},
+                    context:{...server.context,note:'Synthetic context line\n'.repeat(3000)+'context-tail'},
+                    response:{translation:'Synthetic response line\n'.repeat(3000)+'response-tail',reasoning:'synthetic-hidden-reasoning',apiKey:'synthetic-secret'}}}};
+                window.__fixtureCopied=[];Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.__fixtureCopied.push(text);}}});
+            });
             const beforeCopy=await page.locator('.ctMtlDebugDialog').boundingBox(),selectedBeforeCopy=await page.evaluate(()=>window.__mtlApp.ctSelection);
-            for(const section of ['prompt','context']){
-                const text=await page.locator('.ctMtlDebugDialog pre[aria-label="Displayed MTL '+section+'"]').textContent(),button=page.getByRole('button',{name:'Copy '+section,exact:true});
-                await button.focus();await button.press('Enter');await page.waitForFunction(()=>window.__fixtureCopied.length>0);
+            const debugText=section=>page.locator('.ctMtlDebugDialog pre[aria-label="'+(section==='request'?'Selected request fields':'Displayed MTL '+section)+'"]');
+            for(const section of ['prompt','context','request','response']){
+                const box=debugText(section),text=await box.textContent(),button=page.getByRole('button',{name:'Copy '+section,exact:true});
+                assert.ok(text.length>30000);assert.match(text,new RegExp(section+'-tail'));assert.doesNotMatch(text,/synthetic-secret|synthetic-hidden-reasoning|synthetic-connection-config/);
+                const metrics=await box.evaluate(node=>({height:node.getBoundingClientRect().height,client:node.clientHeight,scroll:node.scrollHeight,overflow:getComputedStyle(node).overflowY}));
+                assert.ok(metrics.height<=360&&metrics.scroll>metrics.client,section+' JSON has bounded internal overflow');assert.equal(metrics.overflow,'auto');
+                const copiedCount=await page.evaluate(()=>window.__fixtureCopied.length);
+                await button.focus();await button.press('Enter');await page.waitForFunction(count=>window.__fixtureCopied.length===count+1,copiedCount);
                 assert.equal(await page.evaluate(()=>window.__fixtureCopied.at(-1)),text,'Copy uses full displayed '+section);
+                assert.equal(await button.locator('..').getByRole('status').textContent(),'Copied');
                 assert.equal(await button.evaluate(node=>node===document.activeElement),true,'Keyboard copy retains focus');
+                await box.focus();await box.evaluate(node=>{node.scrollTop=0;});await box.press('PageDown');
+                await page.waitForFunction(label=>document.querySelector('pre[aria-label="'+label+'"]').scrollTop>0,await box.getAttribute('aria-label'));
+                await box.evaluate(node=>{node.scrollTop=0;});const bounds=await box.boundingBox(),bodyScroll=await page.locator('.ctMtlDebugBody').evaluate(node=>node.scrollTop);
+                await page.mouse.move(bounds.x+bounds.width/2,bounds.y+bounds.height/2);await page.mouse.wheel(0,180);
+                await page.waitForFunction(label=>document.querySelector('pre[aria-label="'+label+'"]').scrollTop>0,await box.getAttribute('aria-label'));
+                assert.equal(await page.locator('.ctMtlDebugBody').evaluate(node=>node.scrollTop),bodyScroll,'Pointer scroll stays inside '+section+' JSON');
             }
             assert.deepEqual(await page.locator('.ctMtlDebugDialog').boundingBox(),beforeCopy,'Copy controls do not drag the dialog');
             await page.evaluate(()=>{navigator.clipboard.writeText=async()=>{throw new Error('Synthetic clipboard denial');};});
-            await page.getByRole('button',{name:'Copy context',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.ctMtlDebugDialog [role="alert"]')?.textContent.includes('Could not copy automatically'));
-            assert.equal(await page.evaluate(()=>getSelection().toString()),await page.locator('.ctMtlDebugDialog pre[aria-label="Displayed MTL context"]').textContent());
+            for(const section of ['context','request','response']){
+                const button=page.getByRole('button',{name:'Copy '+section,exact:true});await button.click();
+                await page.waitForFunction(label=>document.activeElement?.getAttribute('aria-label')===label,await debugText(section).getAttribute('aria-label'));
+                assert.match(await button.locator('../..').getByRole('alert').textContent(),/Could not copy automatically.*Ctrl\+C/);
+                assert.equal(await page.evaluate(()=>getSelection().toString()),await debugText(section).textContent(),'Manual fallback selects the complete '+section+' including overflow');
+            }
             assert.equal(await page.evaluate(()=>window.__mtlApp.ctSelection),selectedBeforeCopy);assert.equal(await page.evaluate(()=>window.__mtlApp.ctInlineClosed),false,'Copy actions preserve the inline editor');
             for(const theme of ['light','grey','dark','modern-dark']){
                 await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
@@ -295,6 +320,18 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             await page.setViewportSize({width:920,height:650});
             await page.waitForFunction(()=>{const r=document.querySelector('.ctMtlDebugDialog').getBoundingClientRect();return r.x>=7&&r.y>=7&&r.right<=913&&r.bottom<=643;});
             const resized=await page.locator('.ctMtlDebugDialog').boundingBox();assert.ok(resized.x>=7&&resized.y>=7&&resized.x+resized.width<=913&&resized.y+resized.height<=643,'Resized desktop keeps dialog reachable');
+            await page.setViewportSize({width:920,height:420});
+            await page.waitForFunction(()=>{const r=document.querySelector('.ctMtlDebugDialog').getBoundingClientRect();return r.y>=7&&r.bottom<=413;});
+            for(const section of ['prompt','context','request','response']){
+                const box=debugText(section);await box.scrollIntoViewIfNeeded();
+                assert.ok((await box.boundingBox()).height<=168.5,section+' JSON height follows a short desktop viewport');
+            }
+            const shortHeader=await page.locator('.ctMtlDebugHeader').boundingBox(),shortBody=await page.locator('.ctMtlDebugBody').evaluate(node=>({client:node.clientHeight,scroll:node.scrollHeight}));
+            assert.ok(shortHeader.y>=7&&shortHeader.height>=38&&shortBody.client>100&&shortBody.scroll>shortBody.client,'Short-screen dialog retains its header and scrollable body');
+            await page.screenshot({path:join(outDir,mode+'-debug-short.png'),fullPage:true});
+            await page.getByRole('button',{name:'Close request details',exact:true}).focus();await page.keyboard.press('Escape');
+            assert.equal(await page.locator('.ctMtlDebugButton').evaluate(node=>node===document.activeElement),true,'Large JSON dialog restores trigger focus');
+            await page.locator('.ctMtlDebugButton').click();await page.waitForFunction(()=>!!window.__mtlApp.ctMtlDebugWindow?.record.server);
             await page.setViewportSize({width:1440,height:1000});
             await page.evaluate(()=>{window.__mtlApp.cloudUser={...window.__mtlApp.cloudUser,role:'translator',isAdmin:false};});
             assert.equal(await page.locator('.ctMtlDebugDialog').count(),0);assert.equal(await page.evaluate(()=>Object.keys(window.__mtlApp.ctMtlDebugRecords).length),0,'Role change clears details');
@@ -497,7 +534,7 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             }
         }
         assert.deepEqual(external,[],'No external request is made');assert.deepEqual(errors,[],'Real native controls render without page errors');
-        const report={passed:true,modelSettingsChecks:['Admin-only toolbar bar','model and effort selection','unverified Fast disabled','four themes and desktop resize','Escape restores focus','draft unchanged'],timingChecks:['separate Admin panel with unavailable preview milestones','four themed timing tables and exact request correlation','first provisional frame after nonempty progress; no paint claim','ordinary roles hidden and context fence clears records'],results,externalRequests:external,pageErrors:errors};writeFileSync(join(outDir,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
+        const report={passed:true,debugJsonChecks:['absent response has no copy action','full sanitized prompt/context/request/response copies including overflow','Copied feedback and retained keyboard focus','keyboard and pointer internal scrolling','clipboard denial selects complete JSON for manual copy','four themes and 920x420 viewport','drag and Escape focus restoration','role change clears details'],modelSettingsChecks:['Admin-only toolbar bar','model and effort selection','unverified Fast disabled','four themes and desktop resize','Escape restores focus','draft unchanged'],timingChecks:['separate Admin panel with unavailable preview milestones','four themed timing tables and exact request correlation','first provisional frame after nonempty progress; no paint claim','ordinary roles hidden and context fence clears records'],results,externalRequests:external,pageErrors:errors};writeFileSync(join(outDir,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
     }catch(error){
         const page=browser?.contexts()[0]?.pages()[0];
         if(page){await page.screenshot({path:join(outDir,'failure.png'),fullPage:true});console.error(await page.evaluate(()=>({

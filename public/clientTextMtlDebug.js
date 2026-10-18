@@ -66,9 +66,12 @@
             elapsedMs: server?.elapsedMs ?? record.elapsedMs, error: server?.error || record.error };
         return redact(Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)));
     }
+    const copySections = ['prompt','context','request','response'];
     function sectionText(record,section){
-        if(!['prompt','context'].includes(section))return '';
-        const value=present(record)[section];return value===undefined?'':JSON.stringify(value,null,2);
+        if(!copySections.includes(section))return '';
+        const shown=present(record);
+        if(section==='request'){delete shown.prompt;delete shown.context;delete shown.response;return JSON.stringify(shown,null,2);}
+        const value=shown[section];return value===undefined?'':JSON.stringify(value,null,2);
     }
     const mixin = {
         data: () => ({ ctMtlDebugWindow: null, ctMtlDebugRecords: raw({}) }),
@@ -186,7 +189,8 @@
             promptText(){return sectionText(this.item.record,'prompt');},contextText(){return sectionText(this.item.record,'context');},
             timingGroups(){return Timing?.groups(this.item.record)||[];},
             timingState(){return Timing?.states(this.item.record)||{};},
-            details() { const value=present(this.item.record);delete value.prompt;delete value.context;return JSON.stringify(value,null,2); } },
+            details() { return sectionText(this.item.record,'request'); },
+            responseText() { return sectionText(this.item.record,'response'); } },
         watch:{item(){this.resetCopy();}},
         mounted() {
             this._resize = () => this.place(); window.addEventListener('resize', this._resize);
@@ -198,7 +202,7 @@
             timingValue(value){return Timing.format(value);},
             resetCopy(){for(const timer of Object.values(this._copyTimers||{}))clearTimeout(timer);this._copyTimers={};this._copyRuns={};this.copyBusy={};this.copyMessage={};this.copyError={};},
             async copySection(section){
-                if(!['prompt','context'].includes(section)||!allowed(this.host)||this.copyBusy[section])return false;
+                if(!copySections.includes(section)||!allowed(this.host)||this.copyBusy[section])return false;
                 const item=this.item,origin=this.host.ctMtlDebugOrigin;
                 if(!item?.record)return false;
                 const text=sectionText(item.record,section);
@@ -274,7 +278,12 @@
               <pre v-if="section === 'prompt' ? promptText : contextText" :ref="section+'Text'" tabindex="0" :aria-label="section === 'prompt' ? 'Displayed MTL prompt' : 'Displayed MTL context'">{{ section === 'prompt' ? promptText : contextText }}</pre>
               <p v-else>{{ section === 'prompt' ? 'An executed prompt is available after Translate is used.' : 'Context is unavailable.' }}</p><p v-if="copyError[section]" role="alert">{{ copyError[section] }}</p>
             </section>
-            <h4>Request and response</h4><pre tabindex="0" aria-label="Selected request fields">{{ details }}</pre>
+            <h4>Request and response</h4>
+            <section v-for="section in ['request','response']" :key="section" class="ctMtlDebugSection">
+              <div class="ctMtlDebugSectionTitle"><strong>{{ section === 'request' ? 'Request' : 'Response' }}</strong><button v-if="section === 'request' ? details : responseText" type="button" class="ctMtlCopyButton" :aria-label="'Copy '+section" :title="'Copy '+section" :aria-disabled="copyBusy[section] || undefined" @pointerdown.stop @click.stop="copySection(section)"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 8h12v13H8zM4 16H2V2h13v2"/></svg></button><small role="status" aria-live="polite">{{ copyMessage[section] }}</small></div>
+              <pre v-if="section === 'request' ? details : responseText" :ref="section+'Text'" tabindex="0" :aria-label="section === 'request' ? 'Selected request fields' : 'Displayed MTL response'">{{ section === 'request' ? details : responseText }}</pre>
+              <p v-else>Response is unavailable.</p><p v-if="copyError[section]" role="alert">{{ copyError[section] }}</p>
+            </section>
           </div>
         </section></teleport>`,
     };

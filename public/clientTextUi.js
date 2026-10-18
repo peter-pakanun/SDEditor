@@ -1335,6 +1335,13 @@
                 const status=root.ClientTextState.statusFor(unit,saved);cache.set(unit,{saved,status});return status;
             },
             ctFieldStatus(field) { return this.ctStatus().fields[field.id] || {}; },
+            ctRowStatusClasses(unit) {
+                const status=this.ctStatus(unit);
+                // Saved records can contain intentional blanks or unreviewed
+                // sources. Keep durable Saved separate from row completion.
+                return {isMissing:status.missing,isOutdated:status.outdated,isRevised:status.revised,
+                    hasChanges:status.saved && !status.missing && !status.outdated};
+            },
             ctReviewHash(field) { return root.ClientTextState.sourceHash(field.source); },
             ctValuesFor(unit) { return root.ClientTextState.valuesFor(unit, this.ctSaved[unit.id]); },
             ctFieldsFor(unit=this.ctCurrentUnit) {

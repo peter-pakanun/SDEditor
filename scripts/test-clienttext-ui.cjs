@@ -2503,6 +2503,28 @@ for(const full of [false,true])test('ClientText attention navigation skips compl
     assert.equal(await app.ctSaveAndNavigate(true,{attentionOnly:true,inline:!full}),true);assert.equal(app.ctSelection,rows[4].id);
 });
 
+for(const full of [false,true])test('ClientText attention navigation includes partial Saved records and exact-source review work '+(full?'full':'inline'),async()=>{
+    const rows=Array.from({length:4},(_,index)=>worksheetUnit('PartialAttention'+index,index+2)),partial=rows[1],complete=rows[2],stale=rows[3];
+    partial.fields.find(field=>field.name==='Later').target='';
+    const staleField=stale.fields.find(field=>field.name==='Later'),saved={
+        [partial.id]:{values:S.valuesFor(partial),reviewed:{},saved:true},
+        [complete.id]:{values:S.valuesFor(complete),reviewed:{},saved:true},
+        [stale.id]:{values:S.valuesFor(stale),outdated:[staleField.id],reviewed:{[staleField.id]:S.sourceHash('Previous English')},saved:true}
+    };
+    const {app}=keyboardHarness(rows[0],{ctUnits:rows,ctEditor:full,pageSize:2,ctSaved:saved,
+        _ctUnitIndex:new Map(rows.map(unit=>[unit.id,unit]))});
+    app.ctSave=async()=>true;
+    assert.equal(app.ctRowStatusClasses(partial).hasChanges,false);assert.equal(app.ctRowStatusClasses(complete).hasChanges,true);
+    assert.equal(app.ctRowStatusClasses(stale).hasChanges,false,'a review for a previous source cannot complete the row');
+    assert.equal(await app.ctSaveAndNavigate(false,{attentionOnly:true,inline:!full}),true);assert.equal(app.ctSelection,partial.id);
+    assert.equal(await app.ctSaveAndNavigate(false,{attentionOnly:true,inline:!full}),true);assert.equal(app.ctSelection,stale.id);
+    assert.equal(app.ctPage,2);assert.equal(await app.ctSaveAndNavigate(true,{attentionOnly:true,inline:!full}),true);assert.equal(app.ctSelection,partial.id);
+    app.ctSaved={...app.ctSaved,[stale.id]:{...saved[stale.id],reviewed:{[staleField.id]:S.sourceHash(staleField.source)}}};
+    assert.equal(app.ctNeedsAttention(stale),false);assert.equal(app.ctRowStatusClasses(stale).hasChanges,true);
+    app.ctDiagnostics={[complete.id]:[{severity:'warning'}]};assert.equal(app.ctNeedsAttention(complete),true,'manual findings remain independent');
+    app.ctDiagnostics={};app.ctMtlUnitIds=new Set([complete.id]);assert.equal(app.ctNeedsAttention(complete),true,'MTL review remains independent');
+});
+
 test('ClientText attention navigation stays inside NPC and Convo groups with unchanged context selected',async()=>{
     for(const mode of ['npcs','convo']){
         const h=mode==='npcs'?npcUiHarness():convoUiHarness(),{app,window}=h;
@@ -2762,6 +2784,38 @@ test('ClientText editor progress excludes blank fields, keeps review work and re
     assert.deepEqual(progress(),{total:0,resolved:0,percent:100});
     assert.equal(app.ctStatus(blank).missing,true);assert.equal(app.ctStatus(blank).saved,true);
     assert.deepEqual(originals,before,'Progress never mutates original field facts');
+});
+test('partial ClientText saves retain Missing work without painting the row complete through reloads and scoped saves',async()=>{
+    const original=namedUnit('PartialSave','English first',''),second={...original.fields[0],id:'second',source:'English second'},
+        optional={...second,id:'optional',kind:'form',form:'DexFour',required:false,originalMissing:false},
+        hidden={...second,id:'hidden',source:'',required:false,originalMissing:false};
+    original.fields.push(second,optional,hidden);
+    const before=clone(original),f=fixture();await f.store.import(scope,{units:[original],assets:[asset]});
+    const open=async captured=>listHarness({ctUnits:[original],_ctUnitIndex:new Map([[original.id,original]]),ctSelection:original.id,
+        ctWorkspace:{scope:clone(captured)},ctSaved:await f.store.getSaved(captured),_ctStore:f.store}).app;
+    const app=await open(scope);app.ctValues=S.valuesFor(original);app.ctValues[fieldId]='First translation';
+    app.ctSync=()=>{};app.ctLoadMemory=()=>{};
+    assert.equal(await app.ctSave(),true);
+    const partial=app.ctStatus(original);
+    assert.equal(partial.fields[fieldId].saved,true);assert.equal(partial.fields.second.saved,true,'an explicit blank save remains durable');
+    assert.equal(partial.fields.second.missing,true);assert.equal(partial.saved,true,'Saved counts durable work even when Missing overlaps');
+    assert.equal(app.ctRowStatusClasses(original).hasChanges,false,'a partial save cannot paint the record green');
+    assert.equal(app.ctRowStatusClasses(original).isMissing,true);assert.equal(app.ctNeedsAttention(original),true);
+    assert.equal(app.ctCounts.missing,1);assert.equal(app.ctCounts.saved,1);assert.equal(app.ctTone(original),'missing');
+    app.ctSelectedFilters=['missing'];assert.equal(app.ctRows[0],original);
+    app.ctSelectedFilters=['saved'];assert.equal(app.ctRows[0],original,'Saved remains a durable-work filter');
+    app.ctValues.second='Unsaved second translation';assert.equal(app.ctCounts.missing,1,'drafts do not complete the row');
+    const reloaded=await open(scope);assert.equal(reloaded.ctNeedsAttention(original),true);assert.equal(reloaded.ctRowStatusClasses(original).hasChanges,false);
+    assert.equal(await app.ctSave(),true);assert.equal(app.ctCounts.missing,0);assert.equal(app.ctNeedsAttention(original),false);
+    assert.equal(app.ctRowStatusClasses(original).hasChanges,true,'all required fields are complete; unused optional and empty-source fields may remain blank');
+    app.ctValues.second=' \t\n';assert.equal(await app.ctSave(),true);
+    const cleared=await open(scope);assert.equal(cleared.ctCounts.missing,1);assert.equal(cleared.ctNeedsAttention(original),true);
+    assert.equal(cleared.ctRowStatusClasses(original).hasChanges,false);assert.equal(cleared.ctStatus(original).fields.second.saved,true);
+    for(const changed of [{accountId:'bob'},{game:'poe1'},{branchId:'other'},{versionId:'v2'},{groupId:'other'},{language:'French'}]){
+        const isolated=await open({...scope,...changed});assert.equal(isolated.ctCounts.saved,0);assert.equal(isolated.ctCounts.missing,1);
+        assert.equal(isolated.ctStatus(original).fields[fieldId].missing,true);assert.equal(isolated.ctRowStatusClasses(original).hasChanges,false);
+    }
+    assert.deepEqual(await f.store.getUnit(scope,original.id),S.normalizeUnit(before),'saving never changes immutable field requirements');
 });
 test('draft queues capture unit/scope revisions and serialize subsequent edits against their own head',async()=>{
     const first=deferred(),calls=[],{app}=harness();app.ctDraftDirty=true;

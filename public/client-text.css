@@ -84,6 +84,8 @@
 .ctNpcRelation:focus-visible { outline:2px solid var(--ui-accent); outline-offset:2px; }
 .ctList { min-width:0; }.ctFilePath { display:block; margin-top:4px; color:var(--ui-muted); font-size:11px; overflow-wrap:anywhere; }.ctMetadataValue { display:block; margin-top:4px; font-size:11px; color:var(--ui-muted); }
 .ctTable tr.isOutdated > td { background-color:color-mix(in srgb,var(--ui-dropped) 8%,transparent); }
+.ctTable tr.isMissing > td { background-color:color-mix(in srgb,var(--ui-missing) 8%,transparent); }
+.ctTable tr.isMissing:nth-child(even) > td { background-color:color-mix(in srgb,var(--ui-missing) 12%,transparent); }
 .ctTable .ctRowNumber { width:76px; white-space:nowrap; font-variant-numeric:tabular-nums; }
 .ctPortraitStack { display:block; position:relative; container-type:inline-size; width:min(100%,480px,calc(160px * var(--ct-portrait-count))); height:180px; margin-top:12px; isolation:isolate; }
 .ctPortraitCards { display:flex; position:relative; align-items:flex-start; width:100%; }
@@ -166,14 +168,14 @@
 .ctMtlButton {font-size:12px;min-width:34px;display:inline-flex;align-items:center;justify-content:center;}
 .ctMtlButtonTarget {display:inline-flex;align-items:center;margin-left:auto;}
 .ctMtlDebugButton {font-size:14px;min-width:26px;padding-inline:5px;}
-.ctMtlDebugDialog {position:fixed;z-index:3500;box-sizing:border-box;width:720px;max-width:calc(100vw - 16px);max-height:min(760px,80vh);display:flex;flex-direction:column;border:1px solid var(--ui-border);border-radius:8px;background:var(--color-element);color:var(--color-font);box-shadow:0 12px 42px #0006;font-size:13px;}
-.ctMtlDebugHeader {display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 14px;border-bottom:1px solid var(--ui-border);cursor:grab;user-select:none;touch-action:none;}
+.ctMtlDebugDialog {position:fixed;z-index:3500;box-sizing:border-box;width:720px;max-width:calc(100vw - 16px);max-height:min(760px,calc(100vh - 16px));display:flex;flex-direction:column;border:1px solid var(--ui-border);border-radius:8px;background:var(--color-element);color:var(--color-font);box-shadow:0 12px 42px #0006;font-size:13px;}
+.ctMtlDebugHeader {display:flex;flex-shrink:0;align-items:center;justify-content:space-between;gap:16px;padding:10px 14px;border-bottom:1px solid var(--ui-border);cursor:grab;user-select:none;touch-action:none;}
 .ctMtlDebugDialog.dragging .ctMtlDebugHeader {cursor:grabbing;}
 .ctMtlDebugHeader button {font-size:20px;line-height:1;padding:2px 7px;}
 .ctMtlDebugBody {min-height:0;overflow:auto;padding:0 14px 14px;}
 .ctMtlDebugBody p {margin:10px 0;}
 .ctMtlDebugMode {font-weight:600;color:var(--ui-accent);}
-.ctMtlDebugBody pre {white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--ui-border);border-radius:4px;background:var(--color-element-alt);padding:12px;font-size:12px;user-select:text;}
+.ctMtlDebugBody pre {box-sizing:border-box;max-height:min(360px,40vh);overflow:auto;overscroll-behavior:contain;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--ui-border);border-radius:4px;background:var(--color-element-alt);padding:12px;font-size:12px;user-select:text;}
 .ctMtlDebugSectionTitle {display:flex;align-items:center;gap:8px;}.ctMtlDebugSectionTitle small {color:var(--ui-muted);}
 .ctMtlCopyButton {display:inline-flex;align-items:center;justify-content:center;padding:3px;}.ctMtlCopyButton svg {width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.5;}
 .ctMtlButtonTarget + .fieldToolbarSeparator {margin-left:0;}
