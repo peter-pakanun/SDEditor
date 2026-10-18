@@ -91,7 +91,7 @@ const options={
    this._fixtureDismissals=[];this._fixtureArchiveFailures=0;this._fixtureArchiveLostAcks=0;this._fixtureArchiveDefer=false;this._fixtureArchiveReleases=[];
    this._cloud=Vue.markRaw({request:async(path,init={})=>{
     if(path==='/v1/mtl/capabilities')return{enabled:true,reviewArchive:true,consentVersion:'mtl-v2'};
-    if(path==='/v1/admin/mtl/model-settings')return{settings:{version:'mtl-inference-settings-v1',models:[{model:'gpt-6-luna',efforts:['high','xhigh','max']},{model:'gpt-6.1-sol',efforts:['low','medium','high','xhigh','max']}]}};
+    if(path==='/v1/admin/mtl/model-settings')return{settings:{version:'mtl-inference-settings-v1',models:[{model:'gpt-6-luna',efforts:['none','low','medium','high','xhigh','max']},{model:'gpt-6.1-sol',efforts:['low','medium','high','xhigh','max']}]}};
     if(path.includes('/dismissals')){
      const body=structuredClone(init.body);this._fixtureDismissals.push({path,body});
      if(body.consentVersion!=='mtl-v2')throw Object.assign(new Error('Updated private-retention consent is required.'),{status:403,code:'MTL_REVIEW_CONSENT_REQUIRED'});
@@ -238,6 +238,14 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             await settingsBar.getByLabel('Model',{exact:true}).selectOption('gpt-6.1-sol');await settingsBar.getByLabel('Reasoning',{exact:true}).selectOption('low');
             assert.equal(await settingsBar.getByRole('checkbox',{name:'Fast · unavailable'}).isDisabled(),true);
             assert.deepEqual(await page.evaluate(()=>window.__mtlApp.ctMtlSettingsCapture()),{version:'mtl-inference-settings-v1',model:'gpt-6.1-sol',effort:'low'});
+            assert.match(await settingsBar.locator('.ctMtlSettingsFast').getAttribute('title'),/Fast support and account entitlement have not been verified/);
+            await settingsBar.getByLabel('Model',{exact:true}).selectOption('gpt-6-luna');
+            assert.deepEqual(await settingsBar.getByLabel('Reasoning',{exact:true}).locator('option').allTextContents(),['none','low','medium','high','xhigh','max']);
+            for(const effort of ['none','low','medium']){
+                await settingsBar.getByLabel('Reasoning',{exact:true}).selectOption(effort);
+                assert.deepEqual(await page.evaluate(()=>window.__mtlApp.ctMtlSettingsCapture()),{version:'mtl-inference-settings-v1',model:'gpt-6-luna',effort});
+            }
+            assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureJobs.size),0,'Model choices never generate or probe the provider');
             for(const theme of ['light','grey','dark','modern-dark']){
                 await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);await page.screenshot({path:join(outDir,mode+'-model-settings-'+theme+'.png'),fullPage:true});
                 const box=await settingsBar.boundingBox();assert.ok(box.width>250&&box.x>=0&&box.x+box.width<=1440,'Settings bar fits the desktop');
@@ -538,7 +546,7 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             }
         }
         assert.deepEqual(external,[],'No external request is made');assert.deepEqual(errors,[],'Real native controls render without page errors');
-        const report={passed:true,debugJsonChecks:['absent response has no copy action','full sanitized prompt/context/request/response copies including overflow','Copied feedback and retained keyboard focus','keyboard and pointer internal scrolling','clipboard denial selects complete JSON for manual copy','four themes and 920x420 viewport','drag and Escape focus restoration','role change clears details'],modelSettingsChecks:['Admin-only toolbar bar','model and effort selection','unverified Fast disabled','four themes and desktop resize','Escape restores focus','draft unchanged'],timingChecks:['separate Admin panel with unavailable preview milestones','four themed timing tables and exact request correlation','first provisional frame after nonempty progress; no paint claim','ordinary roles hidden and context fence clears records'],results,externalRequests:external,pageErrors:errors};writeFileSync(join(outDir,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
+        const report={passed:true,debugJsonChecks:['absent response has no copy action','full sanitized prompt/context/request/response copies including overflow','Copied feedback and retained keyboard focus','keyboard and pointer internal scrolling','clipboard denial selects complete JSON for manual copy','four themes and 920x420 viewport','drag and Escape focus restoration','role change clears details'],modelSettingsChecks:['Admin-only toolbar bar','model and effort selection','Luna none/low/medium available','Sol/medium default retained','unverified Fast disabled','four themes and desktop resize','Escape restores focus','draft unchanged'],timingChecks:['separate Admin panel with unavailable preview milestones','four themed timing tables and exact request correlation','first provisional frame after nonempty progress; no paint claim','ordinary roles hidden and context fence clears records'],results,externalRequests:external,pageErrors:errors};writeFileSync(join(outDir,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
     }catch(error){
         const page=browser?.contexts()[0]?.pages()[0];
         if(page){await page.screenshot({path:join(outDir,'failure.png'),fullPage:true});console.error(await page.evaluate(()=>({

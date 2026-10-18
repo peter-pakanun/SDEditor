@@ -7,6 +7,9 @@ const Context = require('../public/clientTextMtlContext.js');
 const MtlState = require('../public/clientTextMtlState.js');
 const S = require('../public/clientTextState.js');
 const N = require('../public/clientTextNpcIndex.js');
+const Convo = require('../public/clientTextConvoIndex.js');
+const Codec = require('../public/clientTextCodec.js');
+const JSZip = require('../../SDEditor-API/node_modules/jszip');
 const Catalog = require('../public/clientTextPortraitCatalog.js');
 const DictionaryScope = require('../public/dictionaryScope.js');
 const UI = require('../public/clientTextMtlUi.js');
@@ -403,6 +406,75 @@ async function ambiguousRowCharacter({sheet='NPCTalkDialogueTextAudio',id='Synth
     return {selected,units,npcIndex,convoIndex,result:await build(selected,units,{npcIndex,convoIndex})};
 }
 
+// Actual OOXML decoding and both derived indexes, including empty metadata
+// cells retained by the decoder. No hand-authored conversation membership.
+async function decodedRowCharacter({blank='',filter=blank,prohibited=blank,npcReference=blank,suffix='NoLore',roleColumn,
+    sheetName='NPCTalkDialogueTextAudio'}={}) {
+    const zip=new JSZip(),ns='http://schemas.openxmlformats.org/spreadsheetml/2006/main',
+        escape=value=>String(value).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\r/g,'&#13;'),
+        meta=value=>({value,metadata:true}),
+        sheets=[
+            [sheetName,[
+                ['ID',meta('NPC'),meta('Character'),'Text','Translation',meta('Character Filter'),meta('Prohibited Character Filter'),meta('AudioFile'),...(roleColumn?[meta(roleColumn)]:[])],
+                ['Synthetic_Spirit_A_Dex4b='+suffix,npcReference,A,'Synthetic selected dialogue.','',filter,prohibited,'Synthetic/clip.ogg',...(roleColumn?[blank]:[])],
+                ['Synthetic_Spirit_B',P,'','Synthetic first NPC dialogue.'],
+                ['Synthetic_Spirit_C',Q,'','Synthetic second NPC dialogue.']]],
+            ['NPCs',[['ID','Name','Translation'],[P,'Same Synthetic Name',''],[Q,'Same Synthetic Name','']]],
+            ['Characters',[['ID','Name','Translation','Description','Translation','Traits Description','Translation'],
+                [A,'Synthetic Mage','','Synthetic authored introduction.','','Synthetic gameplay traits.','']]]
+        ];
+    zip.file('[Content_Types].xml','<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>');
+    zip.file('xl/workbook.xml','<workbook xmlns="'+ns+'" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'+sheets.map(([name],index)=>'<sheet name="'+name+'" sheetId="'+(index+1)+'" r:id="rId'+(index+1)+'"/>').join('')+'</sheets></workbook>');
+    zip.file('xl/_rels/workbook.xml.rels','<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'+sheets.map((_,index)=>'<Relationship Id="rId'+(index+1)+'" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet'+(index+1)+'.xml"/>').join('')+'</Relationships>');
+    zip.file('xl/styles.xml','<styleSheet xmlns="'+ns+'"><fonts count="2"><font/><font><i/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><cellStyleXfs count="1"><xf fontId="0" fillId="0"/></cellStyleXfs><cellXfs count="2"><xf fontId="0" fillId="0" xfId="0"/><xf fontId="1" fillId="0" xfId="0" applyFont="1"/></cellXfs></styleSheet>');
+    for(const [index,[,rows]]of sheets.entries())zip.file('xl/worksheets/sheet'+(index+1)+'.xml','<worksheet xmlns="'+ns+'"><sheetData>'+rows.map((cells,row)=>'<row r="'+(row+1)+'">'+cells.map((cell,column)=>{
+        const metadata=typeof cell==='object';return '<c r="'+String.fromCharCode(65+column)+(row+1)+'" s="'+(metadata?1:0)+'" t="inlineStr"><is><t xml:space="preserve">'+escape(metadata?cell.value:cell)+'</t></is></c>';
+    }).join('')+'</row>').join('')+'</sheetData></worksheet>');
+    const parsed=await Codec.parseWorkbook(await zip.generateAsync({type:'uint8array'}),{filename:'Thai.xlsx',language:'Thai'}),
+        units=parsed.units,selected=units.find(value=>value.recordId==='Synthetic_Spirit_A_Dex4b='+suffix),
+        npcIndex=await N.buildNpcIndex(units,{yield:async()=>{}}),convoIndex=await Convo.buildConvoIndex(units,npcIndex,{yield:async()=>{}}),
+        scope={accountId:'synthetic',game:'poe2',branchId:'default',language:'Thai'},
+        toneNotes={status:'ready',accountId:scope.accountId,scope,entries:[{identityKey:'character:'+A,revision:1,text:'Synthetic saved voice guidance'}]},
+        result=await build(selected,units,{npcIndex,convoIndex,scope,toneNotes});
+    return {selected,units,npcIndex,convoIndex,result};
+}
+
+test('decoded empty NPC and filter cells permit only the independent canonical-character speaker hint',async()=>{
+    for(const blank of ['', ' \t\r\n ']) {
+        const {selected,convoIndex,result}=await decodedRowCharacter({blank});
+        assert.deepEqual(selected.metadata,{NPC:blank,Character:A,'Character Filter':blank,'Prohibited Character Filter':blank,AudioFile:'Synthetic/clip.ogg'});
+        const family=convoIndex.memberships.get(selected.id);
+        assert.equal(family.ambiguous,false);assert.equal(family.npcEvidence.participants.length,1);
+        assert.deepEqual(family.npcEvidence.participants[0].references,[Q,P].sort());
+        assert.equal(result.roleHints.speaker.status,'suggested');assert.equal(key(result,'speaker'),'character:'+A);
+        assert.equal(result.roleHints.speaker.evidence[0].rule,'single-canonical-character-speaks');
+        assert.equal(result.roleHints.listener.status,'unknown');assert.equal(result.roleHints.order.status,'suppressed');
+        assert.deepEqual(result.roleHints.order.reasons,['ambiguous-npc-group-identity']);
+        assert.deepEqual(result.roleHints.constraints,[]);assert.deepEqual(result.roleHints.conflicts,[]);assert.deepEqual(result.roleHints.unresolved,[]);
+        assert.deepEqual(result.sharedToneNotes.entries,[{identityKey:'character:'+A,revision:1,text:'Synthetic saved voice guidance',roles:['speaker']}]);
+        assert.equal(result.roleHints.idSuffix.status,'condition');bounds(result);
+    }
+});
+
+test('decoded populated filters, explicit role columns, NPC references and unknown suffixes still block the row-character fallback',async()=>{
+    const cases=[
+        ...['filter','prohibited'].flatMap(name=>[A,B,'Unknown'].map(value=>({[name]:value}))),
+        ...['Speaker','Speaking Character','Listener','Listening Character','Addressee'].flatMap(roleColumn=>['',' \t\r\n '].map(blank=>({roleColumn,blank}))),
+        {npcReference:P},{npcReference:'Unknown'},{suffix:'Unknown'},{suffix:'StrFour'}
+    ];
+    for(const options of cases) {
+        const {result}=await decodedRowCharacter(options);
+        assert.equal(result.roleHints.speaker.status,'unknown',JSON.stringify(options));
+        assert.equal(result.sharedToneNotes?.entries.length||0,0,JSON.stringify(options));
+        assert.ok(!result.roleHints.speaker.evidence?.some(value=>value.kind==='row-character-convention'),JSON.stringify(options));
+        if(options.filter||options.prohibited) {
+            assert.equal(result.roleHints.constraints.length,1);assert.equal(result.roleHints.constraints[0].raw,options.filter||options.prohibited);
+            assert.equal(result.roleHints.constraints[0].complete,(options.filter||options.prohibited)!=='Unknown');
+        }
+        bounds(result);
+    }
+});
+
 test('one canonical row Character can tentatively speak despite only an ambiguous NPC group; condition suffixes never identify listeners',async()=>{
     for(const sheet of ['NPCTalkDialogueTextAudio','NPCTalkDialogueTextAudio_Gender'])for(const suffix of ['', '=NoLore','=HasLore']){
         const {result}=await ambiguousRowCharacter({sheet,id:'Synthetic_Spirit'+suffix,metadata:{Character:A,AudioFile:'UnrelatedSynthetic/clip.ogg'}});
@@ -424,8 +496,9 @@ test('row-character fallback rejects unresolved, conflicting, filtered, suffix-b
         {metadata:{}},{metadata:{Character:A+','+B}},{metadata:{Character:A+','+A}},{metadata:{Character:'Synthetic Mage'}},
         {metadata:{Character:'Metadata/Characters/Unknown'}},{metadata:{Character:A,character:B}},
         {metadata:{Character:A,NPC:P}},{metadata:{Character:A,npc:P}},{metadata:{Character:A,'Related Character':B}},
+        {metadata:{Character:A,'Related Character':''}},
         ...['Speaker','Speaking Character','Listener','Listening Character','Addressee'].flatMap(name=>['',P,'Unknown'].map(value=>({metadata:{Character:A,[name]:value}}))),
-        ...['Character Filter','Prohibited Character Filter'].flatMap(name=>['',A,B].map(value=>({metadata:{Character:A,[name]:value}}))),
+        ...['Character Filter','Prohibited Character Filter'].flatMap(name=>[A,B,'Unknown'].map(value=>({metadata:{Character:A,[name]:value}}))),
         ...['Unknown','IntFour','StrFour','Scout','NoLore=HasLore','', ' '.repeat(300)+'NoLore'].map(suffix=>({id:'Synthetic='+suffix})),
         ...['NPCTextAudio','CharacterTextAudio','ClientStrings'].map(sheet=>({sheet})),
         {change:({family})=>{family.ambiguous=true;}},{change:({family})=>{delete family.ambiguous;}},

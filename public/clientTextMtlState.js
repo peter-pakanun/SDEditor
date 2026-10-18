@@ -36,7 +36,7 @@
         for (const name of ['provider', 'model', 'effort', 'promptVersion', 'schemaVersion', 'actorId', 'resolvedBy', 'acceptedBy', 'acceptanceJobId'])
             if (own(result, name) && (typeof result[name] !== 'string' || result[name].length > 256)) throw new TypeError('Invalid MTL provenance.');
         if(own(input,'inferenceSettings')){
-            const value=input.inferenceSettings,efforts=value?.model==='gpt-6-luna'?['high','xhigh','max']:value?.model==='gpt-6.1-sol'?['low','medium','high','xhigh','max']:[];
+            const value=input.inferenceSettings,efforts=value?.model==='gpt-6-luna'?['none','low','medium','high','xhigh','max']:value?.model==='gpt-6.1-sol'?['low','medium','high','xhigh','max']:[];
             if(!value||value.version!=='mtl-inference-settings-v1'||Object.keys(value).some(key=>!['version','model','effort'].includes(key))
                 ||!efforts.includes(value.effort)||input.model!==value.model||input.effort!==value.effort)throw new TypeError('Invalid MTL inference settings.');
             result.inferenceSettings={version:value.version,model:value.model,effort:value.effort};

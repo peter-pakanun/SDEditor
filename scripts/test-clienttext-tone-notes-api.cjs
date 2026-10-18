@@ -58,18 +58,22 @@ test('actual API stale conflicts and lost-ack replay preserve drafts and the ori
     h.app.ctToneResolveConflict(true);assert.equal(await h.app.ctToneSave(),true);assert.equal(h.app.ctToneCurrent.saved.revision,3);
 });
 
-test('a guarded canonical-character suggestion refreshes only its saved note and reaches actual API admission and fake provider input',async t=>{
-    const h=await fixture(t),S=require('../public/clientTextState.js'),Context=require('../public/clientTextMtlContext.js'),Npc=require('../public/clientTextNpcIndex.js'),
+test('blank NPC/filter cells through actual indexes refresh only the canonical-character saved note and reach API admission and fake provider input',async t=>{
+    const h=await fixture(t),S=require('../public/clientTextState.js'),Context=require('../public/clientTextMtlContext.js'),Npc=require('../public/clientTextNpcIndex.js'),Convo=require('../public/clientTextConvoIndex.js'),
         api=name=>import(pathToFileURL(join(__dirname,'../../SDEditor-API/src',name)).href),
         {migrateMtlQuota}=await api('mtl-quota.js'),{createMtlService}=await api('mtl-service.js'),{createMtlProvider,MTL_PROMPT_VERSION}=await api('mtl-provider.js'),
         character='Metadata/Characters/Dex/DexFourb',identityKey='character:'+character,
         make=(sheet,recordId,source,metadata={})=>S.normalizeUnit({role:'normal',sheet,recordId,metadata,
             fields:[{id:'text',name:sheet==='NPCs'?'Name':'Text',kind:'text',source,target:''}]}),
-        selected=make('NPCTalkDialogueTextAudio','Synthetic_Spirit_Dex4b=NoLore','Synthetic source {0}',{Character:character}),
+        selected=make('NPCTalkDialogueTextAudio','Synthetic_Spirit_A_Dex4b=NoLore','Synthetic source {0}',
+            {NPC:'',Character:character,'Character Filter':' \t\r\n ','Prohibited Character Filter':''}),
         first=make('NPCs','Metadata/NPC/Synthetic/First','Same Synthetic Name'),second=make('NPCs','Metadata/NPC/Synthetic/Second','Same Synthetic Name'),
-        units=[selected,first,second],npcIndex=await Npc.buildNpcIndex(units,{yield:async()=>{}}),parentKey=[...npcIndex.groupByKey.keys()][0],
-        convoIndex={memberships:new Map([[selected.id,{familyKey:'Synthetic',parentKey,ambiguous:false,
-            npcEvidence:{participants:[{key:parentKey,references:[first.recordId,second.recordId]}],unresolved:[],ambiguous:[]}}]])};
+        firstLine=make('NPCTalkDialogueTextAudio','Synthetic_Spirit_B','Synthetic first NPC dialogue.',{NPC:first.recordId,Character:''}),
+        secondLine=make('NPCTalkDialogueTextAudio','Synthetic_Spirit_C','Synthetic second NPC dialogue.',{NPC:second.recordId,Character:''}),
+        units=[selected,first,second,firstLine,secondLine],npcIndex=await Npc.buildNpcIndex(units,{yield:async()=>{}}),
+        convoIndex=await Convo.buildConvoIndex(units,npcIndex,{yield:async()=>{}});
+    assert.equal(convoIndex.memberships.get(selected.id).ambiguous,false);
+    assert.deepEqual(convoIndex.memberships.get(selected.id).npcEvidence.participants[0].references,[first.recordId,second.recordId]);
     Object.assign(h.app,{ctCurrentUnit:selected,ctSelection:selected.id,ctUnits:units,_ctNpcIndex:npcIndex,_ctConvoIndex:convoIndex});
     assert.equal(await h.app.ctToneOpen(identityKey),true);assert.equal(h.app.ctToneCurrent.saved.revision,0);
     h.app.ctToneEdited('Synthetic saved voice guidance');assert.equal(await h.app.ctToneSave(),true);
@@ -79,6 +83,7 @@ test('a guarded canonical-character suggestion refreshes only its saved note and
     const context=Context.build({unit:selected,field:selected.fields[0],units,npcIndex,convoIndex,scope:h.scope,toneNotes:h.app.ctToneNotesSnapshot(keys)});
     assert.equal(context.roleHints.speaker.status,'suggested');assert.equal(context.roleHints.listener.status,'unknown');
     assert.deepEqual(context.roleHints.order.reasons,['ambiguous-npc-group-identity']);
+    assert.deepEqual(context.roleHints.constraints,[]);
     assert.deepEqual(context.sharedToneNotes.entries,[{identityKey,revision:1,text:'Synthetic saved voice guidance',roles:['speaker']}]);
     assert.ok(!JSON.stringify(context).includes('PRIVATE UNSAVED GUIDANCE'));assert.equal(h.app.ctToneCurrent.draft,'PRIVATE UNSAVED GUIDANCE');
     migrateMtlQuota(h.db);let calls=0,wire;

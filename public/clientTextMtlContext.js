@@ -257,7 +257,10 @@
             kind: family?.parentKey && family.parentKey !== 'unassigned' ? 'conversation-context-then-row-references' : !family && membership?.size ? 'npc-index-then-row-references' : 'row-references',
             participantKeys: participants.slice(0, 4).map(value => value.actor.key),
             ...(unreliable.size ? { reason: [...unreliable][0], reasons: [...unreliable] } : {}) };
-        for (const [name, raw] of metadata.filter(([name]) => /^(?:Prohibited )?Character Filter$/i.test(name)).slice(0, 4)) {
+        // The decoder preserves schema columns on every row. An empty filter
+        // cell supplies no constraint; a nonempty unresolved filter still does.
+        for (const [name, raw] of metadata.filter(([name, raw]) => /^(?:Prohibited )?Character Filter$/i.test(name)
+            && (typeof raw !== 'string' || raw.trim())).slice(0, 4)) {
             const refs = referenceList(raw), keys = refs.map(reference => resolver.resolve(reference, { names: false }).actor?.key), complete = refs.length > 0 && refs.length <= 4 && keys.every(Boolean);
             hints.constraints.push({ field: name, kind: 'listener-constraint', ...rawEvidence(raw), identityKeys: keys.filter(Boolean).slice(0, 4), complete,
                 prohibited: /^Prohibited /i.test(name) });
@@ -299,7 +302,8 @@
             && !blocked.size && !hints.constraints.length && !hints.conflicts.length && !hints.unresolved.length
             && hints.speaker.status === 'unknown' && hints.listener.status === 'unknown'
             && (!hints.idSuffix || hints.idSuffix.status === 'condition' && !hints.idSuffix.truncated && /^(?:HasLore|NoLore)$/i.test(hints.idSuffix.raw.trim()))
-            && !metadata.some(([name]) => /^(?:NPC|Related ?Character|Speaker|Speaking Character|Listener|Listening Character|Addressee|(?:Prohibited )?Character Filter)$/i.test(name.trim()))
+            && !metadata.some(([name, raw]) => /^(?:Related ?Character|Speaker|Speaking Character|Listener|Listening Character|Addressee)$/i.test(name.trim())
+                || /^(?:NPC|(?:Prohibited )?Character Filter)$/i.test(name.trim()) && (typeof raw !== 'string' || raw.trim()))
             && characterPath.startsWith('Metadata/Characters/') && rowActor?.kind === 'character' && rowActor.key === 'character:' + characterPath
             && wellFormed(rowActor.key) && !/[\u0000-\u001f\u007f-\u009f]/u.test(rowActor.key) && new TextEncoder().encode(rowActor.key).length <= 1024) {
             hints.speaker = { status: 'suggested', identityKey: rowActor.key, confidence: 'heuristic', priority: 1,

@@ -930,7 +930,7 @@ function modelSettingsHarness(){
     for(const[name,method]of Object.entries(ModelSettings.mixin.methods))app[name]=method.bind(app);
     for(const[name,getter]of Object.entries(ModelSettings.mixin.computed))Object.defineProperty(app,name,{configurable:true,get:()=>getter.call(app)});
     const generate=app._cloud.request;app._cloud.request=async(path,options)=>path==='/v1/admin/mtl/model-settings'?{settings:{version:'mtl-inference-settings-v1',models:[
-        {model:'gpt-6-luna',efforts:['high','xhigh','max']},{model:'gpt-6.1-sol',efforts:['low','medium','high','xhigh','max']}]}}:generate(path,options);
+        {model:'gpt-6-luna',efforts:['none','low','medium','high','xhigh','max']},{model:'gpt-6.1-sol',efforts:['low','medium','high','xhigh','max']}]}}:generate(path,options);
     return h;
 }
 test('model settings are pinned-Admin-only, session-local and preserve the Sol/medium default and explicit choices',async()=>{
@@ -939,7 +939,9 @@ test('model settings are pinned-Admin-only, session-local and preserve the Sol/m
     assert.equal(app.ctMtlSettingsChoose('model','gpt-6.1-sol'),true);assert.equal(app.ctMtlSettingsChoose('effort','low'),true);
     const selected=app.ctMtlSettingsCapture();assert.deepEqual(selected,{version:'mtl-inference-settings-v1',model:'gpt-6.1-sol',effort:'low'});
     selected.effort='max';assert.equal(app.ctMtlSettingsCapture().effort,'low');
-    assert.equal(app.ctMtlSettingsChoose('model','gpt-6-luna'),true);assert.equal(app.ctMtlSettingsCapture().effort,'high');assert.equal(app.ctMtlSettingsChoose('effort','low'),false);
+    assert.equal(app.ctMtlSettingsChoose('model','gpt-6-luna'),true);assert.equal(app.ctMtlSettingsCapture().effort,'low');
+    for(const effort of ['none','low','medium','high','xhigh','max']){assert.equal(app.ctMtlSettingsChoose('effort',effort),true);assert.equal(app.ctMtlSettingsCapture().effort,effort);}
+    for(const effort of ['minimal','ultra','fast'])assert.equal(app.ctMtlSettingsChoose('effort',effort),false);
     assert.equal(app.ctMtlSettingsDefault(),true);assert.equal(app.ctMtlSettingsCapture(),undefined);
     for(const role of ['translator','manager','viewer']){app.cloudUser={...app.cloudUser,role,isAdmin:role==='viewer'};assert.equal(app.ctMtlSettingsAllowed,false);assert.equal(await app.ctMtlSettingsToggle(field),false);assert.equal(app.ctMtlSettingsCapture(),undefined);}
 });
@@ -958,15 +960,28 @@ test('each panel opening rechecks account availability; failed and unavailable c
     await app.ctMtlSettingsToggle(field);app._cloud.request=async()=>{throw new Error('synthetic private token');};assert.equal(await app.ctMtlSettingsToggle(field),false);
     assert.doesNotMatch(app.ctMtlSettingsError,/private token/);assert.equal(app.ctMtlSettingsCapture(),undefined);assert.deepEqual(app.ctMtlSettingsSelected(),ModelSettings.DEFAULT);
     assert.throws(()=>ModelSettings.catalog({version:'mtl-inference-settings-v1',models:[{model:'gpt-6-astra',efforts:['high']}]}));
-    assert.throws(()=>ModelSettings.settings({...ModelSettings.DEFAULT,model:'gpt-6-luna',effort:'low'}));
+    assert.throws(()=>ModelSettings.settings({...ModelSettings.DEFAULT,model:'gpt-6-luna',effort:'minimal'}));
+});
+
+test('a limited or older API catalog keeps unavailable lower efforts out of captured requests',async()=>{
+    const {app,field}=modelSettingsHarness();
+    app._cloud.request=async()=>({settings:{version:'mtl-inference-settings-v1',models:[{model:'gpt-6-luna',efforts:['high','xhigh','max']}]}});
+    await app.ctMtlSettingsToggle(field);assert.equal(app.ctMtlSettingsChoose('model','gpt-6-luna'),true);
+    assert.equal(app.ctMtlSettingsCapture().effort,'high');
+    for(const effort of ['none','low','medium'])assert.equal(app.ctMtlSettingsChoose('effort',effort),false);
+    app.ctMtlSettingsChoice={version:'mtl-inference-settings-v1',model:'gpt-6-luna',effort:'low'};
+    assert.throws(()=>app.ctMtlSettingsCapture(),/unavailable/);
+    assert.deepEqual(ModelSettings.DEFAULT,{version:'mtl-inference-settings-v1',model:'gpt-6.1-sol',effort:'medium'});
 });
 test('Translate freezes the Admin selection before tone/context awaits and debug retains the captured request',async()=>{
-    const h=modelSettingsHarness(),{app,field}=h;await app.ctMtlSettingsToggle(field);app.ctMtlSettingsChoose('model','gpt-6.1-sol');app.ctMtlSettingsChoose('effort','low');
+  for(const [model,effort]of [['gpt-6.1-sol','low'],['gpt-6-luna','none'],['gpt-6-luna','low'],['gpt-6-luna','medium']]){
+    const h=modelSettingsHarness(),{app,field}=h;await app.ctMtlSettingsToggle(field);app.ctMtlSettingsChoose('model',model);app.ctMtlSettingsChoose('effort',effort);
     const notes=deferred();app.ctToneNotesPrepare=()=>notes.promise;let submitted;const request=app._cloud.request;
     app._cloud.request=async(path,options)=>{if(options?.method==='POST')submitted=structuredClone(options.body);return request(path,options);};
     const task=app.ctMtlGenerate(field);await settle();app.ctMtlSettingsChoose('effort','max');notes.resolve();assert.equal(await task,true);
-    assert.equal(submitted.inferenceSettings.effort,'low');assert.equal(app.ctMtlDebugRecords[field.id].snapshot.inferenceSettings.effort,'low');
+    assert.deepEqual(submitted.inferenceSettings,{version:'mtl-inference-settings-v1',model,effort});assert.equal(app.ctMtlDebugRecords[field.id].snapshot.inferenceSettings.effort,effort);
     assert.equal(app.ctMtlSettingsCapture().effort,'max');assert.equal(h.ordinaryEdits(),0);assert.equal(app.ctValues[field.id],field.target);
+  }
 });
 test('ordinary and reset-to-default generation omit overrides; candidates retain bounded immutable settings',async()=>{
     const h=modelSettingsHarness(),{app,field}=h;let body;const request=app._cloud.request;app.cloudUser.role='translator';app.cloudUser.isAdmin=false;

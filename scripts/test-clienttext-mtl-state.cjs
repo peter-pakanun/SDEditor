@@ -52,4 +52,14 @@ test('candidate identity and generated payload are immutable, with local disposi
     assert.throws(()=>M.normalizeCandidate({...c,generatedText:' '}),/translation/);
     assert.equal(Object.hasOwn(M.normalizeCandidate({...c,source:'Never persist a source catalog',token:'secret'}),'source'),false);
 });
+test('lower Luna settings survive candidate snapshots and cannot be changed by an update',()=>{
+    for(const effort of ['none','low','medium']){
+        const inferenceSettings={version:'mtl-inference-settings-v1',model:'gpt-6-luna',effort},c=candidate(unit(),{model:inferenceSettings.model,effort,inferenceSettings});
+        const normalized=M.normalizeCandidate(c);assert.deepEqual(normalized.inferenceSettings,inferenceSettings);
+        inferenceSettings.effort='max';assert.equal(normalized.inferenceSettings.effort,effort);
+        assert.throws(()=>M.mergeCandidate(normalized,{...c,effort:'max'}),{code:'MTL_CANDIDATE_CHANGED'});
+        for(const invalid of [{...c,effort,inferenceSettings:{...normalized.inferenceSettings,fast:true}},
+            {...c,effort:'minimal',inferenceSettings:{...normalized.inferenceSettings,effort:'minimal'}}])assert.throws(()=>M.normalizeCandidate(invalid));
+    }
+});
 module.exports={candidate,descriptor};
