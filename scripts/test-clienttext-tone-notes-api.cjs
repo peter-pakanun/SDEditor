@@ -95,7 +95,7 @@ test('blank NPC/filter cells through actual indexes refresh only the canonical-c
         input={requestId:'synthetic-guarded-character',userId:'synthetic',consentVersion:'mtl-v2',scope:{...N.scope(h.scope),local:true},
             source:selected.fields[0].source,field:{id:selected.fields[0].id,name:'Text',kind:'text'},context},authorize=async()=>{};
     try{
-        const result=await service.generate(input,{authorize});assert.equal(calls,1);assert.equal(MTL_PROMPT_VERSION,'clienttext-mtl-v6');
+        const result=await service.generate(input,{authorize});assert.equal(calls,1);assert.equal(MTL_PROMPT_VERSION,'clienttext-mtl-v7');
         assert.deepEqual(JSON.parse(wire.input[0].content).context.sharedToneNotes,context.sharedToneNotes);
         assert.match(wire.instructions,/row-character-convention evidence is a tentative speaker suggestion/);
         assert.match(wire.instructions,/Keep the listener unknown/);assert.equal(result.provenance.promptVersion,MTL_PROMPT_VERSION);
