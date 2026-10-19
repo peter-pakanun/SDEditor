@@ -406,6 +406,60 @@ function keyword(recordId = 'Spark', fields = [
     return value;
 }
 
+test('a bare keyword title includes its own definition and approved title without extra lookup or editor-filter dependence', () => {
+    const selected=keyword('SyntheticMark'),title=selected.fields[0];title.source=selected.recordId;
+    const before=JSON.stringify(selected),context=Context.create({unit:selected,field:title,units:[selected],scope:{game:'poe2',language:'Thai'}}),record=context.initial.keywords[0];
+    assert.equal(context.lookupsUsed,0);assert.equal(record.reason,'selected-keyword-title');assert.equal(record.unitId,selected.id);
+    assert.deepEqual(record.fields.map(value=>value.source),selected.fields.map(value=>value.source));
+    assert.equal(record.fields[0].translation,title.target);assert.equal(record.fields[0].translationOrigin,'original-workbook');
+    assert.equal(record.fields[1].translation,undefined);assert.equal(context.initial.omitted.keywordTranslations,0);
+    assert.equal(context.contextHash,S.hash(context.initial));assert.equal(JSON.stringify(selected),before);
+});
+
+test('own keyword title accepts only valid scoped Saved/current original targets and excludes drafts and provisional MTL', () => {
+    const selected=keyword(),title=selected.fields[0],base={unit:selected,field:title,units:[selected],
+        drafts:{[selected.id]:{values:{[title.id]:'DRAFT SECRET'}}},candidates:[{generatedText:'MTL SECRET'}],reviewBuffers:{[selected.id]:'REVIEW SECRET'}};
+    const text=extra=>Context.build({...base,...extra}).keywords[0].fields[0];
+    for(const saved of [{[selected.id]:{saved:true,values:{[title.id]:'Saved title'}}},new Map([[selected.id,{saved:true,values:{[title.id]:'Saved title'}}]])]) {
+        assert.equal(text({saved}).translation,'Saved title');assert.equal(text({saved}).translationOrigin,'saved');
+    }
+    assert.equal(text({saved:{[selected.id]:{saved:false,values:{[title.id]:'DRAFT SECRET'}}}}).translation,title.target);
+    for(const record of [{saved:true,values:{[title.id]:''}},{saved:true,values:{[title.id]:'CONFLICT SECRET'},conflicts:[{fieldId:title.id}]},
+        {saved:true,values:{[title.id]:'INVALID SECRET {9}'}}]) assert.equal(text({saved:{[selected.id]:record}}).translation,undefined);
+    title.outdated=true;assert.equal(text({}).translation,undefined);
+    assert.equal(text({saved:{[selected.id]:{saved:true,values:{[title.id]:'STALE SECRET'}}}}).translation,undefined);
+    assert.equal(text({saved:{[selected.id]:{saved:true,values:{[title.id]:'Reviewed title'},reviewed:{[title.id]:S.sourceHash(title.source)}}}}).translation,'Reviewed title');
+    assert.doesNotMatch(JSON.stringify(Context.build(base)),/SECRET/);
+});
+
+test('own title context is limited to the exact loaded KeywordPopups row, role and field', () => {
+    const selected=keyword(),title=selected.fields[0],wrong=keyword();wrong.id=JSON.stringify(['hint','KeywordPopups','Spark']);wrong.role='hint';wrong.fields[1].source='WRONG ROLE SECRET';
+    const result=Context.build({unit:selected,field:title,units:[wrong,selected],editorFilter:[]});assert.equal(result.keywords.length,1);assert.doesNotMatch(JSON.stringify(result),/SECRET/);
+    const without=Context.build({unit:selected,field:title,units:[wrong]});assert.deepEqual(without.keywords,[]);
+    assert.deepEqual(build(selected,[selected],{field:selected.fields[1]}).keywords,[]);
+    selected.sheet='OtherKeywordPopups';assert.deepEqual(Context.build({unit:selected,field:title,units:[selected]}).keywords,[]);
+    selected.sheet='KeywordPopups_Gender';assert.equal(Context.build({unit:selected,field:title,units:[selected]}).keywords[0].reason,'selected-keyword-title');
+});
+
+test('missing own definition adds no inferred facts; whole oversized fields and translations obey context budgets', () => {
+    const selected=keyword(),title=selected.fields[0];selected.fields=[title];
+    let result=Context.build({unit:selected,field:title,units:[selected]});assert.equal(result.keywords[0].fields.length,1);
+    selected.fields.push({...title,id:'content',name:'Info Content',source:'Definition '+ '字'.repeat(18000)});
+    result=Context.build({unit:selected,field:title,units:[selected]});assert.deepEqual(result.keywords,[]);assert.equal(result.omitted.keywords,1);
+    selected.fields[1].source='Whole bounded definition.';title.target='字'.repeat(20000);
+    result=Context.build({unit:selected,field:title,units:[selected],contextLimit:2400});assert.equal(result.keywords[0].fields[0].translation,undefined);
+    assert.equal(result.keywords[0].fields[1].source,selected.fields[1].source);assert.equal(result.omitted.keywordTranslations,1);
+    assert.ok(JSON.stringify(result).length<=2400);assert.ok(Buffer.byteLength(JSON.stringify(result))<=Context.LIMITS.contextBytes);
+});
+
+test('own keyword title terminology stays ahead of optional examples and keeps referenced keyword priority', () => {
+    const selected=keyword(),other=keyword('Other'),title=selected.fields[0];title.source='A [Other|label]';title.target='A [Other|translated]';
+    selected.developerNotes='large optional note '.repeat(1000);
+    const result=Context.build({unit:selected,field:title,units:[other,selected],contextLimit:3000});
+    assert.deepEqual(result.keywords.map(value=>value.recordId),['Spark','Other']);assert.equal(result.keywords[0].fields[0].translation,title.target);
+    assert.equal(result.keywords[1].reason,'exact-keyword-identity');assert.equal(result.surrounding.entries.length,0);
+});
+
 test('keyword context retains English titles, content and labels with current original translations and provenance', () => {
     const selected=unit('Selected'),popup=keyword('Spark',[
         {name:'Info Title',kind:'text',source:'Synthetic title English',target:'  Synthetic title translation  '},

@@ -698,8 +698,20 @@
         keywordLookup.matched = keywordMatches.size;
         keywordLookup.selfReferences = keywordMatches.has(unit.id) ? 1 : 0;
         keywordMatches.delete(unit.id);
-        const keywordSources = [...keywordMatches.values()].map(original => ({ original, record: sourceRecord(original, 'exact-keyword-identity') })),
-            glossary = [], matchText = [field.source, ...keywordSources.flatMap(({ record }) => record.fields.map(item => item.source))]
+        const selfKeywordTitle = /^KeywordPopups(?:_Gender)?$/.test(unit.sheet) && field.name === 'Info Title' && loaded.get(unit.id) === unit;
+        const keywordSources = [...keywordMatches.values()].map(original => ({ original, record: sourceRecord(original, 'exact-keyword-identity') }));
+        if (selfKeywordTitle) {
+            // The selected title is display text, even when it equals recordId.
+            // Read only this immutable row, never a similarly named/other-role row.
+            const fields = contextFields(unit, options.saved, field), definition = fields.find(item => item.name === 'Info Content'
+                && ['text', 'form'].includes(item.kind) && !State.audioOnly(item.source)
+                && (field.form ? item.form === field.form : !item.form));
+            const record = sourceRecord(unit, 'selected-keyword-title');
+            record.fields = [field, ...(definition ? [definition] : [])].map(item => ({ fieldId: item.id, name: item.name,
+                ...(item.form ? { form: item.form } : {}), source: item.source }));
+            keywordSources.unshift({ original: unit, record });
+        }
+        const glossary = [], matchText = [field.source, ...keywordSources.flatMap(({ record }) => record.fields.map(item => item.source))]
                 .map(value => ' ' + normalizedText(value) + ' ');
         // The caller supplies only a committed shared Dictionary snapshot, never the editable Dictionary or TM.
         const entries = DictionaryScope?.activeEntries(options.dictionary || [], options.scope?.game) || [];
@@ -714,7 +726,9 @@
             if (!sheets.has(sheet)) unavailable.push({ type: label, reason: 'optional-sheet-not-loaded' });
         const translationCount = keywordSources.reduce((sum, { original, record }) => sum + record.fields.filter(projected => {
             const item = original.fields.find(value => value?.id === projected.fieldId);
-            return ['text', 'form'].includes(item?.kind) && !State.audioOnly(item.source) && translationFor(original, item, options.saved);
+            const translation = item && translationFor(original, item, options.saved);
+            return ['text', 'form'].includes(item?.kind) && !State.audioOnly(item.source) && translation
+                && (record.reason !== 'selected-keyword-title' || item.id === field.id && validExample(item, translation));
         }).length, 0), result = { version: 'clienttext-mtl-context-v1', identity: { unitId: unit.id, sheet: unit.sheet, recordId: unit.recordId,
             role: unit.role, fieldId: field.id, fieldName: field.name, kind: field.kind, ...(field.form ? { form: field.form } : {}) },
             keywords: [], glossary: [], notes: [], metadata: [], references: [], surrounding: plan.provenance, unavailable: [],
@@ -764,7 +778,7 @@
         }
         // Omission counters are reserved before packing and only decrease, so
         // diagnostics cannot disappear or grow past a completely filled budget.
-        const included = new Set([unit.id]), keywordRecords = new Map();
+        const included = new Set(selfKeywordTitle ? [] : [unit.id]), keywordRecords = new Map();
         for (const { original, record: source } of keywordSources) {
             const destination = references.has(original.id) ? result.references : result.keywords;
             if (!included.has(original.id) && add(destination, source)) {
@@ -782,8 +796,9 @@
             for (let index = 0; index < record.fields.length; index++) {
                 const before = record.fields[index], field = fields.get(before.fieldId);
                 if (!field || !['text', 'form'].includes(field.kind) || State.audioOnly(field.source)) continue;
+                if (record.reason === 'selected-keyword-title' && field.id !== options.field.id) continue;
                 const translation = translationFor(original, field, options.saved);
-                if (!translation) continue;
+                if (!translation || record.reason === 'selected-keyword-title' && !validExample(field, translation)) continue;
                 record.fields[index] = { ...before, ...translation };
                 if (!fitsContext()) record.fields[index] = before;
                 else result.omitted.keywordTranslations--;

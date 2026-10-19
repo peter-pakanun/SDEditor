@@ -3,7 +3,7 @@
 New requests negotiate `clienttext-mtl-lookup-v1` through API capabilities.
 Older APIs and existing request bodies retain the original translation-only
 path; retries never add lookup, settings or context to an already admitted ID.
-The bounded prompt variant is `clienttext-mtl-v7-lookup-v1`, preserving v7's
+The bounded prompt variant is `clienttext-mtl-v8-lookup-v1`, preserving v7's
 speaker/listener style limits and protected-token rules.
 
 The existing asynchronous admission POST and authenticated status polling carry
@@ -94,3 +94,15 @@ scripts/test-clienttext-mtl-ui.cjs` and the normal related MTL regressions. The
 public wire module and private API vendor copy must stay byte-identical; the
 copy check skips when the sibling API is absent. The API documents its matching
 contract in `docs/mtl-context-lookup.md`.
+
+Selected KeywordPopups/KeywordPopups_Gender Info Title gets a bounded same-row
+title/Info Content projection in the initial packet, including a valid scoped
+Saved/original target title. Only the exact loaded selected row is used, with
+at most two fields and whole-record/translation omissions under existing
+context limits. Drafts, provisional MTL, stale/conflicted targets and other
+roles never supply title translations. Missing definitions are not inferred.
+Prompt v8 clarifies display title versus immutable recordId, retains v7 style
+and injection rules, and keeps lookup discretionary. Existing v7 and
+v7-lookup-v1 retries retain their original body, prompt, settings and result
+without new inference. Deploy the compatible API first, then reload frontend;
+inspect a synthetic bare-title request's first context and one-call fast path.
