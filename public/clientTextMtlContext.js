@@ -4,9 +4,10 @@
     const api = factory(node ? require('./clientTextState.js') : root.ClientTextState,
         node ? require('./dictionaryScope.js') : root.DictionaryScope,
         node ? require('./clientTextPortraitCatalog.js') : root.ClientTextPortraitCatalog,
-        node ? require('./clientTextMtlState.js') : root.ClientTextMtlState);
+        node ? require('./clientTextMtlState.js') : root.ClientTextMtlState,
+        node ? require('./clientTextMtlLookup.js') : root.ClientTextMtlLookup);
     if (node) module.exports = api; else root.ClientTextMtlContext = api;
-})(typeof globalThis === 'object' ? globalThis : self, function (State, DictionaryScope, PortraitCatalog, MtlState) {
+})(typeof globalThis === 'object' ? globalThis : self, function (State, DictionaryScope, PortraitCatalog, MtlState, Lookup) {
     'use strict';
     const LIMITS = Object.freeze({ source: 12000, context: 16000, contextBytes: 48 * 1024, contextEntries: 1500,
         bytes: 65536, surrounding: 2, fields: 8, lookups: 2, results: 4, glossary: 32,
@@ -856,5 +857,64 @@
                     limited: output.length < matches.length, lookupsRemaining: LIMITS.lookups - lookupCount };
             }, get lookupsUsed() { return lookupCount; }, get remainingCharacters() { return remaining; } };
     }
-    return { LIMITS, create, roleHints, exampleScore, build: options => create(options).initial };
+    function createLookupSession(options, request) {
+        if (!Lookup) throw new TypeError('The MTL lookup protocol is unavailable. Reload this tab.');
+        const { unit, field } = options, units = contextUnits(options.units).filter(value => value.role === unit.role), index = new Map(),
+            saved = options.saved instanceof Map ? new Map([...options.saved].map(([key, value]) => [key, copy(value)])) : copy(options.saved || {});
+        for (const value of units) {
+            const key = JSON.stringify([value.sheet, value.recordId]);
+            if (!index.has(key)) index.set(key, []); index.get(key).push(value);
+        }
+        const config = { version: Lookup.VERSION, snapshotHash: State.hash([Lookup.VERSION, request.requestId, request.assetHash,
+            request.parserVersion, request.rawSourceHash, options.scope, saved]) }, binding = Lookup.binding({ ...request, lookup: config }, options.scope);
+        const replies = new Map(); let rounds = 0, totalBytes = 0, totalCharacters = 0;
+        return { config, binding, reply(challenge) {
+            Lookup.keys(challenge, ['id','requestId','requestHash','round','binding','queries','expiresAt']);
+            if (challenge.requestId !== request.requestId || !/^[a-f0-9]{64}$/.test(challenge.requestHash)
+                || typeof challenge.id !== 'string' || !/^[a-zA-Z0-9-]{1,128}$/.test(challenge.id)
+                || State.stableStringify(challenge.binding) !== State.stableStringify(binding)
+                || !Number.isSafeInteger(challenge.expiresAt) || challenge.expiresAt <= Date.now()) throw new TypeError('The MTL lookup snapshot changed.');
+            const queryList = Lookup.queries(challenge.queries), signature = State.hash(challenge);
+            if (replies.has(challenge.id)) {
+                const prior = replies.get(challenge.id); if (prior.signature !== signature) throw new TypeError('The MTL lookup challenge changed.');
+                return copy(prior.body);
+            }
+            if (rounds >= Lookup.LIMITS.rounds || challenge.round !== rounds + 1) throw new RangeError('The MTL lookup round is stale.');
+            let count = 0;
+            const results = queryList.map((query, queryIndex) => {
+                const matches = index.get(JSON.stringify([query.sheet, query.recordId])) || [], records = [];
+                let truncated = false;
+                for (const match of matches) {
+                    if (count >= Lookup.LIMITS.results) { truncated = true; break; }
+                    const fields = [];
+                    for (const item of contextFields(match, saved, field)) {
+                        if (!['text','form'].includes(item.kind) || State.audioOnly(item.source)) continue;
+                        if (fields.length >= Lookup.LIMITS.fields || item.source.length > Lookup.LIMITS.fieldCharacters) { truncated = true; continue; }
+                        const translated = translationFor(match, item, saved), entry = { fieldId: item.id, name: item.name || item.id, source: item.source };
+                        if (validExample(item, translated)) {
+                            if (translated.translation.length <= Lookup.LIMITS.fieldCharacters) Object.assign(entry, translated);
+                            else truncated = true;
+                        }
+                        fields.push(entry);
+                    }
+                    if (!fields.length) { truncated = true; continue; }
+                    records.push({ unitId: match.id, role: match.role, sheet: match.sheet, recordId: match.recordId, fields }); count++;
+                }
+                return { queryIndex, unavailable: !matches.length, truncated, records };
+            });
+            // Drop whole records/fields instead of cutting protected tokens or
+            // representing a partial approved translation as a complete pair.
+            while (Lookup.bytes(results) > Lookup.LIMITS.roundBytes || totalBytes + Lookup.bytes(results) > Lookup.LIMITS.totalBytes
+                || totalCharacters + Lookup.characters(results) > Lookup.LIMITS.totalCharacters) {
+                const result = [...results].reverse().find(value => value.records.length);
+                if (!result) throw new RangeError('The MTL context budget is exhausted.');
+                result.records.pop(); result.truncated = true;
+            }
+            Lookup.results(results, queryList, unit.role);
+            const body = { challengeId: challenge.id, round: challenge.round, requestHash: challenge.requestHash, binding: copy(challenge.binding), results };
+            rounds++; totalBytes += Lookup.bytes(results); totalCharacters += Lookup.characters(results);
+            replies.set(challenge.id, { signature, body: copy(body) }); return body;
+        } };
+    }
+    return { LIMITS, create, roleHints, exampleScore, createLookupSession, build: options => create(options).initial };
 });

@@ -1001,3 +1001,82 @@ test('Admin request diagnostics capture the Sol/medium default without changing 
     app.ctMtlDebugBegin(field,{requestId:'explicit-model',context:{},inferenceSettings:explicit});
     explicit.effort='max';assert.equal(app.ctMtlDebugRecords[field.id].snapshot.inferenceSettings.effort,'xhigh');
 });
+
+function lookupHarness(){
+    const h=pollingHarness(),wire=require('../public/clientTextMtlLookup.js');
+    Object.assign(h.app.ctMtlCapabilities,{contextLookupsEnabled:true,contextLookup:{version:wire.VERSION}});
+    const related=makeUnit('Related {0}','Approved {0}');related.recordId='Extra';related.sheet='NPCTalkDialogueTextAudio';
+    related.id=JSON.stringify([related.role,related.sheet,related.recordId]);h.app.ctUnits.push(related);
+    const status=h.status,challenges=new Map();h.status=(body,changes={})=>status(body,{requestHash:'d'.repeat(64),...changes});
+    h.challenge=(body,round=1)=>{
+        if(!challenges.has(round))challenges.set(round,{id:'challenge-'+round,requestId:body.requestId,requestHash:'d'.repeat(64),round,
+            binding:wire.binding(body,h.scope),queries:[{kind:'record',recordId:'Extra',sheet:related.sheet}],expiresAt:Date.now()+15000});
+        return structuredClone(challenges.get(round));
+    };
+    h.snapshot=(body,round=1)=>h.status(body,{requestHash:'d'.repeat(64),lookupChallenge:h.challenge(body,round),
+        progress:{revision:round,phase:'retrieving',translation:'',provisional:true}});
+    return h;
+}
+
+for(const rounds of [0,1,2])test('bounded polling handles '+rounds+' lookup rounds with one admission and preserves native draft',async()=>{
+    const h=lookupHarness();let body,admissions=0,replies=0,gets=0;const phases=[];
+    const update=h.app.ctMtlProgressUpdate;h.app.ctMtlProgressUpdate=(job,value)=>{phases.push(value.phase);return update(job,value);};
+    h.app._cloud.request=async(path,options={})=>{
+        if(path.endsWith('/context-replies')){
+            replies++;assert.equal(options.body.round,replies);assert.equal(options.body.binding.language,'Thai');
+            assert.equal(options.body.results[0].records[0].fields[0].translation,'Approved {0}');
+            assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');assert.deepEqual(h.mtl.list(h.scope),[]);
+            return{requestId:body.requestId,accepted:true,round:replies};
+        }
+        if(options.method==='POST'){admissions++;body=options.body;assert.equal(body.lookup.version,'clienttext-mtl-lookup-v1');return rounds?h.snapshot(body):h.status(body);}
+        gets++;return replies<rounds?h.snapshot(body,replies+1):{candidate:candidate(h.original,body.requestId,body.baseTargetHash)};
+    };
+    assert.equal(await h.app.ctMtlGenerate(h.field),true);assert.equal(admissions,1);assert.equal(replies,rounds);
+    assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');assert.equal(h.app.ctDraftDirty,false);assert.deepEqual(h.app.ctMtlAcceptances(),[]);
+    assert.equal(h.app._ctMtlLookupSessions.size,0);if(rounds)assert.ok(phases.includes('retrieving'));
+});
+
+test('lost context acknowledgement never resubmits a challenge or another admission',async()=>{
+    const h=lookupHarness();let body,replies=0,posts=0,gets=0;
+    h.app._cloud.request=async(path,options={})=>{
+        if(path.endsWith('/context-replies')){replies++;throw new TypeError('Synthetic lost acknowledgement');}
+        if(options.method==='POST'){posts++;body=options.body;return h.snapshot(body);}
+        return ++gets===1?h.snapshot(body):{candidate:candidate(h.original,body.requestId,body.baseTargetHash)};
+    };
+    assert.equal(await h.app.ctMtlGenerate(h.field),true);assert.equal(posts,1);assert.equal(replies,1);assert.equal(gets,2);
+});
+
+test('lookup scope/session changes, workbook replacement and stale challenges stop safely without replying',async()=>{
+    for(const mode of ['language','snapshot','round','workbook','logout']){
+        const h=lookupHarness();let body,replies=0,stops=0,posts=0;
+        h.app._cloud.request=async(path,options={})=>{
+            if(path.endsWith('/cancellations')){stops++;return h.status(body,{status:'failed',errorCode:'MTL_CANCELLED'});}
+            if(path.endsWith('/context-replies')){replies++;return{};}
+            if(options.method==='POST'){
+                posts++;body=options.body;const response=h.snapshot(body);
+                if(mode==='language')response.lookupChallenge.binding.language='French';
+                if(mode==='snapshot')response.lookupChallenge.binding.snapshotHash='e'.repeat(64);
+                if(mode==='round')response.lookupChallenge.round=2;
+                if(mode==='workbook')h.app.ctUnits=[...h.app.ctUnits];
+                if(mode==='logout')h.app.cloudSignedIn=false;
+                return response;
+            }
+            throw Error('No extra request expected');
+        };
+        assert.equal(await h.app.ctMtlGenerate(h.field),false);await settle();assert.equal(posts,1);assert.equal(replies,0);assert.equal(stops,1);
+        assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');assert.deepEqual(h.mtl.list(h.scope),[]);
+    }
+});
+
+test('request recovery never rebuilds a lost original lookup snapshot or starts another model request',async()=>{
+    const h=lookupHarness(),wire=require('../public/clientTextMtlLookup.js');let body,stops=0;
+    body={requestId:'old-lookup',unitId:h.original.id,fieldId:h.field.id,role:h.original.role,assetHash:descriptor.assetHash,
+        parserVersion:descriptor.parserVersion,rawSourceHash:M.rawSourceHash(h.field.source),lookup:{version:wire.VERSION,snapshotHash:'b'.repeat(64)}};
+    const generation=await h.mtl.putGeneration(h.scope,{...body,sourceHash:S.sourceHash(h.field.source),status:'pending',baseTargetHash:S.hash(h.field.target),createdAt:Date.now()});
+    h.app._cloud.request=async(path,options={})=>{
+        if(path.endsWith('/cancellations')){stops++;return h.status(body,{status:'failed',errorCode:'MTL_CANCELLED'});}
+        assert.notEqual(options.method,'POST');return h.snapshot(body);
+    };
+    assert.equal(await h.app.ctMtlRecover(h.field,generation),false);assert.equal(stops,1);
+    assert.match(h.app.ctMtlError,/snapshot is unavailable/);assert.equal(h.app.ctValues[h.field.id],'Confirmed {0}');
+});

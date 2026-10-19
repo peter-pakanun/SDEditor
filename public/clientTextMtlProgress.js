@@ -5,7 +5,7 @@
 })(typeof window !== 'undefined' ? window : globalThis, function (root) {
     'use strict';
     const labels = Object.freeze({ waiting:'Preparing translation', receiving:'Receiving translation', validating:'Validating translation',
-        reconnecting:'Waiting for connection', cancelling:'Stopping translation' });
+        retrieving:'Looking up workbook context', reconnecting:'Waiting for connection', cancelling:'Stopping translation' });
     const Overlay = {
         props:{state:{type:Object,required:true}},
         computed:{
@@ -17,7 +17,7 @@
             // its original field before removing the focused region.
             if(this.$el.contains(root.document?.activeElement))this.$el.parentElement?.querySelector('[data-ct-target]')?.focus({preventScroll:true});
         },
-        template:`<div class="ctMtlInlineOverlay" :class="{'ctMtlSkeletonWaiting':!text}">
+        template:`<div class="ctMtlInlineOverlay" :class="{'ctMtlSkeletonWaiting':!text}" :title="state.phase === 'retrieving' ? phase : null">
           <span class="srOnly" role="status" aria-live="polite">{{ phase }}. The field is read-only. Use Stop translation to cancel.</span>
           <div v-if="!text" class="ctMtlSkeleton" aria-hidden="true"><i></i><i></i><i></i></div>
           <pre v-else class="ctMtlStreamText" role="textbox" aria-readonly="true" aria-label="Provisional MTL translation, not yet validated" tabindex="0">{{ text }}</pre>

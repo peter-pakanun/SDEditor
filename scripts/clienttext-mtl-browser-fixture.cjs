@@ -40,7 +40,7 @@ async function run(){
         'normalizedStore.js','normalizedRooms.js','offlineStore.js','clientTextState.js','contentAdapters.js','clientTextStore.js',
         'clientTextMtlState.js','clientTextMtlStore.js','clientTextMtlMemoryStore.js','clientTextMtlSync.js','clientTextMemoryStore.js',
         'vendor/fast-xml-parser-5.11.2.min.js','clientTextCodec.js','editorComponents.js','clientTextFormatting.js','clientTextComparisons.js',
-        'clientTextExportProgress.js','clientTextMtlContext.js','clientTextMtlTiming.js','clientTextMtlProgress.js','clientTextMtlSettingsUi.js','clientTextMtlUi.js','clientTextMtlDebug.js','clientTextUi.js','editorSession.js'];
+        'clientTextExportProgress.js','clientTextMtlLookup.js','clientTextMtlContext.js','clientTextMtlTiming.js','clientTextMtlProgress.js','clientTextMtlSettingsUi.js','clientTextMtlUi.js','clientTextMtlDebug.js','clientTextUi.js','editorSession.js'];
     const fixture=String.raw`(async()=>{
 const seed=${seed},ct=ClientTextUI.mixin,mtl=ClientTextMtlUI.mixin,debug=ClientTextMtlDebug.mixin,modelSettings=ClientTextMtlSettingsUI.mixin;
 let app;
@@ -461,6 +461,10 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
                 await page.emulateMedia({reducedMotion:'reduce'});
                 assert.equal(await page.locator('.ctMtlSkeleton i').first().evaluate(node=>getComputedStyle(node).animationName),'none');
                 await page.emulateMedia({reducedMotion:'no-preference'});
+                await page.evaluate(()=>{const job=window.__mtlApp._fixtureLive;job.revision++;job.phase='retrieving';});
+                await page.waitForFunction(()=>Object.values(window.__mtlApp.ctMtlLive).some(value=>value.phase==='retrieving'));
+                assert.equal(await page.locator('.ctMtlInlineOverlay').getAttribute('title'),'Looking up workbook context');
+                assert.equal(await target().inputValue(),'Original draft {0}','Retrieval never changes the native draft');
                 for(const theme of ['light','grey','dark','modern-dark']){
                     await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
                     await page.screenshot({path:join(outDir,mode+'-'+(full?'full':'inline')+'-skeleton-'+theme+'.png'),fullPage:true});

@@ -74,11 +74,19 @@
                 return fields.size;
             }
         },
-        watch: { ctMtlRequestScopeKey: { flush: 'sync', handler() {
+        watch: { ctUnits: { flush: 'sync', handler() { this.ctMtlAbortRequests(); } }, ctMtlRequestScopeKey: { flush: 'sync', handler() {
             this.ctMtlAbortRequests();this._ctMtlSync?.stop?.();this._ctMtlSync=null;this._ctMtlDismissalRead=null;this.ctMtlDismissals=raw([]);this.ctMtlDismissBusy={};
             const ctx=this.ctContext();Promise.resolve().then(()=>{if(this.ctActive&&this.ctCurrent(ctx)&&permissions(this,ctx)){this.ctMtlEnsureSync(ctx);return this.ctMtlRefreshDismissals(ctx);}}).catch(()=>{});
         } } },
-        beforeUnmount() { this.ctMtlReset(); },
+        mounted() {
+            this._ctMtlPageExit = () => this.ctMtlAbortRequests();
+            root.addEventListener?.('pagehide', this._ctMtlPageExit);
+            root.addEventListener?.('offline', this._ctMtlPageExit);
+        },
+        beforeUnmount() {
+            root.removeEventListener?.('pagehide', this._ctMtlPageExit); root.removeEventListener?.('offline', this._ctMtlPageExit);
+            this.ctMtlReset();
+        },
         methods: {
             ctMtlUnitRequestVersion(unit=this.ctCurrentUnit) { return this._ctMtlUnitRequestVersions?.get(unit?.id)||0; },
             ctMtlNoteRequest(unit) {
@@ -93,8 +101,20 @@
                 if(active?.tagName==='BUTTON'&&this.ctEditorElement?.()?.contains(active))this.ctDictionaryTarget?.(field.id)?.focus({preventScroll:true});
             },
             ctMtlAbortRequests() {
-                for (const job of this._ctMtlJobs?.values() || []) job.controller.abort();
+                for (const job of this._ctMtlJobs?.values() || []) {
+                    // Best effort early stop; the server lease also aborts if
+                    // the tab/network disappears before this POST can arrive.
+                    this.ctMtlStopLookup(job);
+                    job.controller.abort();
+                }
+                this._ctMtlLookupSessions?.clear();
                 this._ctMtlJobs?.clear(); this.ctMtlLive = {}; this.ctMtlRequests = {};
+            },
+            ctMtlStopLookup(job) {
+                if (!job.lookupSession || job.completed || job.stopSent) return;
+                job.stopSent = true;
+                job.client.request('/v1/mtl/requests/' + encodeURIComponent(job.requestId) + '/cancellations',
+                    {method:'POST',body:{},timeout:3000}).catch(() => {});
             },
             ctMtlProgressFor(field) {
                 this.ctRevision; this.ctMtlRevision;
@@ -103,7 +123,7 @@
             },
             ctMtlProgressUpdate(job, value) {
                 if (this._ctMtlJobs?.get(job.name) !== job || !job.current?.()) return false;
-                const old = this.ctMtlLive[job.name] || {}, phase = ['waiting', 'receiving', 'validating', 'reconnecting', 'cancelling'].includes(value.phase) ? value.phase : old.phase || 'waiting';
+                const old = this.ctMtlLive[job.name] || {}, phase = ['waiting', 'receiving', 'retrieving', 'validating', 'reconnecting', 'cancelling'].includes(value.phase) ? value.phase : old.phase || 'waiting';
                 const text = typeof value.text === 'string' && value.text.length <= 32768 ? value.text : old.text || '';
                 const elapsedMs = Number.isFinite(value.elapsedMs) && value.elapsedMs >= 0 ? value.elapsedMs : Math.max(0, Date.now() - job.startedAt);
                 this.ctMtlLive = { ...this.ctMtlLive, [job.name]: { requestId: job.requestId, phase, text, elapsedMs, receivedAt: Date.now(), canCancel: value.canCancel === true } };
@@ -152,14 +172,42 @@
                 job.cancel = () => job.client.request(path + '/cancellations', {method:'POST',body:{},signal:job.controller.signal,timeout:10000});
                 while (job.current()) {
                     if (response) {
-                        if (response.candidate) return response;
+                        if (response.candidate) { job.completed = true; return response; }
                         if (response.requestId !== job.requestId || !['reserved','running','completed','failed','cancelled','expired','interrupted'].includes(response.status)) throw invalid();
                         const scope = response.scope;
                         if (!scope || scope.language !== job.scope.language || ['game','branchId'].some(name => scope[name] !== undefined && scope[name] !== job.scope[name])
                             || (String(job.scope.groupId).startsWith('local:') ? scope.local !== true : scope.groupId !== job.scope.groupId)) throw invalid();
                         if (!['reserved','running'].includes(response.status)) throw Object.assign(new Error(failureText(response.errorCode)
                             || 'This MTL attempt ended without a usable translation. The existing text is unchanged.'), {code:response.errorCode || 'MTL_FAILED',mtlFinal:true});
-                        const progress = response.progress, phase = {preparing:'waiting',connecting:'waiting',generating:'receiving',validating:'validating'}[progress?.phase];
+                        if (job.lookupSession) {
+                            if (!/^[a-f0-9]{64}$/.test(response.requestHash) || job.lookupHash && job.lookupHash !== response.requestHash) throw invalid();
+                            job.lookupHash = response.requestHash;
+                        }
+                        if (response.lookupChallenge && !job.cancelledByUser) {
+                            if (!job.lookupSession || job.lookupHash && job.lookupHash !== response.requestHash) {
+                                await job.cancel(); throw Object.assign(new Error('The original workbook lookup snapshot is unavailable. Request a new translation.'), {code:'MTL_LOOKUP_UNAVAILABLE',mtlFinal:true});
+                            }
+                            const challenge = response.lookupChallenge;
+                            if (challenge.requestHash !== response.requestHash || challenge.requestId !== job.requestId) throw invalid();
+                            job.lookupHash = response.requestHash;
+                            this.ctMtlProgressUpdate(job, {phase:'retrieving',text:'',canCancel:true});
+                            const body = job.lookupSession.reply(challenge);
+                            if (!job.current() || job.cancelledByUser) throw stale();
+                            // A lost reply acknowledgement is resolved by polling
+                            // the same challenge; never start another inference.
+                            const sent = job.lookupReplies ||= new Set();
+                            if (!sent.has(challenge.id)) {
+                                sent.add(challenge.id);
+                                try { await job.client.request(path + '/context-replies', {method:'POST',body,signal:job.controller.signal,timeout:10000}); }
+                                catch (error) {
+                                    if (!job.current()) throw stale();
+                                    if ((error.status || error.statusCode) && (error.status || error.statusCode) < 500) throw error;
+                                    // No automatic resubmission: a still-pending
+                                    // challenge expires within the server bound.
+                                }
+                            }
+                        }
+                        const progress = response.progress, phase = {preparing:'waiting',connecting:'waiting',generating:'receiving',retrieving:'retrieving',validating:'validating'}[progress?.phase];
                         if (progress && (progress.provisional !== true || !Number.isSafeInteger(progress.revision) || progress.revision < 0 || !phase
                             || typeof progress.translation !== 'string' || progress.translation.length > 32768 || progress.translation.includes('\u0000')
                             || progress.translation.isWellFormed && !progress.translation.isWellFormed())) throw invalid();
@@ -189,6 +237,7 @@
                         this.ctMtlProgressUpdate(job, {phase:job.cancelling ? 'cancelling' : 'reconnecting',canCancel:!job.cancelling});
                     }
                 }
+                this.ctMtlStopLookup(job);
                 throw stale();
             },
             ctMtlReset() {
@@ -657,10 +706,12 @@
                 const client = this._cloud, capturedAccess = access(this), controller = new AbortController(), name = key(unit.id,field.id),
                     jobs = this._ctMtlJobs ||= raw(new Map()), job = { requestId:generation.requestId, controller, name, startedAt:Date.now(), client, scope:copy(ctx.scope) },
                     mutation = this._ctMtlEditMutations?.get(name) || 0;
+                job.lookupSession = this._ctMtlLookupSessions?.get(generation.requestId);
+                job.loadedUnits = this.ctUnits;
                 jobs.set(name,job); this.ctMtlNoteRequest(unit);this.ctMtlFocusBeforeRequest(field);this.ctMtlRequests = {...this.ctMtlRequests,[name]:generation.requestId};
                 const current = () => jobs.get(name) === job && !controller.signal.aborted && this.ctCurrent(ctx) && this.ctActive
                     && client === this._cloud && capturedAccess === access(this) && permissions(this,ctx)
-                    && this._ctUnitIndex?.get(unit.id) === unit && M.rawSourceHash(field.source) === generation.rawSourceHash;
+                    && this._ctUnitIndex?.get(unit.id) === unit && this.ctUnits === job.loadedUnits && M.rawSourceHash(field.source) === generation.rawSourceHash;
                 job.current = current;
                 this.ctMtlProgressUpdate(job, { phase:'waiting', text:'' });
                 try {
@@ -691,6 +742,7 @@
                     }
                     return false;
                 } finally {
+                    this.ctMtlStopLookup(job); this._ctMtlLookupSessions?.delete(job.requestId);
                     this.ctMtlProgressClear(job);
                     if (jobs.get(name) === job) jobs.delete(name);
                     if (this.ctMtlRequests[name] === generation.requestId) { const requests = {...this.ctMtlRequests}; delete requests[name]; this.ctMtlRequests = requests; }
@@ -728,7 +780,8 @@
                 this.ctMtlRequests = { ...this.ctMtlRequests, [name]: requestId };
                 const current = () => jobs.get(name) === job && !controller.signal.aborted && this.ctCurrent(ctx) && this.ctActive
                     && client === this._cloud && capturedAccess === access(this) && permissions(this, ctx) && this.mtlConsentVersion === 'mtl-v2'
-                    && this._ctUnitIndex?.get(unit.id) === unit && unit.fields.includes(field) && M.rawSourceHash(field.source) === capturedSource;
+                    && this._ctUnitIndex?.get(unit.id) === unit && (!job.loadedUnits || this.ctUnits === job.loadedUnits)
+                    && unit.fields.includes(field) && M.rawSourceHash(field.source) === capturedSource;
                 job.current = current;
                 this.ctMtlProgressUpdate(job, { phase:'waiting', text:'' });
                 try {
@@ -740,6 +793,13 @@
                         baseTargetHash: S.hash(previous), baseRevision: this.ctSaved[unit.id]?.serverRevision || 0, clientFacts: S.clientFacts(unit),
                         context: context.initial, consentVersion: 'mtl-v2', ...(inferenceSettings ? {inferenceSettings:copy(inferenceSettings)} : {}), ...(String(ctx.scope.groupId).startsWith('local:')
                             ? { language: ctx.scope.language, game:ctx.scope.game, branchId:ctx.scope.branchId || 'default' } : {}) };
+                    if (asynchronous && this.ctMtlCapabilities?.contextLookupsEnabled === true
+                        && this.ctMtlCapabilities?.contextLookup?.version === 'clienttext-mtl-lookup-v1') {
+                        job.loadedUnits = this.ctUnits;
+                        job.lookupSession = Context.createLookupSession({unit,field,units:job.loadedUnits,saved:this.ctSaved,scope:ctx.scope}, body);
+                        body.lookup = copy(job.lookupSession.config);
+                        (this._ctMtlLookupSessions ||= raw(new Map())).set(requestId, job.lookupSession);
+                    }
                     if (new TextEncoder().encode(JSON.stringify(body)).length > Context.LIMITS.bytes) throw new Error('This MTL source and context exceed the request size limit.');
                     let path = String(ctx.scope.groupId).startsWith('local:') ? '/v1/mtl/local/requests'
                         : '/v1/content-groups/' + encodeURIComponent(ctx.scope.groupId) + '/mtl/requests?language=' + encodeURIComponent(ctx.scope.language);
@@ -806,6 +866,7 @@
                     return false;
                 }
                 finally {
+                    this.ctMtlStopLookup(job); this._ctMtlLookupSessions?.delete(job.requestId);
                     timing?.finish(job.cancelledByUser?'cancelled':controller.signal.aborted?'stale':'failed');
                     this.ctMtlProgressClear(job);
                     if (jobs.get(name) === job) jobs.delete(name);

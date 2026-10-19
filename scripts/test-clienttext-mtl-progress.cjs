@@ -24,7 +24,8 @@ test('removing a focused provisional region restores the original field without 
 });
 
 test('all transport phases have short neutral accessible labels and reduced motion disables skeleton animation',()=>{
-    for(const phase of ['waiting','receiving','validating','reconnecting','cancelling'])assert.equal(typeof Progress.labels[phase],'string');
+    for(const phase of ['waiting','receiving','retrieving','validating','reconnecting','cancelling'])assert.equal(typeof Progress.labels[phase],'string');
+    assert.equal(Progress.labels.retrieving,'Looking up workbook context');assert.match(Progress.Overlay.template,/:title=/);
     const css=require('node:fs').readFileSync(require('node:path').join(__dirname,'../public/client-text.css'),'utf8');
     assert.match(css,/@media \(prefers-reduced-motion:reduce\)\s*\{\.ctMtlSkeleton i \{animation:none/);
     assert.doesNotMatch(css,/ctMtlProgressPopup|ctMtlLiveButton/);
