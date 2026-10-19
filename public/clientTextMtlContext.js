@@ -703,7 +703,9 @@
         if (selfKeywordTitle) {
             // The selected title is display text, even when it equals recordId.
             // Read only this immutable row, never a similarly named/other-role row.
-            const fields = contextFields(unit, options.saved, field), definition = fields.find(item => item.name === 'Info Content'
+            // Choose the sibling before generic source deduplication: that
+            // dedup can retain another form from the different Content group.
+            const definition = textFields(unit).find(item => item.name === 'Info Content'
                 && ['text', 'form'].includes(item.kind) && !State.audioOnly(item.source)
                 && (field.form ? item.form === field.form : !item.form));
             const record = sourceRecord(unit, 'selected-keyword-title');

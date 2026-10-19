@@ -416,6 +416,33 @@ test('a bare keyword title includes its own definition and approved title withou
     assert.equal(context.contextHash,S.hash(context.initial));assert.equal(JSON.stringify(selected),before);
 });
 
+test('selected keyword title retains its exact sibling form before equal-English definition deduplication', () => {
+    for (const otherTarget of ['', 'Approved other-form definition']) {
+        const selected=keyword('SyntheticForms',[
+            {name:'Info Title',group:'Info Title',kind:'form',form:'DexFour',source:'Synthetic form title',target:'Approved form title',sourceCell:'B2'},
+            {name:'Info Content',group:'Info Content',kind:'form',form:'StrFour',source:'Shared English definition',target:otherTarget,sourceCell:'E2'},
+            {name:'Info Content',group:'Info Content',kind:'form',form:'DexFour',source:'Shared English definition',target:'',sourceCell:'E2'}
+        ]),title=selected.fields[0],before=JSON.stringify(selected),context=Context.create({unit:selected,field:title,units:[selected]});
+        const fields=context.initial.keywords[0].fields;
+        assert.deepEqual(fields.map(value=>value.fieldId),[title.id,selected.fields[2].id]);
+        assert.equal(fields[1].form,'DexFour');assert.equal(fields[1].source,'Shared English definition');
+        assert.equal(fields[1].translation,undefined);assert.equal(context.lookupsUsed,0);
+        assert.equal(fields.length,2);assert.equal(context.contextHash,S.hash(context.initial));assert.equal(JSON.stringify(selected),before);
+    }
+});
+
+test('an oversized matching keyword definition never falls back to a smaller other-form definition', () => {
+    const selected=keyword('SyntheticForms',[
+        {name:'Info Title',kind:'form',form:'DexFour',source:'Synthetic form title',target:'Approved form title'},
+        {name:'Info Content',kind:'form',form:'StrFour',source:'WRONG FORM SECRET',target:''},
+        {name:'Info Content',kind:'form',form:'DexFour',source:'Large matching definition '.repeat(1200),target:''}
+    ]),context=Context.create({unit:selected,field:selected.fields[0],units:[selected]});
+    assert.deepEqual(context.initial.keywords,[]);assert.equal(context.initial.omitted.keywords,1);
+    assert.doesNotMatch(JSON.stringify(context.initial),/WRONG FORM SECRET/);
+    assert.ok(Buffer.byteLength(JSON.stringify(context.initial))<=Context.LIMITS.contextBytes);
+    assert.ok(JSON.stringify(context.initial).length<=Context.LIMITS.context);assert.equal(context.lookupsUsed,0);
+});
+
 test('own keyword title accepts only valid scoped Saved/current original targets and excludes drafts and provisional MTL', () => {
     const selected=keyword(),title=selected.fields[0],base={unit:selected,field:title,units:[selected],
         drafts:{[selected.id]:{values:{[title.id]:'DRAFT SECRET'}}},candidates:[{generatedText:'MTL SECRET'}],reviewBuffers:{[selected.id]:'REVIEW SECRET'}};
