@@ -5,13 +5,12 @@
     else root.PrivateAssets = api;
 })(typeof globalThis === 'object' ? globalThis : self, function (root) {
     'use strict';
-    const LIMITS = Object.freeze({ image: 1024 * 1024, audio: 16 * 1024 * 1024, font: 1024 * 1024 });
-    const TYPES = Object.freeze({ image: ['image/webp', 'image/png', 'image/jpeg', 'image/gif'], audio: ['audio/ogg', 'audio/wav', 'audio/x-wav', 'audio/wave'], font: ['font/ttf', 'font/woff2'] });
+    const LIMITS = Object.freeze({ image: 1024 * 1024, audio: 16 * 1024 * 1024 });
+    const TYPES = Object.freeze({ image: ['image/webp', 'image/png', 'image/jpeg', 'image/gif'], audio: ['audio/ogg', 'audio/wav', 'audio/x-wav', 'audio/wave'] });
     const failure = (message, code) => Object.assign(new Error(message), { code });
     const cancelled = () => Object.assign(failure('Private media request cancelled.', 'PRIVATE_ASSET_CANCELLED'), { name: 'AbortError' });
     function validPath(path, kind) {
         if (typeof path !== 'string' || path.length > 4096) return false;
-        if (kind === 'font') return /^\/fonts\/(?:Fontin-(?:Regular|Bold|Italic|SmallCaps)\.woff2|FrizQuadrata(?:ITC|Std)\.woff2|Koruri-Regular\.woff2|Fontin-SmallCaps-tr-TR\.ttf|OptimusPrincepsSemiBold-tr-TR\.ttf)$/.test(path);
         if (kind === 'image') return /^\/portraits\/poe[12]\/[a-z0-9]+(?:-[a-z0-9]+)*\.webp(?:\?v=\d+)?$/.test(path)
             || /^\/skill-assets\/poe[12]\/[a-z0-9]+(?:-[a-z0-9]+)*\/(?:icon|gem|background)$/.test(path);
         if (kind !== 'audio' || !path.startsWith('/audio/poe2db?path=')) return false;
@@ -24,8 +23,6 @@
     }
     function signature(bytes, type) {
         const ascii = (start, text) => [...text].every((char, index) => bytes[start + index] === char.charCodeAt(0));
-        if (type === 'font/woff2') return bytes.length >= 44 && ascii(0, 'wOF2');
-        if (type === 'font/ttf') return bytes.length >= 12 && [0,1,0,0].every((byte,index) => bytes[index] === byte);
         if (type === 'image/webp') return bytes.length >= 12 && ascii(0, 'RIFF') && ascii(8, 'WEBP');
         if (type === 'image/png') return bytes.length >= 8 && [137,80,78,71,13,10,26,10].every((byte,index) => bytes[index] === byte);
         if (type === 'image/jpeg') return bytes.length >= 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;

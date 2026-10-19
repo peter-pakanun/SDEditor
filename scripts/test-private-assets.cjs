@@ -135,16 +135,3 @@ test('stream cancellation and synchronous context changes during URL allocation 
     const loader = Assets.create({ request: async () => webp(), current: () => valid, createObjectURL: () => { valid = false; return 'blob:changed'; }, revokeObjectURL: url => revoked.push(url) });
     await assert.rejects(loader.load(imagePath), { stale: true }); assert.deepEqual(revoked, ['blob:changed']);
 });
-
-test('font assets allow only reviewed paths, bounded MIME and TrueType/WOFF2 signatures', async () => {
-    for (const [file, type, bytes] of [['Fontin-SmallCaps-tr-TR.ttf', 'font/ttf', Buffer.concat([Buffer.from([0,1,0,0]), Buffer.alloc(40)])],
-        ['Koruri-Regular.woff2', 'font/woff2', Buffer.concat([Buffer.from('wOF2'), Buffer.alloc(40)])]]) {
-        const h = harness({ request: async () => new Blob([bytes], { type }) });
-        const lease = await h.loader.load('/fonts/' + file, { kind: 'font', context: h.context }); lease.release();
-        assert.equal(h.created[0].blob.type, type); assert.equal(h.revoked.length, 1);
-        for (const path of ['/fonts/unknown.ttf', '/fonts/../secret.ttf', '/fonts/' + file + '?token=x'])
-            await assert.rejects(h.loader.load(path, { kind: 'font', context: h.context }), { code: 'PRIVATE_ASSET_PATH' });
-    }
-    const h = harness({ request: async () => new Blob(['<html>invalid-font</html>'], { type: 'font/ttf' }) });
-    await assert.rejects(h.loader.load('/fonts/Fontin-SmallCaps-tr-TR.ttf', { kind: 'font', context: h.context }), { code: 'PRIVATE_ASSET_BYTES' });
-});

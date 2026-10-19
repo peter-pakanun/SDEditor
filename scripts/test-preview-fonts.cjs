@@ -1,35 +1,41 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
-function harness() {
-  const installed = new Set(), loads = [], released = [], faces = [];
-  const window = { document: { fonts: { add: face => installed.add(face), delete: face => installed.delete(face) } }, AbortController,
-    FontFace: class { constructor(family, source, descriptors) { Object.assign(this, { family, source, descriptors }); faces.push(this); } async load() { return this; } } };
+function harness({ load = async face => face } = {}) {
+  const installed = new Set(), faces = [], calls = [];
+  const window = { CloudUI: { apiBase: () => 'https://fonts.example.test' },
+    document: { fonts: { add: face => installed.add(face), delete: face => installed.delete(face) } },
+    FontFace: class { constructor(family, source, descriptors) { Object.assign(this, { family, source, descriptors }); faces.push(this); } async load() { calls.push(this.source); return load(this); } } };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/previewFonts.js'), 'utf8'), { window });
-  const app = { privateMediaAllowed: true, privateMediaContext: () => 'scope', privateMediaCurrent: context => context === 'scope',
-    gamePreviewFontFamily: '"Fontin-SmallCaps-tr-TR", "Fontin", "OptimusPrincepsSemiBold-tr-TR", "Noto Serif", serif', gamePreviewSourceFontFamily: '"Fontin", serif',
-    privateMediaLoad: async (url, kind, options) => { loads.push({ url, kind, options }); return { url: 'blob:synthetic', release: () => released.push(url) }; } };
+  const app = { cloudSignedIn: false, privateMediaAllowed: false,
+    privateMediaLoad() { throw new Error('Public fonts must never use authenticated media'); },
+    gamePreviewFontFamily: '"Fontin-SmallCaps-tr-TR", "Fontin", "OptimusPrincepsSemiBold-tr-TR", "Noto Serif", serif', gamePreviewSourceFontFamily: '"Fontin", serif' };
   Object.assign(app, window.PreviewFonts.mixin.methods);
-  return { app, installed, loads, released, faces };
+  return { app, installed, faces, calls, mixin: window.PreviewFonts.mixin };
 }
-test('private Turkish preview fonts include both exact variants and English styles, releasing every URL', async () => {
+test('unsigned/local previews load both Turkish variants and English styles directly from public API URLs', async () => {
   const h = harness(); h.app.previewFontsRefresh(); await h.app._previewFontsReady;
-  assert.deepEqual(h.loads.map(item => item.url), ['/fonts/Fontin-Regular.woff2', '/fonts/Fontin-Bold.woff2', '/fonts/Fontin-Italic.woff2', '/fonts/Fontin-SmallCaps-tr-TR.ttf', '/fonts/OptimusPrincepsSemiBold-tr-TR.ttf']);
-  assert.equal(h.installed.size, 5); assert.equal(h.released.length, 5);
+  assert.equal(h.installed.size, 5); assert.equal(h.calls.length, 5);
+  assert.ok(h.calls.some(url => url === 'url("https://fonts.example.test/fonts/Fontin-SmallCaps-tr-TR.ttf")'));
+  assert.ok(h.calls.some(url => url === 'url("https://fonts.example.test/fonts/OptimusPrincepsSemiBold-tr-TR.ttf")'));
   assert.ok(h.faces.some(face => face.family === 'Fontin' && face.descriptors.style === 'italic'));
-  h.app.previewFontsClear(); assert.equal(h.installed.size, 0); assert.ok(h.loads.every(item => item.options.signal.aborted));
+  assert.ok(h.calls.every(url => !/token|blob:|Authorization/.test(url)));
 });
-test('signed-out and alternate-language translators request no fonts; stale decoding cannot install faces', async () => {
-  const h = harness(); h.app.privateMediaAllowed = false; h.app.previewFontsRefresh(); assert.equal(h.loads.length, 0);
-  h.app.privateMediaAllowed = true;
-  let finish; h.app.privateMediaLoad = () => new Promise(resolve => { finish = resolve; });
-  h.app.gamePreviewFontFamily = 'serif'; h.app.gamePreviewSourceFontFamily = '"Fontin Smallcaps"';
-  h.app.previewFontsRefresh(); h.app.previewFontsClear(); finish({ url: 'blob:late', release: () => h.released.push('late') });
-  await h.app._previewFontsReady; assert.equal(h.installed.size, 0); assert.deepEqual(h.released, ['late']);
-});
-test('font errors leave language fallback available and font overrides determine requested families', async () => {
-  const h = harness(); h.app.gamePreviewFontFamily = '"Koruri Regular", "Noto Sans JP", serif'; h.app.gamePreviewSourceFontFamily = 'serif';
-  h.app.privateMediaLoad = async (url) => { h.loads.push(url); throw new Error('offline'); };
+test('account/access changes do not affect public font selection or repeat native font loads', async () => {
+  const h = harness(), key = h.mixin.computed.previewFontsKey.call(h.app);
   h.app.previewFontsRefresh(); await h.app._previewFontsReady;
-  assert.deepEqual(h.loads, ['/fonts/Koruri-Regular.woff2']); assert.equal(h.installed.size, 0);
+  h.app.cloudSignedIn = true; h.app.privateMediaAllowed = true; h.app.privateMediaKey = 'another-account-language';
+  assert.equal(h.mixin.computed.previewFontsKey.call(h.app), key);
+  h.app.previewFontsRefresh(); await h.app._previewFontsReady;
+  assert.equal(h.calls.length, 5, 'loaded faces are reused even without a new HTTP request');
+});
+test('a changed preview or unmount cannot install a late font; failed loads can retry online', async () => {
+  let finish;
+  const h = harness({ load: face => new Promise(resolve => { finish = () => resolve(face); }) });
+  h.app.gamePreviewFontFamily = '"Fontin Smallcaps"'; h.app.gamePreviewSourceFontFamily = 'serif';
+  h.app.previewFontsRefresh(); h.app.previewFontsClear(); finish();
+  await h.app._previewFontsReady; assert.equal(h.installed.size, 0);
+  const offline = harness({ load: async () => { throw new Error('offline'); } });
+  offline.app.previewFontsRefresh(); await offline.app._previewFontsReady; assert.equal(offline.installed.size, 0);
+  offline.app.previewFontsRefresh(); await offline.app._previewFontsReady; assert.equal(offline.calls.length, 10);
 });

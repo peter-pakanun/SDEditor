@@ -1,4 +1,4 @@
-/* Private preview faces share the authenticated media loader and scope guard. */
+/* Public font reads are separate from authenticated image/audio resources. */
 (function (root) {
     'use strict';
     const faces = [
@@ -15,40 +15,45 @@
     const mixin = {
         computed: {
             previewFontsKey() {
-                return JSON.stringify([this.privateMediaKey, this.gamePreviewFontFamily, this.gamePreviewSourceFontFamily]);
+                return JSON.stringify([this.gamePreviewFontFamily, this.gamePreviewSourceFontFamily]);
             }
         },
         watch: {
             previewFontsKey: { immediate: true, flush: 'sync', handler() { this.previewFontsRefresh(); } }
         },
-        beforeUnmount() { this.previewFontsClear(); },
+        mounted() {
+            this._previewFontOnline = () => this.previewFontsRefresh();
+            root.addEventListener?.('online', this._previewFontOnline);
+        },
+        beforeUnmount() {
+            this.previewFontsClear(); this._previewFontCache = null;
+            root.removeEventListener?.('online', this._previewFontOnline);
+        },
         methods: {
             previewFontsClear() {
                 this._previewFontEpoch = (this._previewFontEpoch || 0) + 1;
-                this._previewFontAbort?.abort();
                 for (const face of this._previewFontFaces || []) root.document.fonts.delete(face);
                 this._previewFontFaces = [];
             },
             previewFontsRefresh() {
                 this.previewFontsClear();
-                if (!this.privateMediaAllowed || !root.FontFace || !root.document?.fonts) return;
-                let context;
-                try { context = this.privateMediaContext(); } catch (_) { return; }
-                const epoch = this._previewFontEpoch, controller = new root.AbortController();
-                this._previewFontAbort = controller;
+                if (!root.FontFace || !root.document?.fonts) return;
+                const epoch = this._previewFontEpoch, cache = this._previewFontCache ||= new Map();
+                const base = root.CloudUI.apiBase();
                 const families = new Set((this.gamePreviewFontFamily + ',' + this.gamePreviewSourceFontFamily)
                     .split(',').map(value => value.trim().replace(/^['"]|['"]$/g, '').toLowerCase()));
-                const current = () => epoch === this._previewFontEpoch && !controller.signal.aborted && this.privateMediaCurrent(context);
                 this._previewFontsReady = Promise.all(faces.filter(([, names]) => names.some(name => families.has(name.toLowerCase()))).map(async ([filename, names, descriptors]) => {
-                    let lease;
+                    const url = base + '/fonts/' + filename;
                     try {
-                        lease = await this.privateMediaLoad('/fonts/' + filename, 'font', { context, signal: controller.signal });
-                        const loaded = await Promise.all(names.map(name => new root.FontFace(name, 'url("' + lease.url + '")', { style: 'normal', weight: '400', display: 'swap', ...descriptors }).load()));
-                        if (!current()) return;
+                        // Native CORS font requests carry no bearer token and use
+                        // normal HTTP caching in signed-out and local/test sessions.
+                        if (!cache.has(url)) cache.set(url, Promise.all(names.map(name => new root.FontFace(name, 'url("' + url + '")', { style: 'normal', weight: '400', display: 'swap', ...descriptors }).load())));
+                        const loaded = await cache.get(url);
+                        if (epoch !== this._previewFontEpoch) return;
                         for (const face of loaded) { root.document.fonts.add(face); this._previewFontFaces.push(face); }
                     } catch (_) {
-                        // Keep the language's CSS fallbacks; never persist private bytes.
-                    } finally { lease?.release(); }
+                        cache.delete(url); // A later online event can retry failures.
+                    }
                 }));
             }
         }
