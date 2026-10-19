@@ -1244,81 +1244,8 @@ button, label, th, td, input[type="checkbox"] {
   padding-bottom: calc(1.5em * var(--density));
 }
 
-/* A font by Jos Buivenga (exljbris) -> www.exljbris.com */
-/* Bundled preview faces; language mappings and optional faces: fonts/FONTS.md. */
-@font-face {
-  font-family: "Fontin";
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: local("Fontin"), url("fonts/Fontin-Regular.woff2") format("woff2");
-}
-
-@font-face {
-  font-family: "Fontin";
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-  src: local("Fontin Bold"), url("fonts/Fontin-Bold.woff2") format("woff2");
-}
-
-@font-face {
-  font-family: "Fontin";
-  font-style: italic;
-  font-weight: 400;
-  font-display: swap;
-  src: local("Fontin Italic"), url("fonts/Fontin-Italic.woff2") format("woff2");
-}
-
-@font-face {
-  font-family: "Fontin Smallcaps";
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: local("Fontin SmallCaps"), local("Fontin Smallcaps"), url("fonts/Fontin-SmallCaps.woff2") format("woff2");
-}
-
-/* Japanese UI (Metadata). */
-@font-face {
-  font-family: "Koruri Regular";
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: local("Koruri Regular"), url("fonts/Koruri-Regular.woff2") format("woff2");
-}
-
-@font-face {
-  font-family: "Koruri";
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: local("Koruri Regular"), url("fonts/Koruri-Regular.woff2") format("woff2");
-}
-
-/* UISettings uses FrizQuadrataITC as a fallback, not the primary Latin face. */
-@font-face {
-  font-family: "FrizQuadrataITC";
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: local("FrizQuadrataITC"), local("Friz Quadrata ITC"), url("fonts/FrizQuadrataITC.woff2") format("woff2");
-}
-
-@font-face {
-  font-family: "Friz Quadrata ITC";
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: local("Friz Quadrata ITC"), url("fonts/FrizQuadrataITC.woff2") format("woff2");
-}
-
-@font-face {
-  font-family: "Friz Quadrata";
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: local("Friz Quadrata ITC"), url("fonts/FrizQuadrataITC.woff2") format("woff2");
-}
+/* Preview faces are loaded by previewFonts.js through the private API.
+   Language stacks retain web/system fallbacks; see fonts/FONTS.md. */
 
 .gamePreviewStrip {
   position: sticky;

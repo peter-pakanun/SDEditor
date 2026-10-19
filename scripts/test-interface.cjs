@@ -2255,3 +2255,9 @@ test('settings-only cloud updates preserve Dictionary rows and do not normalize 
   e.importSettings({ dictionary: nextDictionary, lang: 'Thai' });
   assert.equal(e.dictionary, nextDictionary); assert.equal(normalized, 1);
 });
+
+test('Optimus overrides keep Turkish CSS fallback without changing preview token rendering', () => {
+  const { editor } = loadEditor();
+  editor.gamePreviewFonts = { Turkish: '"OptimusPrincepsSemiBold-tr-TR"' };
+  assert.equal(editor.getGamePreviewFontFamily('Turkish'), '"OptimusPrincepsSemiBold-tr-TR", "Fontin-SmallCaps-tr-TR", "Fontin", "Noto Serif", serif');
+});

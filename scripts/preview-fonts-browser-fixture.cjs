@@ -1,6 +1,7 @@
 'use strict';
 // Actual shared preview panels, with disposable in-memory SD/ClientText drafts.
-// Google/Spoqa font access is required; no account or durable workspace is used.
+// Uses synthetic in-memory API accounts; no production login or durable workspace.
+// Google/Spoqa fallback font access is required.
 const assert = require('node:assert/strict');
 const { readFileSync, existsSync, mkdirSync, writeFileSync } = require('node:fs');
 const { resolve, join } = require('node:path');
@@ -27,7 +28,7 @@ const samples = {
 };
 const expected = {
     French: /Fontin/, German: /Fontin/, Portuguese: /Fontin/, Spanish: /Fontin Small[Cc]aps/,
-    Russian: /Noto Serif/, Polish: /Noto Serif/, Turkish: /Noto Serif|Fontin-SmallCaps-tr-TR/,
+    Russian: /Noto Serif/, Polish: /Noto Serif/, Turkish: /^Fontin-SmallCaps-tr-TR$/,
     Thai: /^Kanit$/, Japanese: /^Koruri Regular$/, Korean: /^Spoqa Han Sans Neo$/,
     'Traditional Chinese': /Noto Sans (?:CJK )?TC/, 'Simplified Chinese': /Noto Sans (?:CJK )?SC/,
 };
@@ -48,7 +49,18 @@ async function run() {
         .replace("app.mount('#app');", "window.__fontPanelApp=app.mount('#app');")));
     app.use(express.static(publicDir));
     const server = await new Promise(resolve => { const instance = app.listen(0, '127.0.0.1', () => resolve(instance)); });
-    const cases = [], networkFailures = [], errors = [];
+    const { pathToFileURL } = require('node:url');
+    const apiRoot = resolve(__dirname, '../../SDEditor-API');
+    const { createApp } = await import(pathToFileURL(join(apiRoot, 'src/app.js')));
+    const { loadConfig } = await import(pathToFileURL(join(apiRoot, 'src/config.js')));
+    const { openDatabase } = await import(pathToFileURL(join(apiRoot, 'src/database.js')));
+    const config = loadConfig({ ADMIN_GOOGLE_SUB: 'fixture-admin', FRONTEND_ORIGIN: 'http://127.0.0.1:' + server.address().port });
+    const db = openDatabase(':memory:'), api = createApp({ config, database: db, oauthProvider: null, logger: { warn() {}, error() {} } });
+    api.locals.store.registerIdentity({ sub: 'fixture-admin', email: 'font-fixture@test.invalid', name: 'Font fixture' });
+    const session = api.locals.store.createSession('fixture-admin');
+    const apiServer = await new Promise(resolve => { const instance = api.listen(0, '127.0.0.1', () => resolve(instance)); });
+    const apiBase = 'http://127.0.0.1:' + apiServer.address().port;
+    const cases = [], networkFailures = [], cancelledFontRequests = [], errors = [];
     let browser;
     try {
         browser = await chromium.launch({ executablePath, headless: true });
@@ -57,17 +69,43 @@ async function run() {
         for (const [language, sample] of Object.entries(samples).filter(([language]) => !requested || requested.includes(language))) {
             const page = await context.newPage();
             page.on('pageerror', error => errors.push(language + ': ' + error.message));
-            page.on('requestfailed', request => networkFailures.push({ language, url: request.url(), error: request.failure()?.errorText }));
+            page.on('requestfailed', request => {
+                const result = { language, url: request.url(), error: request.failure()?.errorText };
+                // Changing preview scope intentionally aborts obsolete font fetches.
+                if (new URL(result.url).pathname.startsWith('/fonts/') && result.error === 'net::ERR_ABORTED') cancelledFontRequests.push(result);
+                else networkFailures.push(result);
+            });
             const cdp = await context.newCDPSession(page);
             await cdp.send('DOM.enable'); await cdp.send('CSS.enable');
             await page.goto('http://127.0.0.1:' + server.address().port + '/?testMode=1&lang=' + encodeURIComponent(language));
             await page.waitForFunction(() => window.__fontPanelApp?.sourceLoaded);
+            const fontSetup = await page.evaluate(async ({ apiBase, token, user, language }) => {
+                const host = window.__fontPanelApp, Cloud = window.CloudSync;
+                const client = new Cloud.Client({ store: {}, merge: window.DictionarySync, apiBase, fetch: window.fetch.bind(window) });
+                client.state = Cloud.initializeState({ ...Cloud.completeSettings({ lang: language }), dictionary: [] });
+                client.state.profiles.fixture = structuredClone(client.state.profiles.guest); client.state.activeProfile = 'fixture';
+                client.state.auth = { token, user };
+                host.cloudSelectLanguage = async () => true;
+                host.managedScopeChanged = async () => {}; host.managedRefreshActive = async () => {};
+                host.ctRefreshLocal = async () => {}; host.draftScopeChanged = async () => {};
+                host._cloud = client; host.cloudUser = user; host.cloudSignedIn = true; host.cloudProfileId = 'fixture';
+                const load = host.privateMediaLoad.bind(host); host._fixtureFontErrors = [];
+                host.privateMediaLoad = async (...args) => { try { return await load(...args); } catch (error) { host._fixtureFontErrors.push({ path: args[0], error: error.message, code: error.code }); throw error; } };
+                host.privateMediaRefreshAccess(); await host.$nextTick(); await host._previewFontsReady;
+                return { allowed: host.privateMediaAllowed, errors: host._fixtureFontErrors };
+            }, { apiBase, token: session.token, user: session.user, language });
+            assert.equal(fontSetup.allowed, true, language + ': synthetic private session');
+            assert.deepEqual(fontSetup.errors, [], language + ': private font loading');
             const source = 'Fire damage {0} [Fire|Fire]';
             async function inspect(mode, surface, mismatchedSettings = false) {
                 const key = [language, mode, surface, mismatchedSettings ? 'different-settings' : 'matching-settings'].join('/');
                 const targetSelector = '.gamePreviewTargetPane .gamePreviewWindow';
-                await page.waitForSelector(targetSelector);
+                try { await page.waitForSelector(targetSelector); } catch (error) {
+                    const diagnostic = await page.evaluate(() => { const h = window.__fontPanelApp; return { ctActive: h.ctActive, editor: h.ctEditor, inline: h.inlineEditor, previewMounted: h.ctPreviewMounted, unit: !!h.ctCurrentUnit, chooser: h.versionChooserVisible, settings: h.showSetting, current: h.ctContext(), tool: h.ctTool, host: document.querySelector('.gamePreviewTargetPane')?.closest('[id]')?.id }; });
+                    throw new Error(key + ': hidden fixture preview ' + JSON.stringify(diagnostic));
+                }
                 await page.evaluate(async () => {
+                    await window.__fontPanelApp._previewFontsReady;
                     await document.fonts.ready;
                     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
                 });
@@ -109,6 +147,8 @@ async function run() {
                     assert.ok(geometry.scrollWidth <= geometry.clientWidth + 1, key + '/' + theme + ': sample wraps inside panel');
                     if (theme === 'dark') await page.screenshot({ path: join(outputDir, key.replaceAll('/', '-').replaceAll(' ', '-') + '.png') });
                 }
+                const unexpected = await page.evaluate(() => window.__fontPanelApp._fixtureFontErrors.filter(error => !['PRIVATE_ASSET_CANCELLED', 'PRIVATE_ASSET_STALE'].includes(error.code)));
+                assert.deepEqual(unexpected, [], key + ': current private font requests');
                 cases.push({ key, ...state, fonts });
             }
             await page.evaluate(async ({ source, sample }) => {
@@ -125,6 +165,13 @@ async function run() {
             await page.evaluate(async () => { const host = window.__fontPanelApp; await host.openInlineFullEditor(); await host.$nextTick(); });
             await inspect('sd', 'full');
             for (const mismatchedSettings of [false, true]) {
+                // Let Settings watchers finish before opening a synthetic workbook.
+                await page.evaluate(async ({ language, mismatchedSettings }) => {
+                    const host = window.__fontPanelApp; host.ctActive = false;
+                    host.lang = mismatchedSettings ? (language === 'Thai' ? 'German' : 'Thai') : language;
+                    await host.$nextTick();
+                }, { language, mismatchedSettings });
+                await page.evaluate(async () => { await window.__fontPanelApp._previewFontsReady; });
                 await page.evaluate(async ({ language, sample, source, mismatchedSettings }) => {
                     const host = window.__fontPanelApp;
                     host.ctActive = false; host.editorVisible = false; host.inlineActive = false; host._draftSession = null;
@@ -133,7 +180,7 @@ async function run() {
                     const field = { id: 'font-field', kind: 'text', name: 'Text', source,
                         target: sample + ' <b>{' + sample + '} <i>{' + sample + '} {0} [Fire|' + sample + ']', targetCell: 'B2', required: true };
                     const unit = Vue.markRaw({ id: 'normal|Sheet|font', role: 'normal', sheet: 'Sheet', recordId: 'font', fields: [field] });
-                    host.ctWorkspace = { scope: { accountId: 'guest', game: 'poe2', branchId: 'default', versionId: 'font', groupId: 'local:test:fonts', language },
+                    host.ctWorkspace = { scope: { accountId: host.cloudProfileId, game: host.gameVersion, branchId: 'default', versionId: 'font', groupId: 'local:test:fonts', language },
                         metadata: { version: { name: 'Fonts ' + language }, descriptors: [] } };
                     host.ctUnits = Vue.markRaw([unit]); host._ctUnitIndex = Vue.markRaw(new Map([[unit.id, unit]])); host._ctWorkUnits = Vue.markRaw(new Map());
                     host.ctSelection = unit.id; host.ctFocusedField = field.id; host.ctValues = { [field.id]: field.target };
@@ -147,18 +194,34 @@ async function run() {
                 await page.evaluate(async () => { const host = window.__fontPanelApp; host.ctEditor = false; host.inlineEditor = true; host.inlineSidebarVisible = true; await host.$nextTick(); });
                 await inspect('clienttext', 'inline', mismatchedSettings);
             }
+            if (language === 'Turkish') {
+                await page.evaluate(async () => {
+                    const host = window.__fontPanelApp;
+                    host.gamePreviewFonts = { Turkish: '"OptimusPrincepsSemiBold-tr-TR"' };
+                    await host.$nextTick(); await host._previewFontsReady;
+                    const probe = document.createElement('span'); probe.id = 'fixture-turkish-font-probe';
+                    probe.style.fontFamily = host.getGamePreviewFontFamily('Turkish');
+                    probe.textContent = '\u00c7\u00e7\u011e\u011f\u0130\u0131\u00d6\u00f6\u015e\u015f\u00dc\u00fc ^|~'; document.body.append(probe);
+                    await document.fonts.ready;
+                });
+                const { root } = await cdp.send('DOM.getDocument');
+                const { nodeId } = await cdp.send('DOM.querySelector', { nodeId: root.nodeId, selector: '#fixture-turkish-font-probe' });
+                const { fonts } = await cdp.send('CSS.getPlatformFontsForNode', { nodeId });
+                assert.ok(fonts.some(font => font.familyName === 'OptimusPrincepsSemiBold-tr-TR' && font.isCustomFont), JSON.stringify(fonts));
+                assert.ok(fonts.some(font => font.familyName === 'Fontin-SmallCaps-tr-TR' && font.isCustomFont), 'missing punctuation uses Turkish Fontin: ' + JSON.stringify(fonts));
+            }
             console.log('PASS ' + language + ': SD and ClientText inline/full, matching and different Settings, actual glyph fonts, four themes');
             await page.close();
         }
         assert.deepEqual(errors, [], 'Browser errors');
         assert.deepEqual(networkFailures, [], 'Network errors');
         const report = { passed: true, languageCount: new Set(cases.map(item => item.language)).size, cases: cases.length,
-            themeChecks: cases.length * themes.length, results: cases, errors, networkFailures };
+            themeChecks: cases.length * themes.length, results: cases, errors, networkFailures, cancelledFontRequests };
         writeFileSync(join(outputDir, 'report.json'), JSON.stringify(report, null, 2));
         console.log(JSON.stringify({ passed: true, languageCount: report.languageCount, panels: report.cases, themeChecks: report.themeChecks, report: join(outputDir, 'report.json') }));
     } catch (error) {
         writeFileSync(join(outputDir, 'failure.json'), JSON.stringify({ error: error.stack, cases, errors, networkFailures }, null, 2));
         throw error;
-    } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)); }
+    } finally { await browser?.close(); await api.locals.collaborationRealtime.close(); apiServer.closeAllConnections(); await new Promise(resolve => apiServer.close(resolve)); db.close(); await new Promise(resolve => server.close(resolve)); }
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });

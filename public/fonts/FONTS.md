@@ -11,25 +11,35 @@ ClientText, rather than reproducing every game UI element's font and size.
 | Polish | Empty language override; retain the default Fontin body. |
 | Russian | No root Normal font override; retain the default Fontin body. Caveat overrides apply to handwriting and specific UI elements. |
 | Spanish | Fontin body and Fontin Smallcaps; keep the existing smallcaps preview preference. FrizQuadrataITC is a fallback. |
-| Turkish | Fontin body, Fontin-SmallCaps-tr-TR smallcaps and OptimusPrincepsSemiBold-tr-TR sharp text; the preview prefers the Turkish smallcaps face when installed. |
+| Turkish | Fontin body, Fontin-SmallCaps-tr-TR smallcaps and OptimusPrincepsSemiBold-tr-TR sharp text; the preview prefers the Turkish smallcaps face when private font access is available. |
 | Thai | Kanit. |
 | Japanese | Koruri Regular body; some smallcaps roles use NotoSansJP. |
 | Korean | Spoqa Han Sans Neo. |
 | Traditional Chinese | Noto Sans CJK TC, with Noto Sans TC as the web fallback. |
 | Simplified Chinese | No XML supplied; retain the existing Noto Sans SC mapping. |
 
-Fontin regular, bold, italic and smallcaps, Friz Quadrata and Koruri are bundled
-as WOFF2. The stylesheet accepts the game's `FrizQuadrataITC` name as well as the
-existing spaced aliases. Noto Serif is loaded with regular, bold and italic
-variants to cover glyphs missing from bundled Latin faces. Existing Google Fonts
-and Spoqa stylesheets provide the Thai, CJK and Korean web fonts.
+Fontin regular, bold, italic and smallcaps, Friz Quadrata and Koruri, plus the
+user-supplied exact Turkish TTFs, live in the private SDEditor API repository.
+There are no font binaries or static public font downloads in this frontend.
+`previewFonts.js` uses the authenticated private asset loader and FontFace API;
+faces and temporary Blob URLs are released when account, access or workspace
+scope changes. Translators can load the Turkish variants only with a Turkish
+assignment; Manager/Admin retain all-language access without an assignment.
 
-The supplied archive does not contain `Fontin-SmallCaps-tr-TR.ttf` or
-`OptimusPrincepsSemiBold-tr-TR.ttf`. Their exact typeface names are included in the
-Turkish stack for installed fonts; otherwise it uses the bundled Fontin and Friz
-Quadrata faces, then Noto Serif. Do not rename a generic Fontin file to pretend it
-is the Turkish variant. To bundle these exact faces later, add the actual licensed
-font assets and matching `@font-face` declarations.
+Turkish smallcaps uses `Fontin-SmallCaps-tr-TR`. The exact
+`OptimusPrincepsSemiBold-tr-TR` sharp face is available in preview overrides.
+Both include ÇçĞğİıÖöŞşÜü. Optimus has no ASCII `^ | ~` glyphs; its overrides
+retain Turkish Fontin, Fontin and Noto Serif as CSS fallbacks. Font selection
+does not alter protected tokens or parse font tags into new preview semantics.
+
+Web/system CSS fallbacks remain available while signed out, offline or without
+access to the selected language. Google Fonts and Spoqa provide the existing
+Thai, CJK, Korean and Noto Serif fallback faces. Private fonts are held only for
+the current browser scope, never persisted in browser storage.
+
+Deploy the matching API first, then the frontend. Reload open tabs after release;
+do not clear IndexedDB or change installed system fonts. The API checkout carries
+the original Koruri license alongside its font asset.
 
 Saved `gamePreviewFonts` language overrides continue to take precedence over
 these defaults. ClientText previews use the open workbook's language, including
