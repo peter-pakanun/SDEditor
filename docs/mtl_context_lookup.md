@@ -33,15 +33,30 @@ sheets/records are explicit unavailable results.
 | Results per round | 4 records, 2 fields each; source/approved target each at most 2,048 UTF-16 code units |
 | Extra context | 8,192 UTF-8 JSON bytes per round; 16,384 bytes and 8,000 string/key UTF-16 code units total |
 | Original + extra context | 57,344 UTF-8 JSON bytes and 24,000 string/key UTF-16 code units |
-| Provider input | Full serialized request at most 65,536 UTF-8 bytes per call; 196,608 total, conservatively reserved as an input-token upper bound |
-| Provider output | 8,192 tokens per call including reasoning; 24,576 reserved total, without refunds |
-| Total token reservation | 221,184 input-upper-bound plus output tokens; not measured or billable provider usage |
+| Serialized requests | 65,536 UTF-8 JSON bytes reserved per call; 196,608 total before credentials/transport; these are bytes, not tokens |
+| Observable output text | 131,072 UTF-8 bytes per call / 262,144 total; per-call assembled assistant JSON/text high-water marks, without counting repeated delta/done/final snapshots twice |
+| Received SSE data | Abort after crossing 1,048,576 bytes per call / 3,145,728 total; count every delivered chunk, including the crossing chunk |
+| Provider/hidden reasoning tokens | Unmeasured and not hard-capped by the app. SIWC does not support `max_output_tokens`; no provider token-spending guarantee is made |
 | Deadline | Original job deadline, at most 180 seconds including all waits/calls |
 | Challenge wait / browser lease | 15 seconds each; status polls from the original session renew the lease |
 
+The provider HTTP envelope contains only `model`, `reasoning` (effort),
+`instructions`, `input`, `store:false`, `stream:true` and `text` structured-output
+settings. The official [SIWC preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
+reject `max_output_tokens` and HTTP `previous_response_id`; neither is sent.
+
 Every provider attempt reserves one durable provider round, including failed
 attempts. All rounds share the existing one-request quota charge and
-concurrency slot. Context limits never widen automatically; oversized fields
+concurrency slot. Debug budget version `mtl-local-byte-budget-v1` reports
+`callReservations`, `requestBytesReserved`, `receivedStreamBytes` and
+`outputTextBytes`. The last metric sums per-call high-water marks of visible
+assistant output text, including its JSON framing. It does not count reasoning
+or estimate model tokens. `providerTokenCapEnforced:false`,
+`providerTokens:null` and `reasoningTokens:null` state that limitation. An
+observation can itself cross the byte threshold and is counted before local
+abort; cancellation of upstream computation is best effort. Historical receipts
+remain unchanged.
+Context limits never widen automatically; oversized fields
 and records are omitted whole and marked truncated. There are no automatic
 provider retries or new inference IDs. A lost reply acknowledgement is checked
 by polling the same request, without resubmitting a model request.
@@ -54,7 +69,7 @@ without inference; a running lookup cannot reconstruct a lost original snapshot
 after reload and is cancelled. A new translation requires an explicit action.
 
 Admin Download all includes sanitized lookup rounds, results, executed calls,
-wait timestamps/durations and token reservations in `request.json`. The normal
+wait timestamps/durations, byte accounting and provider-token limitations in `request.json`. The normal
 context section remains the frozen initial packet. An explicit consented
 dismissal retains the same evidence in the private server archive. Credentials,
 transport headers, provider errors and chain of thought are excluded. Lookup

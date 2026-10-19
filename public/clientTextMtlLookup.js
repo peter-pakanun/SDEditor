@@ -8,7 +8,9 @@
     const LIMITS = Object.freeze({ rounds: 2, queries: 2, results: 4, fields: 2, fieldCharacters: 2048,
         roundBytes: 8192, totalBytes: 16384, totalCharacters: 8000, contextBytes: 56 * 1024,
         contextCharacters: 24000, waitMs: 15000, leaseMs: 15000, modelCalls: 3,
-        outputTokensPerCall: 8192, totalOutputTokens: 24576, totalInputTokenBound: 196608 });
+        requestBytesPerCall: 65536, totalRequestBytes: 196608,
+        streamBytesPerCall: 1024 * 1024, totalStreamBytes: 3 * 1024 * 1024,
+        outputTextBytesPerCall: 128 * 1024, totalOutputTextBytes: 256 * 1024 });
     const bad = () => { throw new TypeError('Invalid bounded MTL lookup.'); };
     const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
     function keys(value, allowed, required = allowed) {

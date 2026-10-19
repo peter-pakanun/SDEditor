@@ -76,14 +76,18 @@ test('bounded lookup evidence enters the sanitized ZIP request section with call
     const value=record();value.server.lookup={enabled:true,rounds:[{round:1,queries:[{kind:'keyword',recordId:'Spark',sheet:'KeywordPopups'}],
         results:[{queryIndex:0,unavailable:true,truncated:false,records:[]}],startedAt:1,finishedAt:3,elapsedMs:2,status:'received'}],
         calls:[{round:1,startedAt:0,finishedAt:1,elapsedMs:1,status:'completed'},{round:2,startedAt:3,finishedAt:7,elapsedMs:4,status:'completed'}],
-        budget:{modelCalls:2,outputTokensReserved:16384,inputTokenUpperBound:12345},providerRequests:[{
+        budget:{version:'mtl-local-byte-budget-v1',callReservations:2,requestBytesReserved:12345,receivedStreamBytes:4200,outputTextBytes:500,
+            providerTokenCapEnforced:false,providerTokens:null,reasoningTokens:null},providerRequests:[{
             instructions:'Quoted synthetic prompt',input:[{role:'user',content:'Synthetic context'},{type:'reasoning',text:'hidden-lookup-reasoning'}],
             headers:{Authorization:'Bearer lookup-private-secret'},credentials:'lookup-private-credential',reasoning:{text:'hidden-lookup-thought'} }]};
     const downloads=[],h=harness(value);
     await globals({JSZip,saveAs:blob=>downloads.push(blob)},async()=>{
         assert.equal(await h.dialog.downloadAll(),true);const files=await unzip(downloads[0]),lookup=files['request.json'].lookup;
         assert.equal(lookup.rounds[0].queries[0].recordId,'Spark');assert.equal(lookup.rounds[0].elapsedMs,2);
-        assert.equal(lookup.calls[1].elapsedMs,4);assert.equal(lookup.budget.modelCalls,2);assert.equal(lookup.budget.outputTokensReserved,16384);
+        assert.equal(lookup.calls[1].elapsedMs,4);assert.equal(lookup.budget.callReservations,2);assert.equal(lookup.budget.requestBytesReserved,12345);
+        assert.equal(lookup.budget.outputTextBytes,500);assert.equal(lookup.budget.providerTokenCapEnforced,false);
+        assert.equal(lookup.budget.providerTokens,null);assert.equal(lookup.budget.reasoningTokens,null);
+        assert.equal(lookup.budget.outputTokensReserved,undefined);assert.equal(lookup.budget.totalTokenUpperBound,undefined);
         assert.doesNotMatch(JSON.stringify(files),/lookup-private-secret|lookup-private-credential|hidden-lookup-reasoning|hidden-lookup-thought/);
     });
 });
