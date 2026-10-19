@@ -24,6 +24,7 @@ function harness() {
       lang: 'Thai', dictionary: [{ _id: 'one', find: 'Fire', replace: 'ไฟ', alts: [], tlnote: '' }],
       yieldEditorWork: async () => {}, $nextTick: async () => {},
     });
+  Object.defineProperty(e,'settingsVisibleTabs',{get:()=>config.computed.settingsVisibleTabs.call(e)});
   return { e, writes, downloads, timers, listeners, context, window, config };
 }
 
@@ -210,6 +211,7 @@ test('the MTL section preserves existing preferences and legacy Settings navigat
   const { e, config, writes, downloads } = harness();
   assert.equal(e.mtlConsentVersion, '');assert.equal(e.mtlShortcut, 'disabled');
   e.mtlConsentVersion='mtl-v1';e.mtlShortcut='ctrl-alt-f8';
+  e.ctMtlVisible=true;
   const draft={userDay:75};e.mtlLimitsDraft=draft;
   for(const id of ['mtl','general','editor','cloud','data','logs','mtl']){
     e.openSettings(id);assert.equal(e.settingsTab,id);assert.equal(e.mtlLimitsDraft,draft);
@@ -224,6 +226,17 @@ test('the MTL section preserves existing preferences and legacy Settings navigat
     e.exportSettingsClicked();const imported=JSON.parse(await downloads.at(-1).blob.text()),restored=harness().e;
     restored.importSettings(imported);assert.equal(restored.mtlConsentVersion,mtlConsentVersion);assert.equal(restored.mtlShortcut,'ctrl-alt-f8');
   }
+});
+
+test('hidden MTL navigation falls back to General and keyboard navigation skips it without changing preferences',async()=>{
+  const {e,config}=harness();e.ctMtlVisible=true;e.settingsTab='mtl';e.mtlConsentVersion='mtl-v2';e.mtlShortcut='f8';
+  e.mtlLimitsDraft={userDay:77};const draft=e.mtlLimitsDraft;let focus=0;
+  e.settingsDialogVisible=true;e.$nextTick=async callback=>callback?.();e.$refs={settingsDialog:{querySelector(){return{focus(){focus++;}};}}};
+  e.ctMtlVisible=false;config.watch.settingsVisibleTabs.call(e,e.settingsVisibleTabs);
+  assert.equal(e.settingsTab,'general');assert.equal(focus,1);assert.equal(e.mtlLimitsDraft,draft);
+  e.openSettings('mtl');assert.equal(e.settingsTab,'general');
+  e.handleSettingsTabKeydown({key:'ArrowRight',preventDefault(){}},e.settingsVisibleTabs.findIndex(tab=>tab.id==='editor'));
+  assert.equal(e.settingsTab,'cloud');assert.equal(e.mtlConsentVersion,'mtl-v2');assert.equal(e.mtlShortcut,'f8');
 });
 
 test('ClientText class-name display defaults on and survives local save, export, and import', async () => {

@@ -139,7 +139,7 @@ const options={
     candidates:this.ctMtlCount,accepted:this.ctMtlAccepted(field),error:this.ctError||this.ctMtlError};},
   async memoryCount(){return (await this._fixtureStore.getMemory(this.ctWorkspace.scope))?.units?.length||0;}
  },
- template:'<div class="appRoot" data-density="compact"><main class="ctWorkspace" style="margin:24px;width:min(1200px,calc(100vw - 48px))"><h1>Synthetic MTL fixture</h1><button id="fixture-mode" @click="ctEditor=!ctEditor">Toggle full editor</button><button id="fixture-save" data-inline-focus-surface @click="ctSave()">Save</button><span v-if="ctMtlCount" class="ctMtlCount"><span class="ctMtlDot"></span>MTL {{ctMtlCount}}</span><table><tbody><tr :data-unit-id="ctSelection" @click="ctRowClick(ctCurrentUnit,$event)" @focusout="ctInlineFocusOut"><td><section id="fixture-editor" :class="ctEditor ? \'ctFull ctFullEditor\' : \'inlineEditor\'"><ct-fields v-if="ctCurrentUnit && !ctInlineClosed" :host="$root" :side="ctEditor ? \'both\' : \'translation\'"></ct-fields></section></td></tr></tbody></table><p class="fixture-error">{{ctError||ctMtlError}}</p></main><fixture-mtl-consent v-if="fixtureConsent"></fixture-mtl-consent><ct-mtl-debug-dialog v-if="ctMtlDebugAllowed && ctMtlDebugWindow" :host="$root"></ct-mtl-debug-dialog></div>'
+ template:'<div class="appRoot" data-density="compact"><main class="ctWorkspace" style="margin:24px;width:min(1200px,calc(100vw - 48px))"><h1>Synthetic MTL fixture</h1><button id="fixture-mode" @click="ctEditor=!ctEditor">Toggle full editor</button><button id="fixture-save" data-inline-focus-surface @click="ctSave()">Save</button><span v-if="ctMtlVisible && ctMtlCount" class="ctMtlCount"><span class="ctMtlDot"></span>MTL {{ctMtlCount}}</span><table><tbody><tr :data-unit-id="ctSelection" @click="ctRowClick(ctCurrentUnit,$event)" @focusout="ctInlineFocusOut"><td><section id="fixture-editor" :class="ctEditor ? \'ctFull ctFullEditor\' : \'inlineEditor\'"><ct-fields v-if="ctCurrentUnit && !ctInlineClosed" :host="$root" :side="ctEditor ? \'both\' : \'translation\'"></ct-fields></section></td></tr></tbody></table><p class="fixture-error">{{ctError||ctMtlError}}</p></main><fixture-mtl-consent v-if="fixtureConsent"></fixture-mtl-consent><ct-mtl-debug-dialog v-if="ctMtlDebugAllowed && ctMtlDebugWindow" :host="$root"></ct-mtl-debug-dialog></div>'
 };
 const vue=Vue.createApp(options);vue.directive('tooltip',{});
 vue.component('ct-fields',ClientTextUI.fieldsComponent);vue.component('ct-target',ClientTextUI.targetComponent);
@@ -190,6 +190,58 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
         assert.equal((await snapshot()).underlying,'Confirmed {0}');
         await page.evaluate(()=>window.__mtlApp.configure('memory'));
         await page.evaluate(()=>{window.__mtlApp.fixtureConsent=false;});
+        // Account/assignment changes use the actual shared toolbar and field,
+        // in both storage modes and both editor presentations.
+        for(const mode of ['memory','idb'])for(const full of [false,true]){
+            await page.evaluate(async({mode,full})=>{
+                const app=window.__mtlApp;app.cloudUser={id:'synthetic-tester',role:'translator',language:'Thai',assignmentVersion:1};
+                app.cloudCanAccessAllLanguages=false;await app.configure(mode);app.ctEditor=full;
+            },{mode,full});
+            await target().fill('Ordinary unsaved {0}');
+            await page.evaluate(()=>{window.__visibilityTarget=document.querySelector('[data-ct-target]');});
+            for(const role of ['translator','manager','admin'])for(const language of [null,'Thai','French']){
+                await page.evaluate(({role,language})=>{const app=window.__mtlApp;
+                    app.cloudUser={id:'synthetic-tester',role,isAdmin:role==='admin',language,assignmentVersion:(app.cloudUser.assignmentVersion||0)+1};
+                    app.cloudCanAccessAllLanguages=role!=='translator';
+                },{role,language});
+                const shown=role==='admin'||!!language;
+                assert.equal(await page.locator('.ctMtlButton').count(),shown?1:0,mode+'/'+full+'/'+role+'/'+language);
+                assert.equal(await target().inputValue(),'Ordinary unsaved {0}');
+                assert.equal(await target().evaluate(node=>node===window.__visibilityTarget),true,'Visibility retains the mounted field');
+                assert.equal(await page.evaluate(()=>window.__mtlApp.ctEditor),full);
+                if(shown)assert.equal(await page.locator('.ctMtlButton').isDisabled(),role==='translator'&&language!=='Thai');
+                else{
+                    const starts=await page.evaluate(()=>window.__mtlApp._fixtureStarts);
+                    await target().focus();await page.keyboard.press('F8');
+                    assert.equal(await page.evaluate(()=>window.__mtlApp._fixtureStarts),starts,'Hidden shortcut cannot admit a translation');
+                    assert.equal(await page.locator('.ctMtlReview,.ctMtlSettingsButton,.ctMtlDebugButton').count(),0);
+                }
+            }
+            await page.evaluate(()=>{const app=window.__mtlApp;app.cloudUser={...app.cloudUser,role:'manager',isAdmin:false,language:'Thai'};});
+            await page.locator('.ctMtlButton').click();await page.waitForFunction(()=>window.__mtlApp.snapshot().visible==='Generated {0}');
+            await target().fill('Separate retained review {0}');await page.locator('.ctMtlButton').focus();
+            await page.evaluate(()=>{window.__mtlApp.cloudUser.language=null;});
+            assert.equal(await page.locator('.ctMtlReview,.ctMtlButton,.ctMtlCount').count(),0);
+            assert.equal(await page.evaluate(()=>window.__mtlApp.ctStatusFilterOptions.some(item=>item.key==='mtl')),false);
+            assert.equal(await page.evaluate(()=>window.__mtlApp.ctMtlCount),1,'Hidden UI preserves candidate workload data');
+            assert.equal(await target().inputValue(),'Ordinary unsaved {0}');
+            assert.equal(await target().evaluate(node=>node===document.activeElement&&node===window.__visibilityTarget),true,'Removed-control focus returns to the stable field');
+            await page.evaluate(()=>{window.__mtlApp.cloudUser.language='Thai';});
+            assert.equal(await target().inputValue(),'Separate retained review {0}');
+            await page.evaluate(()=>{window.__mtlApp.cloudSignedIn=false;});assert.equal(await page.locator('.ctMtlButton,.ctMtlReview').count(),0);
+            await page.evaluate(()=>{const app=window.__mtlApp;app.cloudSignedIn=true;app.cloudUser={id:'different-account',role:'manager',language:null};});
+            assert.equal(await page.locator('.ctMtlButton').count(),0);
+            for(const width of [560,800,1440]){
+                await page.setViewportSize({width,height:850});
+                await page.evaluate(()=>{window.__mtlApp.cloudUser={id:'synthetic-tester',role:'admin',isAdmin:true,language:null};});
+                const box=await page.locator('.ctMtlButton').boundingBox();assert.equal(box.width,25);assert.equal(box.height,25);
+                assert.ok(box.x>=0&&box.x+box.width<=width,'Square Translate stays reachable at '+width);
+                await page.screenshot({path:join(outDir,`visibility-${mode}-${full?'full':'inline'}-${width}.png`),fullPage:true});
+            }
+        }
+        await page.setViewportSize({width:1440,height:1000});
+        await page.evaluate(()=>{const app=window.__mtlApp;app.cloudUser={id:'synthetic-tester',role:'translator',language:'Thai',assignmentVersion:1};app.cloudCanAccessAllLanguages=false;});
+        await page.evaluate(()=>window.__mtlApp.configure('memory'));
         const auditCopy=async()=>{
             const copy=await page.locator('body').evaluate(node=>{
                 let visible=node.innerText;
@@ -212,10 +264,11 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
                 const order=await toolbar.evaluate(node=>{
                     const mtl=node.querySelector('.ctMtlButtonTarget'),separator=mtl.nextElementSibling,history=separator?.nextElementSibling,
                         box=element=>{const rect=element?.getBoundingClientRect();return rect?{left:rect.left,right:rect.right,top:rect.top,bottom:rect.bottom}:null;};
-                    return{next:separator?.className,icon:mtl.textContent.trim(),mtl:box(mtl),separator:box(separator),history:box(history)};
+                    return{next:separator?.className,icon:!!mtl.querySelector('button > svg[aria-hidden="true"]'),button:box(mtl.querySelector('.ctMtlButton')),mtl:box(mtl),separator:box(separator),history:box(history)};
                 });
                 assert.equal(order.next,'fieldToolbarSeparator',mode+'/'+theme+': MTL immediately precedes history separator');
-                assert.equal(order.icon,'A\u2194\u3042',mode+'/'+theme+': restrained translate icon');
+                assert.equal(order.icon,true,mode+'/'+theme+': SVG translation icon');
+                assert.equal(order.button.right-order.button.left,25);assert.equal(order.button.bottom-order.button.top,25);
                 assert.ok(order.separator.left>=order.mtl.right-1&&order.separator.left-order.mtl.right<=16,
                     mode+'/'+theme+': MTL is visually adjacent before the history separator '+JSON.stringify(order));
                 assert.ok(order.history.left>=order.separator.right-1&&order.history.left-order.separator.right<=16,
@@ -550,7 +603,7 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             }
         }
         assert.deepEqual(external,[],'No external request is made');assert.deepEqual(errors,[],'Real native controls render without page errors');
-        const report={passed:true,debugJsonChecks:['absent response has no copy action','full sanitized prompt/context/request/response copies including overflow','Copied feedback and retained keyboard focus','keyboard and pointer internal scrolling','clipboard denial selects complete JSON for manual copy','four themes and 920x420 viewport','drag and Escape focus restoration','role change clears details'],modelSettingsChecks:['Admin-only toolbar bar','model and effort selection','Luna none/low/medium available','Sol/medium default retained','unverified Fast disabled','four themes and desktop resize','Escape restores focus','draft unchanged'],timingChecks:['separate Admin panel with unavailable preview milestones','four themed timing tables and exact request correlation','first provisional frame after nonempty progress; no paint claim','ordinary roles hidden and context fence clears records'],results,externalRequests:external,pageErrors:errors};writeFileSync(join(outDir,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
+        const report={passed:true,visibilityChecks:['Translator/Manager require explicit assignment; selected language and Manager all-language access are independent','unassigned Admin visible; readiness still disables unavailable actions','live assignment, role, account and sign-out changes in memory/IndexedDB and inline/full editors','hidden F8 makes no request; review controls, counts and filters hidden together','ordinary drafts, separate reviews, field DOM and focus retained','25x25 square SVG icon, 560/800/1440 desktop widths and all four themes; existing spinner and keyboard/pointer cancellation'],debugJsonChecks:['absent response has no copy action','full sanitized prompt/context/request/response copies including overflow','Copied feedback and retained keyboard focus','keyboard and pointer internal scrolling','clipboard denial selects complete JSON for manual copy','four themes and 920x420 viewport','drag and Escape focus restoration','role change clears details'],modelSettingsChecks:['Admin-only toolbar bar','model and effort selection','Luna none/low/medium available','Sol/medium default retained','unverified Fast disabled','four themes and desktop resize','Escape restores focus','draft unchanged'],timingChecks:['separate Admin panel with unavailable preview milestones','four themed timing tables and exact request correlation','first provisional frame after nonempty progress; no paint claim','ordinary roles hidden and context fence clears records'],results,externalRequests:external,pageErrors:errors};writeFileSync(join(outDir,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
     }catch(error){
         const page=browser?.contexts()[0]?.pages()[0];
         if(page){await page.screenshot({path:join(outDir,'failure.png'),fullPage:true});console.error(await page.evaluate(()=>({

@@ -504,6 +504,10 @@ function formatPageRange(total, page, pageSize) {
     this._instancePeers?.clear();
   },
   watch: {
+    settingsVisibleTabs(tabs) {
+      if (tabs.some(tab => tab.id === this.settingsTab)) return;
+      this.setSettingsTab('general', this.settingsDialogVisible);
+    },
     settingsDialogVisible(visible) {
       if (visible) {
         this.ctMtlLoadCapabilities?.();
@@ -659,6 +663,7 @@ function formatPageRange(total, page, pageSize) {
     fullEditorPreviewHeight() { this.saveSettings(); },
   },
   computed: {
+    settingsVisibleTabs() { return this.settingsTabs.filter(tab => tab.id !== 'mtl' || this.ctMtlVisible); },
     editorSessionActive() { return this.editorVisible || !!this.inlineActive; },
     editorToolsMounted() {
       return !this.ctActive && (this.editorVisible || (this.inlineEditor && this.gameVersionSelected && !this.versionChooserVisible
@@ -1850,7 +1855,10 @@ function formatPageRange(total, page, pageSize) {
       this.showSetting = true;
     },
     setSettingsTab(tab, focusTab = false) {
-      if (!this.settingsTabs.some(item => item.id === tab)) return;
+      if (!this.settingsVisibleTabs.some(item => item.id === tab)) {
+        if (tab === 'mtl') this.settingsTab = 'general';
+        return;
+      }
       this.settingsTab = tab;
       if (focusTab) this.$nextTick(() => {
         this.$refs.settingsDialog?.querySelector('[role="tab"][aria-selected="true"]')?.focus();
@@ -1858,13 +1866,13 @@ function formatPageRange(total, page, pageSize) {
     },
     handleSettingsTabKeydown(event, index) {
       let nextIndex;
-      if (event.key === 'ArrowRight') nextIndex = (index + 1) % this.settingsTabs.length;
-      else if (event.key === 'ArrowLeft') nextIndex = (index + this.settingsTabs.length - 1) % this.settingsTabs.length;
+      if (event.key === 'ArrowRight') nextIndex = (index + 1) % this.settingsVisibleTabs.length;
+      else if (event.key === 'ArrowLeft') nextIndex = (index + this.settingsVisibleTabs.length - 1) % this.settingsVisibleTabs.length;
       else if (event.key === 'Home') nextIndex = 0;
-      else if (event.key === 'End') nextIndex = this.settingsTabs.length - 1;
+      else if (event.key === 'End') nextIndex = this.settingsVisibleTabs.length - 1;
       else return;
       event.preventDefault();
-      this.setSettingsTab(this.settingsTabs[nextIndex].id, true);
+      this.setSettingsTab(this.settingsVisibleTabs[nextIndex].id, true);
     },
     settingsTrapFocus(event) {
       const dialog = this.$refs.settingsDialog;

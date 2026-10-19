@@ -165,7 +165,7 @@
 .ctUploadDialog > .versionActions { margin-top:20px; }
 @media(max-width:1150px) { .ctWorkspaceBody { grid-template-columns:170px minmax(0,1fr); }.ctWorkspaceBody.ctToolsOpen { grid-template-columns:170px minmax(0,1fr) clamp(360px,29vw,460px); } }
 .ctMtlDot {display:inline-block;width:7px;height:7px;flex:none;border-radius:50%;background:#67D4F1;}
-.ctMtlButton {font-size:12px;min-width:34px;display:inline-flex;align-items:center;justify-content:center;}
+.editorFieldToolbar .ctMtlButton {box-sizing:border-box;flex:none;width:25px;min-width:25px;height:25px;padding:2px;display:inline-flex;align-items:center;justify-content:center;line-height:1;}
 .ctMtlButtonTarget {display:inline-flex;align-items:center;margin-left:auto;}
 .ctMtlDebugButton {font-size:14px;min-width:26px;padding-inline:5px;}
 .ctMtlDebugDialog {position:fixed;z-index:3500;box-sizing:border-box;width:720px;max-width:calc(100vw - 16px);max-height:min(760px,calc(100vh - 16px));display:flex;flex-direction:column;border:1px solid var(--ui-border);border-radius:8px;background:var(--color-element);color:var(--color-font);box-shadow:0 12px 42px #0006;font-size:13px;}

@@ -27,22 +27,22 @@ async function run(){
         match.slice(0,match.indexOf('>')+1)+'<h3>'+config.data().settingsTabs.find(tab=>tab.id===id).label+'</h3></section>');
     const template='<div @keydown="settingsDialogVisible && handleKeydown($event)"><button id="open-settings" ref="settingsButton" @click="openSettings()">Open settings</button><button id="open-mtl" @click="openSettings(\'mtl\')">Open MTL settings</button>'+dialog+'</div>';
     const methods=['openSettings','setSettingsTab','handleSettingsTabKeydown','settingsTrapFocus','settingsSaveClose','handleKeydown','isImeComposingEvent'].map(name=>config.methods[name].toString()).join(',');
-    const watch=['settingsDialogVisible','mtlConsentVersion','mtlShortcut'].map(name=>config.watch[name].toString()).join(',');
+    const watch=['settingsDialogVisible','settingsVisibleTabs','mtlConsentVersion','mtlShortcut'].map(name=>config.watch[name].toString()).join(',');
     const styles=[...html.matchAll(/<link\b[^>]*rel="stylesheet"[^>]*href="([^"/:]+\.css)"[^>]*>/g)].map(match=>match[0].replace('href="','href="/')).join('\n');
     const fixture=String.raw`(()=>{
 const defaults=${JSON.stringify(config.data())},seed=${JSON.stringify(quota())};
-const navigation={${methods}},settingsWatch={${watch}};
+const navigation={${methods}},settingsWatch={${watch}},mtlVisible=${require('../public/clientTextMtlUi.js').visible.toString()};
 const app=Vue.createApp({mixins:[MtlConnectionUI.mixin,MtlLimitsUI.mixin],
  data(){return{...defaults,gameVersionSelected:true,needsInitialSettings:false,showSetting:false,lang:'Thai',gameVersion:'poe2',
   cloudLanguageSwitching:false,privateMediaEpoch:1,cloudSignedIn:true,cloudProfileId:'synthetic-admin',cloudUser:{id:'synthetic-admin',role:'admin',isAdmin:true,assignmentVersion:1},ctMtlCapabilities:null};},
- computed:{${config.computed.settingsDialogVisible.toString()}},watch:settingsWatch,
+ computed:{${config.computed.settingsDialogVisible.toString()},${config.computed.settingsVisibleTabs.toString()},ctMtlVisible(){return mtlVisible(this);}},watch:settingsWatch,
  methods:{...navigation,handleFileListKeydown(){return false;},normalizeGameVersion(value){return value==='poe2'?'poe2':'poe1';},
   async saveSettings(){this._fixturePreferenceWrites.push({mtlConsentVersion:this.mtlConsentVersion,mtlShortcut:this.mtlShortcut});return true;},
   async ctMtlLoadCapabilities(){const value=await this._cloud.request('/v1/mtl/capabilities');this.ctMtlCapabilities=value;return value;},
   async configure(role='admin',mode='normal'){
    this.showSetting=false;this.mtlLimitsReset();this.mtlConnectionReset();this.mtlLimitsExpanded=false;
    this.mtlConsentVersion='';this.mtlShortcut='disabled';this.privateMediaEpoch++;
-   this.cloudUser={id:'synthetic-admin',role,isAdmin:role==='admin',assignmentVersion:1};
+   this.cloudUser={id:'synthetic-admin',role,isAdmin:role==='admin',assignmentVersion:1,language:role==='admin'?null:'Thai'};
    this._fixtureMode=mode;this._fixtureQuota=structuredClone(seed);this._fixtureRequests=[];this._fixturePreferenceWrites=[];this._fixtureLimitReleases=[];this._fixtureDeferLimits=false;
    this._cloud=Vue.markRaw({epoch:1,request:async(path,options={})=>{
     const record={path,method:options.method||'GET',body:options.body&&structuredClone(options.body)};this._fixtureRequests.push(record);
@@ -76,11 +76,11 @@ app.component('app-notice',EditorComponents.Notice);window.__mtlSettings=app.mou
         const tab=id=>page.locator('#settings-tab-'+id),input=()=>page.locator('[data-mtl-limit="userDay"]');
         const configure=(role='admin',mode='normal')=>page.evaluate(({role,mode})=>window.__mtlSettings.configure(role,mode),{role,mode});
         const openMtl=()=>page.locator('#open-mtl').click(),expand=async()=>{await page.locator('.mtlLimitsPanel summary').click();await page.waitForFunction(()=>window.__mtlSettings.mtlLimitsState||window.__mtlSettings.mtlLimitsLoadError);};
-        const assertTabs=async selected=>{
+        const assertTabs=async (selected,count=6)=>{
             assert.equal(await page.getByRole('dialog',{name:'Settings',exact:true}).count(),1);
             assert.equal(await page.getByRole('tab',{selected:true}).count(),1);assert.equal(await tab(selected).getAttribute('tabindex'),'0');
             const pairs=await page.getByRole('tab').evaluateAll(nodes=>nodes.map(node=>({id:node.id,target:node.getAttribute('aria-controls'),panel:document.getElementById(node.getAttribute('aria-controls'))?.getAttribute('aria-labelledby')})));
-            assert.ok(pairs.every(pair=>pair.id===pair.panel));assert.equal(new Set(pairs.map(pair=>pair.target)).size,6);
+            assert.ok(pairs.every(pair=>pair.id===pair.panel));assert.equal(new Set(pairs.map(pair=>pair.target)).size,count);
         };
         await page.locator('#open-settings').click();await assertTabs('general');
         await tab('editor').focus();await page.keyboard.press('ArrowRight');await assertTabs('mtl');
@@ -133,6 +133,28 @@ app.component('app-notice',EditorComponents.Notice);window.__mtlSettings=app.mou
             await page.getByRole('button',{name:'Save and close',exact:true}).click();await openMtl();await assertTabs('mtl');
         }
         checks.push('Translator/Manager MTL preferences available; Admin-only panels hidden with zero Admin requests');
+        for(const role of ['translator','manager']){
+            await configure(role);await openMtl();await page.getByLabel('Translate current field with MTL').selectOption('f8');
+            await page.getByRole('checkbox',{name:/Allow MTL requests/}).check();
+            await page.getByLabel('Translate current field with MTL').focus();
+            await page.evaluate(()=>{window.__mtlSettings.cloudUser.language=null;});
+            await assertTabs('general',5);
+            assert.equal(await tab('mtl').count(),0);assert.equal(await page.locator('#settings-panel-mtl').count(),0);
+            assert.equal(await tab('general').evaluate(node=>node===document.activeElement),true);
+            await tab('editor').focus();await page.keyboard.press('ArrowRight');assert.equal(await tab('cloud').getAttribute('aria-selected'),'true');
+            await page.evaluate(()=>window.__mtlSettings.openSettings('mtl'));assert.equal(await tab('general').getAttribute('aria-selected'),'true');
+            assert.equal(await page.evaluate(()=>window.__mtlSettings.mtlConsentVersion),'mtl-v2');
+            assert.equal(await page.evaluate(()=>window.__mtlSettings.mtlShortcut),'f8');
+            await page.evaluate(()=>{window.__mtlSettings.cloudUser.language='French';});await tab('mtl').click();await assertTabs('mtl');
+            assert.equal(await page.getByRole('checkbox',{name:/Allow MTL requests/}).isChecked(),true);
+            await page.evaluate(()=>{window.__mtlSettings.cloudUser={id:'other-account',role:'manager',language:null};});
+            assert.equal(await tab('mtl').count(),0);assert.equal(await page.locator('#settings-panel-mtl').count(),0);
+        }
+        await configure('admin');await openMtl();await assertTabs('mtl');
+        assert.equal(await page.evaluate(()=>window.__mtlSettings.cloudUser.language),null);
+        await page.evaluate(()=>{window.__mtlSettings.ctMtlCapabilities={enabled:false};});assert.equal(await tab('mtl').count(),1);
+        await page.evaluate(()=>{window.__mtlSettings.cloudSignedIn=false;});assert.equal(await tab('mtl').count(),0);assert.equal(await page.locator('#settings-panel-mtl').count(),0);
+        checks.push('live assignment removal/restoration, account/role/sign-out transitions, focus fallback, filtered keyboard navigation and unchanged personal preferences; unassigned Admin remains visible while unavailable');
         assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
         const report={passed:true,checks,pageErrors:errors,externalRequests:external};writeFileSync(join(outDir,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
     }finally{await browser?.close();await new Promise(resolve=>server.close(resolve));}

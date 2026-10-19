@@ -291,7 +291,7 @@
                     get open() { return host.ctComparisonState(field, side).open; }, get side() { return side; },
                     get disabled() { return host.ctBusy || !valid(); }, get formatting() { return field.kind !== 'gender'; },
                     get restoreDisabled() { return this.disabled || !!host.ctHistoryRestoreBlocked?.(unit); },
-                    get mtl() { return side==='translation' && !!root.ClientTextMtlState?.eligible(field); },
+                    get mtl() { return !!host.ctMtlVisible && side==='translation' && !!root.ClientTextMtlState?.eligible(field); },
                     get mtlBusy() { return !!host.ctMtlBusy?.(field); },
                     get mtlDisabled() { return this.disabled || !host.ctMtlCanGenerate?.(field); },
                     get mtlHint() { return host.ctMtlHint?.(field) || 'MTL'; },

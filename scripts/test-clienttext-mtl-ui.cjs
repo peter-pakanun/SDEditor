@@ -35,6 +35,36 @@ function candidate(unit,requestId='request1',baseTargetHash=S.hash(unit.fields[0
         assetHash:descriptor.assetHash,parserVersion:descriptor.parserVersion,sourceHash:S.sourceHash(field.source),rawSourceHash:M.rawSourceHash(field.source),
         generatedText:'Generated {0}',revision:1,status:'pending',createdAt:1,baseTargetHash,...changes};
 }
+
+test('MTL visibility uses account assignments for Translator and Manager, independently of selected language and broad access',()=>{
+    const h=harness(),app=h.app;
+    for(const role of ['translator','manager'])for(const language of [null,'','all','Thai','French']){
+        app.cloudUser={id:h.scope.accountId,role,language,assignmentVersion:1};app.cloudCanAccessAllLanguages=role==='manager';
+        app.lang='Japanese';
+        assert.equal(app.ctMtlVisible,['Thai','French'].includes(language),role+'/'+language);
+        assert.equal(app.ctMtlCanGenerate(h.field),['Thai','French'].includes(language)&&(role==='manager'||language===h.scope.language));
+        if(role==='manager')assert.equal(UI.permissions(app,app.ctContext()),true,'Unassigned Manager keeps existing private MTL/API access policy');
+    }
+    app.cloudUser={id:h.scope.accountId,role:'admin',isAdmin:true,language:null};
+    assert.equal(app.ctMtlVisible,true);assert.equal(app.ctMtlCanGenerate(h.field),true);
+    app.ctMtlCapabilities={enabled:false};assert.equal(app.ctMtlVisible,true);assert.equal(app.ctMtlCanGenerate(h.field),false);
+    app.cloudSignedIn=false;assert.equal(app.ctMtlVisible,false);
+});
+
+test('assignment removal hides review overlay while retaining ordinary drafts, review edits and workload filters',async()=>{
+    const h=harness(),app=h.app;await h.put();await app.ctMtlLoadReviews(h.original);
+    app.ctValues[h.field.id]='Ordinary unsaved {0}';app.ctDraftDirty=true;
+    app.ctMtlShow(h.field);app.ctMtlEdited(h.field,'Separate review edit {0}');
+    app.ctFilter='mtl';app.ctSelectedFilters=['mtl'];const reviews=app.ctMtlReviews,candidates=app.ctMtlCandidates,ids=[...app.ctMtlUnitIds];
+    app.cloudUser={...app.cloudUser,role:'manager',language:null};app.cloudCanAccessAllLanguages=true;
+    UI.mixin.watch.ctMtlVisible.call(app,false);
+    assert.equal(app.ctMtlCandidate(h.field),null);assert.equal(app.ctMtlFieldValue(h.field),'Ordinary unsaved {0}');
+    assert.equal(app.ctMtlReviews,reviews);assert.equal(app.ctMtlCandidates,candidates);assert.equal(app.ctDraftDirty,true);
+    assert.equal(app.ctFilter,'mtl');assert.deepEqual(app.ctSelectedFilters,['mtl']);assert.deepEqual([...app.ctMtlUnitIds],ids);
+    let requests=0;app._cloud.request=async()=>{requests++;};app.ctMtlCapabilities=null;
+    assert.equal(await app.ctMtlGenerate(h.field),false);assert.equal(requests,0);
+    app.cloudUser.language='Thai';assert.equal(app.ctMtlFieldValue(h.field),'Separate review edit {0}');
+});
 function debugHarness(){
     const h=harness(),app=h.app;
     Object.assign(app,Debug.mixin.data());

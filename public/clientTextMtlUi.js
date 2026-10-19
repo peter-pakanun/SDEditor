@@ -31,9 +31,18 @@
         return JSON.stringify([host.cloudSignedIn, host.cloudProfileId, host.cloudUser?.id, host.cloudUser?.role,
             host.cloudUser?.language, host.cloudUser?.assignmentVersion, host.cloudUser?.isAdmin, host.cloudCanAccessAllLanguages]);
     }
+    // UI visibility is separate from all-language access.
+    // Account language is the assignment; the selected editor language is not.
+    function visible(host) {
+        const user = host.cloudUser;
+        return host.cloudSignedIn === true && !!user && (user.role === 'admin' || !user.role && user.isAdmin === true
+            || ['translator', 'manager'].includes(user.role) && typeof user.language === 'string'
+                && !!user.language.trim() && user.language !== 'all');
+    }
     const mixin = {
         data() { return { ctMtlCandidates: raw([]), ctMtlReviews: {}, ctMtlRecoveries:raw([]), ctMtlCapabilities: null, ctMtlError: '', ctMtlRequests: {}, ctMtlLive: {}, ctMtlGenerations: raw([]), ctMtlDismissals:raw([]),ctMtlDismissBusy:{},ctMtlRevision: 0 }; },
         computed: {
+            ctMtlVisible() { return visible(this); },
             ctMtlRequestScopeKey() { return JSON.stringify([this.ctActive, this.ctWorkspace?.scope, this.lang, this.gameVersion, this.branchId, access(this), this._cloud?.epoch, this.mtlConsentVersion]); },
             ctInputValues() {
                 const host = this;
@@ -74,7 +83,16 @@
                 return fields.size;
             }
         },
-        watch: { ctUnits: { flush: 'sync', handler() { this.ctMtlAbortRequests(); } }, ctMtlRequestScopeKey: { flush: 'sync', handler() {
+        watch: { ctMtlVisible(allowed) {
+            if (allowed) return;
+            // Keep workload filters and candidate data intact so the selected
+            // inline row does not disappear when its MTL controls are hidden.
+            // Move off a disappearing MTL control without closing the editor or
+            // discarding the underlying draft or the separate review buffer.
+            const active = root.document?.activeElement;
+            if (active?.closest?.('.ctMtlButtonTarget,.ctMtlReview'))
+                active.closest('.ctTarget')?.querySelector('[data-ct-target]')?.focus({preventScroll:true});
+        }, ctUnits: { flush: 'sync', handler() { this.ctMtlAbortRequests(); } }, ctMtlRequestScopeKey: { flush: 'sync', handler() {
             this.ctMtlAbortRequests();this._ctMtlSync?.stop?.();this._ctMtlSync=null;this._ctMtlDismissalRead=null;this.ctMtlDismissals=raw([]);this.ctMtlDismissBusy={};
             const ctx=this.ctContext();Promise.resolve().then(()=>{if(this.ctActive&&this.ctCurrent(ctx)&&permissions(this,ctx)){this.ctMtlEnsureSync(ctx);return this.ctMtlRefreshDismissals(ctx);}}).catch(()=>{});
         } } },
@@ -367,6 +385,7 @@
                     .sort((a, b) => b.createdAt - a.createdAt || b.revision - a.revision || b.id.localeCompare(a.id))[0] || null;
             },
             ctMtlCandidate(field) {
+                if (!visible(this)) return null;
                 const candidate = this.ctMtlPendingCandidate(field); if (!candidate) return null;
                 const review = this.ctMtlReviews[key(this.ctSelection, field.id)];
                 if(this.ctMtlAccepted(field))return null;
@@ -424,7 +443,7 @@
                 return 'MTL · Translate this field' + (this.mtlShortcut === 'f8' ? ' (F8)' : this.mtlShortcut === 'ctrl-alt-f8' ? ' (Ctrl+Alt+F8)' : '');
             },
             ctMtlCanGenerate(field) {
-                return this.ctActive && !this.ctBusy && !this.ctHistoryViewer && this.ctCurrentUnit?.fields.includes(field)
+                return visible(this) && this.ctActive && !this.ctBusy && !this.ctHistoryViewer && this.ctCurrentUnit?.fields.includes(field)
                     && M.eligible(field) && !this.ctMtlBusy(field) && permissions(this, this.ctContext())
                     && !this.ctMtlAccepted(field)&&!this.ctMtlDismissBusyFor(field)&&!this.ctMtlPendingDismissal(field)
                     && (this.ctMtlCapabilities === null || this.ctMtlCapabilities?.enabled === true || !!this.ctMtlPendingGeneration(field));
@@ -754,6 +773,7 @@
                     ...(this.ctToneNotesSnapshot?{toneNotes:this.ctToneNotesSnapshot(root.ClientTextToneNotes?.roleKeys(this,unit)||[])}: {}) });
             },
             async ctMtlGenerate(field) {
+                if (!visible(this)) return false;
                 const timing=this.ctMtlDebugTimingStart?.(field),early=outcome=>{timing?.finish(outcome);return false;};
                 const ctx = this.ctContext();
                 if (this.ctMtlCapabilities === null && this.ctActive && this.ctCurrentUnit?.fields.includes(field) && M.eligible(field) && permissions(this,ctx)) {
@@ -886,5 +906,5 @@
             }
         }
     };
-    return { mixin, permissions };
+    return { mixin, permissions, visible };
 });
