@@ -18,6 +18,10 @@
   const compactText = (value, literal = false) => (literal ? String(value ?? '') : readableText(value)).replace(/\s+/gu, ' ').trim();
   const foldText = (value, literal = false) => compactText(value, literal).normalize('NFC').toLocaleLowerCase();
   const hasQuery = (model, value) => !!foldText(value, sessionFor(model).mode === 'clienttext' || !!model.lookupCatalogSources?.some(source => source.mode === 'clienttext'));
+  // Use the editor's immutable-English detector for CT references too. Saved
+  // targets never control visibility; SD Lookup keeps its existing behavior.
+  const clientTextFieldVisible = (field, hideDNT) => !hideDNT
+    || !!window.ClientTextUI?.isDNTSource && !window.ClientTextUI.isDNTSource(field?.source);
   const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
   function queryRanges(text, query, literal = false) {
@@ -157,7 +161,7 @@
     };
   }
 
-  function buildCatalogIndex(sources, lang) {
+  function buildCatalogIndex(sources, lang, options = {}) {
     const output = [];
     for (const source of sources || []) {
       const scope = window.EditorReferenceCatalog?.scopeKey(source.scope) || JSON.stringify(source.scope || {});
@@ -175,6 +179,7 @@
           || window.ClientTextState?.valuesFor(unit, source.saved?.[unit.id]) || { ...Object.fromEntries((unit.fields || []).map(field => [field.id, field.target])), ...source.saved?.[unit.id]?.values };
         const referenceMetadata = window.ContentAdapters?.clienttext?.referenceMetadata(unit, contextReferences, {game:source.scope?.game}) || [];
         for (const field of unit.fields || []) {
+          if (!clientTextFieldVisible(field, options.hideDNT)) continue;
           const filepath = [unit.role, unit.sheet, unit.recordId, field.name || field.id, field.form].filter(value => value != null && value !== '').join(' · ');
           const english = String(field.source ?? ''), translation = String(values[field.id] ?? '');
           const metadata = [unit.id, field.id, field.kind,
@@ -261,18 +266,18 @@
         const lang = this.lookupActiveLanguage;
         const source = this.descs;
         const workspace = this.localDescs;
-        const catalog = this.lookupCatalogSources, key = sessionKey(this);
+        const catalog = this.lookupCatalogSources, key = sessionKey(this), hideDNT = !!this.hideDNT;
         let cache = caches.get(this);
         if (!cache || cache.source !== source || cache.workspace !== workspace
-          || cache.lang !== lang || cache.revision !== revision || cache.catalog !== catalog || cache.key !== key) {
+          || cache.lang !== lang || cache.revision !== revision || cache.catalog !== catalog || cache.key !== key || cache.hideDNT !== hideDNT) {
           const active = window.EditorReferenceCatalog?.activeSource(this, sessionFor(this), lang);
           // The active committed view can be replaced after a durable save.
           // Keep cached sibling groups while refreshing that live source only.
           const sources = catalog?.length && this.lookupCatalogKey === key
             ? catalog.map(item => active && item.groupId === active.groupId && item.mode === active.mode ? active : item)
             : active ? [active] : null;
-          cache = { source, workspace, lang, revision, catalog, key,
-            entries: sources ? buildCatalogIndex(sources, lang) : sessionFor(this).mode === 'clienttext' ? [] : buildIndex(source, lang, workspace) };
+          cache = { source, workspace, lang, revision, catalog, key, hideDNT,
+            entries: sources ? buildCatalogIndex(sources, lang, {hideDNT}) : sessionFor(this).mode === 'clienttext' ? [] : buildIndex(source, lang, workspace) };
           cache.byPath = new Map(cache.entries.map(entry => [entry.key || entry.filepath, entry]));
           caches.set(this, cache);
         }
@@ -318,6 +323,7 @@
         // translations update both matching results and the selected reference.
         this.lookupResults;
         const entry = caches.get(this)?.byPath.get(this.lookupSelectedFilepath);
+        if (entry?.mode === 'clienttext' && !clientTextFieldVisible(entry.field, this.hideDNT)) return null;
         return entry?.reference || (entry ? { ...buildReference(entry.desc, this.lookupActiveLanguage, entry.local),
           mode: entry.mode || 'statdescription', groupId: entry.groupId || '', groupLabel: entry.groupLabel || '' } : null);
       },
@@ -326,6 +332,13 @@
       descs() { this.invalidateEditorLookupIndex(); },
       localDescs() { this.invalidateEditorLookupIndex(); },
       lang() { this.invalidateEditorLookupIndex(); },
+      hideDNT: {flush:'sync',handler() {
+        const selected = caches.get(this)?.byPath.get(this.lookupSelectedFilepath);
+        if (selected?.mode === 'clienttext' && !clientTextFieldVisible(selected.field, this.hideDNT)) this.lookupSelectedFilepath = '';
+        this.invalidateEditorLookupIndex();
+        if (lookupActive(this) && this.lookupSelectedFilepath
+          && !this.lookupResults.some(entry => (entry.key || entry.filepath) === this.lookupSelectedFilepath)) this.lookupSelectedFilepath = '';
+      }},
       lookupLanguage() { this.lookupCancelPreparation(); this.lookupApplySearch(); this.lookupLoadCatalog(); },
       lookupModeFilter() { this.lookupApplySearch(); },
       lookupGroupFilter() { this.lookupApplySearch(); },

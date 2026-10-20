@@ -728,7 +728,8 @@
       async initializeCollaborationForScope(request) {
         const current = () => this.collaborationWorkspaceReady() && request.key === this.collaborationInitializationKey() && request.source === this.descs
           && request.workspace === this.localDescs && request.client === this._collaboration;
-        if (window.OfflineStore?.listSaveSubmissions) await initializationTask(this, 'Recovering queued local saves', () => this.recoverPendingSaves());
+        // Await routine local recovery before collaboration without an activity row.
+        if (window.OfflineStore?.listSaveSubmissions) await this.recoverPendingSaves();
         if (!current()) return;
         if (this.ctActive || this._managedWorkspaceTransition || this.testMode || !this.offlineStoreReady || this.versionStorageLoading || this._importingSource || this._reconcilingImport || !this.sourceLoaded || !this.sourceIdentity || !this._cloud
           || this.pendingDuplicateLangImport?.mode === 'update' || !this.cloudSignedIn || !this.lang || (!this.cloudCanAccessAllLanguages && this.cloudUser?.language !== this.lang) || !window.CollaborationSync) return;

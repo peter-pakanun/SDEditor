@@ -121,7 +121,7 @@ function assertSelectedBaselineReads(operations, filepaths, scenario) {
     }
 }
 
-async function runFixture({ storageOnly = false } = {}) {
+async function runFixture({ storageOnly = false, recoveryOnly = false } = {}) {
     if (!executablePath) throw new Error('No installed Edge/Chrome found. Set FIXTURE_BROWSER_PATH.');
     const legacyFileCount = Number(process.env.NORMALIZED_LEGACY_FILE_COUNT || 700);
     assert.ok(Number.isInteger(legacyFileCount) && legacyFileCount >= 25, 'Legacy fixture needs at least 25 files');
@@ -161,12 +161,21 @@ async function runFixture({ storageOnly = false } = {}) {
     frontend.use(express.static(publicDir));
     let browser, activePage;
     const errors = [], results = [];
+    const observePage = page => {
+        activePage = page;
+        page.on('pageerror', error => { errors.push(error.message); console.error('Fixture browser error: ' + error.stack); });
+    };
     try {
         browser = await playwright.chromium.launch({ executablePath, headless: true, args: ['--disable-gpu'] });
         const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, ignoreHTTPSErrors: true });
         const page = await context.newPage();
-        activePage = page;
-        page.on('pageerror', error => { errors.push(error.message); console.error('Fixture browser error: ' + error.stack); });
+        observePage(page);
+        if (recoveryOnly) {
+            await recoveryChecks(page, { origin, apiOrigin, secret, results, onPage: observePage });
+            assert.deepEqual(errors, []);
+            console.log(JSON.stringify({ recoveryOnly, results }, null, 2));
+            return results;
+        }
         await page.goto(origin + '/fixture/storage');
         await page.waitForFunction(() => !!window.OfflineStore && !!window.NormalizedStore);
         const migration = await page.evaluate(async ({ legacyFileCount }) => {
@@ -705,7 +714,7 @@ async function runFixture({ storageOnly = false } = {}) {
         await invalidTranslationChecks(page, { apiOrigin, policySession: cloudStore.createSession('normalized-policy-translator'), api, database, apiRoot, results });
         await orphanCarryChecks(page, { apiOrigin, secret, api, database, results });
         console.log('Validated granular saves, transaction abort, receipt replay, staged deletion and submission journal.');
-        if (!storageOnly) await keyboardChecks(page, { origin, apiOrigin, secret, results, onPage: page => { activePage = page; } });
+        if (!storageOnly) await keyboardChecks(page, { origin, apiOrigin, secret, results, onPage: observePage });
         assert.deepEqual(errors, []);
         console.log(JSON.stringify({ storageOnly, results }, null, 2));
         return results;
@@ -1950,19 +1959,68 @@ async function keyboardChecks(page, { origin, apiOrigin, secret, results, onPage
         results.push({ scenario: navigation.key, files: count, dictionaryEntries: dictionaryCount, readyMs,
             saveOperations: operations.length, saveBytes: bytes, ...timing });
     }
+    await queuedSaveRecoveryChecks(page, { origin, apiOrigin, crashPath: path(20), results, onPage });
+}
+
+// Independently runnable normal-mode acceptance for queued-save recovery. The
+// full fixture also calls the same checks after its large-workspace UI suite.
+async function recoveryChecks(page, options) {
+    const { origin, apiOrigin, secret } = options, filepath = 'recovery/first.txt';
+    await page.goto(origin + '/?cloudApi=' + encodeURIComponent(apiOrigin));
+    await page.waitForFunction(() => window.__normalizedApp?.offlineStoreReady && window.__normalizedApp?.startupReady
+        && window.__normalizedApp?._cloud?.state && !window.__normalizedApp._cloudInitializing && !window.__normalizedApp._cloudApplying);
+    await page.evaluate(async ({ secret, filepath }) => {
+        const vm = window.__normalizedApp;
+        const response = await fetch('/fixture/session', { method: 'POST', headers: { 'X-Fixture-Key': secret } });
+        if (!response.ok) throw new Error('Fixture login refused.');
+        await vm._cloud.acceptLogin(await response.json()); await vm.cloudApply(vm._cloud.snapshot());
+        vm.lang = 'Thai'; vm.needsInitialSettings = false; vm.showSetting = false; vm.inlineEditor = false;
+        await vm.saveSettings(); await OfflineStore.setMigratedFromSingleVersion(true);
+        await vm.activateGameVersion('poe1', { checkMigration: false });
+        const source = [filepath, 'recovery/retained.txt'].map((filepath, i) => ({ filepath,
+            filename: filepath.split('/').pop(), filedir: 'recovery', stats: ['recovery_' + i], variables: ['#'], remarks: [''],
+            translations: { English: ['Synthetic source ' + i], Thai: ['Original translation ' + i] } }));
+        const zip = new JSZip();
+        for (const desc of source) zip.file(desc.filepath, descEncode(desc), { date: new Date('2000-01-01T00:00:00Z'), createFolders: false });
+        const file = new File([await zip.generateAsync({ type: 'uint8array' })], 'RecoveryFixture.zip', { type: 'application/zip' });
+        const identity = await vm.readImportZipIdentity(file, zip);
+        await vm.importUpdateZipFile(file, source, { identity, rawSource: source, decisions: [] });
+        vm.showSetting = false; vm.needsInitialSettings = false; vm.versionChooserVisible = false;
+        vm.selectAllFileFilters(); vm.applyFileSearch();
+        await vm.initializeCollaboration();
+    }, { secret, filepath });
+    await page.evaluate(() => window.__normalizedApp.editFile('recovery/retained.txt', true));
+    await page.locator('.editor .textHL input:not([readonly]), .editor .textHL textarea:not([readonly])').first().fill('Independent retained draft');
+    const independentDraft = await page.evaluate(async () => {
+        const vm = window.__normalizedApp;
+        await vm.flushEditorDraft();
+        const draft = await OfflineStore.getTranslationDraft(vm.editorDraftKey(vm.editorDraftScope('recovery/retained.txt')));
+        await vm.editorExit();
+        return draft;
+    });
+    assert.deepEqual(independentDraft.translations, ['Independent retained draft'], 'The independent draft is durable before recovery');
+    await queuedSaveRecoveryChecks(page, { ...options, crashPath: filepath });
+}
+
+async function queuedSaveRecoveryChecks(page, { origin, apiOrigin, crashPath, results, onPage }) {
     // Close without beforeunload after the journal is durable but before the
     // worker receives the command. The same profile must resume that exact job.
-    const crashPath = path(20), submittedText = 'Submitted before fixture crash';
+    const submittedText = 'Submitted before fixture crash';
     await page.evaluate(async filepath => {
         const vm = window.__normalizedApp; vm._fileTableReturnFocus = false; await vm.editorExit(); await vm.$nextTick();
         vm.inlineEditor = false; await vm.$nextTick(); await vm.editFile(filepath, true);
     }, crashPath);
-    await field(false, crashPath).fill(submittedText);
+    await page.locator('.editor .textHL input:not([readonly]), .editor .textHL textarea:not([readonly])').first().fill(submittedText);
     await page.evaluate(() => { window.__normalizedProbe.mode = 'hold'; window.__normalizedProbe.held = []; });
     await page.keyboard.press('F2');
     await page.waitForFunction(() => window.__normalizedProbe.held.length > 0);
     const queued = await page.evaluate(async () => OfflineStore.listSaveSubmissions(window.__normalizedApp.pendingSaveScope()));
     assert.equal(queued.length, 1, 'Submitted intent is durable before worker dispatch');
+    const protectedData = await page.evaluate(async filepath => {
+        const vm = window.__normalizedApp;
+        return { drafts: (await OfflineStore.listTranslationDrafts(vm.editorDraftScope(''))).filter(draft => draft.filepath !== filepath),
+            baseline: await OfflineStore.getSource(vm.managedWorkspaceScope()) };
+    }, crashPath);
     const originalJobId = queued[0].batch.jobId, context = page.context();
     await page.close({ runBeforeUnload: false });
     const restored = await context.newPage();
@@ -1970,12 +2028,44 @@ async function keyboardChecks(page, { origin, apiOrigin, secret, results, onPage
     await restored.goto(origin + '/?cloudApi=' + encodeURIComponent(apiOrigin));
     await restored.waitForFunction(() => window.__normalizedApp?.offlineStoreReady && window.__normalizedApp?.startupReady
         && window.__normalizedApp?.cloudSignedIn && !window.__normalizedApp._cloudInitializing && !window.__normalizedApp._cloudApplying);
+    const routineEntry = 'Recovering queued local saves';
+    assert.equal(await restored.getByText(routineEntry, { exact: true }).count(), 0, 'Startup has no routine recovery entry');
+    // Keep the shell available while the API is offline. Local recovery and its
+    // existing failure actions must work independently of resource sync.
+    await restored.route(apiOrigin + '/**', route => route.abort());
+    await restored.evaluate(() => {
+        const vm = window.__normalizedApp, save = vm._saveWorker.save.bind(vm._saveWorker);
+        let fail = true;
+        vm._saveWorker.save = batch => {
+            if (fail) { fail = false; return Promise.reject(new Error('Synthetic recovered-save storage failure')); }
+            return save(batch);
+        };
+    });
     // Startup intentionally opens the game/version chooser. Return to the
     // captured workspace just as the user does before replaying its saves.
     assert.equal(await restored.evaluate(async sourceHash => {
         const vm = window.__normalizedApp; await vm.activateGameVersion('poe1', { checkMigration: false });
         return vm.managedActivateWorkspace(sourceHash, 'Thai');
     }, queued[0].batch.sourceHash), true, 'Reload activates the original submitted-save scope');
+    await restored.waitForFunction(() => /Synthetic recovered-save storage failure/.test(window.__normalizedApp.localSaveError));
+    const failedRecovery = await restored.evaluate(async () => ({
+        jobs: await OfflineStore.listSaveSubmissions(window.__normalizedApp.pendingSaveScope()),
+        pending: window.__normalizedApp.pendingLocalSaves,
+        log: window.__normalizedApp.workspaceInitializationLogText,
+    }));
+    assert.deepEqual(failedRecovery.jobs.map(job => job.batch), queued.map(job => job.batch), 'Failed replay retains the exact durable command');
+    assert.equal(failedRecovery.pending, 1);
+    assert.ok(!failedRecovery.log.includes(routineEntry), 'Failed replay does not add the routine log entry');
+    assert.equal(await restored.getByRole('button', { name: 'Download pending edits', exact: true }).isVisible(), true);
+    for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
+        await restored.evaluate(theme => {
+            window.__normalizedApp.theme = theme; document.documentElement.setAttribute('data-theme', theme);
+        }, theme);
+        assert.equal(await restored.getByRole('button', { name: 'Retry saving', exact: true }).isVisible(), true);
+        assert.equal(await restored.getByText(routineEntry, { exact: true }).count(), 0);
+        await restored.screenshot({ path: resolve(__dirname, '../temp/queued-recovery-failure-' + theme + '.png') });
+    }
+    await restored.getByRole('button', { name: 'Retry saving', exact: true }).click();
     await restored.waitForFunction(jobId => window.__normalizedApp?.offlineStoreReady && window.__normalizedApp?.sourceLoaded
         && window.__normalizedProbe.events.some(event => event.name === 'dispatch' && event.id === jobId)
         && !window.__normalizedApp.pendingLocalSaves && !window.__normalizedApp._pendingSaves?.snapshot().jobs.length,
@@ -1991,7 +2081,43 @@ async function keyboardChecks(page, { origin, apiOrigin, secret, results, onPage
     assert.deepEqual(recovery.jobs, [], 'Recovered submission has been consumed');
     assert.equal(recovery.history.filter(row => row.note === 'save').length, 1, 'Recovery produces exactly one saved history revision');
     assert.ok(recovery.recoveredIds.includes(originalJobId), 'Recovery reuses the original job ID');
-    results.push({ scenario: 'crash before worker dispatch and same-ID reload recovery' });
+    assert.equal(await restored.getByText(routineEntry, { exact: true }).count(), 0);
+    assert.equal(await restored.evaluate(() => window.__normalizedApp.workspaceInitializationLogText.includes('Recovering queued local saves')), false);
+    // An actual recovery read failure must remain visible even without a row.
+    await restored.evaluate(async () => {
+        const vm = window.__normalizedApp, list = OfflineStore.listSaveSubmissions;
+        const owner = vm.beginWorkspaceInitialization();
+        const earlier = vm.beginWorkspaceInitializationTask('Restoring saved translations', owner);
+        vm.finishWorkspaceInitializationTask(earlier);
+        vm._recoveredSaveScope = null;
+        OfflineStore.listSaveSubmissions = async () => { throw new Error('Synthetic recovery read failure'); };
+        try { await vm.initializeCollaboration(); } catch (_) {}
+        finally { OfflineStore.listSaveSubmissions = list; vm.finishWorkspaceInitialization(owner); }
+    });
+    assert.equal(await restored.getByRole('alert').filter({ hasText: 'Could not recover pending local saves. Synthetic recovery read failure' }).isVisible(), true);
+    const repeated = await restored.evaluate(async filepath => {
+        const vm = window.__normalizedApp;
+        await vm.initializeCollaboration(); await vm.initializeCollaboration();
+        return { log: vm.workspaceInitializationLogText, jobs: await OfflineStore.listSaveSubmissions(vm.pendingSaveScope()),
+            history: await OfflineStore.listRevisions(filepath, 'Thai', 100, vm.managedWorkspaceScope()) };
+    }, crashPath);
+    assert.ok(repeated.log.includes('Restoring saved translations'), 'Other activity is retained');
+    assert.ok(!repeated.log.includes(routineEntry));
+    assert.deepEqual(repeated.jobs, []);
+    assert.deepEqual(repeated.history, recovery.history, 'Repeated recovery never duplicates persisted translation history');
+    const retained = await restored.evaluate(async filepath => {
+        const vm = window.__normalizedApp;
+        return { drafts: (await OfflineStore.listTranslationDrafts(vm.editorDraftScope(''))).filter(draft => draft.filepath !== filepath),
+            baseline: await OfflineStore.getSource(vm.managedWorkspaceScope()) };
+    }, crashPath);
+    assert.deepEqual(retained, protectedData, 'Recovery preserves independent drafts and the immutable original baseline');
+    await restored.unroute(apiOrigin + '/**');
+    await restored.evaluate(() => window.__normalizedApp.collabRetry());
+    await restored.waitForFunction(() => window.__normalizedApp._collaboration?.connected
+        && !window.__normalizedApp._collaboration.snapshot({ includeFiles: false }).pending);
+    const remoteHistory = await restored.evaluate(filepath => window.__normalizedApp._collaboration.history(filepath), crashPath);
+    assert.equal(remoteHistory.items.filter(item => item.origin !== 'imported_baseline').length, 1, 'Reconnection uploads the recovered save exactly once');
+    results.push({ scenario: 'silent crash/reload recovery offline, actionable failed replay and retry, read failure and repeated same-ID recovery' });
     await associatedCachedWorkspaceCheck(restored, results, { filepath: crashPath });
     await restored.close();
 }
@@ -2065,4 +2191,5 @@ async function associatedCachedWorkspaceCheck(page, results, { filepath }) {
 }
 
 module.exports = { runFixture, aggregateOperations };
-if (require.main === module) runFixture({ storageOnly: process.argv.includes('--storage-only') }).catch(error => { console.error(error); process.exitCode = 1; });
+if (require.main === module) runFixture({ storageOnly: process.argv.includes('--storage-only'), recoveryOnly: process.argv.includes('--recovery-only') })
+    .catch(error => { console.error(error); process.exitCode = 1; });

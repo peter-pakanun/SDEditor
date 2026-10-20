@@ -5,6 +5,8 @@
 })(typeof window !== 'undefined' ? window : globalThis, function (root) {
     'use strict';
     const exportProgress = root.ClientTextExportProgress || (typeof require === 'function' ? require('./clientTextExportProgress.js') : null);
+    const statDescCodec = root.StatDescCodec || (typeof require === 'function' ? require('./statDescCodec.js') : null);
+    const clientTextState = root.ClientTextState || (typeof require === 'function' ? require('./clientTextState.js') : null);
     const teams = ['French', 'German', 'Spanish', 'Portuguese', 'Russian', 'Thai', 'Korean', 'Japanese', 'Simplified Chinese', 'Traditional Chinese', 'Turkish', 'Polish'];
     const copy = value => JSON.parse(JSON.stringify(value));
     const raw = value => root.Vue?.markRaw ? root.Vue.markRaw(value) : value;
@@ -63,6 +65,28 @@
         const language=teams.find(team=>name===team.toLowerCase() || name.startsWith(team.toLowerCase()+' ')) || '';
         return { language, role: /(?:^|[_.\s-])Gender(?=$|[_.\s-])/i.test(stem) ? 'gender' : 'normal' };
     }
+    function translatedFilename(filename) {
+        const name = String(filename), match = /^(.*)(\.[^.]+)$/.exec(name), extension = match ? match[2] : '', stem = match ? match[1] : name;
+        if (/_Translated$/i.test(stem)) return name;
+        // Keep browser duplicate counters while moving only the reserved export
+        // marker to the end. Other occurrences of "Translated" are filename text.
+        const duplicate = /^(.*)(_Translated)((?: ?\(\d+\))+)$/i.exec(stem);
+        return duplicate ? duplicate[1] + (duplicate[3].startsWith(' ') ? '' : ' ') + duplicate[3] + duplicate[2] + extension : stem + '_Translated' + extension;
+    }
+    function workbookExportNames(outputs) {
+        const names = new Array(outputs.length), used = new Set(), priority = role => role === 'normal' ? 0 : role === 'gender' ? 1 : 2;
+        const order = outputs.map((output, index) => ({ ...output, index })).sort((a, b) => priority(a.role) - priority(b.role) || a.index - b.index);
+        for (const output of order) {
+            const name = translatedFilename(output.name); let selected = name, attempt = 0;
+            const match = /^(.*)(_Translated)(\.[^.]+)?$/i.exec(name), label = output.role === 'gender' ? 'Gender' : 'Normal';
+            while (used.has(selected.toLowerCase())) {
+                attempt++;
+                selected = match[1] + '_' + label + (attempt > 1 ? '_' + attempt : '') + match[2] + (match[3] || '');
+            }
+            names[output.index] = selected; used.add(selected.toLowerCase());
+        }
+        return names;
+    }
     function groupFields(unit) {
         const groups = [], fields = unit?.fields || [], classSources = new Set(fields.filter(isClassField)
             .map(field => JSON.stringify([field.group || field.name, field.sourceCell])));
@@ -76,6 +100,16 @@
             group.fields.push(field);if (field.kind === 'form') group.forms = true;
         }
         return groups;
+    }
+    function isDNTSource(source) {
+        const text=String(source ?? '');
+        if(statDescCodec.computeIsDNT([text]))return true;
+        if(!text.includes('[DNT') && !text.includes('DNT '))return false;
+        // Workbooks also put marked English inside style payloads (notably
+        // AuguryCardTiers). Apply the same SD prefix rule at each such boundary;
+        // ordinary inline mentions, target text and raw whitespace stay exact.
+        return clientTextState.tokenize(text).some(token=>/^<[A-Za-z]/.test(token.full) && text[token.end]==='{'
+            && statDescCodec.computeIsDNT([text.slice(token.end+1)]));
     }
     function assetBytes(asset) { return asset?.blob || asset?.bytes || asset?.buffer; }
     function historySnapshot(unit, record) {
@@ -280,7 +314,7 @@
                 const aNotes = this.ctNotes(before.unit).join('\n\n'), bNotes = this.ctNotes(after.unit).join('\n\n');
                 return { before, after, rows, notes: this.ctHistoryDiffParts(aNotes, bNotes), hasNotes: !!(aNotes || bNotes) };
             },
-            ctSheets() { this.ctUnits; return this._ctSheets || []; },
+            ctSheets() { this.ctUnits; this.hideDNT; return this._ctSheets || []; },
             ctSheetSeverities() {
                 this.ctRevision;
                 const severities=new Map(),priority=root.ClientTextState.SHEET_COLORS.map(color=>color==='missing'?'error':color==='outdated'?'warning':color);
@@ -622,7 +656,20 @@
             ctScanResultPageCount(value) {this.ctScanResultsPage=Math.min(this.ctScanResultsPage,value);},
             ctScanScopeKey() {this.ctCloseScanDialog(false);this.ctClearScanResults();},
             editorDictionaryRevision() {if(this.ctActive)this.ctClearScanResults();},
-            hideDNT() {if(this.ctActive)this.ctClearScanResults();},
+            hideDNT: {flush:'sync',handler() {
+                if(!this.ctActive)return;
+                this.ctRebuildSheets();this.ctClearScanResults();this.ctPage=1;
+                // Keep the entire draft and selection, including an all-DNT
+                // record. Navigation still checkpoints it before switching.
+                // Fence callbacks which were targeting a now-hidden field.
+                this._ctFieldFocusRun=null;this._ctDictionaryFocusRun=null;this._ctInlineReturn=null;
+                this.ctCloseCompletion();this.ctInitializeVariants();
+                const displayed=this.ctDisplayedFields();
+                if(!displayed.some(field=>field.id===this.ctFocusedField))
+                    this.ctFocusedField=this.ctTabFields().find(field=>displayed.includes(field))?.id || '';
+                this.scheduleClientTextDictionaryMatches();
+                this.$nextTick?.(()=>this.ctRefreshLayout());
+            }},
             managedCatalogScope() { this.ctFence(); this.ctRefreshLocal(); },
             lang() { if (this.ctActive && (this.ctOfflineTest || this.ctWorkspace?.scope.language !== this.lang)) this.ctFence(); },
             gameVersion() { if (this.ctActive && this.ctWorkspace?.scope.game !== this.gameVersion) this.ctFence(); },
@@ -1061,22 +1108,22 @@
             ctOrderedUnits() {
                 const key=this.ctSort,units=this.ctUnits,saved=key==='translation'?this.ctSaved:null;
                 let cache=this._ctOrderCache;
-                if(!cache || cache.units!==units || cache.key!==key || cache.saved!==saved){
+                if(!cache || cache.units!==units || cache.key!==key || cache.saved!==saved || cache.hideDNT!==!!this.hideDNT){
                     const collator=this._ctCollator ||= new Intl.Collator(undefined,{numeric:true,sensitivity:'base'});
                     const ascending=units.slice().sort((a,b)=>(key==='row'
                         ? this.ctSortValue(a,key)-this.ctSortValue(b,key) || collator.compare(a.role,b.role) || collator.compare(a.sheet,b.sheet)
                         : collator.compare(this.ctSortValue(a,key),this.ctSortValue(b,key)))
                         || collator.compare(a.recordId,b.recordId) || a.id.localeCompare(b.id));
-                    cache=this._ctOrderCache={units,key,saved,ascending,descending:null};
+                    cache=this._ctOrderCache={units,key,saved,hideDNT:!!this.hideDNT,ascending,descending:null};
                 }
                 return this.ctSortDir==='desc'?(cache.descending ||= cache.ascending.slice().reverse()):cache.ascending;
             },
             ctSortValue(unit,key) {
                 const cache=this._ctSortCache ||= new WeakMap(),saved=this.ctSaved[unit.id];let item=cache.get(unit);
-                if(!item){
+                if(!item || item.hideDNT!==!!this.hideDNT){
                     // Use the immutable worksheet position, independent of filtering and pagination.
                     const cell=unit.fields[0]?.targetCell || unit.fields[0]?.sourceCell || '';
-                    item={filename:String(unit.recordId),row:Number(/\d+$/.exec(cell)?.[0] || 0)};cache.set(unit,item);
+                    item={filename:String(unit.recordId),row:Number(/\d+$/.exec(cell)?.[0] || 0),hideDNT:!!this.hideDNT};cache.set(unit,item);
                 }
                 if(key==='english' && item.english===undefined)item.english=this.ctListText(unit,'source');
                 if(key==='translation' && (item.saved!==saved || item.translation===undefined)){
@@ -1371,6 +1418,11 @@
             },
             ctReviewHash(field) { return root.ClientTextState.sourceHash(field.source); },
             ctValuesFor(unit) { return root.ClientTextState.valuesFor(unit, this.ctSaved[unit.id]); },
+            ctRebuildSheets(units=this.ctUnits) {
+                const keys=new Set();
+                for(const unit of units)if(this.ctFieldsFor(unit).length)keys.add(JSON.stringify([unit.role,unit.sheet]));
+                this._ctSheets=raw([...keys].map(key=>{const [role,name]=JSON.parse(key);return {key,role,name};}));
+            },
             ctFieldsFor(unit=this.ctCurrentUnit) {
                 if(!unit)return [];
                 // Originals are immutable. Cache visibility without removing
@@ -1379,9 +1431,17 @@
                 if(!item || item.fields!==unit.fields){
                     const hasEnglish=field=>field.kind!=='gender' && String(field.source ?? '').trim().length>0;
                     const fields=unit.fields || [],text=fields.filter(hasEnglish);
-                    item={fields:unit.fields,visible:text.length ? fields.filter(field=>field.kind==='gender' || hasEnglish(field)) : []};cache.set(unit,item);
+                    const visible=text.length ? fields.filter(field=>field.kind==='gender' || hasEnglish(field)) : [];
+                    item={fields:unit.fields,visible};cache.set(unit,item);
                 }
-                return item.visible;
+                if(!this.hideDNT)return item.visible;
+                if(!item.withoutDNT){
+                    const ordinary=item.visible.filter(field=>field.kind!=='gender' && !isDNTSource(field.source));
+                    // Gender has no English source of its own. Retain it as
+                    // metadata only while the record has visible prose.
+                    item.withoutDNT=ordinary.length ? item.visible.filter(field=>field.kind==='gender' || ordinary.includes(field)) : [];
+                }
+                return item.withoutDNT;
             },
             ctTabFields(unit=this.ctCurrentUnit) {
                 const column=field=>{
@@ -1649,7 +1709,7 @@
                     root.ClientTextCodec?.assertGame({units},scope.game);
                     this.ctUnits = raw(units); this._ctUnitIndex = raw(new Map(units.map(unit => [unit.id, unit]))); this.ctSaved = raw(saved);this.ctDraftSummaries=raw(drafts || []); this.ctRevision++;
                     const visibleUnits=units.filter(unit=>this.ctFieldsFor(unit).length);
-                    this._ctSheets = raw([...new Set(visibleUnits.map(unit=>JSON.stringify([unit.role,unit.sheet])))].map(key=>({key,role:JSON.parse(key)[0],name:JSON.parse(key)[1]})));
+                    this.ctRebuildSheets(visibleUnits);
                     this._ctWorkUnits=raw(new Map(units.filter(unit=>unit.fields.some(field=>field.originalMissing || field.outdated) || saved[unit.id]?.outdated?.length).map(unit=>[unit.id,unit])));
                     this.ctSheet = visibleUnits.length ? JSON.stringify([visibleUnits[0].role, visibleUnits[0].sheet]) : ''; this.ctPage = 1;
                     this.ctDiagnostics = raw({}); this.ctScanDone = false; this.ctSearch = ''; this.ctAppliedSearch = '';
@@ -1732,11 +1792,11 @@
                 try{return await operation;}finally{if(this._ctSyncRun===run)this._ctSyncRun=null;}
             },
             async ctSelect(unit, full = false, options = {}) {
-                if (!unit || this.ctBusy || this.ctBrowseBusy || this._ctUnitIndex?.get(unit.id)!==unit) return false;
+                if (!unit || this.ctBusy || this.ctBrowseBusy || this._ctUnitIndex?.get(unit.id)!==unit || this.hideDNT && !this.ctFieldsFor(unit).length) return false;
                 const ctx = this.ctContext(),generation=this._ctBrowseGeneration || 0,run=this._ctSelectRun={unitId:unit.id,ctx,generation,full,pending:true};
                 const current=()=>{
                     const valid=this.ctCurrent(ctx) && this._ctSelectRun===run && this._ctUnitIndex?.get(unit.id)===unit
-                        && generation===(this._ctBrowseGeneration || 0)
+                        && generation===(this._ctBrowseGeneration || 0) && (!this.hideDNT || this.ctFieldsFor(unit).length>0)
                         && (!options.guard || options.guard());
                     if(!valid && this._ctSelectRun===run)run.pending=false;
                     return valid;
@@ -2055,7 +2115,7 @@
                     && !this.versionChooserVisible && !this.settingsDialogVisible && !this.showSetting && !this.ctDiagnosticDialog()?.open
                     && completion.fieldId===field?.id && completion.unitId===this.ctSelection && this.ctCurrent(completion.context)
                     && unproxy(completion.unit)===unproxy(this.ctCurrentUnit) && unproxy(completion.field)===unproxy(current)
-                    && current && current.kind!=='gender' && current.source===completion.source
+                    && current && this.ctFieldsFor().includes(current) && current.kind!=='gender' && current.source===completion.source
                     && (!this.ctFocusedField || this.ctFocusedField===field.id) && (this.ctInputValues || this.ctValues)[field.id]===completion.text
                     && input && input.isConnected!==false && !input.composing && input.selectionStart===completion.selectionStart && input.selectionEnd===completion.selectionEnd
                     && (typeof input.value!=='string' || input.value===completion.text.replace(/\r\n?/g,'\n')));
@@ -2105,7 +2165,7 @@
                 if(!this.ctActive || this.ctBusy || this.ctHistoryViewer || this.ctMtlBusy?.(field) || event.isComposing || event.keyCode===229 || field.kind==='gender')return false;
                 const current=this.ctCurrentUnit?.fields.find(item=>item.id===field.id),input=event.target,text=(this.ctInputValues || this.ctValues)[field.id];
                 const caret=input?.selectionStart,selectionEnd=input?.selectionEnd;
-                if(!current || current.source!==field.source || current.kind!==field.kind || typeof text!=='string'
+                if(!current || !this.ctFieldsFor().includes(current) || current.source!==field.source || current.kind!==field.kind || typeof text!=='string'
                     || !Number.isInteger(caret) || !Number.isInteger(selectionEnd) || !options.manual && selectionEnd!==caret)return false;
                 const rawCaret=root.EditorSession?.rawOffset(text,caret) ?? caret,rawEnd=root.EditorSession?.rawOffset(text,selectionEnd) ?? selectionEnd;
                 const before=text.slice(0,rawCaret),match=selectionEnd===caret ? /([\[<{])([^\]\}>\r\n]*)$/.exec(before) : null;
@@ -2610,7 +2670,7 @@
                 if(!this.ctActive || this.ctScanRunning)return false;
                 const checks={...this.ctScanChecks,...(typeof options==='boolean' ? {consistency:options} : options || {})};
                 if(!this.ctScanTypes.some(type=>checks[type.key]))return false;
-                const environment=this.ctScanEnvironment(),units=this.ctUnits.filter(unit=>this.ctFieldsFor(unit).length && !(this.hideDNT && unit.isDNT)),
+                const environment=this.ctScanEnvironment(),units=this.ctUnits.filter(unit=>this.ctFieldsFor(unit).length),
                     unitMap=new Map(units.map(unit=>[unit.id,unit])),results={},consistencyMap=new Map(),byUnit=new Map(),warningUnits=new Set();
                 this.ctClearScanResults();const runId=this.ctScanRunId;
                 const current=()=>runId===this.ctScanRunId && this.ctScanEnvironmentCurrent(environment);
@@ -2779,17 +2839,18 @@
                             if (progress.phase === 'patching' || progress.phase === 'exporting') run.phase('Worker patching');
                             else if (progress.phase === 'packing') run.phase('Worker compression');
                         } }));
-                        outputs.push({ name: asset.name || parsed.filename, bytes: output });
+                        outputs.push({ role, name: asset.name || parsed.filename, bytes: output });
                         run.check();
                     }
                     if (!outputs.length) throw new Error('This workbook group is not cached. Open its editor before downloading.');
                     run.phase('Packaging');
+                    const names = workbookExportNames(outputs);
                     let blob, name;
-                    if (outputs.length === 1) { blob = new Blob([outputs[0].bytes]); name = outputs[0].name; }
+                    if (outputs.length === 1) { blob = new Blob([outputs[0].bytes]); name = names[0]; }
                     else {
                         // Terminating this dedicated packaging worker interrupts compression too.
-                        const packaged = await run.wait(worker().packageWorkbooks(outputs, { signal }));
-                        blob = new Blob([packaged], { type: 'application/zip' }); name = `${version.name}_${language}_ClientText.zip`;
+                        const packaged = await run.wait(worker().packageWorkbooks(outputs.map((output, index) => ({ name: names[index], bytes: output.bytes })), { signal }));
+                        blob = new Blob([packaged], { type: 'application/zip' }); name = translatedFilename(`${version.name}_${language}_ClientText.zip`);
                     }
                     run.check(); run.phase('Download initiation');
                     root.saveAs(blob, name); run.state.downloadStarted = true; completed = true;
@@ -3467,6 +3528,6 @@
     const comparisonMixin=root.ClientTextComparisons?.mixin;
     if(comparisonMixin){const originalData=mixin.data;mixin.data=function(){return {...originalData.call(this),...comparisonMixin.data.call(this)};};Object.assign(mixin.methods,comparisonMixin.methods);}
     const toolsComponent = root.EditorComponents?.Tools;
-    return { mixin, teams, detect, groupFields, mode, contextComponent, fieldsComponent, targetComponent, toolsComponent };
+    return { mixin, teams, detect, translatedFilename, workbookExportNames, groupFields, isDNTSource, mode, contextComponent, fieldsComponent, targetComponent, toolsComponent };
 });
 

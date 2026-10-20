@@ -6,6 +6,7 @@ const vm = require('node:vm');
 const crypto = require('node:crypto');
 const protocol = require('../public/collaborationProtocol.js');
 const legacyProtocol = require('./legacy-baseline-fixtures.cjs');
+const initialization = require('../public/workspaceInitialization.js').mixin;
 
 function deferred() {
   let resolve, reject;
@@ -328,6 +329,61 @@ test('a transition begun during queued-save recovery fences a pending room initi
   const initializing = e.initializeCollaboration(); await reached.promise;
   e._managedWorkspaceTransition = {}; held.resolve(); await initializing;
   assert.equal(joined, 0); assert.equal(!!e._collaboration, false);
+});
+
+test('silent queued-save recovery remains awaited without adding or erasing initialization activity', async () => {
+  const { editor: e, window } = harness(), held = deferred(), reached = deferred();
+  Object.assign(e, initialization.data(), initialization.methods);
+  for (const [name, getter] of Object.entries(initialization.computed)) Object.defineProperty(e, name, { get: () => getter.call(e) });
+  const owner = e.beginWorkspaceInitialization();
+  try {
+    const previous = e.beginWorkspaceInitializationTask('Restoring saved translations', owner);
+    e.finishWorkspaceInitializationTask(previous);
+    const rows = e.workspaceInitializationRows.slice();
+    e.testMode = false; e.offlineStoreReady = true; e.cloudSignedIn = true; e.cloudCanAccessAllLanguages = true;
+    e._cloud = { apiBase: 'http://api.test', context: () => ({}), request() {} };
+    let joins = 0, recoveries = 0;
+    window.OfflineStore.listSaveSubmissions = async () => [];
+    e.recoverPendingSaves = async () => { recoveries++; reached.resolve(); await held.promise; };
+    window.CollaborationSync = { Client: class {
+      async connect() { joins++; }
+      select() {} setAway() {} disconnect() {}
+    } };
+    const opening = e.initializeCollaboration(); await reached.promise;
+    assert.equal(e.workspaceInitializationActive, true, 'The enclosing readiness gate remains active.');
+    assert.deepEqual(e.workspaceInitializationRows, rows, 'Routine recovery adds no activity row and preserves earlier rows.');
+    assert.doesNotMatch(e.workspaceInitializationLogText, /Recovering queued local saves/);
+    assert.equal(joins, 0, 'Synchronization still waits for local recovery.');
+    held.resolve(); await opening;
+    assert.equal(joins, 1);
+    await e.initializeCollaboration();
+    assert.equal(recoveries, 2, 'Repeated initialization still reaches the recovery guard.');
+    assert.equal(joins, 1, 'The existing room is reused.');
+    assert.equal(e.workspaceInitializationRows[0], rows[0]);
+    assert.doesNotMatch(e.workspaceInitializationLogText, /Recovering queued local saves/);
+  } finally { held.resolve(); e.finishWorkspaceInitialization(owner); }
+});
+
+test('silent recovery preserves actionable storage failure and permits another recovery attempt', async () => {
+  const { editor: e, window } = harness();
+  e.testMode = false; e.offlineStoreReady = true; e.versionStorageLoading = false;
+  window.PendingSaves = require('../public/pendingSaves.js');
+  let reads = 0, releases = 0;
+  e.initializePendingSaves = () => ({ hold: () => () => { releases++; } });
+  window.OfflineStore.listSaveSubmissions = async () => {
+    if (++reads === 1) throw new Error('Synthetic recovery read failed');
+    return [];
+  };
+  e.runWorkspaceInitializationTask = () => assert.fail('Routine recovery must not create an initialization row.');
+  await assert.rejects(e.initializeCollaboration(), /Synthetic recovery read failed/);
+  assert.match(e.cloudStorageError, /Could not recover pending local saves.*Synthetic recovery read failed/);
+  assert.equal(e.collaborationNotice, e.cloudStorageError);
+  assert.equal(e._recoveredSaveScope, undefined);
+  await e.initializeCollaboration();
+  assert.equal(reads, 2, 'A failed recovery is retried instead of being marked recovered.');
+  assert.equal(releases, 2, 'Both attempts release the queue hold.');
+  await e.initializeCollaboration();
+  assert.equal(reads, 2, 'A completed scope is not recovered again.');
 });
 
 test('dashboard suppresses team presence while keeping saved translation collaboration available', async () => {

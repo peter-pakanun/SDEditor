@@ -144,7 +144,7 @@
                 <select id="uiDensity" v-model="uiDensity"><option value="compact">Compact</option><option value="spacious">Spacious</option></select>
               </div>
             </div>
-            <label class="settingsToggle" for="hideDNT"><input type="checkbox" id="hideDNT" v-model="hideDNT"><span><strong>Hide DNT entries</strong><small>Hide a file when any English block is marked as do not translate.</small></span></label>
+            <label class="settingsToggle" for="hideDNT"><input type="checkbox" id="hideDNT" v-model="hideDNT"><span><strong>Hide DNT entries</strong><small>Hide marked English fields in ClientText, or the whole file in StatDescription. Other ClientText fields stay visible.</small></span></label>
           </section>
           <section id="settings-panel-editor" class="settingsPanel" role="tabpanel" aria-labelledby="settings-tab-editor" v-show="settingsTab === 'editor'" tabindex="0">
             <label class="settingsToggle" for="inlineEditor"><input type="checkbox" id="inlineEditor" v-model="inlineEditor"><span><strong>Inline editor</strong><small>Edit the focused file in the workspace. Press Enter on a file row to open the full editor.</small></span></label>
@@ -657,6 +657,7 @@
           <p v-if="ctBrowseMode==='convo' && ctConvoRelation(ctCurrentUnit).label" class="ctNpcRecordFacts"><span>Conversation turn</span><span class="ctNpcRelation ctConvoRelation" tabindex="0" v-tooltip="ctConvoRelation(ctCurrentUnit).tooltip">{{ ctConvoRelation(ctCurrentUnit).label }}</span></p>
           <ct-context :host="$root" :items="ctReferenceMetadata()"></ct-context>
           <div class="ctEditorNavigation"><button @click="ctNavigate(-1)" :disabled="ctBusy">Previous</button><strong>{{ ctCurrentUnit?.recordId }}</strong><button @click="ctNavigate(1)" :disabled="ctBusy">Next</button><editor-attention-navigation :controller="sharedEditorController"></editor-attention-navigation></div>
+          <p v-if="hideDNT && ctCurrentUnit && !ctFieldsFor().length" class="ctDntHidden">All fields in this record are hidden by Hide DNT. Turn it off in Settings to show them. Unsaved edits are retained.</p>
           <ct-fields ref="ctEditorRegion" :host="$root"></ct-fields>
       </editor-full-shell>
       <ct-audio-session v-if="ctCurrentUnit && (ctEditor || inlineEditor)" :host="$root" :surface="ctEditor ? 'both' : 'source'"></ct-audio-session>

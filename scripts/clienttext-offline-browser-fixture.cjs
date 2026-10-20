@@ -10,6 +10,7 @@ const { readFileSync, existsSync, mkdirSync } = require('node:fs');
 const { createHash } = require('node:crypto');
 const { createServer } = require('node:http');
 const Codec = require('../public/clientTextCodec.js');
+const ClientTextUI = require('../public/clientTextUi.js');
 const fromApi = createRequire(resolve(__dirname, '../../SDEditor-API/package.json'));
 const express = require('express');
 const JSZip = fromApi('jszip');
@@ -45,7 +46,7 @@ function dialogueWave() {
     bytes.writeUInt16LE(2, 32); bytes.writeUInt16LE(16, 34); bytes.write('data', 36); bytes.writeUInt32LE(dataSize, 40);
     return bytes;
 }
-async function workbook(role = 'normal', sampleVersion = '') {
+async function workbook(role = 'normal', sampleVersion = '', dnt = false) {
     const zip = new JSZip();
     const rows = role === 'normal' ? [
         row(1, ['ID', 'Notes', 'Name', 'Translation', 'Gender', 'Description', 'Translation']),
@@ -86,6 +87,18 @@ async function workbook(role = 'normal', sampleVersion = '') {
     );
     else sheets.push({ name: 'NPCTextAudio_Gender', rows: [row(1, ['ID', 'Text', 'MS', 'FS', 'NS', 'MP', 'FP', 'NP']),
         row(2, ['RenlyGenderReply', 'Renly-related grammatical variants.', 'Variante Renly', 'Variante Renly', '', '', '', 'NONEXISTENT'])] });
+    if(dnt)sheets.push(role==='normal' ? {name:'DntFields',rows:[
+        row(1,['ID','Hidden','Translation','Ordinary','Translation','Gender']),
+        row(2,['DntMixed','<size:+5>{<augurypopuptext>{[DNT] hidden source}}','Hidden original','Ordinary sibling','Visible original','F']),
+        row(3,['DntAll','DNT all source','All original','[DNT] second','Second original','M']),
+        row(4,['DntNext','Next source','Next original','Next sibling','Next sibling original','F'])]
+    } : {name:'DntForms',rows:[
+        row(1,['ID','Text','MS','FS','StrFour','IntFour','Other','MS','FS','Gender']),
+        row(2,['DntFormMixed','[DNT] forms','Hidden MS','Hidden FS','Hidden Str','Hidden Int','Ordinary forms','Visible MS','Visible FS','F']),
+        row(3,['DntFormAll','DNT forms','All MS','All FS','All Str','All Int','[DNT] other','Other MS','Other FS','M'])]});
+    if(dnt)sheets.push(role==='normal'?{name:'DntOnly',rows:[row(1,['ID','Text','Translation']),
+        row(2,['OnlyDntRow','[DNT] Only-sheet source','Only-sheet original'])]}:{name:'DntOnly_Gender',rows:[row(1,['ID','Text','MS','FS']),
+        row(2,['OnlyDntGenderRow','DNT Only-Gender source','Only-Gender MS','Only-Gender FS'])]});
     zip.file('xl/workbook.xml', `<workbook xmlns="${NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheets.map((sheet, index) => `<sheet name="${sheet.name}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`).join('')}</sheets></workbook>`);
     zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((sheet, index) => `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`).join('')}</Relationships>`);
     for (const [index, sheet] of sheets.entries()) zip.file(`xl/worksheets/sheet${index + 1}.xml`, `<?xml version="1.0"?><worksheet xmlns="${NS}"><sheetData>${sheet.rows.join('')}</sheetData></worksheet>`);
@@ -119,8 +132,9 @@ async function assertLocal(page, label, exited = false) {
     if (exited) activity.requests = activity.requests.filter(path => !/^\/v1\/comments\/unread\?game=poe2$/.test(path));
     // Selecting the confirmed workbook language is a personal settings write,
     // completed while no workbook is active. Workbook data stays in memory.
-    activity.indexedDb=activity.indexedDb.filter(record=>!(record.selectingWorkbookLanguage && record.names.length===1 && record.names[0]==='kv'
+    activity.indexedDb=activity.indexedDb.filter(record=>!((record.selectingWorkbookLanguage || record.changingDntSetting) && record.names.length===1 && record.names[0]==='kv'
         && record.puts.length && record.puts.every(value=>value.store==='kv'&&value.key==='hybrid_v1')));
+    activity.browserStorage=activity.browserStorage.filter(record=>!(record.changingDntSetting && record.method==='setItem' && record.key==='sdeditor-theme'));
     if(exited)activity.indexedDb=activity.indexedDb.filter(record=>!(record.restoringDraftScopeKey
         && record.names.length===3 && ['translation_drafts','baseline_files','storage_migrations'].every(name=>record.names.includes(name))
         && record.puts.length && record.puts.every(value=>value.store==='storage_migrations'&&value.key===record.restoringDraftScopeKey)));
@@ -235,6 +249,7 @@ async function run() {
                     const vm=window.__offlineTestApp,expected=window.__offlineTestExpectedLanguage,
                         pending=vm?.ctWorkspace?.scope,sdScope=vm?.editorDraftScope?.('');
                     tx.__offlineTestWriteRecord = { database: this.name, names: Array.from(typeof names === 'string' ? [names] : names), stack: new Error().stack, puts: [],
+                        changingDntSetting:!!window.__offlineTestChangingDntSetting,
                         selectingWorkbookLanguage:!!expected && vm?.lang===expected && !vm.ctActive && vm.ctBusy && !vm.ctUnits.length
                             && String(pending?.groupId||'').startsWith('local:test:') && pending.language===expected,
                         restoringDraftScopeKey:window.__offlineTestOpenedGroup && !vm.ctActive && !vm.ctWorkspace && !sdScope?.groupId
@@ -251,7 +266,8 @@ async function run() {
             for (const method of ['setItem', 'removeItem', 'clear']) {
                 const original = Storage.prototype[method];
                 Storage.prototype[method] = function (...args) {
-                    if (window.__offlineTestMonitoring) window.__offlineTestStorageWrites.push({ method, key: args[0] || '' });
+                    if (window.__offlineTestMonitoring) window.__offlineTestStorageWrites.push({ method, key: args[0] || '',
+                        ...(window.__offlineTestChangingDntSetting?{changingDntSetting:true}:{}) });
                     return original.apply(this, args);
                 };
             }
@@ -544,7 +560,7 @@ async function run() {
         assert.equal(await page.evaluate(() => window.__offlineTestApp.ctError), '', 'Export succeeds');
         const download = await downloaded;
         await closeExportDialog(page);
-        assert.equal(download.suggestedFilename(), 'French.xlsm');
+        assert.equal(download.suggestedFilename(), 'French_Translated.xlsm');
         const output = readFileSync(await download.path()), exportedZip = await JSZip.loadAsync(output);
         assert.deepEqual(await exportedZip.file('xl/vbaProject.bin').async('nodebuffer'), VBA, 'XLSM export preserves VBA bytes');
         const exported = await Codec.parseWorkbook(output, { filename: 'French.xlsm', role: 'normal' });
@@ -1425,7 +1441,7 @@ async function run() {
                 const downloadedBytes = readFileSync(outputPath);
                 const envelope = files.length > 1 ? await JSZip.loadAsync(downloadedBytes) : null;
                 for (const filename of files) {
-                    const exportedBytes = envelope ? await envelope.file(filename).async('nodebuffer') : downloadedBytes;
+                    const exportedBytes = envelope ? await envelope.file(ClientTextUI.translatedFilename(filename)).async('nodebuffer') : downloadedBytes;
                     const role = filename.includes('_Gender') ? 'gender' : 'normal';
                     if (role !== entry.role) assert.deepEqual(exportedBytes, readFileSync(join(realWorkbookFolder, filename)), 'Untouched paired ' + role + ' workbook preserves exact original bytes');
                     else {
@@ -1465,6 +1481,119 @@ async function run() {
             for (const filename of filenames) assert.equal(checksum(join(realWorkbookFolder, filename)), originalHashes[filename], 'Supplied ' + filename + ' checksum remains unchanged');
             results.push({ screenshots: ['npc-browse-renly.png', 'npc-conversation-renly.png', 'convo-browse-doryani.png', 'convo-editor-doryani.png'].map(filename => join(screenshotFolder, filename)), originalWorkbookSha256: originalHashes });
         }
+        // Exercise the actual setting and visible controls on mixed normal and
+        // Gender/form rows; only the personal settings KV write is allowlisted.
+        const toggleDnt=async enabled=>{
+            await page.evaluate(()=>{window.__offlineTestChangingDntSetting=true;window.__offlineTestApp.openSettings('general');});
+            await page.locator('#hideDNT').setChecked(enabled);
+            await page.locator('.settingsClose').click();
+            await page.waitForFunction(()=>!window.__offlineTestApp.showSetting&&!window.__offlineTestApp.settingsSaving);
+            await page.evaluate(async()=>{await window.__offlineTestApp._cloud.localQueue;window.__offlineTestChangingDntSetting=false;});
+        };
+        const checkRenderedDntLookup=async(surface,targetQuery)=>{
+            const draft=()=>page.evaluate(()=>{const vm=window.__offlineTestApp;return JSON.stringify([vm.ctSelection,vm.ctValues,vm.ctReviewed,vm.ctDraftDirty]);}),before=await draft();
+            await toggleDnt(true);await workspace.getByRole('button',{name:'Lookup',exact:true}).click();
+            const panel=page.locator((surface==='full'?'#ctFullEditorSidebarHost':'#ctInlineEditorSidebarHost')+' #editorLookupPanel');
+            await panel.waitFor();await page.waitForFunction(()=>window.__offlineTestApp.lookupCatalogSources.length>0);
+            const search=async(scope,query)=>{await panel.locator('#editorLookupScope').selectOption(scope);await panel.locator('#editorLookupSearch').fill(query);
+                await page.waitForFunction(query=>window.__offlineTestApp.lookupAppliedQuery===query,query);};
+            await search('english','hidden source');assert.equal(await panel.locator('.lookupResult').count(),0,surface+': hidden English is absent in rendered Lookup');
+            await toggleDnt(false);await panel.locator('.lookupResult').waitFor();assert.equal(await panel.locator('.lookupResult').count(),1);
+            await panel.locator('.lookupResult').click();assert.match(await panel.locator('.lookupReference').textContent(),/hidden source/);
+            await toggleDnt(true);assert.equal(await panel.locator('.lookupResult').count(),0);assert.equal(await panel.locator('.lookupReference .lookupText').count(),0);
+            assert.equal(await page.evaluate(()=>window.__offlineTestApp.lookupSelectedReference),null);
+            await search('translation',targetQuery);assert.equal(await panel.locator('.lookupResult').count(),0,surface+': hidden targets are absent too');
+            await toggleDnt(false);await panel.locator('.lookupResult').waitFor();assert.equal(await panel.locator('.lookupResult').count(),1);await toggleDnt(true);
+            await search('english','Ordinary sibling');await panel.locator('.lookupResult').click();
+            for(const enabled of [false,true,false,true]){
+                await toggleDnt(enabled);assert.equal(await panel.locator('.lookupResult').count(),1);
+                assert.match(await panel.locator('.lookupReference').textContent(),/Ordinary sibling/);
+            }
+            assert.equal(await draft(),before,surface+': Lookup and settings preserve every active draft value and review');
+            await page.screenshot({path:join(disposableFolder,'dnt-lookup-'+surface+'.png')});
+            await workspace.getByRole('button',{name:/Dictionary/}).first().click();
+        };
+        await monitor(page,false);await bootstrap('guest','French');await monitor(page,true);
+        const dntNormal=await workbook('normal','',true),dntGender=await workbook('gender','',true);
+        await toggleDnt(true);
+        await openTest([{name:'French.xlsm',buffer:dntNormal},{name:'French_Gender.xlsm',buffer:dntGender}]);
+        for(const name of ['DntOnly','DntOnly_Gender'])assert.equal(await workspace.locator('.ctSheetList').getByRole('button',{name,exact:true}).count(),0);
+        await toggleDnt(false);
+        for(const name of ['DntOnly','DntOnly_Gender'])assert.equal(await workspace.locator('.ctSheetList').getByRole('button',{name,exact:true}).count(),1,'unhiding restores all-DNT sheet buttons');
+        await workspace.locator('.ctSheetList').getByRole('button',{name:'DntOnly',exact:true}).click();
+        assert.deepEqual(await page.evaluate(()=>window.__offlineTestApp.ctRows.map(unit=>unit.recordId)),['OnlyDntRow']);
+        await page.evaluate(async()=>{const vm=window.__offlineTestApp;vm.ctSelectedFilters=['missing','outdated','saved','revised','unchanged'];
+            vm.ctSheet=JSON.stringify(['normal','DntFields']);await vm.ctSelect(vm.ctUnits.find(unit=>unit.recordId==='DntMixed'),true);});
+        const hiddenDraft='Exact hidden draft @literal\\n\nsecond line';
+        await workspace.getByRole('textbox',{name:'Hidden',exact:true}).fill(hiddenDraft);
+        const dntCounts=await page.evaluate(()=>({counts:window.__offlineTestApp.ctCounts,progress:window.__offlineTestApp.ctWorkProgress}));
+        for(const theme of ['light','grey','dark','modern-dark']){
+            await page.evaluate(theme=>{window.__offlineTestChangingDntSetting=true;const vm=window.__offlineTestApp;vm.theme=theme;vm.applyTheme(theme);},theme);
+            await toggleDnt(true);
+            assert.equal(await workspace.getByRole('textbox',{name:'Hidden',exact:true}).count(),0);
+            assert.equal(await workspace.getByRole('textbox',{name:'Ordinary',exact:true}).count(),1);
+            assert.equal(await page.evaluate(()=>window.__offlineTestApp.ctValues[JSON.stringify(['Hidden',null])]),hiddenDraft);
+            assert.deepEqual(await page.evaluate(()=>({counts:window.__offlineTestApp.ctCounts,progress:window.__offlineTestApp.ctWorkProgress})),dntCounts);
+            if(theme==='modern-dark')await page.screenshot({path:join(disposableFolder,'dnt-mixed-full.png')});
+            await toggleDnt(false);
+            assert.equal(await workspace.getByRole('textbox',{name:'Hidden',exact:true}).inputValue(),hiddenDraft);
+        }
+        await checkRenderedDntLookup('full','Hidden original');
+        await toggleDnt(true);
+        await page.evaluate(()=>{const vm=window.__offlineTestApp;vm.ctSearch='hidden source';vm.ctApplySearch();});
+        assert.equal(await page.evaluate(()=>window.__offlineTestApp.ctRows.length),0);
+        await page.evaluate(()=>{const vm=window.__offlineTestApp;vm.ctSearch='Ordinary sibling';vm.ctApplySearch();});
+        assert.deepEqual(await page.evaluate(()=>window.__offlineTestApp.ctRows.map(unit=>unit.recordId)),['DntMixed']);
+        await workspace.getByRole('button',{name:'Save',exact:true}).click();await page.waitForFunction(()=>!window.__offlineTestApp.ctBusy);
+        assert.equal(await page.evaluate(()=>window.__offlineTestApp.ctSaved[window.__offlineTestApp.ctSelection].values[JSON.stringify(['Hidden',null])]),hiddenDraft);
+        await workspace.getByRole('button',{name:'Close',exact:true}).click();
+        const retainedSelection=await page.evaluate(()=>window.__offlineTestApp.ctSelection);
+        for(const enabled of [false,true,false,true]){
+            await toggleDnt(enabled);
+            for(const name of ['DntOnly','DntOnly_Gender'])assert.equal(await workspace.locator('.ctSheetList').getByRole('button',{name,exact:true}).count(),enabled?0:1);
+            assert.equal(await page.evaluate(()=>window.__offlineTestApp.ctSelection),retainedSelection);
+        }
+        await page.evaluate(async()=>{const vm=window.__offlineTestApp;vm.inlineEditor=true;vm.ctSearch='';vm.ctApplySearch();await vm.ctSelect(vm.ctUnits.find(unit=>unit.recordId==='DntMixed'),false);});
+        const mixedInline=workspace.locator('tr[data-unit-id]').filter({has:page.locator('[data-ct-target]')});
+        assert.equal(await mixedInline.locator('[data-ct-target]').count(),2,'ordinary prose and Gender remain editable inline');
+        await toggleDnt(false);await mixedInline.getByRole('textbox',{name:'Hidden',exact:true}).fill('Inline hidden draft');
+        await toggleDnt(true);assert.equal(await mixedInline.getByRole('textbox',{name:'Hidden',exact:true}).count(),0);
+        assert.equal(await page.evaluate(()=>window.__offlineTestApp.ctValues[JSON.stringify(['Hidden',null])]),'Inline hidden draft');
+        await page.screenshot({path:join(disposableFolder,'dnt-mixed-inline.png')});
+        await checkRenderedDntLookup('inline','Exact hidden draft');
+        await mixedInline.getByRole('textbox',{name:'Ordinary',exact:true}).focus();
+        await page.keyboard.press('F2');await page.waitForFunction(()=>window.__offlineTestApp.ctCurrentUnit?.recordId==='DntNext'&&!window.__offlineTestApp.ctBusy);
+        assert.equal(await page.evaluate(()=>{const vm=window.__offlineTestApp,unit=vm.ctUnits.find(unit=>unit.recordId==='DntMixed');return vm.ctSaved[unit.id].values[JSON.stringify(['Hidden',null])];}),'Inline hidden draft');
+        await page.evaluate(()=>{window.__offlineTestApp.inlineEditor=false;});
+        await toggleDnt(false);
+        await page.evaluate(async()=>{const vm=window.__offlineTestApp;vm.ctSearch='';vm.ctApplySearch();await vm.ctSelect(vm.ctUnits.find(unit=>unit.recordId==='DntAll'),true);});
+        await workspace.getByRole('textbox',{name:'Hidden',exact:true}).fill('All-DNT active draft');
+        await toggleDnt(true);await workspace.locator('.ctDntHidden').waitFor();
+        assert.equal(await workspace.locator('[data-ct-target]').count(),0);
+        await page.keyboard.press('F2');
+        await page.waitForFunction(()=>window.__offlineTestApp.ctCurrentUnit?.recordId==='DntNext'&&!window.__offlineTestApp.ctBusy);
+        assert.equal(await page.evaluate(()=>{const vm=window.__offlineTestApp,unit=vm.ctUnits.find(unit=>unit.recordId==='DntAll');return vm.ctSaved[unit.id].values[JSON.stringify(['Hidden',null])];}),'All-DNT active draft');
+        await page.evaluate(async()=>{const vm=window.__offlineTestApp;vm.ctSheet=JSON.stringify(['gender','DntForms']);
+            await vm.ctSelect(vm.ctUnits.find(unit=>unit.recordId==='DntFormMixed'),true);});
+        assert.deepEqual(await page.evaluate(()=>window.__offlineTestApp.ctFieldsFor().map(field=>[field.name,field.form||null])),[['Other','MS'],['Other','FS'],['Gender',null]]);
+        assert.equal(await workspace.locator('.ctClassVariants').count(),0);
+        const noOpSnapshot=await page.evaluate(()=>JSON.stringify(window.__offlineTestApp.ctSaved));
+        await toggleDnt(false);await toggleDnt(true);assert.equal(await page.evaluate(()=>JSON.stringify(window.__offlineTestApp.ctSaved)),noOpSnapshot);
+        const dntDownload=page.waitForEvent('download');await page.evaluate(()=>window.__offlineTestApp.ctDownload());
+        const dntFile=await dntDownload,dntPackage=await JSZip.loadAsync(readFileSync(await dntFile.path()));await closeExportDialog(page);
+        for(const [role,bytes]of [['normal',dntNormal],['gender',dntGender]]){
+            const filename=role==='normal'?'French_Translated.xlsm':'French_Gender_Translated.xlsm',output=await dntPackage.file(filename).async('uint8array'),
+                parsed=await Codec.parseWorkbook(output,{filename,role}),original=await JSZip.loadAsync(bytes),exported=await JSZip.loadAsync(output);
+            assert.equal(await exported.file('xl/vbaProject.bin').async('nodebuffer').then(buffer=>buffer.equals(VBA)),true);
+            assert.deepEqual(Object.keys(exported.files).sort(),Object.keys(original.files).sort());
+            if(role==='normal'){
+                assert.equal(parsed.units.find(unit=>unit.recordId==='DntMixed').fields.find(field=>field.name==='Hidden').target,'Inline hidden draft');
+                assert.equal(parsed.units.find(unit=>unit.recordId==='DntAll').fields.find(field=>field.name==='Hidden').target,'All-DNT active draft');
+            }else for(const name of Object.keys(original.files))assert.deepEqual(await exported.file(name)?.async('uint8array'),await original.file(name)?.async('uint8array'));
+        }
+        await assertLocal(page,'DNT mixed/normal/Gender toggles, drafts, navigation and export');
+        await monitor(page,false);await workspace.getByRole('button',{name:'Close',exact:true}).click();await workspace.getByRole('button',{name:'Versions',exact:true}).click();
+        results.push('DNT: exact field hiding in mixed normal/Gender rows, four themes, repeated settings toggles, search, hidden drafts, F2 navigation, atomic save and macro/package-preserving export');
         if(realPoe1Workbook){
             const filename=process.env.CLIENTTEXT_POE1_WORKBOOK || 'C:/Users/lpeac/Downloads/2026-10-19_POE1/Thai_PoE1.xlsm',before=checksum(filename);
             await monitor(page,false);await bootstrap('guest','Thai');
@@ -1474,6 +1603,21 @@ async function run() {
             await page.waitForTimeout(500);
             await monitor(page,true);
             await openTest([{name:'Thai_PoE1.xlsm',buffer:readFileSync(filename)}]);
+            const augury=await page.evaluate(async()=>{
+                const vm=window.__offlineTestApp,units=vm.ctUnits.filter(unit=>unit.sheet==='AuguryCardTiers'),marked=units.filter(unit=>unit.fields.some(field=>ClientTextUI.isDNTSource(field.source)));
+                vm.ctSelectedFilters=['missing','outdated','saved','revised','unchanged'];vm.ctSheet=JSON.stringify(['normal','AuguryCardTiers']);
+                return {rows:units.length,marked:marked.length,visible:vm.ctRows.length,hiddenFields:marked.reduce((count,unit)=>count+unit.fields.filter(field=>ClientTextUI.isDNTSource(field.source)).length,0),example:marked[0].id};
+            });
+            assert.equal(augury.rows,81);assert.ok(augury.marked>0);assert.equal(augury.visible,81-augury.marked);
+            await toggleDnt(false);
+            await page.evaluate(async id=>{const vm=window.__offlineTestApp;await vm.ctSelect(vm.ctUnits.find(unit=>unit.id===id),true);},augury.example);
+            assert.equal(await workspace.getByRole('textbox',{name:'Advanced Description',exact:true}).count(),1);
+            await page.screenshot({path:join(disposableFolder,'augury-dnt-visible.png')});
+            await toggleDnt(true);await workspace.locator('.ctDntHidden').waitFor();assert.equal(await workspace.locator('[data-ct-target]').count(),0);
+            await page.screenshot({path:join(disposableFolder,'augury-dnt-hidden.png')});
+            await toggleDnt(false);assert.equal(await workspace.getByRole('textbox',{name:'Advanced Description',exact:true}).count(),1);
+            await toggleDnt(true);
+            results.push({name:'Actual AuguryCardTiers wrapped DNT sources hide/restore through Settings without changing originals',...augury});
             await page.evaluate(async()=>{const vm=window.__offlineTestApp;await vm.ctSelect(vm.ctUnits.find(unit=>unit.sheet==='KeywordPopups'),true);});
             await workspace.getByRole('textbox',{name:'Info Content',exact:true}).fill('PoE1 browser regression');
             await workspace.getByRole('button',{name:'Save',exact:true}).click();

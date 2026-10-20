@@ -88,7 +88,8 @@ async function main(){
   assert(abortedConnections>=1);
   mode='success';let download=page.waitForEvent('download').catch(()=>null);await page.locator('#collect').click();await waitFinished();if(await page.evaluate(()=>app.ctExportTiming.status!=='done'))throw Error(await page.evaluate(()=>app.ctError+' '+app.ctExportLogText));let downloaded=await download;await downloaded.saveAs(join(output,'paired.zip'));await waitFinished();
   assert.equal(posts,1,'Accepted collection retry sends no new end request');
-  const zip=await JSZip.loadAsync(readFileSync(join(output,'paired.zip')));assert.deepEqual(Object.keys(zip.files),['French.xlsx','French_Gender.xlsx']);
+  assert.equal(downloaded.suggestedFilename(),'Fixture_French_ClientText_Translated.zip');
+  const zip=await JSZip.loadAsync(readFileSync(join(output,'paired.zip')));assert.deepEqual(Object.keys(zip.files),['French_Translated.xlsx','French_Gender_Translated.xlsx']);
   for(const name of Object.keys(zip.files)){
    const workbookZip=await JSZip.loadAsync(await zip.file(name).async('nodebuffer'));
    assert.deepEqual(await workbookZip.file('xl/native.bin').async('uint8array'),new Uint8Array([0,255,7,8,9]));

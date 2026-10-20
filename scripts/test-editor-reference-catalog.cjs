@@ -10,7 +10,7 @@ const sd = (text = 'Blade damage', target = 'Saved blade') => ({ filepath: 'same
 const unit = (target = 'Original') => ({ id: '["normal","Sheet","same"]', role: 'normal', sheet: 'Sheet', recordId: 'same',
   developerNotes: 'Developer note', fields: [{ id: 'Text', name: 'Text', kind: 'text', source: 'Blade damage', target }] });
 function harness(options = {}) {
-  const window = { ClientTextCodec: require('../public/clientTextCodec.js'), ContentAdapters: require('../public/contentAdapters.js'), ...options.window };
+  const window = { ClientTextCodec: require('../public/clientTextCodec.js'), ClientTextUI: {isDNTSource: require('../public/clientTextUi.js').isDNTSource}, ContentAdapters: require('../public/contentAdapters.js'), ...options.window };
   const context = vm.createContext({ window, AbortController, setTimeout, clearTimeout });
   for (const name of ['editorReferenceCatalog.js', 'editorLookup.js']) vm.runInContext(fs.readFileSync(path.join(publicDir, name), 'utf8'), context, { filename: name });
   const api = window.EditorLookup;
@@ -43,6 +43,72 @@ test('mixed references have composite identities and retain exact ClientText raw
   assert.equal(api.searchIndex(entries, 'Developer note', 'metadata', false, true).length, 2);
   assert.equal(api.searchIndex(entries, '\\n', 'english', false, true).length, 2);
 });
+test('rendered Lookup filters raw and formatted DNT fields, retains ordinary siblings and target-only markers, and refreshes cached references',()=>{
+  const original=unit(),base=original.fields[0];original.fields=[
+    {...base,id:'Hidden',name:'Hidden',source:'[DNT] HIDDEN_NEEDLE',target:'Hidden target needle'},
+    {...base,id:'Wrapped',name:'Wrapped',source:'<augurypopuptext>{[DNT] WRAPPED_NEEDLE}',target:'Wrapped target needle'},
+    {...base,id:'Ordinary',name:'Ordinary',source:'Ordinary sibling',target:'[DNT] target-only needle'}];
+  const before=plain(original),{host,api}=harness({session:{mode:'clienttext',group:{id:'ct',contentMode:'clienttext'}},
+    host:{ctActive:true,ctUnits:[original],ctSaved:{},hideDNT:true}});
+  for(const [scope,query]of [['english','HIDDEN_NEEDLE'],['english','WRAPPED_NEEDLE'],['translation','Hidden target needle'],['path','Wrapped']]){
+    host.lookupScope=scope;host.lookupQuery=query;host.lookupApplySearch();assert.equal(host.lookupResults.length,0,scope+': '+query);
+  }
+  host.lookupScope='translation';host.lookupQuery='target-only';host.lookupApplySearch();assert.equal(host.lookupResults.length,1);
+  const ordinary=host.lookupResults[0].key;host.lookupSelect(ordinary);
+  assert.equal(host.lookupSelectedReference.blocks[0].fieldId,'Ordinary');
+  for(const enabled of [false,true,false,true]){
+    host.hideDNT=enabled;api.mixin.watch.hideDNT.handler.call(host,enabled);
+    assert.equal(host.lookupSelectedReference.blocks[0].fieldId,'Ordinary','ordinary selected references survive the visibility change');
+  }
+  host.lookupScope='english';host.lookupQuery='HIDDEN_NEEDLE';host.hideDNT=false;host.lookupApplySearch();
+  const hidden=host.lookupResults[0].key;host.lookupSelect(hidden);assert.equal(host.lookupSelectedReference.blocks[0].fieldId,'Hidden');
+  host.hideDNT=true;assert.equal(host.lookupResults.length,0,'cache identity follows the setting even before watcher delivery');
+  assert.equal(host.lookupSelectedReference,null);api.mixin.watch.hideDNT.handler.call(host,true);assert.equal(host.lookupSelectedFilepath,'');
+  host.hideDNT=false;api.mixin.watch.hideDNT.handler.call(host,false);assert.equal(host.lookupResults.length,1);
+  assert.deepEqual(plain(original),before);assert.equal(host.ctValues.Text,'Never a ClientText draft');
+});
+
+test('DNT filtering affects ClientText fields in sibling Lookup catalogs while retaining SD results and selection',()=>{
+  const {host,api}=harness({host:{hideDNT:false}}),original=unit(),hidden={...unit(),id:'hidden'};
+  original.fields[0].source='Ordinary SHARED_NEEDLE';hidden.fields[0].source='DNT SHARED_NEEDLE';
+  const sdDnt={...sd('[DNT] SHARED_NEEDLE'),isDNT:true};
+  host.lookupCatalogKey=host.lookupSessionKey;
+  host.lookupCatalogSources=[{mode:'statdescription',scope:{groupId:'sibling-sd'},groupId:'sibling-sd',descs:[sdDnt]},
+    {mode:'clienttext',scope:{groupId:'sibling-ct'},groupId:'sibling-ct',language:'Thai',units:[original,hidden],saved:{}}];
+  host.lookupScope='english';host.lookupQuery='SHARED_NEEDLE';host.lookupApplySearch();assert.equal(host.lookupResultCount,3);
+  host.lookupSelect(host.lookupResults.find(entry=>entry.mode==='statdescription').key);const selected=host.lookupSelectedFilepath;
+  for(const enabled of [true,false,true,false]){
+    host.hideDNT=enabled;api.mixin.watch.hideDNT.handler.call(host,enabled);
+    assert.equal(host.lookupResultCount,enabled?2:3);assert.equal(host.lookupSelectedFilepath,selected);
+    assert.equal(host.lookupSelectedReference.isDNT,true,'existing SD Lookup includes hidden files independently of worklist filters');
+  }
+});
+
+test('Hide DNT retains SD-only Lookup pagination and the selected reference',()=>{
+  const descs=Array.from({length:23},(_,index)=>({...sd('[DNT] shared source'),filepath:'reference-'+index+'.txt',isDNT:true})),
+    {host,api}=harness({host:{descs,hideDNT:false}});
+  host.lookupQuery='shared source';host.lookupApplySearch();host.lookupPage=2;host.lookupSelect(host.lookupResults.at(-1).key);
+  const selected=host.lookupSelectedFilepath;
+  for(const enabled of [true,false,true]){
+    host.hideDNT=enabled;api.mixin.watch.hideDNT.handler.call(host,enabled);
+    assert.equal(host.lookupResultCount,23);assert.equal(host.lookupPage,2);assert.equal(host.lookupCurrentPage,2);
+    assert.equal(host.lookupSelectedFilepath,selected);assert.equal(host.lookupSelectedReference.isDNT,true);
+  }
+});
+
+test('Lookup visibility changes fence a selected hidden reference while inactive and filter a pending catalog result',async()=>{
+  const original=unit();original.fields[0].source='[DNT] HIDDEN_NEEDLE';
+  const {host,api,session}=harness({session:{mode:'clienttext',group:{id:'ct',contentMode:'clienttext'}},host:{ctUnits:[original],ctSaved:{},hideDNT:false}});
+  host.lookupQuery='HIDDEN_NEEDLE';host.lookupApplySearch();host.lookupSelect(host.lookupResults[0].key);
+  session.toolsVisible=false;host.hideDNT=true;api.mixin.watch.hideDNT.handler.call(host,true);assert.equal(host.lookupSelectedFilepath,'');
+  session.toolsVisible=true;assert.equal(host.lookupSelectedReference,null);assert.equal(host.lookupResults.length,0);
+  const held=deferred();host._editorReferenceCatalog={load:()=>held.promise};const pending=host.lookupLoadCatalog();
+  host.hideDNT=false;api.mixin.watch.hideDNT.handler.call(host,false);host.hideDNT=true;api.mixin.watch.hideDNT.handler.call(host,true);
+  held.resolve({sources:[{mode:'clienttext',scope:session.scope,groupId:'ct',language:'Thai',units:[original],saved:{}}],groups:[],missing:[],errors:[]});
+  assert.equal(await pending,true);assert.equal(host.lookupResults.length,0);
+  host.hideDNT=false;api.mixin.watch.hideDNT.handler.call(host,false);assert.equal(host.lookupResults.length,1);
+});
+
 test('ClientText queries do not interpret literal backslash-n as an actual newline', () => {
   const { api } = harness(), literal = unit(), actual = unit();
   literal.id = 'literal'; literal.fields[0].source = 'A\\nB';

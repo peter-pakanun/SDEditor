@@ -100,3 +100,9 @@ hiding must use the intended SD-equivalent detector while retaining visible sibl
 immutable source/field identities, saved values, status/export facts and history. Hiding
 a complete row whenever one field contains DNT would lose valid work. No DNT filtering
 or status/export change is implemented by this task.
+
+The subsequent [ClientText DNT visibility implementation](clienttext_dnt_visibility.md)
+uses the SD prefix detector per English field and at formatted text boundaries.
+Its local audit covers the actual AuguryCardTiers markers, mixed rows, draft safety,
+retained status/progress definitions and byte-preserving exports. The research
+substring counts above are retained as historical audit evidence.

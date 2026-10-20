@@ -190,6 +190,10 @@ async function main() {
             }
             assert.equal(await state(), before, 'reselect/re-export does not change the old session or its saved work/drafts/diagnostics/history');
         }
+        const memberNames = new Map(await page.evaluate(files => {
+            const names = ClientTextUI.workbookExportNames ? ClientTextUI.workbookExportNames(files) : files.map(file => file.name);
+            return files.map((file, index) => [file.role, names[index]]);
+        }, files.map(({name,role})=>({name,role}))));
         const downloads = await page.evaluate(async () => Promise.all(downloads.map(({ blob, name }) => new Promise((resolve, reject) => {
             const reader = new FileReader(); reader.onload = () => resolve({ name, base64: reader.result.split(',')[1] }); reader.onerror = () => reject(reader.error); reader.readAsDataURL(blob);
         }))));
@@ -199,7 +203,7 @@ async function main() {
             if (fileBacked) {
                 const zip = await JSZip.loadAsync(exported);
                 for (const file of files) {
-                    const workbook = files.length === 1 ? zip : await JSZip.loadAsync(await zip.file(file.name).async('nodebuffer'));
+                    const workbook = files.length === 1 ? zip : await JSZip.loadAsync(await zip.file(memberNames.get(file.role)).async('nodebuffer'));
                     const xml = await workbook.file('xl/worksheets/sheet1.xml').async('string');
                     if (file.role === 'normal') assert(xml.includes('Saved rescue @ value'));
                     assert(!xml.includes('Unexported draft'));
@@ -207,7 +211,7 @@ async function main() {
             } else if (files.length === 1) assert.equal(sha(exported), files[0].hash, 'unchanged saved values and unsaved draft produce a byte-identical workbook');
             else {
                 const zip = await JSZip.loadAsync(exported);
-                for (const file of files) assert.equal(sha(await zip.file(file.name).async('nodebuffer')), file.hash, 'paired workbook bytes are preserved');
+                for (const file of files) assert.equal(sha(await zip.file(memberNames.get(file.role)).async('nodebuffer')), file.hash, 'paired workbook bytes are preserved');
             }
         }
         for (const file of files) if (file.path) assert.equal(sha(readFileSync(file.path)), file.hash, 'original sample remains unchanged');

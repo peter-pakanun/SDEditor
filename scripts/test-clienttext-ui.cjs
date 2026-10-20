@@ -7,7 +7,7 @@ const clone=value=>structuredClone(value),settle=async()=>{for(let i=0;i<8;i++)a
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};};
 function harness(changes={}){
     let nextId=0;
-    const window={ClientTextCodec:require('../public/clientTextCodec.js'),ClientTextExportProgress:require('../public/clientTextExportProgress.js'),ClientTextState:S,ClientTextStore:Store,TranslationDiagnostics:require('../public/translationDiagnostics.js'),
+    const window={StatDescCodec:require('../public/statDescCodec.js'),ClientTextCodec:require('../public/clientTextCodec.js'),ClientTextExportProgress:require('../public/clientTextExportProgress.js'),ClientTextState:S,ClientTextStore:Store,TranslationDiagnostics:require('../public/translationDiagnostics.js'),
         ClientTextNpcIndex:require('../public/clientTextNpcIndex.js'),
         ClientTextConvoIndex:require('../public/clientTextConvoIndex.js'),
         ClientTextIdentities:require('../public/clientTextIdentities.js'),
@@ -660,6 +660,116 @@ test('ClientText list omits all-blank units and ignores hidden targets in search
     app.ctSearch='Visible translation';app.ctApplySearch();assert.deepEqual(Array.from(app.ctRows,unit=>unit.id),[mixed.id]);
     assert.deepEqual([mixed,blank],snapshot);assert.equal(app.ctCounts.total,2,'status totals continue to describe the retained originals');
 });
+test('DNT visibility uses the exact SD English prefix detector per field, never target text',()=>{
+    const original=namedUnit('DntPrefixes'),base=original.fields[0],sources=['[DNT] hidden','[DNT: hidden','[DNTanything','DNT hidden',
+        'DNT','dnt hidden','[dnt] visible',' [DNT] visible','\tDNT visible','Ordinary [DNT] visible','Ordinary\n[DNT] visible','DNT\tvisible','[NOAUDIO] [DNT] visible'];
+    original.fields=sources.map((source,index)=>({...base,id:'field-'+index,name:'Field '+index,source,target:'[DNT] target stays',targetCell:'D'+(index+2)}));
+    original.fields.push({...base,id:'gender',name:'Gender',kind:'gender',source:'',target:'DNT raw metadata'});
+    const snapshot=clone(original),{app,window}=visibleFieldsHarness(original,{hideDNT:true});
+    const expected=original.fields.filter(field=>!window.StatDescCodec.computeIsDNT([field.source]));
+    assert.deepEqual(Array.from(app.ctFieldsFor()),expected);
+    assert.deepEqual(Array.from(app.ctTabFields()).map(field=>field.id).sort(),expected.map(field=>field.id).sort());
+    assert.deepEqual(original,snapshot);app.hideDNT=false;assert.equal(app.ctFieldsFor().length,original.fields.length);
+});
+
+test('DNT mixed rows retain ordinary siblings and Gender; all-DNT rows hide without changing status or progress',()=>{
+    const mixed=worksheetUnit('MixedDnt'),all=namedUnit('AllDnt','[DNT] all',''),base=mixed.fields[0];
+    mixed.fields[0].source='[DNT] Main';mixed.fields[1].source='DNT form';mixed.fields[2].source='DNT form';
+    mixed.fields[0].outdated=true;mixed.fields[0].originalMissing=true;
+    all.fields.push({...base,id:'all-gender',kind:'gender',source:'',target:'F'});
+    const {app}=visibleFieldsHarness(mixed,{ctUnits:[mixed,all],_ctUnitIndex:new Map([[mixed.id,mixed],[all.id,all]]),
+        _ctWorkUnits:new Map([[mixed.id,mixed],[all.id,all]])}),counts=clone(app.ctCounts),progress=clone(require('../public/clientTextUi.js').mixin.computed.ctWorkProgress.call(app));
+    app.hideDNT=true;
+    assert.deepEqual(Array.from(app.ctFieldsFor(),field=>field.name),['Later','Wide','Gender']);
+    assert.deepEqual(Array.from(app.ctRows,unit=>unit.id),[mixed.id]);assert.equal(app.ctFieldsFor(all).length,0);
+    assert.deepEqual(clone(app.ctCounts),counts);assert.deepEqual(clone(require('../public/clientTextUi.js').mixin.computed.ctWorkProgress.call(app)),progress);
+    assert.equal(app.ctRowStatusClasses(mixed).isOutdated,true,'row status still describes all committed fields');
+    app.hideDNT=false;assert.equal(app.ctRows.length,2);
+});
+
+test('ClientText style payloads use the SD marker prefix rule at nested text boundaries',()=>{
+    const {isDNTSource}=require('../public/clientTextUi.js');
+    for(const source of ['<b>{[DNT] internal}','<size:+5>{<augurypopuptitle>{[DNT] Title}}\\n\n<augurypopuptext>{[DNT] Advanced Description}',
+        '<size:+5>{<augurypopuptitle>{Butcher}}\\n\n<augurypopuptext>{[DNT] Advanced Description}','<rgb:ff0000>{DNT internal}',
+        'An ordinary title <custom>{<i>{[DNT: internal}}'])assert.equal(isDNTSource(source),true,source);
+    for(const source of ['<b>{ [DNT] visible}','<b>{[dnt] visible}','<b>{DNT}','<b>{ordinary [DNT] mention}',
+        '<b>[DNT] no payload','{[DNT] plain braces}','</b>{[DNT] closing tag}','<b>{ordinary}\n[DNT] later line',
+        '<b:DNT marker>{ordinary}','[Key|DNT displayed text]'])assert.equal(isDNTSource(source),false,source);
+});
+
+test('DNT manual scans exclude marked fields while scanning ordinary siblings in the same row',async()=>{
+    const mixed=worksheetUnit('DntScanMixed'),all=namedUnit('DntScanAll','[DNT] [Power]','[Broken');
+    mixed.fields[0].source='<augurypopuptext>{[DNT] [Power]}';mixed.fields[0].target='[Broken';mixed.isDNT=true;
+    const {app}=scanHarness([mixed,all],{hideDNT:true});
+    assert.equal(await app.ctStartScan(),true);assert.equal(app.ctScanTotal,1);
+    assert.equal((app.ctDiagnostics[mixed.id] || []).some(issue=>issue.fieldId===mixed.fields[0].id),false);
+    assert.equal(Object.hasOwn(app.ctDiagnostics,all.id),false);
+    app.hideDNT=false;assert.equal(await app.ctStartScan(),true);assert.equal(app.ctScanTotal,2);
+    assert.equal(app.ctDiagnostics[mixed.id].some(issue=>issue.fieldId===mixed.fields[0].id),true);
+});
+
+test('DNT toggles invalidate English/target sort caches and search only visible field values',()=>{
+    const original=worksheetUnit('DntSearch');original.fields[0].source='[DNT] ZZZ_HIDDEN_SOURCE';original.fields[0].target='ZZZ_HIDDEN_TARGET';
+    const {app}=visibleFieldsHarness(original),snapshot=clone(original);
+    for(let turn=0;turn<6;turn++){
+        app.hideDNT=turn%2===1;
+        for(const side of ['english','translation'])assert.equal(app.ctSortValue(original,side).includes('ZZZ_HIDDEN'),!app.hideDNT);
+        for(const query of ['ZZZ_HIDDEN_SOURCE','ZZZ_HIDDEN_TARGET']){app.ctSearch=query;app.ctApplySearch();assert.equal(app.ctRows.length,app.hideDNT?0:1);}
+        app.ctSearch='Later translation';app.ctApplySearch();assert.equal(app.ctRows.length,1);
+        const other=namedUnit('Other','MMM','MMM');app.ctUnits=[original,other];app.ctSort='english';
+        assert.equal(app.ctOrderedUnits()[0].id,app.hideDNT?other.id:original.id);app.ctUnits=[original];
+    }
+    assert.deepEqual(original,snapshot);
+});
+
+test('DNT variant toggle fences hidden focus/completion and retains raw drafts and form identities',()=>{
+    const original=classVariantUnit(),hidden=original.fields.find(field=>field.form==='StrFourb');hidden.source='[DNT] class-specific';
+    const {app,mixin}=keyboardHarness(original),before=clone(original),values=app.ctValues;
+    app.scheduleClientTextDictionaryMatches=()=>{};app.ctInitializeVariants();app.ctFocusedField=hidden.id;
+    app.ctValues[hidden.id]='  exact hidden draft\r\n@literal\\n  ';app.ctReviewed[hidden.id]=S.sourceHash(hidden.source);app.ctDraftDirty=true;
+    const reviewed=clone(app.ctReviewed);app.ctCompletion={items:[{}]};app._ctFieldFocusRun={};app._ctInlineReturn={};
+    for(let turn=0;turn<6;turn++){
+        app.hideDNT=turn%2===0;mixin.watch.hideDNT.handler.call(app);
+        assert.equal(app.ctFieldsFor().includes(hidden),!app.hideDNT);assert.equal(app.ctDisplayedFields().some(field=>field.id===app.ctFocusedField),true);
+        assert.equal(app.ctCompletion,null);assert.equal(app._ctFieldFocusRun,null);assert.equal(app._ctInlineReturn,null);
+        assert.equal(app.ctValues,values);assert.deepEqual(clone(app.ctReviewed),reviewed);assert.equal(app.ctDraftDirty,true);
+    }
+    assert.equal(app.ctValues[hidden.id],'  exact hidden draft\r\n@literal\\n  ');assert.deepEqual(original,before);
+});
+
+test('an all-DNT active draft survives toggle, failed navigation checkpoint, successful navigation and save',async()=>{
+    const original=namedUnit('HiddenActive','[DNT] retained','Original'),next=namedUnit('VisibleNext'),f=fixture();
+    await f.store.import(scope,{units:[original,next],assets:[asset]});
+    const {app,mixin}=visibleFieldsHarness(original,{ctUnits:[original,next],_ctUnitIndex:new Map([[original.id,original],[next.id,next]]),ctEditor:true}),draft=' exact draft\r\n@raw\\n ';
+    app._ctStore=f.store;app.ctValues[fieldId]=draft;app.ctDraftDirty=true;app.scheduleClientTextDictionaryMatches=()=>{};
+    app.ctFlushCommentDraft=async()=>{};app.ctLoadCommentDraft=()=>{};app.ctRefreshLayout=()=>{};app.ctFocusTarget=()=>true;app.ctLoadMemory=()=>{};app.ctSync=()=>{};
+    app.hideDNT=true;mixin.watch.hideDNT.handler.call(app);assert.equal(app.ctFocusedField,'');assert.equal(app.ctEditor,true);
+    assert.equal(await app.ctSelect(original,true),false,'a hidden row cannot be reopened through a stale link');
+    const put=f.store.putDraft;f.store.putDraft=async()=>{throw Error('held draft failure');};
+    assert.equal(await app.ctSelect(next,true),false);assert.equal(app.ctSelection,original.id);assert.equal(app.ctValues[fieldId],draft);
+    f.store.putDraft=put;assert.equal(await app.ctSelect(next,true),true);assert.equal((await f.store.getDraft(scope,original.id)).values[fieldId],draft);
+    app.hideDNT=false;mixin.watch.hideDNT.handler.call(app);assert.equal(await app.ctSelect(original,true),true);assert.equal(app.ctValues[fieldId],draft);
+    app.hideDNT=true;mixin.watch.hideDNT.handler.call(app);assert.equal(await app.ctSave(),true);
+    assert.equal((await f.store.getSaved(scope))[original.id].values[fieldId],draft);assert.equal(await f.store.getDraft(scope,original.id),undefined);
+});
+
+test('DNT toggle during a held record read cannot install a newly hidden selection',async()=>{
+    const original=namedUnit('Outgoing'),incoming=namedUnit('DntIncoming','DNT incoming','Target'),held=deferred(),
+        {app,mixin}=visibleFieldsHarness(original,{ctUnits:[original,incoming],_ctUnitIndex:new Map([[original.id,original],[incoming.id,incoming]])});
+    app.ctFlushDraft=async()=>true;app.ctFlushCommentDraft=async()=>{};app._ctStore={getDraft:()=>held.promise};app.scheduleClientTextDictionaryMatches=()=>{};
+    const values=app.ctValues,opening=app.ctSelect(incoming,true);await settle();assert.equal(app.ctBusy,true);
+    app.hideDNT=true;mixin.watch.hideDNT.handler.call(app);held.resolve({values:{[fieldId]:'Incoming draft'}});
+    assert.equal(await opening,false);assert.equal(app.ctSelection,original.id);assert.equal(app.ctValues,values);assert.equal(app.ctBusy,false);
+});
+
+test('DNT toggle while TM replacement confirmation is pending cannot write a hidden field',async()=>{
+    const original=worksheetUnit('DntPending');original.fields[0].source='[DNT] pending';
+    const held=deferred(),{app,mixin}=visibleFieldsHarness(original,{ctFocusedField:original.fields[0].id,appConfirm:()=>held.promise});
+    app.scheduleClientTextDictionaryMatches=()=>{};const before=clone(app.ctValues),pending=app.ctApplyMemory({target:'Replacement'});await settle();
+    app.hideDNT=true;mixin.watch.hideDNT.handler.call(app);held.resolve(true);
+    assert.equal(await pending,false);assert.deepEqual(clone(app.ctValues),before);assert.equal(app.ctDraftDirty,false);
+});
+
 test('blank-first-field preview, Lookup and TM fall back to real English while hidden authored text stays intact',async()=>{
     const original=blankEnglishUnit(),reference=blankEnglishUnit('Reference'),{app,window}=visibleFieldsHarness(original,{ctUnits:[original,reference],
         _ctUnitIndex:new Map([[original.id,original],[reference.id,reference]]),ctFocusedField:original.fields[0].id});
@@ -3530,7 +3640,7 @@ test('frozen collection export excludes local work and carries source-only revie
     assert.equal(exported[0].saved[sourceOnly.id].saved,false);assert.deepEqual(Array.from(exported[0].saved[sourceOnly.id].outdated),[fieldId]);
     assert.deepEqual(Array.from(exported[0].parsed.units,unit=>unit.id),[original.id,sourceOnly.id],'worker receives Saved and source-review units without the untouched catalog');
     assert.equal(S.valuesFor(sourceOnly,exported[0].saved[sourceOnly.id])[fieldId],sourceOnly.fields[0].target);
-    assert.equal(app.ctSaved,savedView);assert.equal(app.ctSaved[original.id],local);assert.equal(downloads[0][1],'Thai_PoE2.xlsx');
+    assert.equal(app.ctSaved,savedView);assert.equal(app.ctSaved[original.id],local);assert.equal(downloads[0][1],'Thai_PoE2_Translated.xlsx');
 });
 
 test('collection export verifies snapshot original and parser bindings before generating a workbook',async()=>{
@@ -3752,6 +3862,29 @@ function initializationHarness(changes={}){
     h.app.ctFlushDraft=async()=>true;h.app.ctFlushCommentDraft=async()=>{};h.app.ctRefreshLayout=()=>{};h.app.ctLoadMemory=async()=>{};
     return h;
 }
+for(const initialHideDNT of [true,false])test('all-DNT sheet navigation follows repeated toggles after activation; drafts and selection stay intact: '+initialHideDNT,async()=>{
+    const visible=unit(),hidden={...unit(),sheet:'OnlyDntSheet'},gender={...unit(),role:'gender',sheet:'OnlyDntGender'},blank={...unit(),sheet:'OnlyBlank'};
+    for(const original of [hidden,gender,blank])original.id=JSON.stringify([original.role,original.sheet,original.recordId]);
+    hidden.fields[0].source='<augurypopuptext>{[DNT] hidden sheet}';gender.fields[0].source='DNT hidden Gender sheet';blank.fields[0].source='';
+    const units=[visible,hidden,gender,blank],before=clone(units),store={getUnits:async()=>units,getSaved:async()=>({}),getDraftSummaries:async()=>[],
+        getDraft:async()=>null,listHistory:async()=>[],listWorkspaces:async()=>[],listRequests:async()=>[]},
+        {app,mixin}=initializationHarness({hideDNT:initialHideDNT,_ctStore:store});
+    Object.defineProperty(app,'ctSheets',{get:()=>mixin.computed.ctSheets.call(app)});
+    Object.defineProperty(app,'ctFilteredSheets',{get:()=>mixin.computed.ctFilteredSheets.call(app)});
+    assert.equal(await app.ctActivate(scope,{}),true,app.ctError);
+    app.ctSelection=hidden.id;app.ctSheet=JSON.stringify([hidden.role,hidden.sheet]);app.ctSheetFilter='OnlyDnt';
+    app.ctValues={[fieldId]:'  Hidden sheet draft\r\n@raw\\n '};app.ctReviewed={[fieldId]:S.sourceHash(hidden.fields[0].source)};app.ctDraftDirty=true;
+    const values=app.ctValues,reviewed=app.ctReviewed,selected=app.ctSelection;
+    for(const enabled of [false,true,false,true,false]){
+        app.hideDNT=enabled;mixin.watch.hideDNT.handler.call(app);
+        assert.deepEqual(Array.from(app.ctSheets,sheet=>sheet.name),enabled?[visible.sheet]:[visible.sheet,hidden.sheet,gender.sheet]);
+        assert.equal(app.ctFilteredSheets.length,enabled?0:2);
+        assert.equal(app.ctSelection,selected);assert.equal(app.ctSheet,JSON.stringify([hidden.role,hidden.sheet]));
+        assert.equal(app.ctValues,values);assert.equal(app.ctReviewed,reviewed);assert.equal(app.ctDraftDirty,true);
+    }
+    assert.deepEqual(units,before);assert.equal(app.ctValues[fieldId],'  Hidden sheet draft\r\n@raw\\n ');
+});
+
 test('activation rejects internally wrong-game units from an old workspace cache before publishing them',async()=>{
     for(const game of ['poe1','poe2']){
         const foreign={...unit(),sheet:'Characters',recordId:game==='poe1'?'Metadata/Characters/Int/IntFour':'Metadata/Characters/Int/Int'};
@@ -4435,6 +4568,30 @@ function exportHarness() {
     return{...h,version,group,team,collection,manifest,journals,workers,requests,downloads,asset,download:()=>app.ctDownload(collection,group,team.language,version),collect:()=>app.ctCollect(version,group,team,true)};
 }
 const flushExport=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));};
+test('single local and frozen exports add the filename marker without changing original metadata',async()=>{
+    for(const frozen of [false,true])for(const [input,expected]of [['Thai.xlsm','Thai_Translated.xlsm'],['Thai_Translated.XLSX','Thai_Translated.XLSX'],['Thai_Translated (1).xlsx','Thai (1)_Translated.xlsx']]){
+        const h=exportHarness();h.asset.name=input;h.asset.parsed.filename=input;
+        let parsedName;const create=h.window.ClientTextWorkerClient.create;
+        h.window.ClientTextWorkerClient.create=()=>{const worker=create(),exportWorkbook=worker.exportWorkbook;worker.exportWorkbook=(bytes,parsed,...rest)=>{parsedName=parsed.filename;return exportWorkbook(bytes,parsed,...rest);};return worker;};
+        assert.equal(await h.app.ctDownload(frozen?h.collection:null,h.group,h.team.language,h.version),true);
+        assert.equal(h.downloads[0].name,expected);assert.equal(parsedName,input);assert.equal(h.asset.name,input);assert.equal(h.asset.parsed.filename,input);
+    }
+});
+test('local and frozen paired exports keep colliding names distinct and preserve the matching workbook bytes',async()=>{
+    for(const frozen of [false,true]){
+        const h=exportHarness(),gender={...h.original,role:'gender',id:JSON.stringify(['gender','ClientStrings','ID/1'])},genderAsset={...h.asset,role:'gender',name:'Fixture_Translated.xlsx'};
+        h.app._ctStore.getMetadata=async()=>({state:'ready',descriptors:[{role:'gender'},{role:'normal'}]});
+        h.app._ctStore.getUnitsByIds=async()=>[h.original,gender];h.app._ctStore.getAsset=async(scope,role)=>role==='gender'?genderAsset:h.asset;
+        h.app._ctStore.getSaved=async()=>({[h.original.id]:{values:{[fieldId]:'normal'}},[gender.id]:{values:{[fieldId]:'gender'}}});
+        h.manifest.assets.push({...h.manifest.assets[0],role:'gender',descriptor:{...h.manifest.assets[0].descriptor,role:'gender'}});
+        h.manifest.units.push({id:gender.id,values:{[fieldId]:'Frozen gender'}});
+        let packaged;h.window.ClientTextWorkerClient.create=()=>({async exportWorkbook(bytes,parsed){return new Uint8Array([parsed.units[0].role==='gender'?2:1]);},async packageWorkbooks(files){packaged=files;return new Uint8Array([3]);},dispose(){}});
+        assert.equal(await h.app.ctDownload(frozen?h.collection:null,h.group,h.team.language,h.version),true);
+        assert.deepEqual(Array.from(packaged,file=>[file.name,Array.from(file.bytes)]),[['Fixture_Gender_Translated.xlsx',[2]],['Fixture_Translated.xlsx',[1]]]);
+        assert.equal(h.downloads[0].name,'Timing fixture_Thai_ClientText_Translated.zip');
+        assert.equal(h.asset.name,'Fixture.xlsx');assert.equal(genderAsset.name,'Fixture_Translated.xlsx');
+    }
+});
 test('timed collection success retains measured report, uses subset originals and releases each dedicated worker on repeated runs',async()=>{
     const h=exportHarness(),{app}=h;
     for(let i=0;i<3;i++){

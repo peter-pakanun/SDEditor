@@ -11,6 +11,7 @@ const { Readable } = require('node:stream');
 const { randomUUID, createHash } = require('node:crypto');
 const Codec = require('../public/clientTextCodec.js');
 const ClientState = require('../public/clientTextState.js');
+const ClientTextUI = require('../public/clientTextUi.js');
 const StatCodec = require('../public/statDescCodec.js');
 const runtimeModules = 'C:/Users/lpeac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules';
 const playwright = require(process.env.PLAYWRIGHT_MODULE_PATH || require.resolve('playwright', { paths: [runtimeModules] }));
@@ -307,7 +308,7 @@ async function run() {
             await details.locator('tr[data-content-group="' + french.id + '"]').getByRole('button', { name: 'Download', exact: true }).click();
             const paired = await pairedDownload, pairedArchive = await JSZip.loadAsync(readFileSync(await paired.path()));
             await closeExportDialog(page);
-            assert.deepEqual(Object.keys(pairedArchive.files).filter(name => !pairedArchive.files[name].dir).sort(), ['French_Gender_PoE2.xlsm', 'French_PoE2.xlsm']);
+            assert.deepEqual(Object.keys(pairedArchive.files).filter(name => !pairedArchive.files[name].dir).sort(), ['French_Gender_PoE2_Translated.xlsm', 'French_PoE2_Translated.xlsm']);
             const translatorContext = await browser.newContext({ viewport: { width: 1440, height: 1000 }, ignoreHTTPSErrors: true });
             const translator = await translatorContext.newPage();
             translator.on('pageerror', error => failures.push(error.message));
@@ -707,7 +708,7 @@ async function run() {
             const screenshotFull = join(directory,'clienttext-class-variants-full.png'); await page.screenshot({ path: screenshotFull, fullPage: true });
             await page.keyboard.press('Escape'); await page.waitForFunction(() => !window.__clientFixtureApp.ctEditor);
             const downloaded = page.waitForEvent('download'); await workspace.getByRole('button', { name: 'Download workbooks', exact: true }).click();
-            const archive = await JSZip.loadAsync(readFileSync(await (await downloaded).path())), output = await archive.file('German_Gender.xlsm').async('uint8array');
+            const archive = await JSZip.loadAsync(readFileSync(await (await downloaded).path())), output = await archive.file('German_Gender_Translated.xlsm').async('uint8array');
             const originalParsed = await Codec.parseWorkbook(gender, { filename: 'German_Gender.xlsm', role: 'gender' }), exported = await Codec.parseWorkbook(output, { filename: 'German_Gender.xlsm', role: 'gender' });
             const changed = exported.units.find(unit => unit.id === id('variant-fixture'));
             assert.equal(changed.fields.find(field => field.form === 'StrFourb').target, secondText); assert.equal(changed.fields.find(field => field.form === 'DexIntFour').target, '{0}');
@@ -717,7 +718,7 @@ async function run() {
                 for (const field of originalUnit.fields) if (originalUnit.id !== id('variant-fixture') || !['StrFourb','DexIntFour'].includes(field.form))
                     assert.equal(next.fields.find(item => item.id === field.id).target, field.target, 'Untouched default and class forms remain exact');
             }
-            assert.deepEqual(await archive.file('German.xlsm').async('uint8array'), new Uint8Array(normal));
+            assert.deepEqual(await archive.file('German_Translated.xlsm').async('uint8array'), new Uint8Array(normal));
             const originalZip = await JSZip.loadAsync(gender), exportedZip = await JSZip.loadAsync(output);
             for (const part of Object.keys(originalZip.files).filter(part => !originalZip.files[part].dir && !['xl/worksheets/sheet4.xml','xl/styles.xml'].includes(part)))
                 assert.deepEqual(await exportedZip.file(part).async('uint8array'), await originalZip.file(part).async('uint8array'), 'Only edited worksheet/style parts can change: ' + part);
@@ -839,14 +840,14 @@ async function run() {
             await page.keyboard.press('Tab'); assert.equal(await control().evaluate(input => input === document.activeElement), true);
             await control().press('Control+s'); await checkSaved('raw-space', ' ');
             const downloaded = page.waitForEvent('download'); await workspace.getByRole('button', { name: 'Download workbooks', exact: true }).click();
-            const download = await downloaded, archive = await JSZip.loadAsync(readFileSync(await download.path())), output = await archive.file('German.xlsm').async('uint8array'), parsed = await Codec.parseWorkbook(output, { filename: 'German.xlsm', role: 'normal' });
+            const download = await downloaded, archive = await JSZip.loadAsync(readFileSync(await download.path())), output = await archive.file('German_Translated.xlsm').async('uint8array'), parsed = await Codec.parseWorkbook(output, { filename: 'German.xlsm', role: 'normal' });
             await closeExportDialog(page);
             for (const [id, value] of expected) assert.equal(parsed.units.find(unit => unit.recordId === id).fields.find(field => field.id === fieldId).target, value, 'Downloaded workbook preserves exact saved Gender ' + id);
             assert.equal(parsed.warnings.some(warning => warning.code === 'CLIENTTEXT_GENDER_VALUE' || warning.code === 'CLIENTTEXT_NONEXISTENT_FIELD'), false);
             const original = await JSZip.loadAsync(normal), exported = await JSZip.loadAsync(output);
             for (const part of ['xl/vbaProject.bin', 'xl/metadata', 'xl/workbook.xml', 'xl/_rels/workbook.xml.rels', 'xl/worksheets/sheet2.xml', 'xl/worksheets/sheet3.xml'])
                 assert.deepEqual(await exported.file(part).async('uint8array'), await original.file(part).async('uint8array'), 'Unrelated package part retained: ' + part);
-            assert.deepEqual(await archive.file('German_Gender.xlsm').async('uint8array'), new Uint8Array(gender), 'Untouched paired original remains byte-identical');
+            assert.deepEqual(await archive.file('German_Gender_Translated.xlsm').async('uint8array'), new Uint8Array(gender), 'Untouched paired original remains byte-identical');
             assert.deepEqual(failures, []); console.log(JSON.stringify({ status: 'PASS', genderOnly: true, normalMode: true,
                 results: ['Raw arbitrary Gender originals, six native suggestions, free text/NONEXISTENT, worksheet Tab and full/inline Ctrl+S',
                     'Original/draft multiline mount, deleting final newline retains textarea/focus, actual raw CRLF paste and Shift+Enter promote with caret',
@@ -1905,11 +1906,11 @@ async function run() {
         const downloaded = page.waitForEvent('download'); await workspace.getByRole('button', { name: 'Download workbooks', exact: true }).click();
         const download = await downloaded, path = await download.path();
         await closeExportDialog(page);
-        assert.match(download.suggestedFilename(), /ClientText\.zip$/);
+        assert.match(download.suggestedFilename(), /ClientText_Translated\.zip$/);
         const archive = await JSZip.loadAsync(readFileSync(path));
-        assert.deepEqual(Object.keys(archive.files).filter(name => !archive.files[name].dir).sort(), files.map(file => file.name).sort());
-        const parsedNormal = await Codec.parseWorkbook(await archive.file(files[0].name).async('uint8array'), { filename: files[0].name, role: 'normal' });
-        const parsedGender = await Codec.parseWorkbook(await archive.file(files[1].name).async('uint8array'), { filename: files[1].name, role: 'gender' });
+        assert.deepEqual(Object.keys(archive.files).filter(name => !archive.files[name].dir).sort(), files.map(file => ClientTextUI.translatedFilename(file.name)).sort());
+        const parsedNormal = await Codec.parseWorkbook(await archive.file(ClientTextUI.translatedFilename(files[0].name)).async('uint8array'), { filename: files[0].name, role: 'normal' });
+        const parsedGender = await Codec.parseWorkbook(await archive.file(ClientTextUI.translatedFilename(files[1].name)).async('uint8array'), { filename: files[1].name, role: 'gender' });
         const get = (parsed, id, name, form = null) => parsed.units.find(unit => unit.recordId === id).fields.find(field => field.id === JSON.stringify([name, form]));
         assert.equal(get(parsedNormal, 'record', 'Name').target, 'Épée'); assert.equal(get(parsedNormal, 'record', 'Name').originalFill, 'D9D9D9');
         assert.equal(get(parsedNormal, 'record', 'Description').target, 'Old description'); assert.equal(get(parsedNormal, 'record', 'Description').originalFill, 'C6EFCE');
@@ -1922,7 +1923,7 @@ async function run() {
         assert.equal(get(parsedNormal, 'empty-english', 'Description').target, 'Hidden all-whitespace row translation');
         assert.equal(get(parsedGender, 'form', 'Text', 'FS').target, 'Forte'); assert.equal(get(parsedGender, 'noun', 'Gender').target, 'M');
         for (const file of files) {
-            const output = await JSZip.loadAsync(await archive.file(file.name).async('uint8array'));
+            const output = await JSZip.loadAsync(await archive.file(ClientTextUI.translatedFilename(file.name)).async('uint8array'));
             assert.deepEqual(await output.file('xl/vbaProject.bin').async('uint8array'), new Uint8Array([1, 9, 255]));
             assert.deepEqual(await output.file('xl/metadata').async('uint8array'), new Uint8Array([0, 255, 8, 99]));
         }
@@ -2089,7 +2090,7 @@ async function run() {
             const acceptedEvent = page.waitForEvent('download'); await details.getByRole('button', { name: 'Download', exact: true }).click();
             const acceptedDownload = await acceptedEvent, acceptedArchive = await JSZip.loadAsync(readFileSync(await acceptedDownload.path()));
             await closeExportDialog(page);
-            const acceptedNormal = await Codec.parseWorkbook(await acceptedArchive.file(files[0].name).async('uint8array'), { filename: files[0].name, role: 'normal' });
+            const acceptedNormal = await Codec.parseWorkbook(await acceptedArchive.file(ClientTextUI.translatedFilename(files[0].name)).async('uint8array'), { filename: files[0].name, role: 'normal' });
             const acceptedField = get(acceptedNormal, 'record', 'Name'); assert.equal(acceptedField.target, 'En ligne'); assert.equal(acceptedField.originalFill, 'D9D9D9');
             assert.equal(await page.evaluate(() => window.__clientFixtureApp.ctError), '', 'Immutable accepted-work collection downloads');
             results.push('Metadata-only version draft; publication resumes after interrupted upload and reload using cached original files');
@@ -2747,7 +2748,7 @@ async function run() {
                 const exporting = Date.now(), event = page.waitForEvent('download', { timeout: 300000 });
                 await workspace.getByRole('button', { name: 'Download workbooks', exact: true }).click();
                 const exported = await event, exportedBytes = readFileSync(await exported.path()), exportMs = Date.now() - exporting;
-                const outputs = language === 'Thai' ? new Map([['Thai_PoE2.xlsm', exportedBytes]]) : new Map(await Promise.all(['French_PoE2.xlsm', 'French_Gender_PoE2.xlsm'].map(async name => [name, await (await JSZip.loadAsync(exportedBytes)).file(name).async('uint8array')])));
+                const outputs = language === 'Thai' ? new Map([['Thai_PoE2.xlsm', exportedBytes]]) : new Map(await Promise.all(['French_PoE2.xlsm', 'French_Gender_PoE2.xlsm'].map(async name => [name, await (await JSZip.loadAsync(exportedBytes)).file(ClientTextUI.translatedFilename(name)).async('uint8array')])));
                 for (const [filename, output] of outputs) {
                     const role = filename.includes('_Gender_') ? 'gender' : 'normal', parsed = await Codec.parseWorkbook(output, { filename, role, language });
                     assert.equal(parsed.units.length, filename.startsWith('Thai') ? 149550 : role === 'normal' ? 89659 : 68250);
