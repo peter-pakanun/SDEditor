@@ -325,6 +325,10 @@ async function run() {
     });
     await page.waitForSelector('.editor [data-editor-ref="translation_1"]:not([readonly])');
     console.log('SD full editor and native fields mounted.');
+    if (process.env.SDEDITOR_TOOLBAR_ONLY === '1') {
+      await require('./toolbar-tooltip-browser-check.cjs')({ page, context, failures, directory: join(__dirname, '../temp/toolbar-tooltips') });
+      assert.deepEqual(failures, []); return;
+    }
     if (process.env.SDEDITOR_SCANNER_ONLY === '1') {
       await checkDiagnosticScanner(page); assert.deepEqual(failures, []); return;
     }

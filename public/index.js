@@ -8275,7 +8275,13 @@ app.directive('tooltip', {
   mounted(el, binding) {
     el.__sdTooltipValue = binding.value;
     const show = (e) => {
+      // A nested control owns its own hint; row/container pointer listeners
+      // must not replace it while the same mousemove bubbles upward.
+      for (let target = e?.target; target && target !== el; target = target.parentElement) {
+        if (target.__sdTooltipValue) { el.__sdTooltipShown = false; return; }
+      }
       el.__sdTooltipShown = true;
+      el.__sdTooltipAnchor = e;
       binding.instance?.showTooltip?.(e, el.__sdTooltipValue);
     };
     const focus = () => {
@@ -8294,6 +8300,8 @@ app.directive('tooltip', {
   updated(el, binding) {
     el.__sdTooltipValue = binding.value;
     el.removeAttribute('title');
+    // Keep focused/hovered action hints current when their state changes.
+    if (el.__sdTooltipShown && binding.value !== binding.oldValue) el.__sdTooltipHandlers.show(el.__sdTooltipAnchor);
   },
   unmounted(el) {
     const handlers = el.__sdTooltipHandlers;
@@ -8306,6 +8314,7 @@ app.directive('tooltip', {
     if (el.__sdTooltipShown) handlers.hide();
     delete el.__sdTooltipHandlers;
     delete el.__sdTooltipValue;
+    delete el.__sdTooltipAnchor;
   }
 });
 

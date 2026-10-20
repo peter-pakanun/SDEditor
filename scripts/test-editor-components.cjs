@@ -8,7 +8,7 @@ const vm = require('node:vm');
 const window = {};
 vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/editorComponents.js'), 'utf8'), { window });
 vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/clientTextUi.js'), 'utf8'), { window });
-const { NativeField, TextField, Tools, Preview, Autocomplete, TranslationMemory, Lookup, Comments, History, DiagnosticScan } = window.EditorComponents;
+const { NativeField, TextField, Tools, Preview, Autocomplete, TranslationMemory, Lookup, Comments, History, DiagnosticScan, DictionaryEntries } = window.EditorComponents;
 
 test('MTL moves keyboard focus to its stable wrapper before disabling and leaves pointer field focus alone', () => {
   const calls=[],button={parentElement:{focus(){calls.push('focus');}}},toolbar={controller:{generate(){calls.push('generate');}}};
@@ -370,4 +370,70 @@ test('one shared tool surface and common preview and popup replace both mode tem
     assert.ok(consumerAt >= 0, consumer + ' is loaded');
     assert.ok(dependencyAt < consumerAt, dependency + ' loads before ' + consumer);
   }
+});
+
+
+test('field toolbar hints share the app Tooltip while retaining native actions and disabled explanations', () => {
+  const toolbar = window.EditorComponents.FieldToolbar, calls = [], event = { clientX: 7, clientY: 9 };
+  const component = { $root: { showTooltip: (...args) => calls.push(args), hideTooltip: () => calls.push('hide') } };
+  for (const surface of [toolbar, DictionaryEntries]) {
+    surface.methods.showTooltip.call(component, event, 'Current action explanation');
+    surface.methods.hideTooltip.call(component);
+  }
+  assert.deepEqual(calls, [[event, 'Current action explanation'], 'hide', [event, 'Current action explanation'], 'hide']);
+  assert.doesNotMatch(toolbar.template, /(?:\s|:)title=/);
+  assert.match(toolbar.template, /v-tooltip="controller.englishHint"/);
+  assert.match(toolbar.template, /:tabindex="controller.englishDisabled \? 0 : undefined"/);
+  assert.match(toolbar.template, /aria-label="Use English"[^>]+>Eng<\/button>/);
+  assert.match(toolbar.template, /class="fieldMtlTarget" v-tooltip=/);
+  assert.match(toolbar.template, /:tabindex="controller.mtlBusy \|\| controller.mtlDisabled \? 0 : -1"/);
+  assert.match(toolbar.template, /@pointerdown.prevent="controller.capture\(\)" @click="controller.format\(style\)"/);
+  assert.match(toolbar.template, /:aria-pressed="controller.englishActive"/);
+});
+
+test('existing editor action hints use one shared Tooltip across full and inline modes', () => {
+  const titledButtons = text => [...text.matchAll(/<button\b(?:[^">]|"[^"]*")*>/g)].filter(match => /(?:\s|:)title=/.test(match[0]));
+  for (const surface of [DictionaryEntries, Tools, Preview, TranslationMemory, History, DiagnosticScan, window.EditorComponents.AttentionNavigation]) {
+    assert.equal(titledButtons(surface.template).length, 0, surface.name);
+  }
+  const html = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf8');
+  for (const match of html.matchAll(/<button\b(?:[^">]|"[^"]*")*>/g)) {
+    if (/(?:editorActions|editorCopyFilePath)/.test(match[0]) || /@click="(?:editorSave|editorExit|ctCloseEditor|openSettings\(\)|prevPage|nextPage)"/.test(match[0])) assert.doesNotMatch(match[0], /(?:\s|:)title=/);
+  }
+  const audio = fs.readFileSync(path.join(__dirname, '../public/clientTextAudio.js'), 'utf8');
+  assert.doesNotMatch(audio, /:title=/);
+  assert.match(audio, /:aria-label="session.trackTooltip\(track.clip,track.index\)" v-tooltip=/);
+});
+
+
+test('shared Tooltip refreshes a visible action hint in place and does not reopen a blurred control', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../public/index.js'), 'utf8');
+  const first = source.indexOf("app.directive('tooltip', {"), last = source.indexOf("app.mount('#app');", first);
+  let directive; vm.runInNewContext(source.slice(first, last), { app: { directive: (_name, value) => { directive = value; } } });
+  const listeners = {}, calls = [], el = { addEventListener: (name, fn) => { listeners[name] = fn; }, removeEventListener: name => { delete listeners[name]; },
+    removeAttribute() {}, getBoundingClientRect: () => ({ left: 10, top: 20, width: 28, height: 28 }) };
+  const instance = { showTooltip: (anchor, text) => calls.push(['show', anchor.clientX, anchor.clientY, text]), hideTooltip: () => calls.push(['hide']) };
+  directive.mounted(el, { instance, value: 'Translate' }); listeners.focus();
+  directive.updated(el, { instance, value: 'Stop translation', oldValue: 'Translate' });
+  assert.deepEqual(calls, [['show', 24, 34, 'Translate'], ['show', 24, 34, 'Stop translation']]);
+  listeners.blur(); directive.updated(el, { instance, value: 'Stopping translation', oldValue: 'Stop translation' });
+  assert.equal(calls.length, 3); assert.deepEqual(calls.at(-1), ['hide']);
+  directive.unmounted(el); assert.equal(Object.keys(listeners).length, 0); assert.equal(el.__sdTooltipAnchor, undefined);
+});
+
+
+test('nested toolbar hints keep ownership while pointer events bubble through a tooltip row', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../public/index.js'), 'utf8');
+  const first = source.indexOf("app.directive('tooltip', {"), last = source.indexOf("app.mount('#app');", first);
+  let directive; vm.runInNewContext(source.slice(first, last), { app: { directive: (_name, value) => { directive = value; } } });
+  const calls = [], make = parentElement => ({ parentElement, handlers: {}, addEventListener(name, fn) { this.handlers[name] = fn; }, removeAttribute() {} });
+  const row = make(null), button = make(row), icon = make(button), instance = { showTooltip: (_event, text) => calls.push(text), hideTooltip() {} };
+  directive.mounted(row, { value: 'Row details', instance }); directive.mounted(button, { value: 'Toolbar action', instance });
+  row.handlers.mouseenter({ target: row }); button.handlers.mouseenter({ target: icon }); row.handlers.mousemove({ target: icon });
+  assert.deepEqual(calls, ['Row details', 'Toolbar action']);
+  directive.updated(row, { value: 'Updated row', oldValue: 'Row details', instance });
+  assert.equal(calls.at(-1), 'Toolbar action', 'background row updates cannot replace the nested hint');
+  button.handlers.mousemove({ target: icon }); row.handlers.mousemove({ target: icon });
+  assert.equal(calls.at(-1), 'Toolbar action');
+  row.handlers.mousemove({ target: row }); assert.equal(calls.at(-1), 'Updated row');
 });
