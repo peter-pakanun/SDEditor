@@ -1600,7 +1600,7 @@ function formatPageRange(total, page, pageSize) {
     },
     gamePreviewAudioSegments(segments) {
       return this.ctActive && window.ClientTextAudio
-        ? window.ClientTextAudio.previewSegments(segments, window.ClientTextAudio.clipsFor(this.ctCurrentUnit)) : segments;
+        ? window.ClientTextAudio.previewSegments(segments, window.ClientTextAudio.clipsFor(this.ctCurrentUnit, this.ctWorkspace?.scope?.game || this.gameVersion)) : segments;
     },
     buildGamePreviewSegments(decodedString, options = {}) {
       const s = String(decodedString ?? "");

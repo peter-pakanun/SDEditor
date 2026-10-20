@@ -67,7 +67,7 @@
             if (this.disposed || options.signal?.aborted) throw abortError();
             if (!this.worker) throw new Error('The ClientText workbook worker is unavailable.');
             const id = 'clienttext-' + (++this.counter), signal = options.signal;
-            const plainOptions = { filename: options.filename, role: options.role, language: options.language, parserVersion: options.parserVersion };
+            const plainOptions = { filename: options.filename, role: options.role, language: options.language, parserVersion: options.parserVersion, game: options.game };
             return new Promise((resolve, reject) => {
                 const abort = () => {
                     const request = this.pending.get(id);

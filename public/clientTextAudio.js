@@ -13,7 +13,10 @@
         return path.toLowerCase();
     }
 
-    function clipsFor(unit) {
+    function clipsFor(unit, game = 'poe2') {
+        // The protected provider currently serves PoE2 only. Never send a PoE1
+        // workbook hint to that provider, even if its relative path looks valid.
+        if (game !== 'poe2') return [];
         if (!/^(NPCTextAudio|NPCTalkDialogueTextAudio)(?:_Gender)?$/.test(unit?.sheet || '')) return [];
         const value = unit?.metadata?.['Audio File'];
         if (typeof value !== 'string') return [];
@@ -70,7 +73,7 @@
         props: { host: Object, surface: { type: String, default: 'both' } },
         data() { return { selectedIndex: 0, request: null, error: '', trackErrors: {}, playbackState: 'idle', footerHeight: 110 }; },
         computed: {
-            clips() { return clipsFor(this.host.ctCurrentUnit); },
+            clips() { return clipsFor(this.host.ctCurrentUnit, this.host.ctWorkspace?.scope?.game || this.host.gameVersion || 'poe2'); },
             selectedClip() { return this.clips[this.selectedIndex] || this.clips[0] || null; },
             visible() {
                 const host = this.host;

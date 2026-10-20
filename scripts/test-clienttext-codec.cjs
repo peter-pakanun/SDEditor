@@ -47,6 +47,34 @@ const tabColor = async (bytes, path = 'xl/worksheets/sheet1.xml') => {
 };
 const withTab = (raw, color) => raw.replace('<sheetData>', `<sheetPr codeName="NativeSheet" enableFormatConditionsCalculation="0"><tabColor rgb="FF${color}"/><outlinePr summaryRight="0"/><pageSetUpPr fitToPage="1"/></sheetPr><sheetData>`);
 
+test('workbook game detection uses internal identities and corroborated tables, never filenames or translated names', () => {
+    const characters = ids => ({units:ids.map(recordId=>({sheet:'Characters',recordId}))});
+    const one='Metadata/Characters/Str/Str', two='Metadata/Characters/Str/StrFour';
+    assert.equal(Codec.detectGame(characters([one])), 'poe1');
+    assert.equal(Codec.detectGame(characters([two, 'Metadata/Characters/Int/IntFourb'])), 'poe2');
+    assert.equal(Codec.detectGame({filename:'PoE1.xlsm',units:[{sheet:'NPCs',recordId:one}]}),null);
+    assert.equal(Codec.detectGame({sheets:[{name:'KeywordPopups'},{name:'GrantedEffects'}]}),null);
+    assert.equal(Codec.detectGame({sheets:[{name:'GrantedEffects'},{name:'IndexableSkillGems'}]}),'poe1');
+    assert.equal(Codec.detectGame({sheets:[{name:'NPCTalkDialogueTextAudio'},{name:'SupportGemFamily'}]}),'poe2');
+    assert.throws(()=>Codec.detectGame(characters([one,two])),{code:'CLIENTTEXT_GAME_CONFLICT'});
+    assert.throws(()=>Codec.assertGame(characters([one]),'poe2'),{code:'CLIENTTEXT_GAME_MISMATCH'});
+    assert.throws(()=>Codec.assertGame(characters([two]),'poe1'),{code:'CLIENTTEXT_GAME_MISMATCH'});
+    assert.equal(Codec.assertGame({units:[]},'poe1'),null,'Partial/Gender exports keep their explicit selected scope');
+});
+
+test('PoE1 Characters import rejects the wrong game and retains the existing parser and exact no-op XLSM bytes', async () => {
+    const normal=sheet([row(1,[cell('A1','ID'),cell('B1','Name'),cell('C1','Translation')]),
+        row(2,[cell('A2','Metadata/Characters/Str/Str'),cell('B2','Example'),cell('C2','Target',1)])]);
+    const bytes=await workbook({macro:true,normal});
+    const zip=await JSZip.loadAsync(bytes);
+    zip.file('xl/workbook.xml',(await zip.file('xl/workbook.xml').async('string')).replace('name="Normal"','name="Characters"'));
+    const input=await zip.generateAsync({type:'uint8array'});
+    const parsed=await Codec.parseWorkbook(input,{filename:'Uninformative.xlsm',game:'poe1'});
+    assert.equal(parsed.game,'poe1');assert.equal(parsed.parserVersion,'clienttext-v4');
+    assert.deepEqual(await Codec.exportWorkbook(input,parsed,{}),input);
+    await assert.rejects(Codec.parseWorkbook(input,{filename:'PoE2.xlsm',game:'poe2'}),{code:'CLIENTTEXT_GAME_MISMATCH'});
+});
+
 test('export resolves red cells and tabs from current content while retaining unrelated XLSM data', async () => {
     const normal = withTab(sheet([
         row(1, [cell('A1', 'ID'), cell('B1', 'Name'), cell('C1', 'Translation'), cell('D1', 'Character')]),
@@ -830,9 +858,10 @@ test('worker client forwards scoped progress and rejects/ignores cancelled respo
         terminate() { this.terminated = true; }
     }
     const client = WorkerClient.create({ Worker: FakeWorker }), progress = [], signal = new AbortController();
-    const pending = client.parseWorkbook(new Uint8Array([1]), { filename: 'French.xlsx', parserVersion: 'clienttext-v1', signal: signal.signal, onProgress: value => progress.push(value) });
+    const pending = client.parseWorkbook(new Uint8Array([1]), { filename: 'French.xlsx', parserVersion: 'clienttext-v1', game:'poe1', signal: signal.signal, onProgress: value => progress.push(value) });
     await new Promise(resolve => setImmediate(resolve)); const worker = FakeWorker.instance, message = worker.messages[0];
     assert.equal(message.options.parserVersion, 'clienttext-v1');
+    assert.equal(message.options.game,'poe1');
     worker.onmessage({ data: { type: 'progress', id: message.id, value: { sheet: 'A' } } }); assert.equal(progress.length, 1);
     signal.abort(); await assert.rejects(pending, { name: 'AbortError' });
     worker.onmessage({ data: { type: 'progress', id: message.id, value: { sheet: 'B' } } }); assert.equal(progress.length, 1);

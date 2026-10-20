@@ -309,6 +309,71 @@ async function checkAutocomplete(page, ct, label) {
   },{ct,original});
 }
 
+async function checkReferenceScopeIsolation(page) {
+  await page.setViewportSize({width:1440,height:900});
+  while(await page.locator('.keywordPreviewWindow[data-keyword-window]').count())await page.locator('.keywordPreviewWindow[data-keyword-window]').last().locator('.keywordPreviewClose').click();
+  await page.evaluate(async()=>{
+    const host=fixtureApp,field=(name,text)=>({id:name,name,kind:'text',source:text,target:text});
+    const fixture=window.keywordScopeFixture=Vue.reactive({mode:'statdescription',language:'Thai',
+      scope:{accountId:'guest',game:'poe1',branchId:'default',versionId:'A',groupId:'sd',sourceHash:'same-baseline',language:'Thai'},
+      version:{id:'A',game:'poe1',branchId:'default',contentGroups:[]},group:{id:'sd',versionId:'A',contentMode:'statdescription'}});
+    window.keywordScopeReads=[];window.keywordScopeGates=[];window.keywordScopeGated=false;window.keywordScopeWrongGame=false;
+    window.keywordScopeUnits=(label,wrong=false)=>[
+      {id:'character',role:'normal',sheet:'Characters',recordId:'Metadata/Characters/Str/'+(wrong?'StrFour':'Str'),fields:[field('Name','Synthetic character')]},
+      {id:'keyword',role:'normal',sheet:'KeywordPopups',recordId:'Physical',fields:[field('Info Title',label),field('Info Content','Synthetic scoped body')]}
+    ];
+    window.selectKeywordScope=(version,branch='default')=>{
+      fixture.scope.versionId=fixture.version.id=fixture.group.versionId=version;fixture.scope.branchId=fixture.version.branchId=branch;
+      fixture.version.contentGroups=[{id:'ct-'+version,versionId:version,contentMode:'clienttext',language:'Thai'}];
+    };
+    host.editorLookupSession=()=>fixture;
+    host._ctStore={async getMetadata(scope){return{state:'ready',signature:scope.versionId+':'+scope.branchId};},async getSaved(){return{};},
+      async getUnits(scope){window.keywordScopeReads.push({...scope});
+        if(window.keywordScopeGated)return new Promise(resolve=>window.keywordScopeGates.push({resolve,scope:{...scope}}));
+        return window.keywordScopeUnits(scope.versionId+'/'+scope.branchId,window.keywordScopeWrongGame);
+      },async import(){throw Error('Reference test must not write stored originals');},async delete(){throw Error('Reference test must not delete stored originals');}};
+    host._keywordCatalog?.dispose();host._keywordCatalog=null;
+    window.selectKeywordScope('A');host.sourceIdentity='browser-same-baseline-review';host.ctRevision++;
+    // Mount the normal full SD editor before opening its completion UI.
+    host.inlineActive=false;
+    const desc=host.descs.find(desc=>desc.translations.English?.length&&!desc.isDNT&&desc.translations.English.every(text=>!text.includes('@')));
+    await host.openEditorFile(desc.filepath);host.editorBlocks[0].english='[Physical]';host.editorBlocks[0].translation='[Physical]';
+    host.refreshGamePreview();await host.$nextTick();
+    const input=host.getEditorRef('translation',0);input.focus();host.openHlPopup(0,{focusFilter:false});
+    host.hlPopup.items=host.hlPopup.filtered=[{value:'[Physical]',label:'Physical',kwTagName:'Physical'}];host.hlPopup.selectedIndex=0;
+    await host.$nextTick();
+  });
+  const card=page.locator('.keywordAutocompleteCard');
+  for(const[version,branch]of [['A','default'],['B','default'],['A','default'],['B','alternate'],['B','default']]){
+    await page.evaluate(async({version,branch})=>{selectKeywordScope(version,branch);await fixtureApp.$nextTick();},{version,branch});
+    await page.waitForFunction(({version,branch})=>fixtureApp.keywordAutocomplete?.context.scope.versionId===version
+      &&fixtureApp.keywordAutocomplete?.context.scope.branchId===branch,{version,branch});
+    assert.equal(await card.locator('.keywordPreviewTitle').innerText(),version+'/'+branch,'Same-baseline SD release/branch changes refresh the visible keyword card');
+  }
+  await page.evaluate(async()=>{window.keywordScopeGated=true;selectKeywordScope('A','pending');await fixtureApp.$nextTick();});
+  await page.waitForFunction(()=>keywordScopeGates.length===1);
+  await page.evaluate(async()=>{selectKeywordScope('B','pending');await fixtureApp.$nextTick();});
+  await page.waitForFunction(()=>keywordScopeGates.length===2);
+  await page.evaluate(async()=>{selectKeywordScope('A','pending');await fixtureApp.$nextTick();});
+  await page.waitForFunction(()=>keywordScopeGates.length===3);
+  for(const[index,label]of [[0,'Stale A'],[1,'Stale B']]){
+    await page.evaluate(({index,label})=>keywordScopeGates[index].resolve(keywordScopeUnits(label)),{index,label});await settle(page);
+    assert.equal(await card.count(),0,'A late prior-release request cannot publish into the repeated current release');
+  }
+  await page.evaluate(()=>keywordScopeGates[2].resolve(keywordScopeUnits('Fresh A')));
+  await page.waitForFunction(()=>fixtureApp.keywordAutocomplete?.title[0]?.text==='Fresh A');
+  await page.screenshot({path:join(folder,'sd-release-isolation.png')});
+  const rejected=await page.evaluate(async()=>{
+    window.keywordScopeGated=false;window.keywordScopeWrongGame=true;selectKeywordScope('Foreign');await fixtureApp.$nextTick();
+    const result=await EditorReferenceCatalog.create(fixtureApp).load(keywordScopeFixture,'Thai');await fixtureApp.$nextTick();
+    return{errors:result.errors,foreignSources:result.sources.filter(source=>source.mode==='clienttext').length,
+      entries:KeywordPopups.snapshot(fixtureApp,result.sources,true).entries.size};
+  });
+  assert.equal(rejected.foreignSources,0);assert.equal(rejected.entries,0);assert.match(rejected.errors[0],/PoE2 workbook/);
+  assert.equal(await card.count(),0,'Foreign cached units cannot populate SD autocomplete');
+  console.log(JSON.stringify({reviewScopeIsolation:'PASS',sameBaselineTransitions:5,pendingABARequests:3,wrongGameCacheRejected:true}));
+}
+
 (async () => {
   let browser;
   try {
@@ -465,6 +530,7 @@ async function checkAutocomplete(page, ct, label) {
     await page.setViewportSize({ width: 700, height: 350 }); await settle(page);
     const long = await windows.first().evaluate(node => ({ bottom: node.getBoundingClientRect().bottom, scrollable: node.scrollHeight > node.clientHeight }));
     assert.ok(long.bottom <= 342 && long.scrollable, 'tall pinned card stays within resized viewport and scrolls');
+    await checkReferenceScopeIsolation(page);
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ browser: executablePath, checks: 'nested pointer-down/up traces without parent activation, canceled keyword release, blank header dragging, active/inactive alpha, outside focus clear and focused Escape; autocomplete SD/ClientText inline/full: translated details below TL Note, pointer/keyboard selection, caret, Enter/ClientText Tab, typing/filtering, partial data, nested pins; trigger-only immediate dismissal, keyword-only pinning, card click raise/focus without pin, pinned root/nested pointer paths, hover blocking over cards and previews, captured header dragging of pinned cards and clamping, nested edge placement, translation/source, pin/close/focus/z-order, Escape isolation, file/game/language/source lifetime, SD and ClientText inline/full, safe markup, all themes, viewport bounds', screenshots: folder }));
   } finally {

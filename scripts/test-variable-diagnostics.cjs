@@ -1286,7 +1286,7 @@ test('a reused preview anchor opens a new window for a new file without retarget
 
 test('late reference lookup cannot publish a popup after the selected file changes', async () => {
   const { editor, context } = loadEditor(); let resolve;
-  context.window.EditorReferenceCatalog = { sessionFor: () => ({}), create: () => ({ load: () => new Promise(done => { resolve = done; }) }) };
+  context.window.EditorReferenceCatalog = { sessionFor: () => ({}), contextKey: () => '', create: () => ({ load: () => new Promise(done => { resolve = done; }) }) };
   editor.editorCurrentEditingDesc = { filepath: 'first.txt' };
   const pending = editor.previewKeywordEnter({ currentTarget: { isConnected: true } }, { tagName: 'Tag' }, false);
   editor.editorCurrentEditingDesc = { filepath: 'second.txt' }; resolve({ sources: [] });

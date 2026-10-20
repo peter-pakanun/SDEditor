@@ -3,6 +3,24 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const State=require('../public/clientTextState.js');
 const browser={ClientTextState:State};vm.runInNewContext(fs.readFileSync(require.resolve('../public/keywordPopups.js'),'utf8'),{window:browser});
 const Popup=browser.KeywordPopups;
+
+test('identical KeywordPopups IDs remain isolated by game, account, branch, language and release',()=>{
+ const {host}=fixture(),scope={...host.ctWorkspace.scope,branchId:'default',versionId:'release'};
+ host.ctWorkspace.scope=scope;
+ const source=(changes,title)=>({scope:{...scope,...changes},units:[row('Example',title,'body')],saved:{}});
+ const wrong=[source({game:'poe1'},'other game'),source({accountId:'other'},'other account'),source({branchId:'other'},'other branch'),
+  source({versionId:'old'},'old release'),source({language:'German'},'other language'),{scope:{},units:[row('Example','unscoped','body')]}];
+ assert.equal(Popup.snapshot(host,wrong,true).entries.size,0);
+ const own=source({},'own');
+ assert.equal(Popup.snapshot(host,[...wrong,own],false).entries.get('Example').title,'English own');
+ host.ctWorkspace.scope={...scope,game:'poe1'};
+ const poe1=source({game:'poe1'},'one');
+ assert.equal(Popup.snapshot(host,[own,poe1],false).entries.get('Example').title,'English one');
+ host.ctValues={'Info Title':'Unsaved active draft'};
+ assert.equal(Popup.snapshot(host,[source({game:'poe1',groupId:'sibling'},'sibling')],true).entries.get('Example').title,'Target sibling',
+  'An identical unit ID in a sibling group cannot receive the active draft');
+ assert.equal(Popup.snapshot(host,[poe1],true).entries.get('Example').title,'Unsaved active draft');
+});
 const field=(id,source,target)=>({id,name:id,kind:'text',source,target});
 const row=(id,title,body)=>({id:'unit-'+id,role:'normal',sheet:'KeywordPopups',recordId:id,fields:[field('Info Title','English '+title,'Target '+title),field('Info Content','English '+body,'Target '+body)]});
 function fixture(){const units=[row('Example','heading','body [Nested]'),row('Nested','nested heading','nested body')];

@@ -1583,12 +1583,13 @@
                                 {responseType:'blob',timeout:180000,signal,onDownloadProgress:(completed,total)=>{if(!guard())return;report({completed,total,unit:'bytes',workbook:name});reportProgress({phase:'Downloading original',completed,total,workbook:name,sheet:''});}});check();return result;
                         },initialization);
                         const parsed=await this.ctInitializationStep('Parsing original: '+name,async report=>{
-                            const result=await worker.parseWorkbook(await blob.arrayBuffer(),{filename:name,role:descriptor.role,language:scope.language,parserVersion:descriptor.parserVersion || 'clienttext-v1',signal,
+                            const result=await worker.parseWorkbook(await blob.arrayBuffer(),{filename:name,role:descriptor.role,language:scope.language,game:scope.game,parserVersion:descriptor.parserVersion || 'clienttext-v1',signal,
                                 onProgress:progress=>{if(!guard())return;const detail={...progress,completed:progress.completed ?? progress.processed,workbook:name};report(detail);reportProgress(detail);}});check();return result;
                         },initialization);
                         if(hash && parsed.artifactHash!==hash)throw new Error('The original workbook hash differs from its published descriptor.');
                         originals=parsed.units;asset={role:descriptor.role,blob,hash:parsed.artifactHash,name:parsed.filename,parserVersion:parsed.parserVersion,parsed:{...parsed,units:undefined},descriptor:full.assets[index]?.descriptor || descriptor};
                     }
+                    root.ClientTextCodec?.assertGame({sheets:asset.parsed?.sheets,units:originals},scope.game);
                     if(Number.isSafeInteger(descriptor.unitCount) && originals.length!==descriptor.unitCount)throw new Error('Workbook record count differs from the accepted descriptor.');
                     for(const unit of originals)units.push(unit);assets.push(asset);check();
                 }
@@ -1645,6 +1646,7 @@
                         const result=await Promise.all([store.getUnits(scope,{guard:current,onProgress:progress=>report({...progress,completed:progress.completed ?? progress.processed})}), store.getSaved(scope,{guard:current}),store.getDraftSummaries?.(scope,{guard:current})]);check();return result;
                     },initialization);
                     check();
+                    root.ClientTextCodec?.assertGame({units},scope.game);
                     this.ctUnits = raw(units); this._ctUnitIndex = raw(new Map(units.map(unit => [unit.id, unit]))); this.ctSaved = raw(saved);this.ctDraftSummaries=raw(drafts || []); this.ctRevision++;
                     const visibleUnits=units.filter(unit=>this.ctFieldsFor(unit).length);
                     this._ctSheets = raw([...new Set(visibleUnits.map(unit=>JSON.stringify([unit.role,unit.sheet])))].map(key=>({key,role:JSON.parse(key)[0],name:JSON.parse(key)[1]})));
@@ -3071,8 +3073,7 @@
                         candidates.sort((a,b)=>required.indexOf(a.role)-required.indexOf(b.role));
                         const units = [], assets = [];
                         for (const candidate of candidates) {
-                            // ClientText filenames are optional naming hints.
-                            // The selected release supplies the game scope.
+                            // Internal workbook markers must agree with the selected game.
                             const bytes = await candidate.file.arrayBuffer();
                             // A browser File can retain a path-backed reference.
                             // Own the verified bytes before the user moves or
@@ -3080,9 +3081,10 @@
                             const originalBlob = new Blob([bytes], { type: candidate.file.type });
                             this.ctReport({phase:'Checking reusable original',workbook:candidate.file.name,sheet:'',completed:0,total:null});
                             const hash=await this.ctOriginalHash(bytes),cached=this.ctUploadTest ? null : await this._ctStore.getCachedOriginal?.(hash,root.ClientTextState.PARSER_VERSION,candidate.role,{guard:()=>key===this.managedCatalogScope && !this._ctAbort.signal.aborted});
-                            if(cached){for(const unit of cached.units)units.push(unit);assets.push({...cached.asset,role:candidate.role,blob:originalBlob,name:candidate.file.name,hash});}
+                            if(cached){root.ClientTextCodec?.assertGame({sheets:cached.asset.parsed?.sheets,units:cached.units},this.gameVersion);for(const unit of cached.units)units.push(unit);assets.push({...cached.asset,role:candidate.role,blob:originalBlob,name:candidate.file.name,hash});}
                             else{
-                                const parsed = await this._ctWorker.parseWorkbook(bytes, { filename: candidate.file.name, role: candidate.role, language, signal: this._ctAbort.signal, onProgress: progress => this.ctReport({...progress,workbook:candidate.file.name}) });
+                                const parsed = await this._ctWorker.parseWorkbook(bytes, { filename: candidate.file.name, role: candidate.role, language, game:this.gameVersion, signal: this._ctAbort.signal, onProgress: progress => this.ctReport({...progress,workbook:candidate.file.name}) });
+                                root.ClientTextCodec?.assertGame(parsed,this.gameVersion);
                                 if(parsed.artifactHash!==hash)throw new Error('Workbook original changed while preparing the selected file.');
                                 for(const unit of parsed.units)units.push(unit);
                                 assets.push({ role: candidate.role, blob: originalBlob, name: candidate.file.name, hash,parserVersion:parsed.parserVersion, parsed: { ...parsed, units: undefined } });

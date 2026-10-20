@@ -2,6 +2,15 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
 const Audio=require('../public/clientTextAudio.js');
+test('PoE1 workbook audio hints cannot use the PoE2-only provider',async()=>{
+    assert.deepEqual(Audio.clipsFor(unit(),'poe1'),[]);
+    assert.equal(Audio.clipsFor(unit(),'poe2').length,1);
+    const {app,calls}=harness();
+    app.host.ctWorkspace.scope.game='poe1';
+    assert.equal(app.clips.length,0);
+    await app.play(0);
+    assert.equal(calls.media.length,0);
+});
 const first='4.0/NPC/Part1/Act1/Una/Una_01A.ogg';
 const second='4.0/NPC/Tujen/Tujen_A4_Intro_SkippedAlvaRog_01=StrDex4.ogg';
 const unit=(audio=first,sheet='NPCTextAudio')=>({id:'una',sheet,metadata:{'Audio File':audio}});

@@ -23,6 +23,7 @@ if (!executablePath) throw new Error('No installed Edge/Chrome found; set FIXTUR
 const realNpcWorkbooks = process.argv.includes('--npc-real-workbooks') || process.argv.includes('--convo-real-workbooks');
 const realHistoryWorkbooks = process.argv.includes('--history-real-workbooks');
 const realHintWorkbook = process.argv.includes('--hint-real-workbook');
+const realPoe1Workbook = process.argv.includes('--poe1-real-workbook');
 const realWorkbookFolder = process.env.CLIENTTEXT_NPC_WORKBOOK_FOLDER || 'C:/Users/lpeac/Downloads/2026-10-13_POE2';
 const hintWorkbookPath = process.env.CLIENTTEXT_HINT_WORKBOOK || 'C:/Users/lpeac/Downloads/2026-10-15_POE2/Thai_with_hint.xlsx';
 const screenshotFolder = process.env.CLIENTTEXT_NPC_SCREENSHOT_FOLDER || 'C:/Users/lpeac/.codex/visualizations/2026/10/14/01a1388c-f446-7330-ab32-353def01f2d9';
@@ -462,7 +463,7 @@ async function run() {
             await page.waitForFunction(() => {
                 const vm = window.__offlineTestApp;
                 return !vm.ctUploading && !vm.ctBusy && !vm.workspaceInitializationActive && (vm.ctActive || vm.ctUploadError);
-            }, null, { timeout: realNpcWorkbooks || realHistoryWorkbooks || realHintWorkbook ? 180000 : 30000 });
+            }, null, { timeout: realNpcWorkbooks || realHistoryWorkbooks || realHintWorkbook || realPoe1Workbook ? 180000 : 30000 });
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctUploadError), '', 'One Open click prepares and validates the workbooks');
             assert.equal(await page.evaluate(() => window.__offlineTestApp.ctActive), true, 'Prepared test sheet opens successfully');
             await workspace.waitFor();
@@ -1463,6 +1464,45 @@ async function run() {
             }
             for (const filename of filenames) assert.equal(checksum(join(realWorkbookFolder, filename)), originalHashes[filename], 'Supplied ' + filename + ' checksum remains unchanged');
             results.push({ screenshots: ['npc-browse-renly.png', 'npc-conversation-renly.png', 'convo-browse-doryani.png', 'convo-editor-doryani.png'].map(filename => join(screenshotFolder, filename)), originalWorkbookSha256: originalHashes });
+        }
+        if(realPoe1Workbook){
+            const filename=process.env.CLIENTTEXT_POE1_WORKBOOK || 'C:/Users/lpeac/Downloads/2026-10-19_POE1/Thai_PoE1.xlsm',before=checksum(filename);
+            await monitor(page,false);await bootstrap('guest','Thai');
+            await page.evaluate(async()=>{await window.__offlineTestApp.selectGameVersion('poe1');});
+            await page.waitForFunction(()=>window.__offlineTestApp.gameVersion==='poe1'&&!window.__offlineTestApp.versionStorageLoading);
+            await page.evaluate(async()=>{const vm=window.__offlineTestApp;if(vm.lang!=='Thai'){vm.lang='Thai';await vm.saveSettings();await vm._cloudLanguageSwitch;}await vm.$nextTick();await vm._cloud.localQueue;});
+            await page.waitForTimeout(500);
+            await monitor(page,true);
+            await openTest([{name:'Thai_PoE1.xlsm',buffer:readFileSync(filename)}]);
+            await page.evaluate(async()=>{const vm=window.__offlineTestApp;await vm.ctSelect(vm.ctUnits.find(unit=>unit.sheet==='KeywordPopups'),true);});
+            await workspace.getByRole('textbox',{name:'Info Content',exact:true}).fill('PoE1 browser regression');
+            await workspace.getByRole('button',{name:'Save',exact:true}).click();
+            await page.waitForFunction(()=>!window.__offlineTestApp.ctBusy);
+            const info=await page.evaluate(async()=>{
+                const vm=window.__offlineTestApp;
+                const keyword=vm.ctUnits.find(unit=>unit.sheet==='KeywordPopups'),mods=vm.ctUnits.find(unit=>unit.sheet==='Mods');
+                const field=keyword.fields.find(field=>field.name==='Info Content');
+                const context=await vm.keywordContext(true),saved=context.entries.get(keyword.recordId)?.content;
+                const wrong=KeywordPopups.snapshot(vm,[{scope:{...vm.ctWorkspace.scope,game:'poe2'},units:[keyword],saved:vm.ctSaved}],true);
+                return{game:vm.ctWorkspace.scope.game,units:vm.ctUnits.length,sheets:vm.ctSheets.length,modsTarget:mods.fields[0].targetCell,
+                    saved,isolated:wrong.entries.size===0,skillCard:!!vm.ctSkillContextKey,audio:ClientTextAudio.clipsFor(keyword,'poe1').length,
+                    stored:(await vm.ctStorage(vm.ctWorkspace.scope).getSaved(vm.ctWorkspace.scope))[keyword.id]?.values[field.id]};
+            });
+            assert.equal(info.game,'poe1');assert.equal(info.units,146929);assert.equal(info.sheets,245);
+            assert.match(info.modsTarget,/^E\d+$/);assert.equal(info.saved,'PoE1 browser regression');assert.equal(info.stored,info.saved);assert.equal(info.isolated,true);
+            assert.equal(info.skillCard,false);assert.equal(info.audio,0);
+            const download=page.waitForEvent('download');await page.evaluate(()=>window.__offlineTestApp.ctDownload());
+            const exported=await download;const exportedPath=await exported.path();
+            const parsed=await Codec.parseWorkbook(readFileSync(exportedPath),{filename:exported.suggestedFilename(),game:'poe1'});
+            assert.ok(parsed.units.some(unit=>unit.sheet==='KeywordPopups'&&unit.fields.some(field=>field.target===info.saved)));
+            await closeExportDialog(page);
+            await page.screenshot({path:join(disposableFolder,'poe1-keyword-editor.png')});
+            assert.equal(checksum(filename),before,'Actual PoE1 sample remains unchanged');
+            await assertLocal(page,'PoE1 actual workbook import/save/export');
+            await monitor(page,false);await workspace.getByRole('button',{name:'Close',exact:true}).click();
+            await page.waitForFunction(()=>!window.__offlineTestApp.ctEditor);
+            await workspace.getByRole('button',{name:'Versions',exact:true}).click();
+            results.push({name:'Actual PoE1 import, shifted Mods layout, full KeywordPopups edit/save/export and cross-game isolation',...info,originalHash:before});
         }
         for (const version of [null, { id: 'fixture-normal-version', name: 'Existing fixture version' }]) {
             // Inspect the ordinary importer without beginning a publication or

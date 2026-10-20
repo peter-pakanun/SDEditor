@@ -3,10 +3,10 @@
  * session cache; they need preparation again after a reload. ClientText uses its
  * existing verified original cache, without publishing or staging translations. */
 (function (root, factory) {
-  const api = factory(root);
+  const api = factory(root, typeof module === 'object' && module.exports ? require('./clientTextCodec.js') : null);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.EditorReferenceCatalog = api;
-})(typeof window === 'object' ? window : globalThis, function (root) {
+})(typeof window === 'object' ? window : globalThis, function (root, Codec) {
   'use strict';
   const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
   const mode = group => group?.contentMode === 'clienttext' ? 'clienttext' : 'statdescription';
@@ -74,19 +74,31 @@
       language, descs: host.descs || [], workspace: host.localDescs };
   }
   function create(host) {
-    let retainedContext = '', prepared = new Map();
+    let retainedContext = '', prepared = new Map(), generation = 0;
+    function validate(source) {
+      if (source.mode !== 'clienttext') return;
+      const codec = Codec || root.ClientTextCodec;
+      if (!codec?.assertGame) throw new Error('ClientText workbook validation is unavailable. Reload the editor.');
+      codec.assertGame({ units: source.units }, source.scope.game);
+    }
     async function load(session, language, options = {}) {
       const key = contextKey(host, session), client = host._cloud;
-      const current = () => !options.signal?.aborted && key === contextKey(host) && (!options.current || options.current());
+      const matches = () => !options.signal?.aborted && key === contextKey(host) && (!options.current || options.current());
+      if (!matches()) throw abort();
+      if (retainedContext !== key) { prepared.clear(); retainedContext = key; generation++; }
+      const captured = generation;
+      const current = () => captured === generation && matches();
       const check = () => { if (!current()) throw abort(); };
       check();
       if (session.version && (session.version.game && session.version.game !== session.scope?.game
         || (session.version.branchId || 'default') !== (session.scope?.branchId || 'default')))
         throw new Error('Reference groups belong to another game or branch.');
-      if (retainedContext !== key) { prepared.clear(); retainedContext = key; }
       const groups = groupsFor(host, session), sources = [], missing = [], errors = [];
       const active = activeSource(host, session, language);
-      if (active && (!host.cloudSignedIn || host.cloudCanAccessAllLanguages || language === host.cloudUser?.language || !groups.length)) sources.push(active);
+      if (active && (!host.cloudSignedIn || host.cloudCanAccessAllLanguages || language === host.cloudUser?.language || !groups.length)) {
+        try { validate(active); sources.push(active); }
+        catch (error) { missing.push({ id: active.groupId, label: active.groupLabel, mode: active.mode }); errors.push(active.groupLabel + ': ' + error.message); }
+      }
       for (const candidate of groups) {
         if (!allowsLanguage(host, candidate, language)) continue;
         if (active && candidate.id === active.groupId) continue;
@@ -154,9 +166,13 @@
               prepared.set(preparedKey(scope), cached);
             }
           }
-          if (cached) sources.push(cached); else missing.push({ id: group.id, label: label(group), mode: mode(group) });
+          if (cached) { validate(cached); sources.push(cached); }
+          else missing.push({ id: group.id, label: label(group), mode: mode(group) });
         } catch (error) {
           check();
+          // Drop only the derived session index. The original cached workbook,
+          // Saved values and history remain available for explicit recovery.
+          prepared.delete(preparedKey(scope));
           missing.push({ id: group.id, label: label(group), mode: mode(group) });
           errors.push(label(group) + ': ' + error.message);
         }
@@ -177,7 +193,7 @@
       check();
       return { sources, groups: groups.map(group => ({ id: group.id, label: label(group), mode: mode(group) })), missing, errors };
     }
-    return { load, dispose() { prepared.clear(); retainedContext = ''; } };
+    return { load, dispose() { generation++; prepared.clear(); retainedContext = ''; } };
   }
   return { create, sessionFor, contextKey, scopeKey, groupsFor, groupScope, activeSource };
 });

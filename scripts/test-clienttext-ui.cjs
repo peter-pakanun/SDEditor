@@ -7,7 +7,7 @@ const clone=value=>structuredClone(value),settle=async()=>{for(let i=0;i<8;i++)a
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};};
 function harness(changes={}){
     let nextId=0;
-    const window={ClientTextExportProgress:require('../public/clientTextExportProgress.js'),ClientTextState:S,ClientTextStore:Store,TranslationDiagnostics:require('../public/translationDiagnostics.js'),
+    const window={ClientTextCodec:require('../public/clientTextCodec.js'),ClientTextExportProgress:require('../public/clientTextExportProgress.js'),ClientTextState:S,ClientTextStore:Store,TranslationDiagnostics:require('../public/translationDiagnostics.js'),
         ClientTextNpcIndex:require('../public/clientTextNpcIndex.js'),
         ClientTextConvoIndex:require('../public/clientTextConvoIndex.js'),
         ClientTextIdentities:require('../public/clientTextIdentities.js'),
@@ -3578,7 +3578,7 @@ function uploadPreparationHarness(names,game='poe2'){
     h.app.ctReport=()=>{};
     h.app._ctWorker={
         async parseWorkbook(bytes,options){
-            parseCalls.push({bytes:Buffer.from(bytes).toString('utf8'),filename:options.filename,role:options.role,language:options.language,signal:options.signal});
+            parseCalls.push({bytes:Buffer.from(bytes).toString('utf8'),filename:options.filename,role:options.role,language:options.language,game:options.game,signal:options.signal});
             const original={...unit(),role:options.role,id:JSON.stringify([options.role,'ClientStrings','ID/1'])},artifactHash=S.sha256(bytes);
             return{units:[original],artifactHash,assetHash:artifactHash,sheets:[{name:'ClientStrings',headers:[]}],warnings:[]};
         },
@@ -3600,6 +3600,18 @@ test('workbook preparation retains owned byte snapshots after selected files bec
         const snapshot=app.ctPrepared[0].assets[0].blob;
         assert.notEqual(snapshot,files[0]);assert.equal(Buffer.from(await snapshot.arrayBuffer()).toString(),'Exact original bytes: Thai.xlsx');
         assert.equal(S.sha256(await snapshot.arrayBuffer()),app.ctPrepared[0].assets[0].hash);
+    }
+});
+
+test('fresh and cached workbook preparation reject internal markers from the other game before descriptors or carry requests',async()=>{
+    for(const game of ['poe1','poe2'])for(const cached of [false,true]){
+        const h=uploadPreparationHarness(['Thai.xlsx'],game),{app,parseCalls,manifestCalls,requests}=h;
+        const foreign={...unit(),sheet:'Characters',recordId:game==='poe1'?'Metadata/Characters/Str/StrFour':'Metadata/Characters/Str/Str'};
+        if(cached)app._ctStore={async getCachedOriginal(){return{units:[foreign],asset:{parsed:{}}};}};
+        else{const parse=app._ctWorker.parseWorkbook;app._ctWorker.parseWorkbook=async(bytes,options)=>({...await parse(bytes,options),units:[foreign]});}
+        await app.ctPrepareUpload();assert.match(app.ctUploadError,/workbook\. Select that game/);
+        assert.equal(app.ctPrepared.length,0);assert.equal(manifestCalls.length,0);assert.equal(requests.length,0);
+        if(!cached)assert.equal(parseCalls[0].game,game);
     }
 });
 
@@ -3740,6 +3752,25 @@ function initializationHarness(changes={}){
     h.app.ctFlushDraft=async()=>true;h.app.ctFlushCommentDraft=async()=>{};h.app.ctRefreshLayout=()=>{};h.app.ctLoadMemory=async()=>{};
     return h;
 }
+test('activation rejects internally wrong-game units from an old workspace cache before publishing them',async()=>{
+    for(const game of ['poe1','poe2']){
+        const foreign={...unit(),sheet:'Characters',recordId:game==='poe1'?'Metadata/Characters/Int/IntFour':'Metadata/Characters/Int/Int'};
+        const store={async getUnits(){return[foreign];},async getSaved(){return{};},async getDraftSummaries(){return[];}};
+        const {app}=initializationHarness({gameVersion:game,_ctStore:store});let prepared=0;app.ensureDictionarySnapshot=async()=>prepared++;
+        assert.equal(await app.ctActivate({...scope,game},{}),false);assert.match(app.ctError,/workbook\. Select that game/);
+        assert.equal(prepared,0);assert.equal(app.ctUnits.includes(foreign),false);assert.equal(app.ctActive,false);
+    }
+});
+
+test('group preparation rejects a wrong-game reusable original before importing its workspace',async()=>{
+    let imported=false;
+    const foreign={...unit(),sheet:'Characters',recordId:'Metadata/Characters/Str/Str'};
+    const {app}=initializationHarness({_ctStore:{async getCachedOriginal(){return{units:[foreign],asset:{parsed:{sheets:[]}}};},async import(){imported=true;}}});
+    await assert.rejects(app.ctCacheGroup({game:'poe2'},{assets:[{role:'normal',assetHash:'a'.repeat(64),unitCount:1,parserVersion:S.PARSER_VERSION}]},scope),
+        {code:'CLIENTTEXT_GAME_MISMATCH'});
+    assert.equal(imported,false);
+});
+
 test('cached ClientText opening uses the shared initialization owner and skips workbook parsing and downloads',async()=>{
     const f=fixture(),original=unit();await f.store.import(scope,{units:[original],assets:[asset]});
     const {app}=initializationHarness({_ctStore:f.store,ctSheetFilter:'previous workspace sheet query'}),dictionary=[];

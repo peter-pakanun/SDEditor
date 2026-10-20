@@ -236,6 +236,16 @@ async function run() {
         const filter = page.getByRole('searchbox', {name:'Filter sheets'});
         const tooltip = page.getByRole('tooltip');
         if(process.argv.includes('--sheet-colours-only')){
+            const display = locator => locator.evaluate(element=>{
+                const pixels=value=>{const canvas=document.createElement('canvas');canvas.width=canvas.height=1;const ctx=canvas.getContext('2d');ctx.fillStyle=value;ctx.fillRect(0,0,1,1);return [...ctx.getImageData(0,0,1,1).data];};
+                const over=(fg,bg)=>fg.slice(0,3).map((channel,index)=>channel*fg[3]/255+bg[index]*(1-fg[3]/255));
+                const ancestors=[];for(let current=element;current;current=current.parentElement)ancestors.unshift(current);
+                const background=ancestors.reduce((bg,current)=>over(pixels(getComputedStyle(current).backgroundColor),bg),[255,255,255]);
+                const style=getComputedStyle(element),foreground=over(pixels(style.color),background);
+                const luminance=rgb=>rgb.slice(0,3).map(channel=>{channel/=255;return channel<=.04045?channel/12.92:((channel+.055)/1.055)**2.4;}).reduce((sum,value,index)=>sum+value*[.2126,.7152,.0722][index],0);
+                const bg=luminance(background),contrast=rgb=>{const fg=luminance(rgb);return (Math.max(fg,bg)+.05)/(Math.min(fg,bg)+.05);};
+                return {background,backgroundColor:style.backgroundColor,color:style.color,contrast:contrast(foreground),accentContrast:contrast(pixels(style.getPropertyValue('--ui-accent'))),shadow:style.boxShadow,outline:style.outlineStyle,focusVisible:element.matches(':focus-visible')};
+            });
             for(const theme of ['light','grey','dark','modern-dark'])for(const width of [1440,1100]){
                 await page.setViewportSize({width,height:900});
                 await page.evaluate(theme=>{
@@ -270,10 +280,57 @@ async function run() {
                 assert.notEqual(styles.grey.background,styles.neutral.background,name+': explicit grey background differs from no colour');
                 assert.notEqual(styles.grey.border,styles.neutral.border,name+': explicit grey border differs from no colour');
                 assert.ok(styles.contrast>=4.5,name+': grey text remains readable');
+                const purple=nav.getByRole('button',{name:'Revised',exact:true}),stateStyles=[];
+                for(const button of [purple,grey]){
+                    const normal=await display(button);assert.ok(normal.contrast>=4.5,name+': status button contrast');
+                    await button.hover();const hover=await display(button);
+                    assert.deepEqual(hover.background,normal.background,name+': hover retains status fill');
+                    assert.notEqual(hover.shadow,'none',name+': hover stays visible');
+                    await button.click();await settle();
+                    assert.equal(await button.getAttribute('aria-pressed'),'true');
+                    assert.notEqual((await display(button)).shadow,'none',name+': active status keeps selection edge');
+                    await page.keyboard.press('Tab');await page.keyboard.press('Shift+Tab');
+                    const focus=await display(button);assert.equal(focus.focusVisible,true,name+': keyboard focus');
+                    assert.notEqual(focus.outline,'none',name+': keyboard outline');
+                    assert.ok(focus.contrast>=4.5,name+': focused button contrast');
+                    assert.ok(focus.accentContrast>=3,name+': selection edge contrast');
+                    stateStyles.push({label:await button.textContent(),normal,hover,focus});
+                }
                 await grey.click();await settle();assert.equal(await grey.getAttribute('aria-pressed'),'true');
                 assert.notEqual(await grey.evaluate(element=>getComputedStyle(element).boxShadow),'none',name+': selection remains visible on grey');
-                if(width===1440){const path=join(fixtureArtifacts,'sheet-colours-'+theme+'.png');await nav.screenshot({path});screenshots.push(path);}
-                results.push({name,styles});
+                await nav.getByRole('button',{name:'All sheets',exact:true}).click();await settle();
+                await page.mouse.move(width-5,895);
+                if(width===1440){const path=join(fixtureArtifacts,'sheet-colours-'+theme+'.png');await page.screenshot({path});screenshots.push(path);}
+                const row=page.locator('.ctTable > tbody > tr').filter({has:page.locator('.fileRevisedLabel')}),cell=row.locator('td').first(),normal=await display(cell);
+                // Both stripes and the stronger fill must retain every piece of row text.
+                for(const text of [cell,row.locator('.fileOpenButton'),row.locator('.ctFilePath'),row.locator('.fileRevisedLabel'),row.locator('.inlineReadText').first()]){
+                    const style=await display(text);assert.ok(style.contrast>=4.5,name+': revised row text contrast '+JSON.stringify(style));
+                }
+                await row.evaluate(element=>{const stripe=document.createElement('tr');stripe.dataset.statusStripeFixture='';element.before(stripe);});await settle();
+                assert.deepEqual((await display(cell)).background,normal.background,name+': odd and even revised fill');
+                await page.locator('[data-status-stripe-fixture]').evaluate(element=>element.remove());
+                await row.hover();assert.notEqual((await display(cell)).shadow,'none',name+': row hover edge');
+                await row.click();await settle();await row.focus();
+                assert.equal(await row.getAttribute('aria-selected'),'true');
+                assert.notEqual((await display(cell)).shadow,'none',name+': selected row edge');
+                // Force keyboard modality before checking the native row focus ring.
+                await page.keyboard.press('Tab');await row.focus();
+                assert.notEqual((await display(row)).outline,'none',name+': row keyboard focus ring');
+                assert.ok((await display(cell)).accentContrast>=3,name+': row selection edge contrast');
+                assert.deepEqual((await display(cell)).background,normal.background,name+': row interactions retain purple');
+                if(width===1440){const path=join(fixtureArtifacts,'sheet-colours-focused-'+theme+'.png');await page.screenshot({path});screenshots.push(path);}
+                // Synthetic overlapping CSS states preserve Missing/Outdated and diagnostic precedence.
+                for(const flag of ['isOutdated','isMissing','diagnosticWarning','diagnosticError']){
+                    await row.evaluate((element,flag)=>element.classList.add(flag),flag);
+                    const combined=await display(cell);
+                    assert.notDeepEqual(combined.background,normal.background,name+': '+flag+' wins over revised');
+                    for(const text of [row.locator('.fileOpenButton'),row.locator('.ctFilePath'),row.locator('.fileRevisedLabel')])assert.ok((await display(text)).contrast>=4.5,name+': '+flag+' mixed row text contrast');
+                    await row.evaluate(element=>element.classList.remove('isRevised'));
+                    assert.equal((await display(cell)).backgroundColor,combined.backgroundColor,name+': '+flag+' has its unchanged higher-priority fill');
+                    await row.evaluate(element=>element.classList.add('isRevised'));
+                    await row.evaluate((element,flag)=>element.classList.remove(flag),flag);
+                }
+                results.push({name,styles,stateStyles,revised:normal});
             }
             assert.deepEqual(errors,[],'No browser errors');console.log(JSON.stringify({status:'PASS',passed:results.length,screenshots,results},null,2));return;
         }

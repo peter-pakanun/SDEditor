@@ -10,7 +10,7 @@ const sd = (text = 'Blade damage', target = 'Saved blade') => ({ filepath: 'same
 const unit = (target = 'Original') => ({ id: '["normal","Sheet","same"]', role: 'normal', sheet: 'Sheet', recordId: 'same',
   developerNotes: 'Developer note', fields: [{ id: 'Text', name: 'Text', kind: 'text', source: 'Blade damage', target }] });
 function harness(options = {}) {
-  const window = { ContentAdapters: require('../public/contentAdapters.js'), ...options.window };
+  const window = { ClientTextCodec: require('../public/clientTextCodec.js'), ContentAdapters: require('../public/contentAdapters.js'), ...options.window };
   const context = vm.createContext({ window, AbortController, setTimeout, clearTimeout });
   for (const name of ['editorReferenceCatalog.js', 'editorLookup.js']) vm.runInContext(fs.readFileSync(path.join(publicDir, name), 'utf8'), context, { filename: name });
   const api = window.EditorLookup;

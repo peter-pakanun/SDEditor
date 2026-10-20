@@ -21,6 +21,31 @@
     const modernLayout = version => version === 'clienttext-v3' || version === 'clienttext-v4';
     const array = value => value === undefined || value === null ? [] : Array.isArray(value) ? value : [value];
     const error = (message, code = 'CLIENTTEXT_INVALID_WORKBOOK') => Object.assign(new Error(message), { code });
+    function detectGame(workbook) {
+        // Use internal identities, never a translated name or a filename. Gender
+        // and partial exports may contain no game evidence; their chosen release
+        // remains authoritative. Do not guess from overlapping sheet names.
+        const games = new Set(), sheets = new Set((workbook.sheets || []).map(sheet => sheet.name));
+        for (const unit of workbook.units || []) {
+            sheets.add(unit.sheet);
+            if (unit.sheet !== 'Characters') continue;
+            if (/^Metadata\/Characters\/(Str|Int|Dex|StrDex|DexInt|StrInt|StrDexInt)\/\1$/.test(unit.recordId)) games.add('poe1');
+            if (/^Metadata\/Characters\/(Str|Int|Dex|StrDex|DexInt|StrInt)\/\1Fourb?$/.test(unit.recordId)) games.add('poe2');
+        }
+        // Corroborated full-export table signatures also cover retained caches
+        // whose parsed metadata omits the unit array.
+        if (sheets.has('GrantedEffects') && sheets.has('IndexableSkillGems')) games.add('poe1');
+        if (sheets.has('NPCTalkDialogueTextAudio') && sheets.has('SupportGemFamily')) games.add('poe2');
+        if (games.size > 1) throw error('The workbook contains conflicting PoE1 and PoE2 game markers.', 'CLIENTTEXT_GAME_CONFLICT');
+        return games.values().next().value || null;
+    }
+    function assertGame(workbook, expected) {
+        if (expected !== undefined && !['poe1', 'poe2'].includes(expected)) throw error('Select PoE1 or PoE2 for the workbook.', 'CLIENTTEXT_GAME_MISMATCH');
+        const game = detectGame(workbook);
+        if (game && expected && game !== expected) throw error('This is a ' + (game === 'poe1' ? 'PoE1' : 'PoE2')
+            + ' workbook. Select that game before preparing or opening it.', 'CLIENTTEXT_GAME_MISMATCH');
+        return game;
+    }
     function parserVersion(value) {
         if (!PARSER_VERSIONS.includes(value)) throw error('Unsupported ClientText parser version: ' + value + '.', 'CLIENTTEXT_UNSUPPORTED_PARSER');
         return value;
@@ -337,7 +362,9 @@
         }
         const artifactHash = await rawHash(bytes);
         progress({ phase: 'complete', processed: sheets.length, total: sheets.length, percent: 100, sheet: sheets[sheets.length - 1]?.name || '' });
-        return { version: VERSION, parserVersion: version, filename, role, language, artifactHash, assetHash: artifactHash, format: macroEnabled ? 'xlsm' : 'xlsx', sheets, units, warnings };
+        const result = { version: VERSION, parserVersion: version, filename, role, language, artifactHash, assetHash: artifactHash, format: macroEnabled ? 'xlsm' : 'xlsx', sheets, units, warnings };
+        result.game = assertGame(result, options.game);
+        return result;
     }
     function savedRecords(saved) {
         if (saved instanceof Map) return saved;
@@ -544,5 +571,5 @@
         progress({ phase: 'complete', processed: parsed.sheets.length, total: parsed.sheets.length, percent: 100, sheet: '' });
         return result;
     }
-    return { VERSION, PARSER_VERSION, PARSER_VERSIONS, FORMS, CLASS_FORMS, FILLS, parseWorkbook, exportWorkbook };
+    return { VERSION, PARSER_VERSION, PARSER_VERSIONS, FORMS, CLASS_FORMS, FILLS, detectGame, assertGame, parseWorkbook, exportWorkbook };
 });

@@ -23,18 +23,25 @@
   }
   function snapshot(host, sources, translated) {
     const entries = new Map();
+    const selected = host.ctActive ? host.ctWorkspace?.scope || {} : root.EditorReferenceCatalog?.sessionFor(host)?.scope || {game:host.gameVersion};
     let scope = {};
-    for (const source of sources) for (const unit of source.units || []) {
-      if (unit.sheet !== 'KeywordPopups' || unit.role !== 'normal') continue;
-      if (entries.has(unit.recordId)) continue; // Active workbook wins over sibling references.
-      if (!entries.size) scope = source.scope || {};
-      const originalValues = root.ClientTextState.valuesFor(unit, source.saved?.[unit.id]);
-      const values = unit.id === host.ctCurrentUnit?.id && host.ctActive ? { ...originalValues, ...host.ctValues } : originalValues;
-      const read = name => {
-        const field = unit.fields.find(field => field.name === name);
-        return String((translated ? values?.[field?.id] : field?.source) ?? '');
-      };
-      entries.set(unit.recordId, { title: read('Info Title'), content: read('Info Content'), scope: copy(source.scope || {}) });
+    for (const source of sources) {
+      // Defense in depth for stale catalog results and identical tag/unit IDs
+      // in the two games. A sibling may differ in group, but not release scope.
+      if (['game','accountId','branchId','versionId'].some(key => selected[key] && source.scope?.[key] !== selected[key])
+        || selected.language && source.scope?.language !== selected.language) continue;
+      for (const unit of source.units || []) {
+        if (unit.sheet !== 'KeywordPopups' || unit.role !== 'normal') continue;
+        if (entries.has(unit.recordId)) continue; // Active workbook wins over sibling references.
+        if (!entries.size) scope = source.scope || {};
+        const originalValues = root.ClientTextState.valuesFor(unit, source.saved?.[unit.id]);
+        const values = unit.id === host.ctCurrentUnit?.id && host.ctActive && source.scope?.groupId === selected.groupId ? { ...originalValues, ...host.ctValues } : originalValues;
+        const read = name => {
+          const field = unit.fields.find(field => field.name === name);
+          return String((translated ? values?.[field?.id] : field?.source) ?? '');
+        };
+        entries.set(unit.recordId, { title: read('Info Title'), content: read('Info Content'), scope: copy(source.scope || {}) });
+      }
     }
     const language = translated ? host.ctWorkspace?.scope?.language || host.lang : 'English';
     return raw({ entries, language, translated, scope: copy(scope),
@@ -51,8 +58,13 @@
   const mixin = {
     data: () => ({ keywordWindows: [], keywordWindowSequence: 0, keywordAutocomplete: null, keywordActiveId: null }),
     computed: {
+      keywordReferenceKey() {
+        const catalog = root.EditorReferenceCatalog, session = catalog?.sessionFor(this);
+        return session ? catalog.contextKey(this, session) : JSON.stringify([this.ctActive ? this.ctWorkspace?.scope : this.sourceIdentity,
+          this.gameVersion, this.branchId, this.lang, this.cloudUser?.id]);
+      },
       keywordPreviewOrigin() {
-        return JSON.stringify([this.ctActive, this.ctActive ? this.ctWorkspace?.scope : this.sourceIdentity,
+        return JSON.stringify([this.keywordReferenceKey, this.ctActive, this.ctActive ? this.ctWorkspace?.scope : this.sourceIdentity,
           this.gameVersion, this.lang, this.ctActive ? this.ctSelection : this.editorCurrentEditingDesc?.filepath,
           this.cloudUser?.id]);
       },
@@ -76,6 +88,7 @@
       },
     },
     watch: {
+      keywordReferenceKey: { flush: 'sync', handler() { this.fenceKeywordContext(); } },
       keywordPreviewOrigin() {
         this._keywordAnchor = null; this._keywordPointerTarget = null;
         this.dismissKeywordWindows(null);
@@ -154,7 +167,16 @@
       this._keywordCatalog?.dispose();
     },
     methods: {
+      fenceKeywordContext() {
+        this._keywordContextGeneration = (this._keywordContextGeneration || 0) + 1;
+        this._keywordCatalog?.dispose();
+        this._keywordAutocompleteRun = null; this._keywordAutocompleteCache = null;
+        this._keywordAnchor = null; this._keywordPointerTarget = null;
+        this._keywordPress = null; this._keywordClick = null; this._keywordRestoreAnchor = null;
+        this.clearKeywordAutocomplete(); this.dismissKeywordWindows(null);
+      },
       async keywordContext(translated) {
+        const generation = this._keywordContextGeneration || 0, key = this.keywordReferenceKey;
         let sources;
         if (this.ctActive) sources = [{ units: this.ctUnits, saved: this.ctSaved, scope: this.ctWorkspace?.scope }];
         else if (root.EditorReferenceCatalog) {
@@ -165,6 +187,7 @@
             sources = [];
           }
         }
+        if (generation !== (this._keywordContextGeneration || 0) || key !== this.keywordReferenceKey) return null;
         return snapshot(this, sources || [], translated);
       },
       keywordCard(tag, context, extra = {}) {
