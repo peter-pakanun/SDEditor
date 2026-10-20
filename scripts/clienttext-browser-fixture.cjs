@@ -235,6 +235,10 @@ async function run() {
             await target.getByRole('region', { name: 'Source versions' }).waitFor();
         };
         await bootstrap(page, managerAccessOnly ? 'manager' : 'admin');
+        if(process.argv.includes('--english-consistency-only')){
+            await require('./clienttext-english-consistency-browser-check.cjs')({page,api,files,Codec,ClientState,JSZip,failures,directory});
+            return;
+        }
         if(process.argv.includes('--english-http-only')){
             await require('./clienttext-english-http-browser-check.cjs')({page,api,files,Codec,ClientState,failures,directory});
             return;

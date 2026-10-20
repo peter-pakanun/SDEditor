@@ -3553,6 +3553,29 @@ test('completed consistency scans refresh changed rows and their peers without c
     assert.equal(app.ctDiagnostics[unrelated.id],third);
 });
 
+for(const mode of ['ordinary Save','received shared edit'])test('completed consistency scan refreshes a former English approval after '+mode,async()=>{
+    const first=namedUnit('ApprovedConsistency','Power',''),peer=namedUnit('ConsistencyPeer','Power','Peer translation'),unrelated=namedUnit('UnrelatedDiagnostic','Other {0}','Missing variable');
+    const rows=[first,peer,unrelated],f=fixture();await f.store.import(scope,{units:rows,assets:[asset]});
+    await f.store.save(scope,first.id,{jobId:'approved-before-scan',intentProtocol:S.ENGLISH_INTENT_PROTOCOL,values:S.valuesFor(first),reviewed:{[fieldId]:S.sourceHash('Power')},
+        englishActions:{[fieldId]:{action:'set',sourceHash:S.sourceHash('Power')}}},{sync:false});
+    const {app,mixin}=scanHarness(rows,{_ctStore:f.store,ctSaved:await f.store.getSaved(scope),ctValues:S.valuesFor(first),_ctEditRevision:1});
+    app.ctLoadMemory=()=>{};onlyScanChecks(app,'variables','consistency');
+    assert.equal(await app.ctStartScan(),true);assert.equal(app.ctScanWarningFileCount,0);assert.equal(app.ctScanErrorFileCount,1);
+    assert.equal(app.ctDiagnostics[first.id].length,0,'approved blank has no actionable finding');
+    const retained=app.ctDiagnostics[unrelated.id],key=app.ctConsistencyKey(first.fields[0]);let incoming='Different saved translation',revision=0;
+    if(mode==='ordinary Save')app.ctSync=()=>{};
+    else app._ctSync={async flush(){return{uploaded:0,conflicts:0};},async pull(){revision++;return f.store.applyRemote(scope,{events:[{unit:{unitId:first.id,revision,values:{[fieldId]:incoming},reviewed:{},saved:true,
+        englishIntent:{[fieldId]:{state:'revoked',sourceHash:S.sourceHash('Power'),decisionId:'peer-'+revision}}}}],sequence:revision});}};
+    const change=async text=>{if(mode==='ordinary Save'){app.ctValues[fieldId]=text;app.ctDraftDirty=true;assert.equal(await app.ctSave(),true);}else{incoming=text;await mixin.methods.ctSync.call(app);}};
+    await change('Different saved translation');
+    assert.equal(app.ctSaved[first.id].englishIntent[fieldId].state,'revoked');assert.equal(app.ctScanDone,true);assert.equal(app.ctScanWarningFileCount,2);
+    for(const row of [first,peer])assert.ok(app.ctDiagnostics[row.id].some(issue=>issue.code==='clienttext-consistency'));
+    assert.equal(app.ctDiagnostics[unrelated.id],retained,'unrelated findings keep their identity');
+    assert.ok(app._ctConsistencyIndex.get(key).some(entry=>entry.unitId===first.id));assert.ok(app._ctConsistencyByUnit.get(first.id).has(key));
+    await change('Peer translation');assert.equal(app.ctScanWarningFileCount,0);assert.equal(app.ctScanErrorFileCount,1);assert.equal(app.ctDiagnostics[unrelated.id],retained);
+    assert.equal(app.ctScanDone,true,'automatic refresh preserves the completed scan');
+});
+
 test('comment drafts retain their captured account/group while late loads cannot replace the current composer',async()=>{
     const f=fixture(),{app,original}=harness(),pending=deferred();let first=true;
     app.ctCommentText='Old group draft';app.ctCommentGlobal=true;app._ctStore={...f.store,async getRequest(...args){if(first){first=false;await pending.promise;}return f.store.getRequest(...args);}};

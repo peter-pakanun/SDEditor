@@ -2832,7 +2832,10 @@
                         const unit=units[i];results[unit.id]=this.ctAnalyzeScanUnit(unit,checks,terminology);if(!check())return false;
                         if (checks.consistency) {
                             for (const field of this.ctFieldsFor(unit)) {
-                                if (this.ctUsesEnglish(field,unit) || field.kind==='gender' || !field.source.trim() || root.ClientTextState.audioOnly(field.source))continue;
+                                // Keep immutable peer membership when a current
+                                // target uses English: later saves/shared edits
+                                // can replace the blank without a full rescan.
+                                if (field.kind==='gender' || !field.source.trim() || root.ClientTextState.audioOnly(field.source))continue;
                                 const key = this.ctConsistencyKey(field),entries=consistencyMap.get(key) || [];entries.push({unitId:unit.id,fieldId:field.id});consistencyMap.set(key,entries);
                                 const keys=byUnit.get(unit.id)||new Set();keys.add(key);byUnit.set(unit.id,keys);
                             }
