@@ -79,7 +79,15 @@ async function validateTargetedPatches(bytes, parsed) {
             originalRemainder = originalRemainder.replace(pattern, '<validated-target coordinate="' + coordinate + '"/>');
             changedRemainder = changedRemainder.replace(pattern, '<validated-target coordinate="' + coordinate + '"/>');
         }
-        assert.equal(changedRemainder, originalRemainder, 'English, metadata, notes and unrelated cells remain byte-exact: ' + name);
+        const sheetName = parsed.sheets.find(sheet => sheet.path === name)?.name;
+        const statuses = parsed.units.filter(unit => unit.sheet === sheetName).map(unit => State.statusFor(unit, records[unit.id]));
+        const expectedColor = statuses.some(status => status.missing) ? Codec.FILLS.missing : statuses.some(status => status.outdated) ? Codec.FILLS.outdated
+            : statuses.some(status => status.revised) ? Codec.FILLS.revised : Codec.FILLS.filled;
+        const tabColor = /<(?:[\w.-]+:)?tabColor\b[^>]*\brgb="FF([A-F0-9]{6})"/i.exec(changed)?.[1];
+        assert.equal(tabColor, expectedColor, 'Tab color uses the whole committed sheet: ' + name);
+        const withoutTab = raw => raw.replace(/<((?:[\w.-]+:)?tabColor)\b[^>]*?(?:\/>|>[\s\S]*?<\/\1\s*>)/, '')
+            .replace(/<((?:[\w.-]+:)?sheetPr)([^>]*?)>\s*<\/\1>/, '<$1$2/>').replace(/<(?:[\w.-]+:)?sheetPr\s*\/>/, '');
+        assert.equal(withoutTab(changedRemainder), withoutTab(originalRemainder), 'English, metadata, notes, other sheet properties and unrelated cells remain byte-exact: ' + name);
     }
     return selected.length;
 }

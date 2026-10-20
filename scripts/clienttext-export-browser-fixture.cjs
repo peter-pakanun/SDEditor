@@ -16,7 +16,7 @@ async function workbook(){
  zip.file('[Content_Types].xml','<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>');
  zip.file('xl/workbook.xml',`<workbook xmlns="${ns}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Normal" sheetId="1" r:id="rId1"/></sheets></workbook>`);
  zip.file('xl/_rels/workbook.xml.rels','<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>');
- zip.file('xl/worksheets/sheet1.xml',`<worksheet xmlns="${ns}"><sheetData><row r="1">${cell('A1','ID')+cell('C1','Name')+cell('D1','Translation')}</row><row r="2">${cell('A2','fixture')+cell('C2','Source')+cell('D2','Original')}</row></sheetData></worksheet>`);
+ zip.file('xl/worksheets/sheet1.xml',`<worksheet xmlns="${ns}"><sheetPr codeName="ExportFixture"><tabColor rgb="FFFA8072"/><outlinePr summaryBelow="0"/></sheetPr><sheetData><row r="1">${cell('A1','ID')+cell('C1','Name')+cell('D1','Translation')}</row><row r="2">${cell('A2','fixture')+cell('C2','Source')+cell('D2','Original')}</row></sheetData></worksheet>`);
  zip.file('xl/styles.xml',`<styleSheet xmlns="${ns}"><fonts count="1"><font/></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>`);
  zip.file('xl/native.bin',new Uint8Array([0,255,7,8,9]));return zip.generateAsync({type:'nodebuffer'});
 }
@@ -93,6 +93,8 @@ async function main(){
    const workbookZip=await JSZip.loadAsync(await zip.file(name).async('nodebuffer'));
    assert.deepEqual(await workbookZip.file('xl/native.bin').async('uint8array'),new Uint8Array([0,255,7,8,9]));
    assert((await workbookZip.file('xl/worksheets/sheet1.xml').async('string')).includes('Frozen target @ value'));
+   assert((await workbookZip.file('xl/worksheets/sheet1.xml').async('string')).includes('<tabColor rgb="FFD9D2E9"/>'),'Frozen collection revises the formerly red sheet tab');
+   assert((await workbookZip.file('xl/worksheets/sheet1.xml').async('string')).includes('<outlinePr summaryBelow="0"/>'));
   }
   assert.equal(await page.evaluate(()=>workers.every(w=>w.disposed && !w.worker && w.pending.size===0)),true);
   await context.grantPermissions(['clipboard-read','clipboard-write']);await page.getByRole('button',{name:'Copy timings',exact:true}).click();
@@ -106,8 +108,19 @@ async function main(){
   results.push('Abort during collection fetch reports unknown server outcome; failed manifest retains an accepted receipt and readable timings.');
   mode='success';download=page.waitForEvent('download').catch(()=>null);await page.locator('#collect').click();await download;await waitFinished();await page.getByRole('button',{name:'Close',exact:true}).click();
   download=page.waitForEvent('download').catch(()=>null);await page.locator('#export').click();const localDownload=await download;await localDownload.saveAs(join(output,'local-paired.zip'));await waitFinished();
-  const localZip=await JSZip.loadAsync(readFileSync(join(output,'local-paired.zip')));for(const name of Object.keys(localZip.files)){const packageZip=await JSZip.loadAsync(await localZip.file(name).async('nodebuffer'));assert((await packageZip.file('xl/worksheets/sheet1.xml').async('string')).includes('Local Saved target'));}
+  const localZip=await JSZip.loadAsync(readFileSync(join(output,'local-paired.zip')));for(const name of Object.keys(localZip.files)){const packageZip=await JSZip.loadAsync(await localZip.file(name).async('nodebuffer'));const raw=await packageZip.file('xl/worksheets/sheet1.xml').async('string');assert(raw.includes('Local Saved target'));assert(raw.includes('<tabColor rgb="FFD9D2E9"/>'),'Local Saved export revises the formerly red sheet tab');}
   await page.getByRole('button',{name:'Close',exact:true}).click();results.push('Local export reads durable Saved targets independently of frozen collection content and preserves both workbook packages.');
+  // Report an absent reference without deleting any immutable data.
+  const beforeFailure=await page.evaluate(()=>savedBlobs.length);
+  await page.evaluate(()=>{window.originalLookup=app._ctStore.getUnitsByIds;app._ctStore.getUnitsByIds=(scope,ids,options)=>originalLookup(scope,[...ids,JSON.stringify(['normal','Normal','PRIVATE-ID'])],options);});
+  await page.locator('#export').click();await waitFinished();
+  assert.equal(await page.evaluate(()=>savedBlobs.length),beforeFailure);assert.match(await modal.getByRole('alert').textContent(),/Reopen the same content group/);
+  assert.match(await page.evaluate(()=>app.ctExportLogText),/Failure code: CLIENTTEXT_ORIGINAL_UNIT_MISSING/);assert(!(await page.evaluate(()=>app.ctExportLogText)).includes('PRIVATE-ID'));
+  for(const theme of ['light','grey','dark','modern-dark']){
+   await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);const box=await modal.boundingBox();assert(box.height<980);await page.screenshot({path:join(output,'original-lookup-failed-'+theme+'.png')});
+  }
+  await page.evaluate(()=>{app._ctStore.getUnitsByIds=originalLookup;});await page.getByRole('button',{name:'Close',exact:true}).click();
+  results.push('Missing original reference reports its safe code and exact lookup step in Copy timings, displays retry guidance in all four desktop themes, and initiates no download. Originals remain intact.');
   // Abort from the real worker compression phase: terminate, suppress saveAs, and release all busy flags.
   await page.evaluate(()=>{const create=ClientTextWorkerClient.create;ClientTextWorkerClient.create=(...args)=>{const worker=create(...args),exp=worker.exportWorkbook.bind(worker);worker.exportWorkbook=(b,p,s,o)=>exp(b,p,s,{...o,onProgress(value){o.onProgress?.(value);if(value.phase==='packing')app.ctAbortExport();}});return worker;};});
   const before=await page.evaluate(()=>savedBlobs.length);await page.locator('#collect').click();await waitFinished();assert.equal(await page.evaluate(()=>app.ctExportTiming.status),'aborted');assert.equal(await page.evaluate(()=>savedBlobs.length),before);assert.equal(await page.evaluate(()=>workers.every(w=>w.disposed && !w.worker && w.pending.size===0)),true);

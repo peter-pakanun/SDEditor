@@ -13,7 +13,7 @@ test('export original lookup reads only requested immutable unit keys and reject
     assert.equal(f.operations.filter(op=>op.name===CT.stores.cacheUnits && op.method==='getAll').length,0);
     assert.equal(selected[0].fields[0].targetCell,'C2');assert.equal(selected[0].fields[0].sourceCell,'B2');
     assert.deepEqual(await f.store.getUnitsByIds(scope,[]),[]);
-    await assert.rejects(f.store.getUnitsByIds(scope,[JSON.stringify(['normal','ClientStrings','missing'])]),/absent from its immutable original/);
+    await assert.rejects(f.store.getUnitsByIds(scope,[JSON.stringify(['normal','ClientStrings','missing'])]),error=>error.code==='CLIENTTEXT_ORIGINAL_UNIT_MISSING' && /absent from its immutable original/.test(error.message));
     await assert.rejects(f.store.getUnitsByIds({...scope,groupId:'other'},[units[2].id]),error=>error.code==='CLIENTTEXT_NOT_READY');
     await assert.rejects(f.store.getUnitsByIds(scope,[units[2].id],{signal:AbortSignal.abort()}),error=>error.name==='AbortError');
 });

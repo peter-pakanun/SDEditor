@@ -1,4 +1,4 @@
-/* ClientText OOXML adapter. Originals stay immutable; exports patch only target cells. */
+/* ClientText OOXML adapter. Originals stay immutable; exports patch targets and status colors. */
 (function (root, factory) {
     const node = typeof module === 'object' && module.exports;
     const api = factory(root, node ? require('./vendor/fast-xml-parser-5.11.2.min.js').default : root.XMLParser?.default || root.XMLParser,
@@ -10,7 +10,7 @@
     'use strict';
     const VERSION = 1, RED = 'FA8072', ORANGE = 'FF9966';
     const PARSER_VERSION = 'clienttext-v4', PARSER_VERSIONS = Object.freeze(['clienttext-v1', 'clienttext-v2', 'clienttext-v3', PARSER_VERSION]);
-    const FILLS = { missing: 'FA8072', outdated: 'FF9966', filled: 'D9D9D9', reviewed: 'C6EFCE', revised: 'D9D2E9' };
+    const FILLS = State.FILLS;
     const FORMS = ['MS', 'FS', 'NS', 'MP', 'FP', 'NP'];
     const CLASS_FORMS = Object.freeze(['StrFour', 'IntFour', 'DexFour', 'StrDexFour', 'DexIntFour', 'StrIntFour',
         'StrFourb', 'IntFourb', 'DexFourb', 'StrDexFourb', 'DexIntFourb', 'StrIntFourb']);
@@ -332,7 +332,8 @@
                 if (units.length > 1000000) throw error('ClientText exceeds the supported record count.');
                 if (records.size % 1024 === 0) progress({ phase: 'parsing', processed: index, total: sheetItems.length, percent: index / sheetItems.length * 100, sheet: name, rows: records.size });
             }
-            sheets.push({ name, path: sheetPath, index, state: attr(item, 'state') || 'visible', headers, unitCount: units.length - start });
+            sheets.push({ name, path: sheetPath, index, state: attr(item, 'state') || 'visible', headers, unitCount: units.length - start,
+                originalStatusCounts: workloadCounts(units.slice(start)) });
         }
         const artifactHash = await rawHash(bytes);
         progress({ phase: 'complete', processed: sheets.length, total: sheets.length, percent: 100, sheet: sheets[sheets.length - 1]?.name || '' });
@@ -343,16 +344,13 @@
         if (Array.isArray(saved)) return new Map(saved.map(value => [value.id || value.unitId, value]));
         return new Map(Object.entries(saved || {}));
     }
-    function chosenFill(field, value, saved) {
-        const assignedOutdated = (field.outdated || (saved?.outdated || []).includes(field.id)) && !State.audioOnly(field.source);
-        const reviewed = saved?.reviewed?.[field.id] === State.sourceHash(field.source);
-        if (saved?.saved === false && value === field.target && !assignedOutdated && !reviewed) return null;
-        if (field.required && !State.audioOnly(field.source) && !value.trim()) return FILLS.missing;
-        if (assignedOutdated && !reviewed) return FILLS.outdated;
-        if (field.originalMissing && value.trim()) return FILLS.filled;
-        if (assignedOutdated || reviewed && field.originalFill === ORANGE) return FILLS.reviewed;
-        if (value !== field.target && !State.audioOnly(field.source)) return FILLS.revised;
-        return null;
+    function workloadCounts(units) {
+        const counts = State.emptyColorCounts();
+        for (const unit of units) {
+            const colors = State.colorCountsFor(unit);
+            for (const key of Object.keys(counts)) counts[key] += colors[key];
+        }
+        return counts;
     }
     function startTagAttrs(tag) {
         const output = {};
@@ -383,7 +381,7 @@
         return { get text() { return output; }, clone(styleId, fill) {
             const key = styleId + '/' + fill;
             if (cache.has(key)) return cache.get(key);
-            const sectionMatch = section('cellXfs'), xfPattern = /<((?:[\w.-]+:)?xf)\b[^>]*(?:\/>|>[\s\S]*?<\/\1\s*>)/g, entries = Array.from(sectionMatch[0].matchAll(xfPattern));
+            const sectionMatch = section('cellXfs'), xfPattern = /<((?:[\w.-]+:)?xf)\b[^>]*?(?:\/>|>[\s\S]*?<\/\1\s*>)/g, entries = Array.from(sectionMatch[0].matchAll(xfPattern));
             const entry = entries[Number(styleId || 0)];
             if (!entry) throw error('Cannot clone the original translation style.');
             const fillsName = section('fills')[1], prefix = fillsName.includes(':') ? fillsName.split(':')[0] + ':' : '';
@@ -440,6 +438,34 @@
         if (found.size !== edits.size) throw error('A saved translation points to a missing workbook row.');
         return original.slice(0, region.index) + patched + original.slice(region.index + region[0].length);
     }
+    function patchTabColor(original, color) {
+        const root = /<((?:[\w.-]+:)?worksheet)\b[^>]*>/.exec(original);
+        if (!root) throw error('Worksheet has no editable root.');
+        const at = root.index + root[0].length, rest = original.slice(at), prefix = root[1].replace(/worksheet$/, '');
+        // sheetPr is the first worksheet child. Scope the patch to that region
+        // so extension XML and every unrelated worksheet property stay exact.
+        const properties = /^(?:\s|<!--[\s\S]*?-->)*<((?:[\w.-]+:)?sheetPr)\b[^>]*?(?:\/>|>[\s\S]*?<\/\1\s*>)/.exec(rest);
+        if (!properties) return color ? original.slice(0, at) + '<' + prefix + 'sheetPr><' + prefix + 'tabColor rgb="FF' + color + '"/></' + prefix + 'sheetPr>' + rest : original;
+        const raw = properties[0], tab = /<((?:[\w.-]+:)?tabColor)\b[^>]*?(?:\/>|>[\s\S]*?<\/\1\s*>)/.exec(raw);
+        let changed;
+        if (tab) {
+            const opening = /^<[^>]+>/.exec(tab[0])[0], attrs = startTagAttrs(opening);
+            if (color && String(attrs.rgb || '').toUpperCase() === 'FF' + color && !['theme','indexed','auto','tint'].some(key => own(attrs, key))) return original;
+            if (!color && !Object.values(FILLS).includes(String(attrs.rgb || '').slice(-6).toUpperCase())) return original;
+            let replacement = '';
+            if (color) {
+                let updated = opening;
+                for (const key of ['rgb','theme','indexed','auto','tint']) updated = setAttr(updated, key, null);
+                replacement = setAttr(updated, 'rgb', 'FF' + color) + tab[0].slice(opening.length);
+            }
+            changed = raw.slice(0, tab.index) + replacement + raw.slice(tab.index + tab[0].length);
+        } else if (color) {
+            const opening = /<(?:[\w.-]+:)?sheetPr\b[^>]*>/.exec(raw), tag = '<' + properties[1].replace(/sheetPr$/, '') + 'tabColor rgb="FF' + color + '"/>';
+            changed = raw.slice(0, opening.index) + opening[0].replace(/\/>$/, '>') + tag
+                + (/\/>$/.test(opening[0]) ? '</' + properties[1] + '>' : raw.slice(opening.index + opening[0].length));
+        } else return original;
+        return original.slice(0, at) + changed + rest.slice(raw.length);
+    }
     async function exportWorkbook(input, parsed, savedInput, options = {}) {
         const bytes = await bytesOf(input);
         const progress = options.onProgress || (() => {});
@@ -451,7 +477,7 @@
         for (const declared of [parsed.parserVersion, parsed.descriptor?.parserVersion, options.parserVersion, options.descriptor?.parserVersion]) {
             if (declared !== undefined && parserVersion(declared) !== version) throw error('The export parser version does not match its parsed baseline.', 'CLIENTTEXT_PARSER_MISMATCH');
         }
-        const zip = await open(bytes), saved = savedRecords(savedInput), units = new Map(parsed.units.map(unit => [unit.id, unit])), editsBySheet = new Map();
+        const zip = await open(bytes), saved = savedRecords(savedInput), units = new Map(parsed.units.map(unit => [unit.id, unit])), editsBySheet = new Map(), sheetChanges = new Map();
         progress({ phase: 'patching', processed: 0, total: parsed.sheets.length, sheet: '' });
         let styles = null;
         for (const [unitId, record] of saved) {
@@ -461,12 +487,19 @@
             if (Object.keys(record.values).some(id => !valid.has(id)) || Object.keys(record.reviewed || {}).some(id => !valid.has(id))) throw error('Saved ClientText contains an unknown field.');
             if (record.outdated !== undefined && (!Array.isArray(record.outdated) || record.outdated.some(id => !valid.has(id)))) throw error('Saved ClientText contains an unknown outdated field.');
             try { State.normalizeReviewed(unit, record.reviewed || {}); } catch (cause) { throw error(cause.message); }
+            const originalColors = State.colorCountsFor(unit), status = State.statusFor(unit, record), colors = State.colorCountsFor(unit, record, status);
+            if (!sheetChanges.has(unit.sheet)) sheetChanges.set(unit.sheet, State.emptyColorCounts());
+            const change = sheetChanges.get(unit.sheet);
+            for (const key of Object.keys(change)) change[key] += colors[key] - originalColors[key];
             for (const field of unit.fields) {
                 if (!own(record.values, field.id) && !own(record.reviewed, field.id) && !(record.outdated || []).includes(field.id)) continue;
                 const value = own(record.values, field.id) ? record.values[field.id] : field.target;
                 if (typeof value !== 'string') throw error('Saved ClientText field is not text.');
                 if (field.kind === 'text' && value.trim() === 'NONEXISTENT') throw error('NONEXISTENT is only valid in a gender-form field.');
-                const chosen = chosenFill(field, value, record), fill = chosen === field.originalFill ? null : chosen;
+                const chosen = State.fillFor(field, value, record, status.fields[field.id]), fill = chosen === field.originalFill ? null : chosen;
+                if (chosen || value !== field.target) {
+                    if (!editsBySheet.has(unit.sheet)) editsBySheet.set(unit.sheet, new Map());
+                }
                 if (value === field.target && !fill) continue;
                 if (fill && !styles) styles = stylePatcher(await part(zip, 'xl/styles.xml', true));
                 const styleId = fill ? styles.clone(field.originalStyleId, fill) : String(field.originalStyleId || '0');
@@ -476,15 +509,37 @@
                 edits.set(field.targetCell, { styleId, ...(value !== field.target ? { value } : {}) });
             }
         }
-        if (editsBySheet.size && Object.keys(zip.files).some(name => name.startsWith('_xmlsignatures/'))) throw error('A signed workbook cannot be edited without invalidating its document signature.');
+        let legacySheets = null, modified = false;
         for (let index = 0; index < parsed.sheets.length; index++) {
             const sheet = parsed.sheets[index];
             progress({ phase: 'exporting', processed: index, total: parsed.sheets.length, percent: index / parsed.sheets.length * 80, sheet: sheet.name });
             const edits = editsBySheet.get(sheet.name);
-            if (edits?.size) zip.file(sheet.path, patchSheet(await part(zip, sheet.path), edits), { date: zip.file(sheet.path).date, createFolders: false });
+            if (!edits) continue;
+            let counts = sheet.originalStatusCounts;
+            const keys = Object.keys(State.emptyColorCounts());
+            if (!counts || keys.some(key => !own(counts, key))) {
+                const supplied = parsed.units.filter(unit => unit.sheet === sheet.name);
+                if (supplied.length === sheet.unitCount) counts = workloadCounts(supplied);
+                else {
+                    // Older cached headers predate the immutable sheet summary.
+                    // Re-derive it using the accepted parser, never a newer layout.
+                    legacySheets ||= (await parseWorkbook(bytes, { filename: parsed.filename, role: parsed.role, language: parsed.language, parserVersion: version })).sheets;
+                    counts = legacySheets.find(item => item.name === sheet.name)?.originalStatusCounts;
+                }
+            }
+            if (!counts || !keys.every(key => Number.isSafeInteger(counts[key]) && counts[key] >= 0)) throw error('Workbook sheet workload is unavailable.');
+            const change = sheetChanges.get(sheet.name), current = Object.fromEntries(keys.map(key => [key, counts[key] + change[key]]));
+            if (keys.some(key => current[key] < 0)) throw error('Workbook sheet workload differs from its original.');
+            const color = FILLS[State.sheetColorFor(current)] || null;
+            const original = await part(zip, sheet.path), patched = patchTabColor(edits.size ? patchSheet(original, edits) : original, color);
+            if (patched !== original) {
+                if (Object.keys(zip.files).some(name => name.startsWith('_xmlsignatures/'))) throw error('A signed workbook cannot be edited without invalidating its document signature.');
+                modified = true;
+                zip.file(sheet.path, patched, { date: zip.file(sheet.path).date, createFolders: false });
+            }
         }
         if (styles) zip.file('xl/styles.xml', styles.text, { date: zip.file('xl/styles.xml').date, createFolders: false });
-        if (!editsBySheet.size) { progress({ phase: 'complete', processed: parsed.sheets.length, total: parsed.sheets.length, percent: 100, sheet: '' }); return bytes.slice(); }
+        if (!modified) { progress({ phase: 'complete', processed: parsed.sheets.length, total: parsed.sheets.length, percent: 100, sheet: '' }); return bytes.slice(); }
         const result = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', compressionOptions: { level: 5 } }, value => progress({ phase: 'packing', processed: parsed.sheets.length, total: parsed.sheets.length, percent: 80 + value.percent * 0.2, sheet: value.currentFile || '' }));
         progress({ phase: 'complete', processed: parsed.sheets.length, total: parsed.sheets.length, percent: 100, sheet: '' });
         return result;

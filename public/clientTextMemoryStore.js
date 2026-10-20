@@ -143,7 +143,7 @@
             const workspace=ready(capture(rawScope,options));
             return [...new Set(unitIds)].map(unitId=>{
                 const unit=workspace.byId.get(unitId);
-                if(!unit)throw new Error('Saved ClientText unit is absent from its immutable original: '+unitId+'.');
+                if(!unit)throw Object.assign(new Error('Saved ClientText unit is absent from its immutable original: '+unitId+'.'), {code:'CLIENTTEXT_ORIGINAL_UNIT_MISSING'});
                 return S.copy(unit);
             });
         }

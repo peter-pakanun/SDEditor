@@ -7,6 +7,9 @@
     'use strict';
     const FORMAT = 'clienttext-v1', TRUSTED_FORMAT = 'clienttext-trusted-v1', STORAGE_PROTOCOL = TRUSTED_FORMAT, PARSER_VERSION = 'clienttext-v4';
     const PARSER_VERSIONS = Object.freeze(['clienttext-v1', 'clienttext-v2', 'clienttext-v3', PARSER_VERSION]);
+    const FILLS = Object.freeze({ missing: 'FA8072', outdated: 'FF9966', filled: 'D9D9D9', reviewed: 'C6EFCE', revised: 'D9D2E9' });
+    const SHEET_COLORS = Object.freeze(['missing', 'outdated', 'revised', 'reviewed', 'filled', '']);
+    const COLOR_BY_FILL = Object.freeze(Object.fromEntries(Object.entries(FILLS).map(([color, fill]) => [fill, color])));
     const CLASS_FORMS = Object.freeze(['StrFour', 'IntFour', 'DexFour', 'StrDexFour', 'DexIntFour', 'StrIntFour',
         'StrFourb', 'IntFourb', 'DexFourb', 'StrDexFourb', 'DexIntFourb', 'StrIntFourb']);
     const isClassForm = field => CLASS_FORMS.includes(typeof field === 'string' ? field : field?.kind === 'form' ? field.form : null);
@@ -313,6 +316,52 @@
         return { missing, outdated, saved: savedPresent, revised, unchanged: !missing && !outdated && !savedPresent,
             isMissing: missing, isOutdated: outdated, hasChanges: savedPresent, isRevised: revised, isDropped: false, fields };
     }
+    // A fill override is separate from Saved: an unchanged complete save does
+    // not acquire a completion colour. Null preserves the original cell fill.
+    function fillFor(field, value, saved, status) {
+        const assignedOutdated = (field.outdated || (saved?.outdated || []).includes(field.id)) && !audioOnly(field.source);
+        const reviewed = saved?.reviewed?.[field.id] === sourceHash(field.source);
+        if (saved?.saved === false && value === field.target && !assignedOutdated && !reviewed) return null;
+        if (status.missing) return FILLS.missing;
+        if (status.outdated) return FILLS.outdated;
+        if ((field.originalMissing || isAbsent(field, field.target)) && value.trim()) return FILLS.filled;
+        if (assignedOutdated || reviewed && field.originalFill === FILLS.outdated) return FILLS.reviewed;
+        if (status.revised) return FILLS.revised;
+        if (field.originalFill === FILLS.missing && value.trim() && !audioOnly(field.source)) return FILLS.filled;
+        return null;
+    }
+    function fieldColorFor(field, saved, status) {
+        if (status.missing) return 'missing';
+        if (status.outdated) return 'outdated';
+        const value = own(saved?.values, field.id) ? saved.values[field.id] : field.target;
+        const involved = own(saved?.values, field.id) || own(saved?.reviewed, field.id) || (saved?.outdated || []).includes(field.id);
+        const fill = involved ? fillFor(field, value, saved, status) : null;
+        if (fill) return COLOR_BY_FILL[fill] || '';
+        if (audioOnly(field.source)) return '';
+        // Retain recognised completion fills in a previously exported original.
+        // White/no fill and other workbook formatting never mean completed work.
+        const color = COLOR_BY_FILL[field.originalFill];
+        return color === 'revised' || color === 'reviewed' || color === 'filled' && value.trim() ? color : '';
+    }
+    const emptyColorCounts = () => ({ missing: 0, outdated: 0, revised: 0, reviewed: 0, filled: 0 });
+    const sheetColorFor = counts => SHEET_COLORS.find(color => color && counts[color] > 0) || '';
+    function colorCountsFor(unit, saved = null, status = statusFor(unit, saved)) {
+        const counts = emptyColorCounts();
+        for (const field of unit.fields) {
+            const color = fieldColorFor(field, saved, status.fields[field.id]);
+            if (color) counts[color]++;
+        }
+        return counts;
+    }
+    function unitColorFor(unit, saved = null, status = statusFor(unit, saved)) {
+        let selected = '';
+        for (const field of unit.fields) {
+            const color = fieldColorFor(field, saved, status.fields[field.id]);
+            if (SHEET_COLORS.indexOf(color) < SHEET_COLORS.indexOf(selected)) selected = color;
+            if (selected === 'missing') break;
+        }
+        return selected;
+    }
     function counts(units, saved = {}) {
         const value = { missing: 0, outdated: 0, saved: 0, revised: 0, unchanged: 0, total: units.length };
         for (const unit of units) for (const key of ['missing','outdated','saved','revised','unchanged']) if (statusFor(unit, saved instanceof Map ? saved.get(unit.id) : saved[unit.id])[key]) value[key]++;
@@ -510,7 +559,7 @@
         if (allowsNonexistent(field) && !openedBy) items.unshift({ value: 'NONEXISTENT', label: 'NONEXISTENT', matchText: 'NONEXISTENT', matchTextLower: 'nonexistent', replaceWholeField: true });
         return items;
     }
-    return { FORMAT, TRUSTED_FORMAT, STORAGE_PROTOCOL, PARSER_VERSION, PARSER_VERSIONS, CLASS_FORMS, isClassForm, isNamedForm, allowsNonexistent, canonical, stableStringify, sha256, hash, canonicalSource, audioOnly, audioMarkerTooltip, sourceHash,
+    return { FORMAT, TRUSTED_FORMAT, STORAGE_PROTOCOL, PARSER_VERSION, PARSER_VERSIONS, FILLS, SHEET_COLORS, fillFor, emptyColorCounts, colorCountsFor, sheetColorFor, unitColorFor, CLASS_FORMS, isClassForm, isNamedForm, allowsNonexistent, canonical, stableStringify, sha256, hash, canonicalSource, audioOnly, audioMarkerTooltip, sourceHash,
         clientFacts, originalValues, emptySummary, addOriginalSummary, originalCacheKey, buildDescriptors,
         normalizeUnit, compactUnit, normalizeCompact, leafHash, nodeHash, buildManifest, proofFor, verifyWitness,
         normalizeValues, normalizeReviewed, valuesFor, needsSourceReview, statusFor, counts, carryForward, reviewAudioMarkerChanges, tokenize, maskAudioMarkers, tokenInsertion, extractVariables, variableIdentityKey, diagnose, suggestions, copy };

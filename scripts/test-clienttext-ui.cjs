@@ -295,13 +295,36 @@ test('Sheet sidebar severity includes hidden committed work and findings, with e
     app.ctSaved={[reply.id]:{values:{[fieldId]:'Saved complete'},reviewed:{},revision:1}};app.ctRevision++;
     assert.equal(app.ctSheetSeverities.get(key(reply)),'warning','saving leaves the retained scan warning visible');
     app.ctDiagnostics={[dialogue.id]:[{severity:'warning'},{severity:'error'}]};
-    assert.equal(app.ctSheetSeverities.get(key(dialogue)),'error');assert.equal(app.ctSheetSeverities.get(key(reply)),'');
+    assert.equal(app.ctSheetSeverities.get(key(dialogue)),'error');assert.equal(app.ctSheetSeverities.get(key(reply)),'filled');
     app.ctDiagnostics={};app.ctSelection=dialogue.id;app.ctValues={[fieldId]:''};
     assert.equal(app.ctSheetSeverities.get(key(dialogue)),'','blank drafts do not change the sidebar');
     app.ctSaved={...app.ctSaved,[topic.id]:{values:S.valuesFor(topic),reviewed:{[fieldId]:S.sourceHash(topic.fields[0].source)},revision:1},
         [dialogue.id]:{values:{[fieldId]:'Saved correction'},reviewed:{},revision:1}};app.ctRevision++;
-    assert.equal(app.ctSheetSeverities.get(key(topic)),'');assert.equal(app.ctSheetSeverities.get(key(dialogue)),'','Saved and Revised remain neutral');
+    assert.equal(app.ctSheetSeverities.get(key(topic)),'reviewed');assert.equal(app.ctSheetSeverities.get(key(dialogue)),'revised','Reviewed and Revised have their own sheet colours');
     assert.deepEqual(app.ctUnits,before);
+});
+
+test('Sheet sidebar keeps grey distinct from no colour, uses all six priorities, and labels completed work',()=>{
+    const neutral=namedUnit('Neutral'),grey=namedUnit('Grey'),green=namedUnit('Green'),purple=namedUnit('Purple'),orange=namedUnit('Orange'),red=namedUnit('Red');
+    for(const [index,current] of [neutral,grey,green,purple,orange,red].entries()){
+        current.sheet='Sheet '+index;current.id=JSON.stringify([current.role,current.sheet,current.recordId]);
+    }
+    grey.fields[0].target='';grey.fields[0].originalMissing=true;grey.fields[0].required=true;
+    green.fields[0].outdated=true;orange.fields[0].outdated=true;
+    red.fields[0].target='';red.fields[0].required=true;red.fields[0].originalMissing=true;
+    const saved={[neutral.id]:{values:S.valuesFor(neutral)},[grey.id]:{values:{[fieldId]:'Completed'}},
+        [green.id]:{values:S.valuesFor(green),reviewed:{[fieldId]:S.sourceHash(green.fields[0].source)}},[purple.id]:{values:{[fieldId]:'Revised'}}};
+    const {app}=listHarness({ctUnits:[neutral,grey,green,purple,orange,red],ctSaved:saved,ctDiagnostics:{}}),key=current=>JSON.stringify([current.role,current.sheet]);
+    assert.deepEqual([red,orange,purple,green,grey,neutral].map(current=>app.ctSheetSeverities.get(key(current))),['error','warning','revised','reviewed','filled','']);
+    assert.equal(app.ctSheetSeverityLabel({key:key(grey)}),'Completed Missing translation in this sheet');
+    assert.equal(app.ctSheetSeverityLabel({key:key(neutral)}),'');
+    // Combine records on a single sheet and remove the leading colour in turn.
+    for(const current of app.ctUnits){current.sheet='Mixed';current.id=JSON.stringify([current.role,current.sheet,current.recordId]);}
+    app.ctSaved={[neutral.id]:{values:S.valuesFor(neutral)},[grey.id]:{values:{[fieldId]:'Completed'}},
+        [green.id]:{values:S.valuesFor(green),reviewed:{[fieldId]:S.sourceHash(green.fields[0].source)}},[purple.id]:{values:{[fieldId]:'Revised'}}};
+    for(const [current,color] of [[red,'error'],[orange,'warning'],[purple,'revised'],[green,'reviewed'],[grey,'filled'],[neutral,'']]){
+        assert.equal(app.ctSheetSeverities.get(key(current)),color);app.ctUnits=app.ctUnits.filter(unit=>unit!==current);
+    }
 });
 
 test('Sheet sidebar keeps same-named workbook roles separate and resets severity on a workspace fence',()=>{
@@ -3568,6 +3591,17 @@ function uploadPreparationHarness(names,game='poe2'){
         assert.equal(options?.method,undefined,'preparation only reads predecessor metadata');return{version:null,group:null};}};
     h.app.ctChooseFiles({target:{files}});return{...h,files,parseCalls,manifestCalls,requests,storeCalls};
 }
+test('workbook preparation retains owned byte snapshots after selected files become unreadable, for parsed and cached originals',async()=>{
+    for(const cached of [false,true]){
+        const h=uploadPreparationHarness(['Thai.xlsx']),{app,files}=h;
+        if(cached){const parsed=await app._ctWorker.parseWorkbook(await files[0].arrayBuffer(),{filename:files[0].name,role:'normal',language:'Thai'});app._ctStore={async getCachedOriginal(){return{units:parsed.units,asset:{hash:parsed.artifactHash,parsed}};}};}
+        await app.ctPrepareUpload();assert.equal(app.ctUploadError,'');
+        files[0].arrayBuffer=async()=>{throw Object.assign(new Error('A requested file or directory could not be found at the time an operation was processed.'),{name:'NotFoundError'});};
+        const snapshot=app.ctPrepared[0].assets[0].blob;
+        assert.notEqual(snapshot,files[0]);assert.equal(Buffer.from(await snapshot.arrayBuffer()).toString(),'Exact original bytes: Thai.xlsx');
+        assert.equal(S.sha256(await snapshot.arrayBuffer()),app.ctPrepared[0].assets[0].hash);
+    }
+});
 
 test('new ClientText v4 preparation stops before parsing on an older trusted API with an actionable error',async()=>{
     for(const names of [['Thai.xlsx'],['Polish.xlsx','Polish_Gender.xlsx']]){
@@ -3618,7 +3652,7 @@ for(const game of ['poe1','poe2'])test('neutral German normal/Gender filenames p
     const group=app.ctPrepared[0];assert.equal(group.contentMode,'clienttext');assert.equal(group.language,'German');assert.deepEqual(Array.from(group.assignments),['German']);
     assert.deepEqual(Array.from(group.assets,asset=>[asset.role,asset.name]),[['normal','German.xlsm'],['gender','German_Gender.xlsm']]);
     assert.deepEqual(parseCalls.map(call=>[call.filename,call.role,call.language]),[['German.xlsm','normal','German'],['German_Gender.xlsm','gender','German']]);
-    for(const asset of group.assets){const original=files.find(file=>file.name===asset.name);assert.equal(asset.blob,original);assert.equal(await asset.blob.text(),'Exact original bytes: '+asset.name);}
+    for(const asset of group.assets){const original=files.find(file=>file.name===asset.name);assert.notEqual(asset.blob,original);assert.equal(await asset.blob.text(),'Exact original bytes: '+asset.name);}
     assert.equal(manifestCalls.length,1);assert.equal(group.originals.descriptors.length,2);assert.equal(storeCalls.length,0);assert.equal(requests.length,1);
     assert.ok(requests[0].url.includes('game='+game));assert.ok(requests[0].url.includes('versionId=selected-release'));
 });
@@ -4427,6 +4461,55 @@ for(const failure of ['collection','manifest','worker','saveAs'])test('timed '+f
     if(failure==='saveAs')h.window.saveAs=()=>{throw new Error('PRIVATE filename');};
     assert.equal(await h.collect(),false);assert.equal(h.app.ctBusy,false);assert.equal(h.app._ctExportRun,null);assert.equal(h.app.ctExportTiming.status,'failed');
     assert.equal(h.journals.size,1);assert.equal(h.downloads.length,0);assert(!h.mixin.computed.ctExportLogText.call(h.app).includes('PRIVATE'));
+});
+for(const lookup of ['metadata','units','asset'])test('local export identifies '+lookup+' lookup failure without copying raw errors or changing saved data',async()=>{
+    const h=exportHarness(),before=clone(h.app.ctSaved),method={metadata:'getMetadata',units:'getUnitsByIds',asset:'getAsset'}[lookup],
+        detail={metadata:'Workspace metadata',units:'Original records for saved values',asset:'Original workbook package'}[lookup];
+    h.app._ctStore[method]=async()=>{throw Object.assign(new Error('PRIVATE workbook target token=secret'),{name:'InvalidStateError'});};
+    assert.equal(await h.app.ctDownload(null,h.group,h.team.language,h.version),false);
+    assert.equal(h.requests.length,0);assert.equal(h.downloads.length,0);assert.equal(h.app.ctBusy,false);
+    assert.equal(h.app.ctExportTiming.status,'failed');assert.equal(h.app.ctExportTiming.failure.name,'InvalidStateError');
+    assert.equal(h.app.ctExportTiming.failure.step,detail);assert.equal(h.app.ctExportTiming.rows.at(-1).detail,detail);
+    const report=h.mixin.computed.ctExportLogText.call(h.app);
+    assert.match(report,/Error type: InvalidStateError/);assert(report.includes('Failure step: '+detail));assert.match(report,/Reopen the same content group/);
+    assert(!report.includes('PRIVATE'));assert(!report.includes('secret'));assert.match(h.app.ctError,/PRIVATE/,'exact error remains available in the workspace');
+    assert.deepEqual(h.app.ctSaved,before);
+});
+test('missing original failure keeps only its allowlisted code while retry replaces the failed report',async()=>{
+    const h=exportHarness(),lookup=h.app._ctStore.getUnitsByIds;
+    h.app._ctStore.getUnitsByIds=async()=>{throw Object.assign(new Error('PRIVATE record ID'),{code:'CLIENTTEXT_ORIGINAL_UNIT_MISSING'});};
+    assert.equal(await h.app.ctDownload(null,h.group,h.team.language,h.version),false);
+    const report=h.mixin.computed.ctExportLogText.call(h.app);
+    assert.match(report,/Failure code: CLIENTTEXT_ORIGINAL_UNIT_MISSING/);assert(!report.includes('PRIVATE'));assert.equal(h.downloads.length,0);
+    assert.equal(h.app.ctExportTiming.rows.length,4);assert.equal(h.app.ctExportTiming.rows.at(-1).status,'failed');
+    h.app._ctStore.getUnitsByIds=lookup;
+    assert.equal(await h.app.ctDownload(null,h.group,h.team.language,h.version),true);
+    assert.equal(h.app.ctExportTiming.failure,undefined);assert(!h.mixin.computed.ctExportLogText.call(h.app).includes('Failure code:'));assert.equal(h.downloads.length,1);
+});
+test('unknown error names and codes cannot enter the copyable export report',async()=>{
+    const h=exportHarness();h.app._ctStore.getUnitsByIds=async()=>{throw {name:'PRIVATE-NAME',code:'PRIVATE-CODE',message:'PRIVATE-MESSAGE'};};
+    assert.equal(await h.app.ctDownload(null,h.group,h.team.language,h.version),false);
+    assert.equal(h.app.ctExportTiming.failure.name,'Error');assert.equal(h.app.ctExportTiming.failure.code,'CLIENTTEXT_EXPORT_FAILED');
+    assert(!h.mixin.computed.ctExportLogText.call(h.app).includes('PRIVATE'));
+});
+test('temporary workbook export failure keeps the tab open and never recommends reopening or reloading',async()=>{
+    const h=exportHarness();h.group.id='local:test:group';h.version.id='local:test:version';
+    h.app.ctWorkspace={scope:{...scope,groupId:h.group.id,versionId:h.version.id}};h.app._ctTestStores=new Map([[h.group.id,h.app._ctStore]]);
+    h.app._ctStore.getUnitsByIds=async()=>{throw Error('Synthetic lookup failure');};
+    assert.equal(await h.app.ctDownload(null,h.group,h.team.language,h.version),false);
+    const report=h.mixin.computed.ctExportLogText.call(h.app);
+    assert.equal(h.app.ctExportTiming.memoryOnly,true);assert.match(report,/only in this open tab/);assert.match(report,/recovery copy before reloading/);assert(!report.includes('Reopen the same content group'));
+    assert.equal(h.downloads.length,0);assert.equal(h.app._ctTestStores.size,1);
+});
+test('unavailable file backing is reported at workbook byte read before any export worker starts',async()=>{
+    for(const name of ['NotFoundError','NotReadableError']){
+        const h=exportHarness();h.asset.blob=new class extends Blob {async arrayBuffer(){throw Object.assign(new Error('PRIVATE file path'),{name});}}(['original']);
+        assert.equal(await h.app.ctDownload(null,h.group,h.team.language,h.version),false);
+        assert.equal(h.app.ctExportTiming.failure.code,'CLIENTTEXT_ORIGINAL_FILE_UNAVAILABLE');assert.equal(h.app.ctExportTiming.failure.name,name);
+        assert.equal(h.app.ctExportTiming.failure.step,'Reading original workbook bytes');assert.match(h.app.ctError,/no longer readable from its disk location/);
+        assert.equal(h.workers.length,0);assert.equal(h.downloads.length,0);assert.equal(h.requests.length,0);
+        assert(!h.mixin.computed.ctExportLogText.call(h.app).includes('PRIVATE'));
+    }
 });
 test('receipt cleanup failure after download initiation remains visible and retryable',async()=>{
     const h=exportHarness();h.app._ctStore.deleteRequest=async()=>{throw Error('Synthetic receipt cleanup failure');};

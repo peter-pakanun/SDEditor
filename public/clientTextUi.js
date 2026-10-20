@@ -283,14 +283,15 @@
             ctSheets() { this.ctUnits; return this._ctSheets || []; },
             ctSheetSeverities() {
                 this.ctRevision;
-                const severities=new Map();
+                const severities=new Map(),priority=root.ClientTextState.SHEET_COLORS.map(color=>color==='missing'?'error':color==='outdated'?'warning':color);
                 for(const unit of this.ctUnits){
                     const key=JSON.stringify([unit.role,unit.sheet]);
                     if(severities.get(key)==='error')continue;
                     const status=this.ctStatus(unit),issues=this.ctDiagnostics[unit.id] || [];
                     const severity=status.missing || issues.some(issue=>issue.severity==='error') ? 'error'
-                        : status.outdated || issues.some(issue=>issue.severity==='warning') ? 'warning' : '';
-                    if(severity || !severities.has(key))severities.set(key,severity);
+                        : status.outdated || issues.some(issue=>issue.severity==='warning') ? 'warning'
+                        : root.ClientTextState.unitColorFor(unit,this.ctSaved[unit.id],status);
+                    if(!severities.has(key) || priority.indexOf(severity)<priority.indexOf(severities.get(key)))severities.set(key,severity);
                 }
                 return severities;
             },
@@ -892,7 +893,8 @@
             },
             ctNpcSeverityLabel(group) {return {error:'Missing or Error in related text',warning:'Outdated or Warning in related text'}[this.ctNpcSeverities.get(group.key)] || '';},
             ctNpcGroupTooltip(group) {return [group.label,this.ctNpcSeverityLabel(group),`${group.units.length.toLocaleString('en-US')} related records`,...group.paths].filter(Boolean).join('\n');},
-            ctSheetSeverityLabel(sheet) {return {error:'Missing or Error in this sheet',warning:'Outdated or Warning in this sheet'}[this.ctSheetSeverities.get(sheet.key)] || '';},
+            ctSheetSeverityLabel(sheet) {return {error:'Missing or Error in this sheet',warning:'Outdated or Warning in this sheet',
+                revised:'Revised translation in this sheet',reviewed:'Reviewed source in this sheet',filled:'Completed Missing translation in this sheet'}[this.ctSheetSeverities.get(sheet.key)] || '';},
             ctSheetTooltip(sheet) {return [sheet.name,(sheet.role==='gender'?'Gender':'Normal')+' workbook',this.ctSheetSeverityLabel(sheet)].filter(Boolean).join('\n');},
             ctConvoNodeKey(type,key) {return JSON.stringify([type,key]);},
             ctConvoSelectedNode() {
@@ -2694,6 +2696,7 @@
                 const run = operation || this.ctBeginExport(collection ? 'Download collection' : 'Export saved ClientText');
                 if (!run) return false;
                 const signal = run.signal;
+                const lookupLabel = this.ctOfflineTest ? 'In-memory original lookup' : 'Indexed original lookup';
                 let scope, store;
                 const current = () => !signal.aborted && run.current() && this._ctExportRun === run;
                 const worker = () => {
@@ -2709,7 +2712,7 @@
                         run.check();
                         if (this.ctOfflineTest && collection) throw new Error('Online collections are unavailable in this offline test.');
                     });
-                    let metadata = await run.step('Indexed original lookup', () => store.getMetadata(scope, { guard: current }));
+                    let metadata = await run.step(lookupLabel, () => store.getMetadata(scope, { guard: current }), 'workspace-metadata');
                     if (metadata?.state !== 'ready') {
                         // Cold preparation uses the same verified cache path without switching workspace or taking over the screen.
                         await run.step('Checkpoint / preparation', async () => {
@@ -2720,10 +2723,10 @@
                             if (full.id !== group.id || full.versionId !== version.id || full.contentMode !== 'clienttext' || full.language !== language
                                 || full.game && full.game !== scope.game || full.branchId && full.branchId !== scope.branchId) throw new Error('The returned content group differs from the selected scope.');
                             await this.ctCacheGroup(version, full, scope, { signal, current, worker: worker(), comparison: true }); run.check();
-                        });
-                        metadata = await run.step('Indexed original lookup', () => store.getMetadata(scope, { guard: current }));
+                        }, 'original-preparation');
+                        metadata = await run.step(lookupLabel, () => store.getMetadata(scope, { guard: current }), 'workspace-metadata');
                     }
-                    let saved = collection ? {} : await run.step('Checkpoint / preparation', () => store.getSaved(scope)), collectionAssets = null, collectionAssetSignature = '';
+                    let saved = collection ? {} : await run.step('Checkpoint / preparation', () => store.getSaved(scope), 'saved-records'), collectionAssets = null, collectionAssetSignature = '';
                     if (collection) {
                         run.phase('Manifest retrieval (network + server)');
                         let cursor = '';
@@ -2745,20 +2748,27 @@
                             cursor = response.nextCursor || '';
                         } while (cursor);
                     }
-                    run.phase('Indexed original lookup');
+                    run.phase(lookupLabel, 'saved-originals');
                     const units = await run.wait(store.getUnitsByIds(scope,Object.keys(saved),{guard:current})),
                         roles = (metadata.descriptors || []).map(descriptor => descriptor.role), outputs = [];
                     if (collectionAssets && (collectionAssets.length !== roles.length || roles.some(role => !collectionAssets.some(asset => asset.role === role)))) throw new Error('Cached workbook roles differ from the collection originals.');
                     for (const role of roles) {
-                        run.phase('Indexed original lookup');
+                        run.phase(lookupLabel, 'workbook-original');
                         const asset = await run.wait(store.getAsset(scope, role)); run.check(); if (!asset) throw new Error('Open this content group once to verify and cache its originals before downloading.');
                         const expected = collectionAssets?.find(item => item.role === role);
                         if (expected && (asset.parsed?.artifactHash !== expected.artifactHash
                             || (asset.parsed?.parserVersion || asset.descriptor?.parserVersion || 'clienttext-v1') !== (expected.descriptor.parserVersion || 'clienttext-v1'))) throw new Error('Cached workbook original or parser differs from the collection snapshot.');
-                        const bytes = assetBytes(asset), buffer = bytes instanceof Blob ? await bytes.arrayBuffer() : bytes;
+                        run.phase('Original workbook byte read', 'workbook-bytes');
+                        const bytes = assetBytes(asset); let buffer;
+                        try { buffer = bytes instanceof Blob ? await bytes.arrayBuffer() : bytes; }
+                        catch (error) {
+                            if (!['NotFoundError','NotReadableError'].includes(error.name)) throw error;
+                            throw Object.assign(new Error('The selected original workbook is no longer readable from its disk location. Keep this tab open and make a local recovery copy before reloading or changing workbooks.'),
+                                {name:error.name,code:'CLIENTTEXT_ORIGINAL_FILE_UNAVAILABLE'});
+                        }
                         run.check();
-                        // The immutable package supplies untouched cells. Only
-                        // affected units are needed to validate and patch work.
+                        // The immutable package and its sheet workload summaries
+                        // supply untouched cells/statuses; send only affected units.
                         const parsed = { ...asset.parsed, units: units.filter(unit => unit.role === role && saved[unit.id]) };
                         const roleSaved=Object.fromEntries(parsed.units.filter(unit=>saved[unit.id]).map(unit=>[unit.id,saved[unit.id]]));
                         run.phase('Worker verification');
@@ -2783,7 +2793,7 @@
                     root.saveAs(blob, name); run.state.downloadStarted = true; completed = true;
                     return true;
                 } catch (error) {
-                    if (run.current() && !signal.aborted && error.name !== 'AbortError') this.ctError = error.message;
+                    if (run.current() && !signal.aborted && error.name !== 'AbortError') { run.fail(error); this.ctError = error.message; }
                     return false;
                 } finally {
                     if (!operation) this.ctFinishExport(run, signal.aborted || !run.current() ? 'aborted' : completed ? 'done' : 'failed');
@@ -2822,7 +2832,7 @@
                     return completed;
                 } catch (error) {
                     completed = false;
-                    if (run.current() && !run.signal.aborted && error.name !== 'AbortError') this.ctError = error.message;
+                    if (run.current() && !run.signal.aborted && error.name !== 'AbortError') { run.fail(error); this.ctError = error.message; }
                     return false;
                 } finally {
                     this.ctFinishExport(run, run.signal.aborted || !run.current() ? 'aborted' : completed ? 'done' : 'failed');
@@ -3064,14 +3074,18 @@
                             // ClientText filenames are optional naming hints.
                             // The selected release supplies the game scope.
                             const bytes = await candidate.file.arrayBuffer();
+                            // A browser File can retain a path-backed reference.
+                            // Own the verified bytes before the user moves or
+                            // removes the selected disk file during this session.
+                            const originalBlob = new Blob([bytes], { type: candidate.file.type });
                             this.ctReport({phase:'Checking reusable original',workbook:candidate.file.name,sheet:'',completed:0,total:null});
                             const hash=await this.ctOriginalHash(bytes),cached=this.ctUploadTest ? null : await this._ctStore.getCachedOriginal?.(hash,root.ClientTextState.PARSER_VERSION,candidate.role,{guard:()=>key===this.managedCatalogScope && !this._ctAbort.signal.aborted});
-                            if(cached){for(const unit of cached.units)units.push(unit);assets.push({...cached.asset,role:candidate.role,blob:candidate.file,name:candidate.file.name,hash});}
+                            if(cached){for(const unit of cached.units)units.push(unit);assets.push({...cached.asset,role:candidate.role,blob:originalBlob,name:candidate.file.name,hash});}
                             else{
                                 const parsed = await this._ctWorker.parseWorkbook(bytes, { filename: candidate.file.name, role: candidate.role, language, signal: this._ctAbort.signal, onProgress: progress => this.ctReport({...progress,workbook:candidate.file.name}) });
                                 if(parsed.artifactHash!==hash)throw new Error('Workbook original changed while preparing the selected file.');
                                 for(const unit of parsed.units)units.push(unit);
-                                assets.push({ role: candidate.role, blob: candidate.file, name: candidate.file.name, hash,parserVersion:parsed.parserVersion, parsed: { ...parsed, units: undefined } });
+                                assets.push({ role: candidate.role, blob: originalBlob, name: candidate.file.name, hash,parserVersion:parsed.parserVersion, parsed: { ...parsed, units: undefined } });
                             }
                             if (key !== this.managedCatalogScope || this._ctAbort.signal.aborted) return;
                         }

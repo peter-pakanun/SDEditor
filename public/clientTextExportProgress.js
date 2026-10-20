@@ -1,4 +1,4 @@
-/* Explicit export timings contain phase names and durations only, never workbook text or credentials. */
+/* Export reports retain allowlisted failure details, never raw error payloads, workbook text or credentials. */
 (function (root, factory) {
     const api = factory(root);
     if (typeof module === 'object' && module.exports) module.exports = api;
@@ -8,6 +8,13 @@
     const now = () => root.performance?.now?.() ?? Date.now();
     const duration = ms => (Math.max(0, ms) / 1000).toFixed(2) + ' s';
     const aborted = () => Object.assign(new Error('Export stopped.'), { name: 'AbortError', stale: true });
+    const operations = {
+        'workspace-metadata': 'Workspace metadata', 'original-preparation': 'Original workbook preparation',
+        'saved-records': 'Saved records', 'saved-originals': 'Original records for saved values', 'workbook-original': 'Original workbook package',
+        'workbook-bytes': 'Reading original workbook bytes'
+    };
+    const failureCodes = new Set(['CLIENTTEXT_NOT_READY', 'CLIENTTEXT_ORIGINAL_UNIT_MISSING', 'CLIENTTEXT_ORIGINAL_ASSET_MISSING', 'CLIENTTEXT_ORIGINAL_FILE_UNAVAILABLE']);
+    const errorNames = new Set(['Error', 'TypeError', 'SyntaxError', 'DataError', 'DataCloneError', 'InvalidStateError', 'NotFoundError', 'NotReadableError', 'QuotaExceededError', 'TransactionInactiveError', 'UnknownError', 'VersionError', 'ReadOnlyError', 'ConstraintError', 'NetworkError']);
     const collectionText = state => state === 'accepted'
         ? 'Collection accepted by the server. Local Abort cannot undo collection or ending. An interrupted download can retry using the retained receipt.'
         : state === 'uncertain' ? 'Collection outcome unknown: the server may have accepted it or ended the team. Retry uses the same retained request ID.'
@@ -27,16 +34,32 @@
             if (row?.status === 'running') row.elapsed = now() - row.startedAt;
             this.publish({ ...this.state, rows: this.state.rows.map(row => ({ ...row })) });
         }
-        phase(label) {
+        phase(label, operation) {
             this.check(); const previous = this.state.rows.at(-1);
-            if (previous?.label === label && previous.status === 'running') return;
-            this.endPhase('done'); this.state.rows.push({ label, startedAt: now(), elapsed: 0, status: 'running' }); this.tick();
+            const detail = operations[operation] || '';
+            if (previous?.label === label && previous.status === 'running' && (previous.detail || '') === detail) return;
+            this.endPhase('done'); this.state.rows.push({ label, ...(detail ? { detail } : {}), startedAt: now(), elapsed: 0, status: 'running' }); this.tick();
         }
         endPhase(status) {
             const row = this.state.rows.at(-1);
             if (row?.status === 'running') { row.elapsed = now() - row.startedAt; row.status = status; }
         }
-        async step(label, callback) { this.phase(label); const result = await this.wait(callback()); this.check(); return result; }
+        async step(label, callback, operation) { this.phase(label, operation); const result = await this.wait(callback()); this.check(); return result; }
+        fail(error) {
+            if (this.signal.aborted || !this.current() || this.state.failure) return;
+            const row = this.state.rows.at(-1), originalRead = ['Workspace metadata', 'Original workbook preparation', 'Original records for saved values', 'Original workbook package', 'Reading original workbook bytes'].includes(row?.detail);
+            this.state.failure = {
+                code: failureCodes.has(error?.code) ? error.code : 'CLIENTTEXT_EXPORT_FAILED',
+                name: errorNames.has(error?.name) ? error.name : 'Error',
+                step: row?.detail || row?.label || 'Export setup',
+                message: this.state.memoryOnly
+                    ? 'Workbook edits remain only in this open tab. Keep it open and share Copy timings and the workspace error details. Make a local recovery copy before reloading or changing workbooks.'
+                    : originalRead
+                    ? 'Export could not read its original workbook data. Reopen the same content group and retry. If it fails again, share Copy timings and the workspace error details.'
+                    : 'Share Copy timings and the workspace error details if retrying the export fails.'
+            };
+            this.tick();
+        }
         async delay(ms) {
             let timer;
             const cancel = () => clearTimeout(timer);
@@ -70,9 +93,11 @@
                 const state = this.ctExportTiming;
                 if (!state) return '';
                 return [(state.contentMode === 'statdescription' ? 'StatDescription' : 'ClientText') + ' export timing', state.label, 'Status: ' + state.status, 'Total elapsed: ' + duration(state.elapsed),
+                    ...(state.memoryOnly ? ['Workbook storage: temporary; edits remain only in this open tab.'] : []),
                     collectionText(state.collection), state.downloadStarted ? 'Browser download initiated; completion is not observable.' : 'Download not initiated.',
+                    ...(state.failure ? ['Failure code: ' + state.failure.code, 'Error type: ' + state.failure.name, 'Failure step: ' + state.failure.step, 'Next action: ' + state.failure.message] : []),
                     'Request durations include network and server wall time; they are not server CPU measurements.',
-                    ...state.rows.map(row => `${row.label}: ${duration(row.elapsed)} (${row.status})`)].join('\n');
+                    ...state.rows.map(row => `${row.label}${row.detail ? ' [' + row.detail + ']' : ''}: ${duration(row.elapsed)} (${row.status})`)].join('\n');
             },
         },
         methods: {
@@ -89,6 +114,7 @@
                     if (added && follow) this.$nextTick?.(() => { if (log) log.scrollTop = log.scrollHeight; });
                 }, current, label);
                 run.state.contentMode = contentMode;
+                run.state.memoryOnly = contentMode === 'clienttext' && !!this.ctOfflineTest;
                 this._ctExportRun = this._ctExportReportId = run; this.ctBusy = true; this.ctError = '';
                 this.ctExportCopyMessage = ''; this.ctExportCopyBusy = false; this._ctExportCopyRequest = null; run.tick();
                 if (show) this.ctShowExport(); return run;

@@ -469,7 +469,7 @@
                     guard(options);
                     const batch=await Promise.all(ids.slice(start,start+128).map(async unitId=>{
                         const cache=cacheForUnit(metadata,unitId),row=cache ? await get(tx,stores.cacheUnits,key(cache,unitId)) : null;
-                        if(!row?.unit || row.unit.id!==unitId || row.unit.role!==JSON.parse(unitId)[0]) throw new Error('Saved ClientText unit is absent from its immutable original: '+unitId+'.');
+                        if(!row?.unit || row.unit.id!==unitId || row.unit.role!==JSON.parse(unitId)[0]) throw Object.assign(new Error('Saved ClientText unit is absent from its immutable original: '+unitId+'.'), {code:'CLIENTTEXT_ORIGINAL_UNIT_MISSING'});
                         return row.unit;
                     }));
                     units.push(...batch);
@@ -481,7 +481,7 @@
         async function getAsset(rawScope, role = 'normal', options) {
             const metadata=await requireReady(capture(rawScope).id,options),descriptor=metadata.descriptors.find(item=>item.role===role);
             const id=metadata.originalCaches?.[role];if(!id)return undefined;
-            const asset=await one(id,stores.cacheAssets,'asset',options);if(!asset)throw new Error('ClientText retained original is unavailable.');
+            const asset=await one(id,stores.cacheAssets,'asset',options);if(!asset)throw Object.assign(new Error('ClientText retained original is unavailable.'), {code:'CLIENTTEXT_ORIGINAL_ASSET_MISSING'});
             const name=metadata.assetNames?.[role] || metadata.group?.assets?.find(item=>item.role===role)?.filename || asset.name;
             return {...asset,name,parsed:{...asset.parsed,filename:name},descriptor,cacheKey:id};
         }

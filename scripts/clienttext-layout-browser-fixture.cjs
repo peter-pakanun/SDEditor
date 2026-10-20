@@ -198,9 +198,14 @@ async function run() {
         ${workspaceShell}<template #content>
         <div class="ctWorkspaceBody">${navigation}<div class="workspaceMain ctList">${npcHeading}${convoHeading}<div ref="ctFileTableRegion" class="fileTableScroll">${table}</div></div></div>
         </template></editor-workspace-shell>${fullEditor}</section><app-tooltip :state="tooltip"></app-tooltip></div></div>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js"></script>
+        <script src="/fixture-vue.js"></script>
         <script src="/statDescCodec.js"></script><script src="/translationDiagnostics.js"></script><script src="/clientTextState.js"></script><script src="/contentAdapters.js"></script><script src="/clientTextNpcIndex.js"></script><script src="/clientTextConvoIndex.js"></script><script src="/editorSession.js"></script><script src="/editorComponents.js"></script><script src="/inlineEditor.js"></script><script src="/clientTextUi.js"></script><script src="/fixture.js"></script></body></html>`));
     frontend.get('/fixture.js', (req, res) => res.type('js').send(fixtureJs));
+    frontend.get('/fixture-vue.js', (req,res)=>{
+        const cached=process.env.FIXTURE_VUE_PATH || join(__dirname,'../temp/clienttext-fixture-vue.min.js');
+        if(existsSync(cached))res.type('js').send(readFileSync(cached));
+        else res.redirect('https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js');
+    });
     frontend.use(express.static(publicDir));
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const results = [], screenshots = [], errors = [];
@@ -230,6 +235,48 @@ async function run() {
         const nav = page.getByRole('navigation', {name:'Workbook navigation'});
         const filter = page.getByRole('searchbox', {name:'Filter sheets'});
         const tooltip = page.getByRole('tooltip');
+        if(process.argv.includes('--sheet-colours-only')){
+            for(const theme of ['light','grey','dark','modern-dark'])for(const width of [1440,1100]){
+                await page.setViewportSize({width,height:900});
+                await page.evaluate(theme=>{
+                    document.documentElement.dataset.theme=theme;
+                    const vm=window.__ctLayoutFixture,S=ClientTextState,names=['Missing','Outdated','Revised','Reviewed','Completed','Unmarked'];
+                    const units=names.map((name,index)=>({id:JSON.stringify(['normal',name,'row']),role:'normal',sheet:name,recordId:'row',row:2,metadata:{},developerNotes:'',
+                        fields:[{id:'text',name:'Text',kind:'text',source:'English',target:index===0 || index===4?'':'Original',required:true,
+                            originalMissing:index===0 || index===4,outdated:index===1 || index===3,originalFill:index===0 || index===4?S.FILLS.missing:index===1 || index===3?S.FILLS.outdated:'FFFFFF',targetCell:'C2',sourceCell:'B2'}]}));
+                    vm.ctEditor=false;vm.ctInlineClosed=true;vm.ctSelection='';vm.ctSheet='';vm.ctBrowseMode='sheets';vm.ctDiagnostics=Vue.markRaw({});
+                    vm.ctSearch='';vm.ctAppliedSearch='';vm.ctSheetFilter='';vm.ctSelectedFilters=['missing','outdated','revised','saved','unchanged'];
+                    vm.ctSaved=Vue.markRaw({[units[2].id]:{values:{text:'Correction'}},[units[3].id]:{values:{text:'Original'},reviewed:{text:S.sourceHash('English')}},
+                        [units[4].id]:{values:{text:'Completed'}},[units[5].id]:{values:{text:'Original'}}});
+                    vm._ctSheets=Vue.markRaw(names.map(name=>({key:JSON.stringify(['normal',name]),role:'normal',name})));
+                    vm._ctUnitIndex=Vue.markRaw(new Map(units.map(unit=>[unit.id,unit])));vm.ctUnits=Vue.markRaw(units);vm.ctRevision++;
+                },theme);await settle();
+                const name=theme+'/'+width+' sheet colours';
+                for(const [label,color] of [['Missing','error'],['Outdated','warning'],['Revised','revised'],['Reviewed','reviewed'],['Completed','filled']]){
+                    const button=nav.getByRole('button',{name:label,exact:true});
+                    assert.equal(await button.evaluate((element,color)=>element.classList.contains('ctNavigationSeverity-'+color),color),true,name+': '+label);
+                    assert.ok(await button.getAttribute('aria-description'),name+': colour meaning is accessible');
+                }
+                const grey=nav.getByRole('button',{name:'Completed',exact:true}),neutral=nav.getByRole('button',{name:'Unmarked',exact:true});
+                assert.equal(await neutral.evaluate(element=>[...element.classList].some(value=>value.startsWith('ctNavigationSeverity-'))),false,name+': unmarked is not grey');
+                const styles=await page.evaluate(()=>{
+                    const nav=document.querySelector('.ctSheetList'),buttons=[...nav.querySelectorAll('button')],grey=buttons.find(button=>button.textContent==='Completed'),neutral=buttons.find(button=>button.textContent==='Unmarked');
+                    const read=element=>{const style=getComputedStyle(element);return {background:style.backgroundColor,border:style.borderColor,color:style.color};};
+                    const pixels=value=>{const canvas=document.createElement('canvas');canvas.width=canvas.height=1;const ctx=canvas.getContext('2d');ctx.fillStyle=value;ctx.fillRect(0,0,1,1);return [...ctx.getImageData(0,0,1,1).data].slice(0,3);};
+                    const luminance=value=>pixels(value).map(channel=>{channel/=255;return channel<=0.04045?channel/12.92:((channel+0.055)/1.055)**2.4;}).reduce((sum,value,index)=>sum+value*[.2126,.7152,.0722][index],0);
+                    const a=read(grey),b=read(neutral),fg=luminance(a.color),bg=luminance(a.background);
+                    return {grey:a,neutral:b,contrast:(Math.max(fg,bg)+.05)/(Math.min(fg,bg)+.05)};
+                });
+                assert.notEqual(styles.grey.background,styles.neutral.background,name+': explicit grey background differs from no colour');
+                assert.notEqual(styles.grey.border,styles.neutral.border,name+': explicit grey border differs from no colour');
+                assert.ok(styles.contrast>=4.5,name+': grey text remains readable');
+                await grey.click();await settle();assert.equal(await grey.getAttribute('aria-pressed'),'true');
+                assert.notEqual(await grey.evaluate(element=>getComputedStyle(element).boxShadow),'none',name+': selection remains visible on grey');
+                if(width===1440){const path=join(fixtureArtifacts,'sheet-colours-'+theme+'.png');await nav.screenshot({path});screenshots.push(path);}
+                results.push({name,styles});
+            }
+            assert.deepEqual(errors,[],'No browser errors');console.log(JSON.stringify({status:'PASS',passed:results.length,screenshots,results},null,2));return;
+        }
         const rowHeader = page.getByRole('columnheader', {name:'Row number'});
         assert.equal(await rowHeader.getAttribute('aria-sort'), 'ascending', 'Worksheet row order is the default');
         assert.equal(await page.locator('.ctTable > tbody > tr > .ctRowNumber').first().textContent(), '2', 'Show the original worksheet row');
@@ -698,8 +745,8 @@ async function run() {
             assert.equal(await renlyButton.evaluate(element=>element.classList.contains('ctNavigationSeverity-error') || element.classList.contains('ctNavigationSeverity-warning')),false,name+': removing the final finding restores normal styling');
             assert.equal(await unaButton.evaluate(element=>element.classList.contains('ctNavigationSeverity-warning')),false,name+': other resolved rows also return to normal');
             await sheetsTab.click();await page.waitForFunction(()=>window.__ctLayoutFixture.ctBrowseMode==='sheets' && !window.__ctLayoutFixture.ctBrowseBusy);await settle();
-            assert.equal(await audioSheet.evaluate(element=>element.classList.contains('ctNavigationSeverity-warning')),false,name+': resolved Sheets return to normal');
-            assert.equal(await namesSheet.evaluate(element=>element.classList.contains('ctNavigationSeverity-warning')),false,name+': unrelated Sheets also refresh');
+            assert.equal(await audioSheet.evaluate(element=>element.classList.contains('ctNavigationSeverity-revised')),true,name+': a saved correction keeps its purple Sheet colour after findings clear');
+            assert.equal(await namesSheet.evaluate(element=>[...element.classList].some(value=>value.startsWith('ctNavigationSeverity-'))),false,name+': unchanged complete Sheets return to no colour');
             results.push({name:name+' accessible tabs, production labels, long names, fixed filter, independent scroll/page and exact editor caret handoff'});
         }
         for(const theme of ['light','grey','dark','modern-dark'])for(const width of [1440,1100]){

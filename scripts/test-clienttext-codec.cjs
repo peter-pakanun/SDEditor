@@ -40,6 +40,198 @@ async function workbook({ replace = {}, macro = false, normal } = {}) {
 }
 const get = (parsed, record, sheetName = 'Normal') => parsed.units.find(unit => unit.recordId === record && unit.sheet === sheetName);
 const field = (unit, name, form = null) => unit.fields.find(item => item.id === JSON.stringify([name, form]));
+const withoutAddedTab = raw => raw.replace(/<((?:[\w.-]+:)?sheetPr)><(?:[\w.-]+:)?tabColor\b[^>]*\/><\/\1>/, '');
+const tabColor = async (bytes, path = 'xl/worksheets/sheet1.xml') => {
+    const raw = await (await JSZip.loadAsync(bytes)).file(path).async('string');
+    return /<(?:[\w.-]+:)?tabColor\b[^>]*\brgb="FF([A-F0-9]{6})"/i.exec(raw)?.[1] || null;
+};
+const withTab = (raw, color) => raw.replace('<sheetData>', `<sheetPr codeName="NativeSheet" enableFormatConditionsCalculation="0"><tabColor rgb="FF${color}"/><outlinePr summaryRight="0"/><pageSetUpPr fitToPage="1"/></sheetPr><sheetData>`);
+
+test('export resolves red cells and tabs from current content while retaining unrelated XLSM data', async () => {
+    const normal = withTab(sheet([
+        row(1, [cell('A1', 'ID'), cell('B1', 'Name'), cell('C1', 'Translation'), cell('D1', 'Character')]),
+        row(2, [cell('A2', 'missing'), cell('B2', 'English'), empty('C2', 2), '<c r="D2"><f>1+1</f><v>2</v></c>']),
+        row(3, [cell('A3', 'stale-red'), cell('B3', 'English'), cell('C3', 'Already translated', 2)]),
+    ]), Codec.FILLS.missing);
+    const bytes = await workbook({ macro: true, normal }), parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsm' });
+    const missing = get(parsed, 'missing'), stale = get(parsed, 'stale-red');
+    const saved = { [missing.id]: { values: { [field(missing, 'Name').id]: 'Filled' } },
+        [stale.id]: { values: { [field(stale, 'Name').id]: field(stale, 'Name').target } } };
+    const output = await Codec.exportWorkbook(bytes, parsed, saved), reopened = await Codec.parseWorkbook(output, { filename: 'French.xlsm' });
+    assert.equal(field(get(reopened, 'missing'), 'Name').originalFill, Codec.FILLS.filled);
+    assert.equal(field(get(reopened, 'stale-red'), 'Name').originalFill, Codec.FILLS.filled, 'Saved nonblank content cannot retain an obsolete red Missing fill');
+    assert.equal(await tabColor(output), Codec.FILLS.filled, 'A completed red sheet must reflect its resolved content');
+    const before = await JSZip.loadAsync(bytes), after = await JSZip.loadAsync(output);
+    assert.deepEqual(Object.keys(after.files), Object.keys(before.files));
+    for (const name of Object.keys(before.files)) if (!before.files[name].dir && !['xl/styles.xml', 'xl/worksheets/sheet1.xml'].includes(name))
+        assert.deepEqual(await after.file(name).async('uint8array'), await before.file(name).async('uint8array'), name);
+    const omitEdits = raw => raw.replace(/<tabColor\b[^>]*\/>/, '<tabColor/>').replace(/<c\b[^>]*?\br="C[23]"[^>]*?(?:\/>|>[\s\S]*?<\/c>)/g, '<target/>');
+    assert.equal(omitEdits(await after.file('xl/worksheets/sheet1.xml').async('string')), omitEdits(normal), 'Only selected targets and the tab colour may change, including formula caches and sheetPr options');
+    const corrected = await Codec.exportWorkbook(bytes, parsed, { ...saved, [stale.id]: { values: { [field(stale, 'Name').id]: 'Revised red cell' } } });
+    assert.equal(field(get(await Codec.parseWorkbook(corrected, { filename: 'French.xlsm' }), 'stale-red'), 'Name').originalFill, Codec.FILLS.revised);
+    assert.equal(await tabColor(corrected), Codec.FILLS.revised, 'A correction of complete original text is Revised even if its original fill was red');
+});
+
+test('sheet tabs include untouched Missing and Outdated fields, then reviewed and revised saved content', async () => {
+    const normal = withTab(sheet([
+        row(1, [cell('A1', 'ID'), cell('B1', 'Name'), cell('C1', 'Translation')]),
+        row(2, [cell('A2', 'missing'), cell('B2', 'English'), empty('C2', 2)]),
+        row(3, [cell('A3', 'outdated'), cell('B3', 'Changed English'), cell('C3', 'Old', 3)]),
+        row(4, [cell('A4', 'complete'), cell('B4', 'English'), cell('C4', 'Original', 1)]),
+    ]), Codec.FILLS.missing);
+    const bytes = await workbook({ macro: true, normal }), parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsm' });
+    const missing = get(parsed, 'missing'), outdated = get(parsed, 'outdated'), complete = get(parsed, 'complete'), records = {};
+    const save = (unit, value, reviewed = {}) => records[unit.id] = { values: { [field(unit, 'Name').id]: value }, reviewed };
+    const exported = () => Codec.exportWorkbook(bytes, { ...parsed, units: parsed.units.filter(unit => records[unit.id]) }, records);
+    save(complete, 'Revised');
+    assert.equal(await tabColor(await exported()), Codec.FILLS.missing, 'An untouched missing row keeps a mixed sheet red');
+    save(missing, 'Filled');
+    assert.equal(await tabColor(await exported()), Codec.FILLS.outdated, 'Untouched Outdated work outranks completed or revised work');
+    save(outdated, 'Old', { [field(outdated, 'Name').id]: State.sourceHash(field(outdated, 'Name').source) });
+    const output = await exported();
+    assert.equal(await tabColor(output), Codec.FILLS.revised, 'An eligible correction remains visible after all workload is resolved');
+    const reopened = await Codec.parseWorkbook(output, { filename: 'French.xlsm' });
+    assert.equal(field(get(reopened, 'outdated'), 'Name').originalFill, Codec.FILLS.reviewed);
+    assert.equal(field(get(reopened, 'complete'), 'Name').originalFill, Codec.FILLS.revised);
+    save(complete, 'Original');
+    assert.equal(await tabColor(await exported()), Codec.FILLS.reviewed, 'Reverting a correction leaves reviewed completion');
+    assert.deepEqual(await Codec.exportWorkbook(bytes, parsed, {}), bytes, 'Unmodified workbooks keep their exact bytes');
+    assert.deepEqual(await Codec.exportWorkbook(bytes, parsed, { [complete.id]: records[complete.id] }), bytes, 'An unchanged complete save preserves original formatting and tabs');
+});
+
+test('legacy affected-only headers rederive whole-sheet workload with their accepted parser', async () => {
+    for (const parserVersion of Codec.PARSER_VERSIONS) {
+        const normal = classDialogue().replace('</sheetData>', row(3, [cell('A3', 'untouched'), cell('C3', 'English'), cell('D3', 'Complete', 1), cell('E3', 'Complete', 1)]) + '</sheetData>');
+        const bytes = await workbook({ macro: true, normal: withTab(normal, Codec.FILLS.missing) });
+        const parsed = await Codec.parseWorkbook(bytes, { filename: 'German.xlsm', parserVersion });
+        const unit = get(parsed, 'dialogue'), current = field(unit, 'Text', 'MS'), saved = { [unit.id]: { values: { [current.id]: 'Revised' } } };
+        const legacy = { ...parsed, sheets: parsed.sheets.map(({ originalStatusCounts, ...sheet }) => sheet), units: [unit] };
+        assert.deepEqual(await Codec.exportWorkbook(bytes, legacy, saved), await Codec.exportWorkbook(bytes, parsed, saved), parserVersion);
+        assert.equal(await tabColor(await Codec.exportWorkbook(bytes, legacy, saved)), parserVersion === 'clienttext-v1' ? Codec.FILLS.revised : Codec.FILLS.missing);
+        const oldCounts = { ...legacy, sheets: parsed.sheets.map(sheet => ({ ...sheet, originalStatusCounts: {
+            missing: sheet.originalStatusCounts.missing, outdated: sheet.originalStatusCounts.outdated } })) };
+        assert.deepEqual(await Codec.exportWorkbook(bytes, oldCounts, saved), await Codec.exportWorkbook(bytes, parsed, saved), 'Two-colour cached counts are upgraded from the same accepted original');
+    }
+});
+
+test('exported grey completion is distinct from no colour, with retained higher completion colours across untouched fields', async () => {
+    const plain = sheet([row(1, [cell('A1', 'ID'), cell('B1', 'Name'), cell('C1', 'Translation')]),
+        row(2, [cell('A2', 'plain'), cell('B2', 'English'), cell('C2', 'Original', 1)])]);
+    const bytes = await workbook({ macro: true, normal: plain }), parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsm' });
+    const unit = get(parsed, 'plain'), current = field(unit, 'Name');
+    const saved = { [unit.id]: { values: { [current.id]: 'Correction' } } };
+    assert.equal(await tabColor(await Codec.exportWorkbook(bytes, parsed, saved)), Codec.FILLS.revised);
+    saved[unit.id].values[current.id] = current.target;
+    const reverted = await Codec.exportWorkbook(bytes, parsed, saved);
+    assert.equal(await tabColor(reverted), null, 'An unchanged complete original has no colour, not grey');
+    assert.deepEqual(reverted, bytes, 'Reverting the correction retains the exact original uncoloured workbook');
+
+    const completionStyles = styles.replace('<fills count="4">', '<fills count="7">').replace('</fills>',
+        ['filled','reviewed','revised'].map(color => '<fill><patternFill patternType="solid"><fgColor rgb="FF' + Codec.FILLS[color] + '"/></patternFill></fill>').join('') + '</fills>')
+        .replace('<cellXfs count="4">', '<cellXfs count="7">').replace('</cellXfs>',
+            [4,5,6].map(fillId => '<xf numFmtId="0" fontId="0" fillId="' + fillId + '" borderId="0" xfId="0"/>').join('') + '</cellXfs>');
+    for (const [styleId, expected] of [[1,'filled'],[4,'filled'],[5,'reviewed'],[6,'revised']]) {
+        const normal = withTab(sheet([row(1, [cell('A1', 'ID'), cell('B1', 'Name'), cell('C1', 'Translation')]),
+            row(2, [cell('A2', 'missing'), cell('B2', 'English'), empty('C2', 2)]),
+            row(3, [cell('A3', 'untouched'), cell('B3', 'English'), cell('C3', 'Complete', styleId)])]), Codec.FILLS.missing);
+        const original = await workbook({ macro: true, normal, replace: { 'xl/styles.xml': completionStyles } });
+        const baseline = await Codec.parseWorkbook(original, { filename: 'French.xlsm' }), missing = get(baseline, 'missing');
+        const work = { [missing.id]: { values: { [field(missing, 'Name').id]: 'Completed' } } };
+        const exported = await Codec.exportWorkbook(original, { ...baseline, units: [missing] }, work);
+        assert.equal(await tabColor(exported), Codec.FILLS[expected], 'Untouched completion fills participate in whole-sheet priority');
+        const reopened = await Codec.parseWorkbook(exported, { filename: 'French.xlsm' });
+        assert.equal(field(get(reopened, 'missing'), 'Name').originalFill, Codec.FILLS.filled);
+        assert.equal(State.unitColorFor(get(reopened, 'missing')), 'filled', 'Reimported completion-grey remains distinct');
+        assert.deepEqual(get(reopened, 'untouched'), get(baseline, 'untouched'), 'Unmodified fields keep their exact source styling');
+    }
+});
+
+test('an affected uncoloured sheet removes obsolete status tabs, including grey, while retaining unrelated tab formatting', async () => {
+    for (const color of [...Object.values(Codec.FILLS), '123456']) {
+        const normal = withTab(sheet([row(1, [cell('A1', 'ID'), cell('B1', 'Name'), cell('C1', 'Translation')]),
+            row(2, [cell('A2', 'audio'), cell('B2', '[NOAUDIO]'), cell('C2', 'Original metadata', 1)])]), color);
+        const bytes = await workbook({ macro: true, normal }), parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsm' });
+        const unit = get(parsed, 'audio'), current = field(unit, 'Name'), saved = { [unit.id]: { values: { [current.id]: 'Changed metadata' } } };
+        assert.equal(State.unitColorFor(unit, saved[unit.id]), '', 'Audio-only source retains its existing workload exemption');
+        const output = await Codec.exportWorkbook(bytes, parsed, saved);
+        assert.equal(await tabColor(output), color === '123456' ? color : null, 'No colour is an explicit result and clears known status colours');
+        const reopened = await Codec.parseWorkbook(output, { filename: 'French.xlsm' });
+        assert.equal(field(get(reopened, 'audio'), 'Name').originalFill, 'FFFFFF', 'Cell-colour exemptions remain unchanged');
+        const raw = await (await JSZip.loadAsync(output)).file('xl/worksheets/sheet1.xml').async('string');
+        assert.ok(raw.includes('<outlinePr summaryRight="0"/><pageSetUpPr fitToPage="1"/>'));
+    }
+});
+
+test('review-only and source-only exports update tabs without manufacturing Revised or Saved fills', async () => {
+    const normal = withTab(sheet([
+        row(1, [cell('A1', 'ID'), cell('B1', 'Name'), cell('C1', 'Translation')]),
+        row(2, [cell('A2', 'complete'), cell('B2', 'English'), cell('C2', 'Original', 1)]),
+    ]), Codec.FILLS.missing);
+    const bytes = await workbook({ macro: true, normal }), parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsm' });
+    const unit = get(parsed, 'complete'), current = field(unit, 'Name');
+    const sourceOnly = { values: {}, outdated: [current.id], saved: false };
+    const orange = await Codec.exportWorkbook(bytes, parsed, { [unit.id]: sourceOnly });
+    assert.equal(await tabColor(orange), Codec.FILLS.outdated);
+    const reviewed = { ...sourceOnly, reviewed: { [current.id]: State.sourceHash(current.source) } };
+    const green = await Codec.exportWorkbook(bytes, parsed, { [unit.id]: reviewed });
+    assert.equal(await tabColor(green), Codec.FILLS.reviewed);
+    assert.equal(field(get(await Codec.parseWorkbook(green, { filename: 'French.xlsm' }), 'complete'), 'Name').originalFill, Codec.FILLS.reviewed);
+    assert.equal(State.statusFor(unit, reviewed).saved, false);
+
+    const orangeBytes = await workbook({ macro: true, normal: normal.replace(cell('C2', 'Original', 1), cell('C2', 'Original', 3)) });
+    const originalOrange = await Codec.parseWorkbook(orangeBytes, { filename: 'French.xlsm' });
+    const tabOnly = await Codec.exportWorkbook(orangeBytes, originalOrange, { [unit.id]: { values: { [current.id]: 'Original' } } });
+    assert.equal(await tabColor(tabOnly), Codec.FILLS.outdated, 'A tab can change even when target XML and its existing orange fill need no change');
+    const before = await JSZip.loadAsync(orangeBytes), after = await JSZip.loadAsync(tabOnly);
+    assert.equal((await after.file('xl/worksheets/sheet1.xml').async('string')).replace(/<tabColor\b[^>]*\/>/, ''), normal.replace(cell('C2', 'Original', 1), cell('C2', 'Original', 3)).replace(/<tabColor\b[^>]*\/>/, ''));
+    assert.deepEqual(await after.file('xl/styles.xml').async('uint8array'), await before.file('xl/styles.xml').async('uint8array'));
+    const signedZip = await JSZip.loadAsync(orangeBytes); signedZip.file('_xmlsignatures/sig1.xml', '<Signature/>');
+    const signed = await signedZip.generateAsync({ type: 'uint8array' }), signedParsed = await Codec.parseWorkbook(signed, { filename: 'French.xlsm' });
+    await assert.rejects(Codec.exportWorkbook(signed, signedParsed, { [unit.id]: { values: { [current.id]: 'Original' } } }), /signature/, 'Tab-only changes also invalidate signatures');
+});
+
+test('tab patches support absent, empty and prefixed sheet properties and retain other sheet settings', async () => {
+    const base = sheet([row(1, [cell('A1', 'ID'), cell('B1', 'Name'), cell('C1', 'Translation')]),
+        row(2, [cell('A2', 'complete'), cell('B2', 'English'), cell('C2', 'Original', 1)])]);
+    for (const [name, properties] of [
+        ['absent', ''],
+        ['empty', '<sheetPr/>'],
+        ['commented', '<!--retained--><sheetPr codeName="Native"/>'],
+        ['options', '<sheetPr codeName="Native"><outlinePr summaryBelow="0"/><pageSetUpPr fitToPage="1"/></sheetPr>'],
+        ['theme', '<sheetPr codeName="Native"><tabColor theme="4" tint="0.5"/><outlinePr summaryBelow="0"/></sheetPr>'],
+    ]) for (const prefix of ['', 'x:']) {
+        let normal = base.replace('<sheetData>', properties + '<sheetData>');
+        if (prefix) normal = normal.replace(/<(\/?)(worksheet|sheetPr|tabColor|outlinePr|pageSetUpPr|sheetData|row|c|is|t|extLst|ext)(?=[\s/>])/g, '<$1x:$2').replace(`xmlns="${NS}"`, `xmlns:x="${NS}"`);
+        const bytes = await workbook({ macro: true, normal }), parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsm' });
+        const unit = get(parsed, 'complete'), current = field(unit, 'Name');
+        const output = await Codec.exportWorkbook(bytes, parsed, { [unit.id]: { values: { [current.id]: 'Revised' } } });
+        assert.equal(await tabColor(output), Codec.FILLS.revised, name + prefix);
+        const raw = await (await JSZip.loadAsync(output)).file('xl/worksheets/sheet1.xml').async('string');
+        assert.equal((raw.match(/<(?:x:)?tabColor\b/g) || []).length, 1, name + prefix);
+        assert.equal(raw.includes('theme="4"'), false); assert.equal(raw.includes('tint="0.5"'), false);
+        if (name !== 'absent' && name !== 'empty') assert.ok(raw.includes('codeName="Native"'));
+        if (name === 'commented') assert.ok(raw.includes('<!--retained-->'));
+        for (const child of properties.match(/<(?:outlinePr|pageSetUpPr)\b[^>]*\/>/g) || [])
+            assert.ok(raw.includes(prefix ? child.replace('<', '<x:') : child));
+        assert.equal(field(get(await Codec.parseWorkbook(output, { filename: 'French.xlsm' }), 'complete'), 'Name').target, 'Revised');
+    }
+});
+
+test('status fills clone the exact original style across mixed self-closing and expanded cellXfs', async () => {
+    const originalStyles = styles.replace('<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1"/></xf>',
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>')
+        .replace('fillId="2" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1"/>',
+            'fillId="2" borderId="0" xfId="0" applyAlignment="1" applyProtection="1"><alignment wrapText="1" readingOrder="2"/><protection locked="0"/>');
+    const bytes = await workbook({ macro: true, replace: { 'xl/styles.xml': originalStyles } });
+    const parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsm' }), unit = get(parsed, 'record'), current = field(unit, 'Name');
+    const output = await Codec.exportWorkbook(bytes, parsed, { [unit.id]: { values: { [current.id]: 'Filled' } } });
+    const parser = new (require('../public/vendor/fast-xml-parser-5.11.2.min.js').default)({ ignoreAttributes: false });
+    const raw = await (await JSZip.loadAsync(output)).file('xl/styles.xml').async('string'), xfs = parser.parse(raw).styleSheet.cellXfs.xf;
+    const reopened = await Codec.parseWorkbook(output, { filename: 'French.xlsm' }), styleId = Number(field(get(reopened, 'record'), 'Name').originalStyleId);
+    const withoutFill = xf => Object.fromEntries(Object.entries(xf).filter(([key]) => !['@_fillId', '@_applyFill'].includes(key)));
+    assert.deepEqual(withoutFill(xfs[styleId]), withoutFill(parser.parse(originalStyles).styleSheet.cellXfs.xf[Number(current.originalStyleId)]));
+});
+
 const classDialogue = () => sheet([
     row(1, [cell('A1', 'ID'), cell('B1', 'Character Class'), cell('C1', 'Text'), cell('D1', 'MS'), cell('E1', 'FS'),
         ...Codec.CLASS_FORMS.map((name, index) => cell(String.fromCharCode(70 + index) + '1', name)), cell('R1', 'Notes')]),
@@ -82,7 +274,7 @@ test('v4 italic header metadata overrides editable-name heuristics without consu
     const before = await JSZip.loadAsync(bytes), after = await JSZip.loadAsync(output);
     for (const name of Object.keys(before.files)) if (!before.files[name].dir && !['xl/worksheets/sheet1.xml', 'xl/styles.xml'].includes(name))
         assert.deepEqual(await after.file(name).async('uint8array'), await before.file(name).async('uint8array'), name);
-    const omitTarget = text => text.replace(/<c\b[^>]*\br="E2"[^>]*(?:\/>|>[\s\S]*?<\/c>)/, '<chosen-target/>');
+    const omitTarget = text => withoutAddedTab(text).replace(/<c\b[^>]*\br="E2"[^>]*(?:\/>|>[\s\S]*?<\/c>)/, '<chosen-target/>');
     assert.equal(omitTarget(await after.file('xl/worksheets/sheet1.xml').async('string')), omitTarget(await before.file('xl/worksheets/sheet1.xml').async('string')), 'All metadata cells and headers remain byte-exact');
 });
 test('v4 resolves header font italic booleans and keeps nonitalic Gender editable', async () => {
@@ -229,7 +421,7 @@ test('class exports patch only the chosen target while retaining exact text, nat
     const before = await JSZip.loadAsync(bytes), after = await JSZip.loadAsync(output);
     for (const name of Object.keys(before.files)) if (!before.files[name].dir && !['xl/worksheets/sheet1.xml', 'xl/styles.xml'].includes(name))
         assert.deepEqual(await after.file(name).async('uint8array'), await before.file(name).async('uint8array'), name);
-    const omitTarget = text => text.replace(/<c\b[^>]*\br="L2"[^>]*(?:\/>|>[\s\S]*?<\/c>)/, '<chosen-target/>');
+    const omitTarget = text => withoutAddedTab(text).replace(/<c\b[^>]*\br="L2"[^>]*(?:\/>|>[\s\S]*?<\/c>)/, '<chosen-target/>');
     assert.equal(omitTarget(await after.file('xl/worksheets/sheet1.xml').async('string')), omitTarget(await before.file('xl/worksheets/sheet1.xml').async('string')));
     assert.deepEqual(await Codec.exportWorkbook(bytes, parsed, {}), bytes);
 });
@@ -358,7 +550,7 @@ test('named-form exports patch each independent target without rewriting English
         assert.equal(field(result, 'Display Name', form).target, authored);
         for (const original of unit.fields) if (original.id !== current.id) assert.deepEqual(result.fields.find(item => item.id === original.id), original);
         assert.equal(result.developerNotes, unit.developerNotes); assert.deepEqual(result.metadata, unit.metadata);
-        const after = await JSZip.loadAsync(output), omitTarget = text => text.replace(new RegExp('<c\\b[^>]*?\\br="' + current.targetCell + '"[^>]*?(?:/>|>[\\s\\S]*?</c>)'), '<chosen-target/>');
+        const after = await JSZip.loadAsync(output), omitTarget = text => withoutAddedTab(text).replace(new RegExp('<c\\b[^>]*?\\br="' + current.targetCell + '"[^>]*?(?:/>|>[\\s\\S]*?</c>)'), '<chosen-target/>');
         for (const name of Object.keys(before.files)) if (!before.files[name].dir && !['xl/worksheets/sheet1.xml', 'xl/styles.xml'].includes(name))
             assert.deepEqual(await after.file(name).async('uint8array'), await before.file(name).async('uint8array'), name);
         assert.equal(omitTarget(await after.file('xl/worksheets/sheet1.xml').async('string')), omitTarget(await before.file('xl/worksheets/sheet1.xml').async('string')));
@@ -431,7 +623,7 @@ test('NPCText and NPCTalk Context references retain raw cells through v1/v2 pars
             if (before.files[name].dir || name === 'xl/styles.xml') continue;
             if (!changed.has(name)) assert.deepEqual(await after.file(name).async('uint8array'), await before.file(name).async('uint8array'), name);
             else {
-                const omitTarget = text => text.replace(new RegExp('<c\\b[^>]*\\br="' + changed.get(name) + '"[^>]*(?:/>|>[\\s\\S]*?</c>)'), '<chosen-target/>');
+                const omitTarget = text => withoutAddedTab(text).replace(new RegExp('<c\\b[^>]*\\br="' + changed.get(name) + '"[^>]*(?:/>|>[\\s\\S]*?</c>)'), '<chosen-target/>');
                 assert.equal(omitTarget(await after.file(name).async('string')), omitTarget(await before.file(name).async('string')), 'Context and all unrelated cells stay byte-identical in ' + name);
             }
         }
@@ -468,6 +660,8 @@ test('complete XLSM exports patch only targets and cloned status styles', async 
     assert.equal(field(get(result, 'complete'), 'Name').target, '=Literal _x0020_ & <angle>\r\nnext');
     assert.equal(field(get(result, 'record', 'Words_Gender'), 'Text', 'FS').target, 'Forte');
     assert.equal(field(get(result, 'record'), 'Name').source, 'Sword');
+    assert.equal(await tabColor(output), Codec.FILLS.revised, 'Resolved normal sheet reflects its eligible saved correction');
+    assert.equal(await tabColor(output, 'xl/worksheets/sheet2.xml'), Codec.FILLS.missing, 'Unresolved forms keep their own sheet red independently');
     const before = await JSZip.loadAsync(bytes), after = await JSZip.loadAsync(output);
     for (const name of ['xl/vbaProject.bin', 'xl/native.bin', 'xl/metadata', 'xl/workbook.xml', '[Content_Types].xml', 'xl/_rels/workbook.xml.rels']) assert.deepEqual(await after.file(name).async('uint8array'), await before.file(name).async('uint8array'), name);
     assert.ok((await after.file('xl/styles.xml').async('string')).includes('<alignment wrapText="1"/>'));
