@@ -293,7 +293,7 @@ test('clipped profile and voice pairs are validated after clipping and keep only
 test('full and inline UI filters, pagination, variant selection and view rows cannot change roles or sourced tone',async()=>{
     const selected=line('Selected',{Speaker:A,Listener:P}),hero=character(A,'Synthetic Mage'),actor=npc(P,'Synthetic Scout'),units=[selected,hero,actor],
         npcIndex=await N.buildNpcIndex(units,{yield:async()=>{}}),host={ctContext:()=>({scope:{game:'poe2'}}),ctCurrentUnit:selected,ctUnits:units,
-            _ctNpcIndex:npcIndex,ctSaved:{},ctMtlCommittedGlossary:()=>[]};
+            _ctNpcIndex:npcIndex,ctSaved:{},ctMtlContextGlossary:()=>[]};
     for(const name of ['ctRows','ctPageRows','ctDisplayedFields'])Object.defineProperty(host,name,{get(){throw new Error('view projection accessed');}});
     const create=()=>UI.mixin.methods.ctMtlBuildContext.call(host,selected.fields[0]),initial=create();
     for(const state of [{ctEditor:'full',ctSearch:'hidden'}, {ctEditor:'inline',ctPage:99}, {ctNpcKey:'another-npc',ctConvoKey:'another-family'},
