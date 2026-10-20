@@ -37,20 +37,81 @@ test('NPC/conversation groups never establish a speaker', () => {
     assert.equal(result.metadata[0].speakerEstablished, false);
     assert.equal(result.metadata[0].ambiguous, true);
 });
-test('committed glossary uses matching main pairs and current-game shadowing', () => {
+test('glossary uses matching main and alternate pairs and current-game shadowing', () => {
     const selected = unit('Line');
     const dictionary = [
         {_id:'all', find:'Scout', replace:'all-target', gameScope:'all'},
-        {_id:'poe2', find:'Scout', replace:'current-target', gameScope:'poe2', alts:[{find:'Spark',replace:'unsent-alternate'}]},
+        {_id:'poe2', find:'Scout', replace:'current-target', gameScope:'poe2', alts:[{find:'Spark',replace:'current-alternate'}]},
         {_id:'poe1', find:'Spark', replace:'wrong-game', gameScope:'poe1'},
         {_id:'disabled', find:'spark', replace:'disabled-target', disabled:true},
         {_id:'unmatched', find:'Nothing', replace:'unmatched-target'},
         {_id:'blank', find:'A', replace:''}
     ];
     const result = Context.build({unit:selected,field:selected.fields[0],units:[selected],dictionary,scope:{game:'poe2'}});
-    assert.deepEqual(result.glossary.map(row=>row.id), ['poe2']);
-    assert.equal(result.glossary[0].translation, 'current-target');
-    assert.ok(!JSON.stringify(result).includes('unsent-alternate'));
+    assert.deepEqual(result.glossary.map(row=>[row.id,row.source,row.translation]),
+        [['poe2','Scout','current-target'],['poe2','Spark','current-alternate']]);
+    assert.equal(result.omitted.glossary,0);
+});
+
+test('plain Delirium source matches the reported parent/alternate shape, including an untranslated or blank primary',()=>{
+    const selected=unit('Delirium','AfflictionRewardTypeVisuals','Delirium'),dictionary=[
+        {_id:'synthetic-delirium',find:'ContainsDelirium',replace:'ContainsDelirium',alts:[
+            {_id:'synthetic-mirror',find:'Mirror of Delirium',replace:'กระจกเดลิเรียม'},
+            {_id:'synthetic-delirium-alt',find:'Delirium',replace:'เดลิเรียม'},
+            {_id:'synthetic-fog',find:'Delirium Fog',replace:'หมอกเดลิเรียม'}],tlnote:''},
+        {_id:'stun',find:'Stun',replace:'สตัน',gameScope:'all'},
+        {_id:'mace',find:'Mace',replace:'กระบอง',gameScope:'all'}],before=structuredClone(dictionary);
+    selected.fields[0].name='Display Name';
+    const options={dictionary,scope:{game:'poe2',language:'Thai',branchId:'default'}},result=Context.build({unit:selected,field:selected.fields[0],units:[selected],...options});
+    assert.deepEqual(result.keywords,[]);assert.equal(result.keywordLookup.requested,0);assert.equal(result.omitted.glossary,0);
+    assert.deepEqual(result.glossary,[{id:'synthetic-delirium',source:'Delirium',translation:'เดลิเรียม',gameScope:'all'}]);
+    assert.equal(JSON.stringify(result.glossary).includes('ContainsDelirium'),false);assert.deepEqual(dictionary,before);
+    dictionary[0].replace='';
+    assert.deepEqual(Context.build({unit:selected,field:selected.fields[0],units:[selected],...options}).glossary,result.glossary);
+    const control=unit('ground_slam','ActiveSkills','Hit with a Mace and stun enemies.'),direct=Context.build({unit:control,field:control.fields[0],units:[control],...options});
+    assert.deepEqual(direct.glossary.map(row=>[row.source,row.translation]),[['Stun','สตัน'],['Mace','กระบอง']]);
+});
+
+test('browser context factory uses the loaded editor definition-pair helper for alternates without Node access',()=>{
+    const sandbox={ClientTextState:S,DictionaryScope:require('../public/dictionaryScope.js'),DictionaryMatching:require('../public/dictionaryMatching.js'),
+        ClientTextMtlState:require('../public/clientTextMtlState.js'),TextEncoder};
+    require('node:vm').runInNewContext(require('node:fs').readFileSync(require.resolve('../public/clientTextMtlContext.js'),'utf8'),sandbox);
+    const selected=unit('Synthetic','ClientStrings','Alternate term'),dictionary=[{_id:'synthetic-parent',find:'Parent',replace:'',alts:[{find:'Alternate term',replace:'Browser alternate'}]}];
+    const result=sandbox.ClientTextMtlContext.build({unit:selected,field:selected.fields[0],units:[selected],dictionary,scope:{game:'poe2'}});
+    assert.deepEqual(JSON.parse(JSON.stringify(result.glossary)),[{id:'synthetic-parent',source:'Alternate term',translation:'Browser alternate',gameScope:'all'}]);
+});
+
+test('alternate glossary matching respects phrase boundaries, pair eligibility, duplicates and approved grammatical variants',()=>{
+    const selected=unit('Synthetic','ActiveSkills','Delirium; burning damage. Lifetime is unrelated.'),dictionary=[
+        {_id:'parent',find:'UnmatchedParent',replace:'Synthetic primary',alts:[
+            {find:'Delirium',replace:'variant one'},{find:'delirium',replace:'variant one'},{find:'Delirium',replace:'variant two'},
+            {find:'burning damage',replace:'phrase'},{find:'Life',replace:'substring must not match'},
+            {find:'unrelated term',replace:'unrelated'},{find:'Lifetime',replace:''},{find:'',replace:'empty find'}]},
+        {_id:'disabled',find:'Other',replace:'',disabled:true,alts:[{find:'Delirium',replace:'disabled'}]}],
+        result=Context.build({unit:selected,field:selected.fields[0],units:[selected],dictionary,scope:{game:'poe2'}});
+    assert.deepEqual(result.glossary.map(row=>[row.source,row.translation]),
+        [['Delirium','variant one'],['Delirium','variant two'],['burning damage','phrase']]);
+    assert.equal(result.omitted.glossary,0);
+});
+
+test('current-game parent shadowing governs every alternate, including blank current-game targets',()=>{
+    const selected=unit('Synthetic','ClientStrings','Delirium'),all={_id:'all-parent',find:'ContainsDelirium',replace:'',alts:[{find:'Delirium',replace:'all alternate'}]},
+        current={_id:'poe2-parent',find:'ContainsDelirium',replace:'',gameScope:'poe2',alts:[{find:'Delirium',replace:'current alternate'}]},
+        wrong={_id:'poe1-parent',find:'DifferentParent',replace:'',gameScope:'poe1',alts:[{find:'Delirium',replace:'wrong game'}]};
+    const build=game=>Context.build({unit:selected,field:selected.fields[0],units:[selected],dictionary:[all,current,wrong],scope:{game}});
+    assert.deepEqual(build('poe2').glossary.map(row=>[row.id,row.translation]),[['poe2-parent','current alternate']]);
+    current.alts[0].replace='';assert.deepEqual(build('poe2').glossary,[],'a scoped blank cannot fall back to the shadowed All entry');
+    assert.deepEqual(build('poe1').glossary.map(row=>row.translation),['all alternate','wrong game']);
+});
+
+test('alternate glossary pairs retain existing context limits and captured hashes after Dictionary edits',()=>{
+    const selected=unit('Synthetic','ActiveSkills',Array.from({length:40},(_,i)=>'Term'+i).join(' ')),dictionary=[
+        {_id:'parent',find:'UnusedParent',replace:'',alts:Array.from({length:40},(_,i)=>({find:'Term'+i,replace:'Target '+i}))}],
+        context=Context.create({unit:selected,field:selected.fields[0],units:[selected],dictionary,scope:{game:'poe2'}}),snapshot=structuredClone(context.initial);
+    assert.equal(context.initial.glossary.length,Context.LIMITS.glossary);assert.equal(context.initial.omitted.glossary,8);
+    dictionary[0].alts[0].replace='Later correction';dictionary[0].alts.push({find:'Term39',replace:'New variant'});
+    assert.deepEqual(context.initial,snapshot);assert.equal(context.contextHash,S.hash(snapshot));assert.equal(context.glossaryHash,S.hash(snapshot.glossary));
+    assert.ok(JSON.stringify(context.initial).length<=Context.LIMITS.context);
 });
 test('lookups are exact, bounded to two, read only and contained in loaded workbook', () => {
     const selected=unit('Line'), related=unit('Other','Characters','Related English');

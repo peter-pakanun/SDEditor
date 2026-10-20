@@ -36,7 +36,7 @@ async function run(){
     const consentHtml=html.match(/<label class="settingsToggle"><input type="checkbox" v-model="mtlConsentVersion"[\s\S]*?<\/details>/)?.[0];
     assert.ok(consentHtml,'Actual Settings consent and privacy details are available');
     const styles=[...html.matchAll(/<link\b[^>]*rel="stylesheet"[^>]*href="([^"/:]+\.css)"[^>]*>/g)].map(match=>match[0].replace('href="','href="/')).join('\n');
-    const scripts=['workspaceState.js','dictionaryScope.js','regexEngine.js','translationDiagnostics.js','translationMemory.js',
+    const scripts=['workspaceState.js','dictionaryScope.js','dictionaryMatching.js','regexEngine.js','translationDiagnostics.js','translationMemory.js',
         'normalizedStore.js','normalizedRooms.js','offlineStore.js','clientTextState.js','contentAdapters.js','clientTextStore.js',
         'clientTextMtlState.js','clientTextMtlStore.js','clientTextMtlMemoryStore.js','clientTextMtlSync.js','clientTextMemoryStore.js',
         'vendor/fast-xml-parser-5.11.2.min.js','clientTextCodec.js','editorComponents.js','clientTextFormatting.js','clientTextComparisons.js',
@@ -137,7 +137,8 @@ const options={
     reopened=await ClientTextCodec.parseWorkbook(bytes,{filename:'Thai.xlsx',role:'normal'});return reopened.units[0].fields[0].target;},
   snapshot(){const field=this.ctCurrentUnit.fields[0];return{underlying:this.ctValues[field.id],visible:this.ctMtlFieldValue(field),reviewed:this.ctReviewed[field.id]||'',dirty:this.ctDraftDirty,
     candidates:this.ctMtlCount,accepted:this.ctMtlAccepted(field),error:this.ctError||this.ctMtlError};},
-  async memoryCount(){return (await this._fixtureStore.getMemory(this.ctWorkspace.scope))?.units?.length||0;}
+  async memoryCount(){return (await this._fixtureStore.getMemory(this.ctWorkspace.scope))?.units?.length||0;},
+  async durableMemorySnapshot(){return JSON.stringify(await ClientTextStore.create().getMemory(this.ctWorkspace.scope));}
  },
  template:'<div class="appRoot" data-density="compact"><main class="ctWorkspace" style="margin:24px;width:min(1200px,calc(100vw - 48px))"><h1>Synthetic MTL fixture</h1><button id="fixture-mode" @click="ctEditor=!ctEditor">Toggle full editor</button><button id="fixture-save" data-inline-focus-surface @click="ctSave()">Save</button><span v-if="ctMtlVisible && ctMtlCount" class="ctMtlCount"><span class="ctMtlDot"></span>MTL {{ctMtlCount}}</span><table><tbody><tr :data-unit-id="ctSelection" @click="ctRowClick(ctCurrentUnit,$event)" @focusout="ctInlineFocusOut"><td><section id="fixture-editor" :class="ctEditor ? \'ctFull ctFullEditor\' : \'inlineEditor\'"><ct-fields v-if="ctCurrentUnit && !ctInlineClosed" :host="$root" :side="ctEditor ? \'both\' : \'translation\'"></ct-fields></section></td></tr></tbody></table><p class="fixture-error">{{ctError||ctMtlError}}</p></main><fixture-mtl-consent v-if="fixtureConsent"></fixture-mtl-consent><ct-mtl-debug-dialog v-if="ctMtlDebugAllowed && ctMtlDebugWindow" :host="$root"></ct-mtl-debug-dialog></div>'
 };
@@ -425,13 +426,16 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
             assert.equal(await page.evaluate(()=>window.__mtlApp.ctInlineClosed),false,'Accept preserves inline editor');
             assert.equal(await target().evaluate(node=>node===document.activeElement),true,'Accept returns focus to the same native field');
             assert.equal((await snapshot()).underlying,'From memory {0}');assert.equal(await page.evaluate(()=>window.__mtlApp.exportTarget()),'Confirmed {0}','Accepted unsaved draft does not export');
+            const durableMemoryBeforeSave=await page.evaluate(()=>window.__mtlApp.durableMemorySnapshot());
             await page.locator('#fixture-save').click();await page.waitForFunction(()=>{const app=window.__mtlApp,field=app.ctCurrentUnit.fields[0];
                 return app.ctError||!app.ctBusy&&app.ctSaved[app.ctSelection]?.values[field.id]==='From memory {0}';});
             assert.equal((await snapshot()).error,'',mode+': save succeeds');assert.equal((await snapshot()).candidates,0,mode+': normal atomic save resolves candidate');
             assert.equal(await page.evaluate(()=>window.__mtlApp.exportTarget()),'From memory {0}','Saved accepted text exports');
             const savedMemory=await page.evaluate(()=>window.__mtlApp.memoryCount());
-            if(mode==='idb')assert.ok(savedMemory>0,'Only authored saved text teaches durable TM');
-            else assert.equal(savedMemory,0,'Disposable local work never writes durable TM');
+            assert.ok(savedMemory>0,'Only authored saved text teaches '+(mode==='memory'?'session':'durable')+' TM');
+            const durableMemoryAfterSave=await page.evaluate(()=>window.__mtlApp.durableMemorySnapshot());
+            if(mode==='memory')assert.equal(durableMemoryAfterSave,durableMemoryBeforeSave,'Disposable saves leave every durable TM pair unchanged');
+            else assert.notEqual(durableMemoryAfterSave,durableMemoryBeforeSave,'Persistent saves teach durable TM');
             await page.evaluate(()=>{window.__mtlApp._fixtureDefer=true;});await page.locator('.ctMtlButton').click();
             await page.waitForFunction(()=>window.__mtlApp._fixtureReleases.length===1);await target().evaluate(input=>{const app=window.__mtlApp,field=app.ctCurrentUnit.fields[0];app.ctValues[field.id]='New ordinary {0}';app.ctEdited(field);});
             await page.evaluate(()=>{window.__mtlApp._fixtureReleases.shift()();window.__mtlApp._fixtureDefer=false;});
@@ -443,6 +447,7 @@ document.addEventListener('keydown',event=>app.ctKey(event));await app.configure
                 return app.ctMtlPendingCandidate(next.fields[0])===null&&app.ctMtlCount===0;});
             assert.equal(sourceHidden,true,'Source change silently hides candidate');
             await page.evaluate(mode=>window.__mtlApp.configure(mode),mode);
+            if(mode==='memory')assert.equal(await page.evaluate(()=>window.__mtlApp.memoryCount()),0,'A new temporary session clears its learned TM');
             await target().fill('Unconfirmed ordinary {0}');
             const selection=await page.evaluate(()=>window.__mtlApp.ctSelection);
             await page.evaluate(()=>{window.__mtlApp._fixtureDefer=true;});

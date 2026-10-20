@@ -49,7 +49,7 @@ app.component('ct-tone-notes-button',ClientTextToneNotesUI.Button);app.component
 window.__toneApp=app.mount('#app');window.__toneApp.configure().then(()=>window.__toneReady=true);
 })()`;
     writeFileSync(join(outDir,'fixture.js'),fixture);const frontend=express(),server=createServer(frontend),errors=[],external=[],checks=[];
-    const scripts=['clientTextState.js','clientTextMtlContext.js','clientTextToneNotes.js','clientTextToneNotesUi.js'];
+    const scripts=['clientTextState.js','dictionaryScope.js','dictionaryMatching.js','clientTextMtlContext.js','clientTextToneNotes.js','clientTextToneNotesUi.js'];
     frontend.get('/',(_req,res)=>res.type('html').send('<!doctype html><html lang="en" data-theme="light"><head><meta charset="utf-8">'+styles+'</head><body><div id="app"></div><script src="/fixture-vue.js"></script>'+scripts.map(src=>'<script src="/'+src+'"></script>').join('')+'<script src="/fixture.js"></script></body></html>'));
     frontend.get('/fixture-vue.js',(_req,res)=>res.type('js').send(readFileSync(vuePath)));frontend.get('/fixture.js',(_req,res)=>res.type('js').send(fixture));frontend.use(express.static(publicDir));
     await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));let browser;

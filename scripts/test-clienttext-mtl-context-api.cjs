@@ -63,6 +63,20 @@ test('API accepts generated keyword contexts under text, UTF-8 and structural pr
     }
 });
 
+test('API accepts matched alternate glossary pairs with parent identity and unchanged submitted context',options,async()=>{
+    const validation=await api(),selected=unit('ClientStrings','SyntheticAlternate',[field('Text','Delirium and another term.','')]),dictionary=[
+        {_id:'synthetic-parent',find:'UnusedParent',replace:'',gameScope:'poe2',alts:[{find:'Delirium',replace:'เดลิเรียม'},{find:'another term',replace:'Synthetic alternate'}]}],
+        context=Context.create({unit:selected,field:selected.fields[0],units:[selected],dictionary,scope:{game:'poe2',language:'Thai'}}),
+        body=request(selected,context.initial,validation),before=structuredClone(body);
+    assert.deepEqual(body.context.glossary.map(row=>[row.id,row.source,row.translation]),
+        [['synthetic-parent','Delirium','เดลิเรียม'],['synthetic-parent','another term','Synthetic alternate']]);
+    for(const local of [false,true]){
+        const input=local?{...body,language:'Thai',game:'poe2',branchId:'default'}:body;
+        assert.deepEqual(validation.mtlRequestInput(input,{local}).context,before.context);bounds(context.initial,input);
+    }
+    dictionary[0].alts[0].replace='Later edit';assert.deepEqual(body,before);assert.equal(context.contextHash,S.hash(before.context));
+});
+
 test('oversized keyword translations leave bounded English context and API context limits remain enforced',options,async()=>{
     const validation=await api(),selected=unit('ClientStrings','Selected',[field('Text','Use [Spark|spark].','Existing selected')]),
         popup=unit('KeywordPopups','Spark',[field('Info Title','Title English','Small title'),field('Info Content','Content English','Original content')]),

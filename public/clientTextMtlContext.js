@@ -5,9 +5,10 @@
         node ? require('./dictionaryScope.js') : root.DictionaryScope,
         node ? require('./clientTextPortraitCatalog.js') : root.ClientTextPortraitCatalog,
         node ? require('./clientTextMtlState.js') : root.ClientTextMtlState,
-        node ? require('./clientTextMtlLookup.js') : root.ClientTextMtlLookup);
+        node ? require('./clientTextMtlLookup.js') : root.ClientTextMtlLookup,
+        node ? require('./dictionaryMatching.js') : root.DictionaryMatching);
     if (node) module.exports = api; else root.ClientTextMtlContext = api;
-})(typeof globalThis === 'object' ? globalThis : self, function (State, DictionaryScope, PortraitCatalog, MtlState, Lookup) {
+})(typeof globalThis === 'object' ? globalThis : self, function (State, DictionaryScope, PortraitCatalog, MtlState, Lookup, DictionaryMatching) {
     'use strict';
     const LIMITS = Object.freeze({ source: 12000, context: 16000, contextBytes: 48 * 1024, contextEntries: 1500,
         bytes: 65536, surrounding: 2, fields: 8, lookups: 2, results: 4, glossary: 32,
@@ -715,14 +716,17 @@
         }
         const glossary = [], matchText = [field.source, ...keywordSources.flatMap(({ record }) => record.fields.map(item => item.source))]
                 .map(value => ' ' + normalizedText(value) + ' ');
-        // The caller supplies only a committed shared Dictionary snapshot, never the editable Dictionary or TM.
+        // The caller captures the selected Dictionary. Use the editor's same
+        // main/alternate pairs; only a matching pair supplies its translation.
         const entries = DictionaryScope?.activeEntries(options.dictionary || [], options.scope?.game) || [];
         for (const entry of entries) {
-            const find = clean(entry?.find), target = clean(entry?.replace);
-            const phrase = normalizedText(find);
-            if (entry?.disabled || !phrase || !target.trim() || !matchText.some(text => text.includes(' ' + phrase + ' '))) continue;
-            glossary.push({ id: String(entry._id || entry.id || ''), source: find, translation: target,
-                ...(clean(entry.tlnote) ? { note: entry.tlnote } : {}), gameScope: DictionaryScope.normalize(entry) });
+            if (entry.disabled) continue;
+            for (const pair of DictionaryMatching.getDefinitionPairs(entry)) {
+                const find = pair.find, target = pair.replace, phrase = normalizedText(find);
+                if (!phrase || !target.trim() || !matchText.some(text => text.includes(' ' + phrase + ' '))) continue;
+                glossary.push({ id: String(entry._id || entry.id || ''), source: find, translation: target,
+                    ...(clean(entry.tlnote) ? { note: entry.tlnote } : {}), gameScope: DictionaryScope.normalize(entry) });
+            }
         }
         for (const [sheet, label] of [['NPCs', 'NPC context'], ['Characters', 'character context']])
             if (!sheets.has(sheet)) unavailable.push({ type: label, reason: 'optional-sheet-not-loaded' });

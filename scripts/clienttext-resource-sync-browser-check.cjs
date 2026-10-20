@@ -50,10 +50,16 @@ module.exports=async function({page,bootstrap,files,failures}){
         assert.equal(await app(()=>JSON.stringify(window.__clientFixtureApp.ctMtlDebugWindow.record).includes('Preview live note')),true);
         console.log('Live context preview refreshed');
         await app(()=>{
+            const vm=window.__clientFixtureApp,word=vm.dictionary.find(word=>word._id==='online-sword');
+            word.find='SyntheticSwordBundle';word.replace='';word.alts=[{_id:'synthetic-preview-alt',find:'Sword',replace:'Alternate preview term'}];vm.dictionaryEntryInput(word);
+        });
+        await page.waitForFunction(()=>window.__clientFixtureApp.ctMtlDebugWindow?.record.snapshot?.context?.glossary.some(row=>row.source==='Sword'&&row.translation==='Alternate preview term'));
+        console.log('Alternate-only live glossary preview refreshed');
+        await app(()=>{
             const vm=window.__clientFixtureApp,field=vm.ctPreviewField;
             vm.ctMtlDebugBegin(field,{requestId:'synthetic-already-submitted',context:vm.ctMtlBuildContext(field).initial});
             window.__frozenResourceRequest=JSON.stringify(vm.ctMtlDebugWindow.record);
-            vm.dictionary[0].replace='After captured request';vm.dictionaryEntryInput(vm.dictionary[0]);
+            vm.dictionary[0].alts[0].replace='After captured request';vm.dictionaryEntryInput(vm.dictionary[0]);
         });
         await page.waitForTimeout(250);
         assert.equal(await app(()=>JSON.stringify(window.__clientFixtureApp.ctMtlDebugWindow.record)===window.__frozenResourceRequest),true);
