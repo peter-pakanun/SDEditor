@@ -8287,6 +8287,10 @@ app.directive('tooltip', {
     };
     const show = (e) => {
       if (el.__sdTooltipDismissed) return;
+      const pinned=el.ownerDocument?.__sdTooltipTrigger;
+      // Touch-opened explanations survive compatibility mouse events on the
+      // disabled child and its focusable wrapper.
+      if(pinned?.__sdTooltipTouch && e?.type?.startsWith('mouse') && pinned.contains?.(e.target))return;
       // A nested control owns its own hint; row/container pointer listeners
       // must not replace it while the same mousemove bubbles upward.
       for (let target = e?.target; target && target !== el; target = target.parentElement) {
@@ -8298,10 +8302,12 @@ app.directive('tooltip', {
       if (previous && previous !== el) {
         previous.__sdTooltipShown = false;
         doc.removeEventListener('keydown', previous.__sdTooltipHandlers.escape, true);
+        doc.removeEventListener('pointerdown', previous.__sdTooltipHandlers.outside, true);
+        previous.__sdTooltipTouch=false;
       }
       if (doc) {
-        if (el.__sdTooltipShown) { doc.__sdTooltipTrigger = el; doc.addEventListener('keydown', escape, true); }
-        else { delete doc.__sdTooltipTrigger; doc.removeEventListener('keydown', escape, true); }
+        if (el.__sdTooltipShown) { doc.__sdTooltipTrigger = el; doc.addEventListener('keydown', escape, true); if(el.__sdTooltipTouch)doc.addEventListener('pointerdown', outside, true); }
+        else { delete doc.__sdTooltipTrigger; doc.removeEventListener('keydown', escape, true); doc.removeEventListener('pointerdown', outside, true); el.__sdTooltipTouch=false; }
       }
       binding.instance?.showTooltip?.(e, el.__sdTooltipValue);
     };
@@ -8315,10 +8321,12 @@ app.directive('tooltip', {
       el.__sdTooltipShown = false;
       const doc = el.ownerDocument, owns = doc?.__sdTooltipTrigger === el;
       doc?.removeEventListener('keydown', escape, true);
+      doc?.removeEventListener('pointerdown', outside, true);
+      el.__sdTooltipTouch=false;
       if (owns) delete doc.__sdTooltipTrigger;
       if (!doc || owns) binding.instance?.hideTooltip?.();
     };
-    const reset = () => { el.__sdTooltipDismissed = false; hide(); };
+    const reset = event => { if(el.__sdTooltipTouch && event?.type==='mouseleave')return;el.__sdTooltipDismissed = false; hide(); };
     const escape = event => {
       if (event.isComposing || event.keyCode === 229 || event.key !== 'Escape' || !el.__sdTooltipShown || el.ownerDocument?.__sdTooltipTrigger !== el) return;
       const owner = binding.instance?.$root || binding.instance;
@@ -8328,12 +8336,44 @@ app.directive('tooltip', {
       el.__sdTooltipDismissed = true;
       hide();
     };
-    el.__sdTooltipHandlers = { show, enter, focus, hide, reset, escape, describe };
+    const outside = event => {
+      if(el.__sdTooltipTouch && el.ownerDocument?.__sdTooltipTrigger===el && !el.contains?.(event.target)){el.__sdTooltipDismissed=true;hide();}
+    };
+    let touchStart=null,blockTouchClick=false;
+    const touchAvailable = event => {
+      const button=el.querySelector?.('button:disabled');
+      return el.getAttribute?.('tabindex')==='0' && !!button && (event.target===el || button.contains(event.target));
+    };
+    const touchDown = event => {
+      touchStart=null;blockTouchClick=false;
+      if(event.pointerType!=='touch' || !touchAvailable(event))return;
+      blockTouchClick=true;
+      if(event.isPrimary!==false)touchStart={id:event.pointerId,x:event.clientX,y:event.clientY};
+    };
+    const touchMove = event => {if(touchStart && event.pointerId===touchStart.id && (event.type==='pointercancel' || Math.hypot(event.clientX-touchStart.x,event.clientY-touchStart.y)>8))touchStart=null;};
+    const touchUp = event => {
+      const start=touchStart;touchStart=null;
+      if(!start || event.pointerId!==start.id || Math.hypot(event.clientX-start.x,event.clientY-start.y)>8 || !touchAvailable(event))return;
+      // Reopen even if the wrapper already has focus after keyboard Escape.
+      // No control click or Eng action is synthesized.
+      el.__sdTooltipTouch=true;el.focus?.({preventScroll:true});focus();
+    };
+    const touchClick = event => {
+      // A gesture started on a disabled control cannot activate it, including
+      // if an asynchronous update enabled the control before pointerup.
+      if(blockTouchClick && (event.pointerType==='touch' || event.sourceCapabilities?.firesTouchEvents)){blockTouchClick=false;event.preventDefault();event.stopImmediatePropagation();}
+    };
+    el.__sdTooltipHandlers = { show, enter, focus, hide, reset, escape, describe, outside, touchDown, touchMove, touchUp, touchClick };
     el.addEventListener('mouseenter', enter);
     el.addEventListener('mousemove', show);
     el.addEventListener('mouseleave', reset);
     el.addEventListener('focus', focus);
     el.addEventListener('blur', reset);
+    el.addEventListener('pointerdown', touchDown, true);
+    el.addEventListener('pointermove', touchMove, true);
+    el.addEventListener('pointercancel', touchMove, true);
+    el.addEventListener('pointerup', touchUp, true);
+    el.addEventListener('click', touchClick, true);
     el.removeAttribute('title');
     describe(binding.value);
   },
@@ -8352,12 +8392,19 @@ app.directive('tooltip', {
     el.removeEventListener('mouseleave', handlers.reset);
     el.removeEventListener('focus', handlers.focus);
     el.removeEventListener('blur', handlers.reset);
+    el.removeEventListener('pointerdown', handlers.touchDown, true);
+    el.removeEventListener('pointermove', handlers.touchMove, true);
+    el.removeEventListener('pointercancel', handlers.touchMove, true);
+    el.removeEventListener('pointerup', handlers.touchUp, true);
+    el.removeEventListener('click', handlers.touchClick, true);
+    el.ownerDocument?.removeEventListener('pointerdown', handlers.outside, true);
     el.ownerDocument?.removeEventListener('keydown', handlers.escape, true);
     if (el.__sdTooltipShown) handlers.hide();
     if (el.ownerDocument?.__sdTooltipTrigger === el) delete el.ownerDocument.__sdTooltipTrigger;
     if (el.__sdTooltipDescription !== undefined && el.getAttribute?.('aria-description') === el.__sdTooltipDescription) el.removeAttribute('aria-description');
     delete el.__sdTooltipDescription;
     delete el.__sdTooltipDismissed;
+    delete el.__sdTooltipTouch;
     delete el.__sdTooltipHandlers;
     delete el.__sdTooltipValue;
     delete el.__sdTooltipAnchor;
