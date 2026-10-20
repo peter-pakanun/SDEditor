@@ -129,8 +129,8 @@
         const createdAt = entry.createdAt || entry.at || record.savedAt || 0;
         const time = typeof createdAt === 'number' ? createdAt : Date.parse(createdAt) || 0;
         const key = origin + ':' + String(entry.id ?? entry.jobId ?? root.ClientTextState.hash([unitId, time, entry.before, record]));
-        return { key, id: entry.id, unitId, origin, action: entry.origin || record.origin || 'save', createdAt: time,
-            actor: copy(entry.actor || {}), before: historySnapshot(unit, entry.before || null), after: historySnapshot(unit, record),
+        return { key, id: entry.id, unitId, origin, action: Object.keys(entry.intentChanges || record.intentChanges || entry.after?.intentChanges || {}).length ? 'Use English decision / translation change' : entry.origin || record.origin || 'save', createdAt: time,
+            actor: copy(entry.actor || {}), intentChanges:Object.fromEntries(Object.entries(entry.intentChanges || record.intentChanges || {}).map(([id,change])=>[id,{...copy(change),label:unit.fields.find(field=>field.id===id)?.name || 'this field'}])), before: historySnapshot(unit, entry.before || null), after: historySnapshot(unit, record),
             context: copy(ctx), provenance: copy(record.provenance || {}), sequence: entry.sequence };
     }
     const mixin = {
@@ -155,7 +155,7 @@
             ctDictionaryPack:null, ctDraftSummaries:[], ctCommentPostError:'',
             ctCheckpointWarning: null, ctLocalEmergencyDrafts: [], ctLocalIssue: '', ctLocalDraftState: '', ctLocalBackupBusy: false, ctPeers: [], ctLocalWorkspaces: [], ctRequests: [], ctUploadVisible: false, ctUploadLocal: false, ctUploadTest: false,
             ctUploadVersion: null, ctUploadPredecessor: null, ctUploadName: '', ctUploadDeadline: '', ctUploadFiles: raw([]), ctPrepared: raw([]),
-            ctUploadHistory: false, ctUploadHistoryFiles: raw([]), ctWorkbookDragDepth: 0,
+            ctUploadHistory: false, ctUploadHistoryFiles: raw([]), ctUploadEnglishPrevious:'', ctWorkbookDragDepth: 0,
             ctUploadAssignments: teams.slice(), ctPolicy: null, ctPolicyText: '', ctUploadError: '', ctUploading: false, ctDuplicateChoices: {},
             activeContentGroup: null, ctTeamOptions: teams
         }; },
@@ -2091,6 +2091,18 @@
                 if(!target || active && active!==input && active!==target && active!==root.document?.body && active!==root.document?.documentElement)return true;
                 target.focus?.({preventScroll:true});target.setSelectionRange?.(caret,caret,'none');this.ctResizeField(target);return true;
             },
+            ctEnglishEligible(field) {
+                return this.gameVersion==='poe2' && root.ClientTextState.englishEligible(field) && !isDNTSource(field.source)
+                    && (this.ctOfflineTest || this.ctPolicy?.clientTextEnglishIntent===root.ClientTextState.ENGLISH_INTENT_PROTOCOL);
+            },
+            ctEnglishDecision(field) { return this.ctSaved[this.ctSelection]?.englishIntent?.[field.id] || this.ctSaved[this.ctSelection]?.provenance?.englishIntent?.[field.id]; },
+            ctUsesEnglish(field) { return root.ClientTextState.englishIntentFor(field,this.ctSaved[this.ctSelection]); },
+            ctEnglishOffer(field) { return this.ctEnglishEligible(field) && !this.ctUsesEnglish(field) && this.ctValues[field.id]===field.source; },
+            async ctChooseEnglish(field,revoke=false) {
+                if(!this.ctEnglishEligible(field) || this.ctBusy || this.ctHistoryViewer || this.ctMtlBusy?.(field) || this.ctMtlCandidate?.(field) || this._ctSaveJob)return false;
+                const action={action:revoke?'revoke':'set',sourceHash:this.ctReviewHash(field),previousValue:String(this.ctValues[field.id] ?? '')};
+                return this.ctSave(false,{englishActions:{[field.id]:action},englishValues:{...this.ctValues,...(!revoke?{[field.id]:''}:{})},englishReviewed:{...this.ctReviewed,...(!revoke?{[field.id]:this.ctReviewHash(field)}:{})}});
+            },
             ctMarkReviewed(field) { if(this.ctBusy || this.ctHistoryViewer || this.ctMtlBusy?.(field) || this.ctMtlCandidate?.(field))return false;this.ctReviewed[field.id] = this.ctReviewHash(field); this.ctDraftStageFailure=null;this.ctDraftDirty = true; this.ctQueueDraft(); },
             ctChoiceDisabled(choice) {
                 const field=this.ctCurrentUnit?.fields.find(field=>field.id===choice?.fieldId);
@@ -2318,13 +2330,16 @@
                 const job=existing?.unitId===unitId && existing.scopeKey===scopeKey ? existing : {unitId,scopeKey,id:uuid()};
                 this._ctSaveJob=job;this.ctBusy = true;let submittedSignature;
                 try {
-                    const command=job.command ||= { jobId:job.id, values: copy(this.ctValues), reviewed: copy(this.ctReviewed), baseRevision: this.ctSaved[unitId]?.serverRevision || 0, expectedRevision: this._ctEditRevision || 0, expectedDraftRevision:this._ctDraftRevision || null,
+                    job.editorSignature ||= JSON.stringify([this.ctValues,this.ctReviewed]);
+                    const command=job.command ||= { jobId:job.id, intentProtocol:root.ClientTextState.ENGLISH_INTENT_PROTOCOL, values: copy(options.englishValues || this.ctValues), reviewed: copy(options.englishReviewed || this.ctReviewed), baseRevision: this.ctSaved[unitId]?.serverRevision || 0, expectedRevision: this._ctEditRevision || 0, expectedDraftRevision:this._ctDraftRevision || null,
+                        ...(options.englishActions?{englishActions:copy(options.englishActions)}:{}),
                         ...(this.ctMtlAcceptances?.(unitId)?.length ? {mtlAcceptances:copy(this.ctMtlAcceptances(unitId))} : {}),
                         ...(options.origin ? {origin:options.origin}: {}) };
                     submittedSignature=JSON.stringify([command.values,command.reviewed]);
                     const result = await store.save(ctx.scope, unitId, command);
                     if (!this.ctCurrent(ctx)) return false;
-                    const sameEditor=JSON.stringify([this.ctValues,this.ctReviewed])===JSON.stringify([command.values,command.reviewed]);
+                    const sameEditor=JSON.stringify([this.ctValues,this.ctReviewed])===job.editorSignature;
+                    if(sameEditor && command.englishActions){this.ctValues=copy(result.saved.values);this.ctReviewed=copy(result.saved.reviewed);}
                     this.ctLocalDraftState=sameEditor?'stored':'pending';this.ctSaved = raw({ ...this.ctSaved, [unitId]: result.saved }); this.ctRevision++; this.ctDraftDirty = !sameEditor;if(!sameEditor)this.ctQueueDraft();this.ctClearDraftStageFailure(ctx,unitId,submittedSignature); if(this._ctSaveJob===job)this._ctSaveJob = null;
                     this._ctEditRevision=result.saved.revision;
                     try{await this.ctMtlSaved?.(ctx,unitId);}catch(error){if(this.ctCurrent(ctx))this.ctMtlError='Saved, but MTL review state could not be refreshed: '+error.message;}
@@ -3124,7 +3139,7 @@
                     this.managedSetOperationError('next-version','');
                 }
                 this._ctPublicationRequest=null;this._ctReleaseRequest=null;this._ctReleaseCommand=null;this.ctDuplicateChoices={};
-                this.ctUploadSyncResources=false;
+                this.ctUploadSyncResources=false;this.ctUploadEnglishPrevious='';
                 this.ctUploadVisible = true; this.ctUploadVersion = version; this.ctUploadLocal = local; this.ctUploadTest = test; this.ctUploadFiles = raw([]); this.ctPrepared = raw([]); this.ctUploadError = ''; this.ctUploadAssignments = teams.slice();
                 const predecessorId=version ? version.parentVersionId : options.predecessor?.id || (!options.resume ? this.managedHeadVersion?.id : null);
                 this.ctUploadPredecessor=local ? null : copy(options.predecessor || this.managedVersions?.find(candidate=>candidate.id===predecessorId) || (predecessorId ? {id:predecessorId,name:predecessorId} : null));
@@ -3362,6 +3377,12 @@
                             const options={signal:this._ctAbort.signal,guard:()=>key===this.managedCatalogScope,
                                 onProgress:progress=>this.ctReport(progress)};
                             let previousScope;
+                            if(this.ctUploadEnglishPrevious){
+                                if(prepared.previous)throw new Error('Choose either a saved local workbook or previous comparison files.');
+                                const previous=this.ctLocalWorkspaces.find(row=>row.groupId===this.ctUploadEnglishPrevious);
+                                if(!previous || !String(previous.groupId).startsWith('local:test:') || previous.game!==scope.game || previous.language!==scope.language || previous.branchId!==scope.branchId)throw new Error('Choose a saved local workbook in the same game, branch and language.');
+                                previousScope=this.ctScope(previous.versionId,previous.groupId,previous.language);
+                            }
                             if(prepared.previous){
                                 const previous=prepared.previous,previousVersion={...version,id:'local:test:'+uuid(),name:'Previous workbook sample'},
                                     previousGroup={...group,id:'local:test:'+uuid(),versionId:previousVersion.id,roles:previous.assets.map(asset=>asset.role)},
@@ -3578,7 +3599,7 @@
             field: {flush:'sync',handler() {this.genderMultilineLatched=this.genderMultilineRequired;}},
             genderMultilineRequired: {immediate:true,flush:'sync',handler(value) {if(value)this.genderMultilineLatched=true;}},
         }, template: `
-        <div class="ctTarget" :class="{missing:host.ctFieldStatus(field).missing,outdated:host.ctFieldStatus(field).outdated,mtl:!!host.ctMtlCandidate?.(field)}">
+        <div class="ctTarget" :class="{missing:host.ctFieldStatus(field).missing && !host.ctUsesEnglish(field),outdated:host.ctFieldStatus(field).outdated,mtl:!!host.ctMtlCandidate?.(field)}">
             <label :for="'ctfield-'+field.targetCell" :class="{srOnly:field.kind === 'form' || (field.kind === 'gender' ? !compact : compact)}">{{ field.kind === 'gender' ? 'Gender' : field.kind === 'form' ? field.name+' '+host.ctClassVariantLabel(field) : (host.ctWorkspace?.scope.language || host.lang)+' translation' }} <small>{{ field.required ? '' : 'Optional' }}</small></label>
             <component :is="host.ctFieldToolbar ? 'editor-field-toolbar' : 'div'" :controller="host.ctFieldToolbar ? host.ctFieldToolbar(field,'translation') : undefined">
             <template v-if="field.kind === 'gender'">
@@ -3589,7 +3610,15 @@
             </component>
             <div v-if="host.ctMtlVisible && host.ctMtlPendingDismissal?.(field)" class="ctMtlReview ctMtlDismissal" data-inline-focus-surface role="status" @click.capture="host.ctMtlReviewFocus(field,$event)"><span>{{ host.ctMtlDismissalText(host.ctMtlPendingDismissal(field)) }}</span><small v-if="String(host.ctWorkspace?.scope?.groupId || '').startsWith('local:')">Keep this tab and workbook session open; closing or reloading loses unsent dismissal requests.</small><button type="button" @click="host.ctMtlRetryDismissals(host.ctMtlPendingDismissal(field))" :disabled="host.ctBusy">Retry dismissal upload</button></div>
             <div v-if="host.ctMtlVisible && (host.ctMtlPendingCandidate?.(field) || host.ctMtlAccepted?.(field))" class="ctMtlReview" data-inline-focus-surface @click.capture="host.ctMtlReviewFocus(field,$event)"><span class="ctMtlDot" aria-hidden="true"></span><span>MTL · {{ host.ctMtlAccepted?.(field) ? 'Accepted draft · Save to apply' : 'Needs review' }}</span><template v-if="host.ctMtlCandidate?.(field)"><button type="button" @click="host.ctMtlAccept(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)" title="Use as a reviewed draft. Save applies this text.">Accept</button><button type="button" @click="host.ctMtlDismiss(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Dismiss</button><small>Save and export use the underlying translation until you accept this text.</small></template><template v-else-if="host.ctMtlAccepted?.(field)"><button type="button" @click="host.ctMtlUndoAccept(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field)">Undo accept</button></template><template v-else><button type="button" @click="host.ctMtlShow(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Review MTL</button><button type="button" @click="host.ctMtlDismiss(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Dismiss</button></template><button v-if="host.ctMtlRecoveryReviews?.(field)?.length" type="button" @click="host.ctMtlRecoverReview(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Recover my review</button></div>
-            <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated || diagnosticPresentation.warningCount || diagnosticPresentation.errorCount" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || !!host.ctMtlCandidate?.(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button><editor-diagnostic-meta :presentation="diagnosticPresentation"></editor-diagnostic-meta></div>
+            <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated || diagnosticPresentation.warningCount || diagnosticPresentation.errorCount" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing && !host.ctUsesEnglish(field)">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || !!host.ctMtlCandidate?.(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button><editor-diagnostic-meta :presentation="diagnosticPresentation"></editor-diagnostic-meta></div>
+            <div v-if="host.ctEnglishEligible(field) || host.ctEnglishDecision(field)" class="ctEnglishIntent fieldMeta" data-inline-focus-surface>
+                <span v-if="host.ctUsesEnglish(field)" role="status">Use English recorded · exports this field blank.</span>
+                <span v-else-if="host.ctEnglishDecision(field)?.state === 'needs_review'" role="status">Previous Use English decision needs review.</span>
+                <span v-else-if="host.ctEnglishOffer(field)" role="note">This translation matches English. You can keep it, or choose Use English.</span>
+                <button v-if="host.ctEnglishEligible(field) && !host.ctUsesEnglish(field)" type="button" :disabled="host.ctBusy || host.ctHistoryViewer || !!host._ctSaveJob || host.ctMtlBusy?.(field) || !!host.ctMtlCandidate?.(field)" @click="host.ctChooseEnglish(field)" title="Save this ID with this field blank and record an explicit Use English decision. Previous translation text stays in history.">Use English and save ID</button>
+                <button v-if="host.ctEnglishEligible(field) && host.ctEnglishDecision(field) && host.ctEnglishDecision(field).state!=='revoked'" type="button" :disabled="host.ctBusy || host.ctHistoryViewer || !!host._ctSaveJob || host.ctMtlBusy?.(field) || !!host.ctMtlCandidate?.(field)" @click="host.ctChooseEnglish(field,true)">Require translation and save ID</button>
+                <small v-if="host.ctEnglishDecision(field)">Raw Missing counts and the existing team progress calculation are unchanged.</small>
+            </div>
             <div v-for="(issue,index) in diagnosticPresentation.notes" :key="index" :class="issue.kind === 'consistency' ? 'consistencyWarning' : 'terminologyWarning'" role="note">{{ issue.message }}</div>
         </div>` };
     const comparisonMixin=root.ClientTextComparisons?.mixin;

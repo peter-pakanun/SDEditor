@@ -5,7 +5,7 @@
     else root.ClientTextLocalStore = api;
 })(typeof window === 'object' ? window : globalThis, function (root) {
     'use strict';
-    const protocol = 'clienttext-local-v1';
+    const protocol = 'clienttext-local-v2';
     const state = () => root.ClientTextState;
     const core = () => root.ClientTextStore;
     const clone = value => state().copy(value);
@@ -93,7 +93,7 @@
                 // Each authored snapshot is one readonly transaction. Previous
                 // comparison reads never acquire/release an editor's ownership.
                 const metadata=await base.getMetadata(input), assets=[];
-                if(!metadata || metadata.localProtocol!==protocol)throw fail('Unsupported local workbook version. Its browser data is retained.');
+                if(!metadata || !['clienttext-local-v1',protocol].includes(metadata.localProtocol))throw fail('Unsupported local workbook version. Its browser data is retained.');
                 for(const descriptor of metadata.descriptors) {
                     const asset=await base.getAsset(input,descriptor.role), path='originals/'+workspaces.length+'/'+descriptor.role+'.bin';
                     if(!(asset?.blob instanceof Blob))throw fail('The retained original workbook is unavailable. Browser data is retained.');
@@ -113,14 +113,14 @@
             if(!file || file._data?.uncompressedSize>128*1024*1024)throw fail('This is not a supported local workbook backup.');
             const manifestText=await file.async('string');if(manifestText.length>64*1024*1024)throw fail('Backup metadata exceeds the import limit.');
             const manifest=JSON.parse(manifestText);
-            if(manifest.protocol!==protocol || !Array.isArray(manifest.workspaces) || !manifest.workspaces.length || manifest.workspaces.length>20)throw fail('Unsupported local backup format.');
+            if(!['clienttext-local-v1',protocol].includes(manifest.protocol) || !Array.isArray(manifest.workspaces) || !manifest.workspaces.length || manifest.workspaces.length>20)throw fail('Unsupported local backup format.');
             const mapped=new Map(), prepared=[];
             for(const record of manifest.workspaces) {
                 const old=normalizeScope(record.scope), scope={...old,...owner,versionId:'local:test:'+root.crypto.randomUUID(),groupId:'local:test:'+root.crypto.randomUUID()};
                 if(old.game!==owner.game)throw fail('Select the backup’s game before restoring.');
                 const oldId=identity(old);if(mapped.has(oldId))throw fail('Duplicate workbook identity in backup.');mapped.set(oldId,scope);
                 core().validateLocalMetadata(old,record.metadata);
-                if(record.metadata?.localProtocol!==protocol || !Array.isArray(record.assets) || !record.assets.length || record.assets.length>2)throw fail('Malformed backup metadata.');
+                if(!['clienttext-local-v1',protocol].includes(record.metadata?.localProtocol) || !Array.isArray(record.assets) || !record.assets.length || record.assets.length>2)throw fail('Malformed backup metadata.');
                 const assets=[],units=[],roles=new Set();
                 for(const item of record.assets) {
                     if(!['normal','gender'].includes(item.role) || roles.has(item.role))throw fail('Duplicate or unsupported backup workbook role.');roles.add(item.role);

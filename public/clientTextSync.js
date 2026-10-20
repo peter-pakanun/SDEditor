@@ -75,6 +75,8 @@
                         let body=claimed.requestBody;
                         if(!body && claimed.storageProtocol===PROTOCOL){
                             body={storageProtocol:PROTOCOL,mutationId:claimed.mutationId,baseRevision:claimed.baseRevision||0,
+                                ...(claimed.intentProtocol?{intentProtocol:claimed.intentProtocol}:{}),
+                                ...(claimed.englishActions?{englishActions:claimed.englishActions}:{}),
                                 ...(claimed.mtlAcceptances?.length?{mtlAcceptances:claimed.mtlAcceptances}:{}),
                                 ...(Object.prototype.hasOwnProperty.call(claimed,'origin')?{origin:claimed.origin}:{}),
                                 role:claimed.role,assetHash:claimed.assetHash,parserVersion:claimed.parserVersion,

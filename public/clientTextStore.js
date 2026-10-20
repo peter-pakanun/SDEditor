@@ -25,13 +25,13 @@
     }
     const scopeKey = input => { const scope = normalizeScope(input); return key(scope.accountId, scope.game, scope.branchId, scope.versionId, scope.groupId, scope.language); };
     const isLocal = scope => String(scope?.groupId || '').startsWith('local:test:');
-    const LOCAL_PROTOCOL = 'clienttext-local-v1';
+    const LOCAL_PROTOCOL = 'clienttext-local-v2';
     const scopeFromKey = id => Object.fromEntries(['accountId','game','branchId','versionId','groupId','language'].map((name,index)=>[name,JSON.parse(id)[index]]));
     const corrupt = message => Object.assign(new Error('Local workbook recovery data is invalid: ' + message + '. The stored data has been retained.'), {code:'CLIENTTEXT_LOCAL_INVALID'});
     function validateLocalProtocols(value) {
         // v1 is the first durable private format. Missing tags are not evidence
         // of an older compatible format; never infer or downgrade stored data.
-        if(value?.localProtocol!==LOCAL_PROTOCOL || value?.storageProtocol!==S.STORAGE_PROTOCOL)
+        if(!['clienttext-local-v1',LOCAL_PROTOCOL].includes(value?.localProtocol) || value?.storageProtocol!==S.STORAGE_PROTOCOL)
             throw Object.assign(new Error('Unsupported or missing local workbook protocol. This editor supports '+LOCAL_PROTOCOL+' and '+S.STORAGE_PROTOCOL+'. Stored data has been retained. Open it with a compatible editor; do not clear browser data.'),{code:'CLIENTTEXT_LOCAL_PROTOCOL_UNSUPPORTED'});
     }
     function validateLocalMetadata(scope, value) {
@@ -62,7 +62,7 @@
         if(!value)return value;
         if(!unit || value.unitId!==unit.id || !Number.isSafeInteger(value.revision) || value.revision<(historical?0:1)
             || !draft && !historical && typeof value.saved!=='boolean')throw corrupt(draft?'draft identity':'saved record identity');
-        try{S.normalizeValues(unit,value.values);S.normalizeReviewed(unit,value.reviewed || {});}catch(_){throw corrupt(draft?'draft fields':'saved fields');}
+        try{S.normalizeValues(unit,value.values);S.normalizeReviewed(unit,value.reviewed || {});S.normalizeEnglishIntent(unit,value.englishIntent || value.provenance?.englishIntent || {},{values:value.values,historical});}catch(_){throw corrupt(draft?'draft fields':'saved fields');}
         if(value.outdated && (!Array.isArray(value.outdated) || value.outdated.some(id=>!unit.fields.some(field=>field.id===id))))throw corrupt('source review fields');
         if(value.provenance?.requiredReview)try{S.normalizeReviewed(unit,value.provenance.requiredReview);}catch(_){throw corrupt('required source reviews');}
         return value;
@@ -516,19 +516,20 @@
             const captured=capture(rawScope),previous=capture(rawPreviousScope);
             if(!isLocal(captured.scope) || !isLocal(previous.scope) || captured.id===previous.id
                 || ['accountId','game','branchId','language'].some(name=>captured.scope[name]!==previous.scope[name]))throw new TypeError('Previous local workbooks must match the account, game, branch and language.');
-            const previousUnits=new Map((await getUnits(previous.scope,options)).map(unit=>[unit.id,unit])),records=[];
+            const previousUnits=new Map((await getUnits(previous.scope,options)).map(unit=>[unit.id,unit])),previousSaved=await getSaved(previous.scope,options),records=[];
             for(let index=0;index<units.length;index++){
                 guard(options);const unit=units[index],old=previousUnits.get(unit.id);
                 if(old){
                     const state=S.carryForward(old,unit,null),markerReview=S.reviewAudioMarkerChanges(old,unit,state);
-                    if(state.outdated.length || markerReview){
+                    S.carryEnglishIntent(old,unit,previousSaved[unit.id],state);
+                    if(state.outdated.length || markerReview || state.englishIntent){
                         const before=new Map(old.fields.map(field=>[field.id,field])),requiredReview={};
                         for(const field of unit.fields)if(before.has(field.id) && S.sourceHash(before.get(field.id).source)!==S.sourceHash(field.source)
                             && !S.audioOnly(field.source) && S.needsSourceReview(field,state.values[field.id]))requiredReview[field.id]=S.sourceHash(field.source);
-                        const provenance={groupId:previous.scope.groupId,unitId:unit.id,revision:0,sourceOnly:true,requiredReview,conflicts:state.conflicts,origin:'version_import'};
-                        const after={unitId:unit.id,values:state.values,reviewed:state.reviewed,saved:false,revision:1,serverRevision:0,provenance,conflicts:state.conflicts,
+                        const provenance={groupId:previous.scope.groupId,unitId:unit.id,revision:previousSaved[unit.id]?.revision || 0,sourceOnly:true,requiredReview,conflicts:state.conflicts,origin:'version_import'};
+                        const after={unitId:unit.id,values:state.values,reviewed:state.reviewed,saved:false,revision:1,serverRevision:0,provenance,conflicts:state.conflicts,...(state.englishIntent?{englishIntent:state.englishIntent}:{}),
                             outdated:Object.keys(requiredReview).filter(id=>state.reviewed[id]!==requiredReview[id])};
-                        records.push({id:'test-version-import:'+unit.id,unitId:unit.id,origin:'version_import',actor:{name:'Previous workbook sample'},createdAt:Date.now(),
+                        records.push({id:'test-version-import:'+unit.id,unitId:unit.id,origin:'version_import',actor:{name:state.englishIntent?'Automatic local version carry':'Previous workbook sample'},createdAt:Date.now(),
                             before:{unitId:unit.id,values:S.valuesFor(unit),reviewed:{},revision:0},after});
                     }
                 }
@@ -765,6 +766,8 @@
             const unit=await getUnit(rawScope,unitId,options);if(!unit)throw new Error('ClientText save source is unavailable.');
             const values=S.normalizeValues(unit,input.values), reviewed=S.normalizeReviewed(unit,input.reviewed||{});
             const command={scope:captured.scope,unitId,values,reviewed,
+                ...(own(input,'intentProtocol')?{intentProtocol:input.intentProtocol}:{}),
+                ...(own(input,'englishActions')?{englishActions:copy(input.englishActions)}:{}),
                 ...(input.mtlAcceptances?.length ? {mtlAcceptances:copy(input.mtlAcceptances)} : {}),
                 ...(own(input,'origin')?{origin:input.origin}:{}),
                 ...(own(input,'baseRevision')?{baseRevision:input.baseRevision}:{}),
@@ -783,22 +786,32 @@
                 if(isLocal(rawScope)){validateLocalRecord(unit,before);validateLocalRecord(unit,draft,{draft:true});}
                 if(own(input,'expectedRevision')&&(before?.revision||0)!==input.expectedRevision)throw Object.assign(new Error('Another tab changed the ClientText saved translation.'),{code:'UNIT_CHANGED'});
                 if(own(input,'expectedDraftRevision')&&(draft?.revision||null)!==input.expectedDraftRevision)throw Object.assign(new Error('Another tab changed this ClientText draft.'),{code:'DRAFT_CHANGED'});
+                if((own(input,'englishActions') || Object.keys(before?.englishIntent || before?.provenance?.englishIntent || {}).length) && input.intentProtocol!==S.ENGLISH_INTENT_PROTOCOL)throw new TypeError('Update the editor before changing work with Use English decisions.');
+                if(input.englishActions && input.mtlAcceptances?.length)throw new TypeError('Resolve the MTL candidate separately before using English.');
+                const intent=S.applyEnglishActions(unit,before,values,input.englishActions,input.jobId,captured.scope.game);
+                if(isLocal(rawScope) && Object.keys(intent.englishIntent).length){currentMetadata.localProtocol=LOCAL_PROTOCOL;put(tx,stores.meta,scope,'meta',currentMetadata,{accountId:captured.scope.accountId});}
+                const policyOnly=!!input.englishActions && S.stableStringify(values)===S.stableStringify(S.valuesFor(unit,before));
                 const descriptor=metadata.descriptors.find(value=>value.role===unit.role);
                 const acceptedMtl=mtl ? await mtl.validateAcceptancesTx(tx,captured.scope,unit,input.mtlAcceptances,values,descriptor) : [];
                 if(acceptedMtl.length && ((input.origin||options.origin)==='restore' || acceptedMtl.some(claim=>({...before?.reviewed,...reviewed})[claim.fieldId]!==claim.candidate.sourceHash)))
                     throw Object.assign(new Error('MTL acceptance requires a normal Save reviewed against the current source.'),{code:'MTL_REVIEW_MISMATCH'});
-                const after={unitId,values,reviewed:{...before?.reviewed,...reviewed},saved:true,revision:(before?.revision||0)+1,
+                const after={unitId,values,reviewed:{...before?.reviewed,...reviewed},saved:policyOnly?!!before && before.saved!==false:true,revision:(before?.revision||0)+1,
+                    ...(Object.keys(intent.englishIntent).length?{englishIntent:intent.englishIntent}:{}),
+                    ...(before?.provenance?{provenance:copy(before.provenance)}:{}),
                     serverRevision:before?.serverRevision||input.baseRevision||0,baseRevision:before?.serverRevision||input.baseRevision||0,
                     savedAt:Date.now(),jobId:input.jobId,origin:input.origin||options.origin||'save',outdated:before?.outdated||[],
                     ...(acceptedMtl.length ? {mtlAcceptances:copy(input.mtlAcceptances)} : {})};
                 if(mtl)await mtl.resolveAcceptancesTx(tx,captured.scope,acceptedMtl,{jobId:input.jobId,now:after.savedAt});
                 put(tx,stores.saved,scope,unitId,after);
                 await learnMemory(tx,captured.scope,unit,after,input.jobId,after.origin);
-                put(tx,stores.history,scope,input.jobId,{id:input.jobId,unitId,before:before||null,after,origin:after.origin,createdAt:after.savedAt},{unitKey:key(scope,unitId)});
+                put(tx,stores.history,scope,input.jobId,{id:input.jobId,unitId,before:before||null,after,origin:after.origin,createdAt:after.savedAt,...(Object.keys(intent.changes).length?{intentChanges:intent.changes}:{})},{unitKey:key(scope,unitId)});
                 if(own(input,'expectedDraftRevision'))del(tx,stores.drafts,scope,unitId);
                 if(!isLocal(captured.scope) && options.sync!==false){
                     const pending=await get(tx,stores.outbox,key(scope,unitId));
+                    if(pending?.state==='conflict' && pending.englishActions && !input.englishActions && Object.keys(pending.englishActions).some(id=>!values[id]?.trim()))throw new TypeError('Resolve the conflicting Use English choice explicitly before saving a blank field.');
                     const operation={unitId,mutationId:input.jobId,storageProtocol:S.STORAGE_PROTOCOL,role:unit.role,assetHash:descriptor.assetHash,parserVersion:descriptor.parserVersion,
+                        ...(own(input,'intentProtocol')?{intentProtocol:input.intentProtocol}:{}),
+                        ...(own(input,'englishActions')?{englishActions:copy(input.englishActions)}:{}),
                         ...(acceptedMtl.length ? {mtlAcceptances:copy(input.mtlAcceptances)} : {}),
                         ...(own(input,'origin')?{origin:input.origin}:{}),
                         clientFacts:S.clientFacts(unit),originalValues:S.originalValues(unit),values:copy(values),reviewed:copy(after.reviewed),baseRevision:after.serverRevision,
@@ -806,7 +819,7 @@
                     // Accepted MTL must reach the server as its own atomic Save.
                     // Keep that queued claim and every uncertain request intact
                     // while newer human saves wait for the original receipt.
-                    if(pending&&(['sending','uncertain'].includes(pending.state)||pending.state==='queued'&&pending.mtlAcceptances?.length))operation.predecessor=copy(pending);
+                    if(pending&&(['sending','uncertain'].includes(pending.state)||pending.state==='queued'&&(pending.mtlAcceptances?.length || pending.englishActions)))operation.predecessor=copy(pending);
                     else if(pending?.predecessor)operation.predecessor=copy(pending.predecessor);
                     put(tx,stores.outbox,scope,unitId,operation,{unitKey:key(scope,unitId)});
                 }
@@ -868,14 +881,21 @@
                     if(before?.serverRevision===revision&&S.stableStringify(before.remoteBase?.values||before.values)===S.stableStringify(values))continue;
                     const sharedOrigin=remote.origin==='restore'?'restore':'shared';
                     const accepted={unitId,values,reviewed,revision,...(own(remote,'origin')?{origin:remote.origin}:{})},merged=pending?mergeRemote(unit,before,pending.base,accepted):{values,conflicts:[]};
+                    const remoteIntent=S.normalizeEnglishIntent(unit,remote.englishIntent || remote.provenance?.englishIntent || {},{values});
+                    const intentConflict=pending?.englishActions && !Object.keys(pending.englishActions).every(id=>remoteIntent[id]?.decisionId===pending.mutationId);
+                    if(intentConflict){
+                        const id=Object.keys(pending.englishActions)[0];merged.conflicts.push({fieldId:id,base:pending.base?.values?.[id] || '',local:before?.values?.[id] || '',remote:values[id],reason:'Use English decision changed concurrently. Review the accepted copy.'});
+                        if(!pending.predecessor && pending.state==='queued'){pending.state='conflict';put(tx,stores.outbox,scope,unitId,pending,{unitKey:key(scope,unitId)});}
+                    }
                     const inherited=remote.conflicts||remote.provenance?.conflicts||[];
                     const conflicts=[...new Map([...inherited,...merged.conflicts].map(conflict=>[S.stableStringify(conflict),copy(conflict)])).values()];
                     const after={...before,unitId,values:merged.values,reviewed:pending?{...reviewed,...before?.reviewed}:reviewed,saved:pending?true:remote.saved!==false,
+                        englishIntent:pending && !intentConflict?before?.englishIntent || remoteIntent:remoteIntent,
                         outdated:remote.outdated||Object.keys(remote.provenance?.requiredReview||{}),provenance:copy(remote.provenance||before?.provenance||{}),
                         revision:(before?.revision||0)+1,serverRevision:revision,baseRevision:revision,remoteBase:accepted,conflicts,savedAt:remote.updatedAt||Date.now(),origin:sharedOrigin};
                     put(tx,stores.saved,scope,unitId,after);
                     await learnMemory(tx,captured.scope,unit,{...after,values,reviewed,saved:remote.saved!==false,conflicts:inherited},'remote:'+revision+':'+unitId,'shared');
-                    if(pending&&!pending.predecessor&&!['sending','uncertain'].includes(pending.state)){
+                    if(pending&&!pending.englishActions&&!pending.predecessor&&!['sending','uncertain'].includes(pending.state)){
                         pending.values=copy(after.values);pending.reviewed=copy(after.reviewed);pending.baseRevision=revision;pending.base=accepted;
                         pending.state=merged.conflicts.length?'conflict':'queued';put(tx,stores.outbox,scope,unitId,pending,{unitKey:key(scope,unitId)});
                     }
@@ -896,7 +916,9 @@
                 const accepted={unitId,values:copy(remote?.values||remote?.unit?.values||operation.values),reviewed:copy(remote?.reviewed||remote?.unit?.reviewed||operation.reviewed),revision};
                 if((row.serverRevision||0)<=revision){row.serverRevision=revision;row.baseRevision=revision;row.remoteBase=accepted;
                     if(remote?.outdated||remote?.provenance?.requiredReview)row.outdated=remote.outdated||Object.keys(remote.provenance.requiredReview);
-                    if(remote?.provenance)row.provenance=copy(remote.provenance);put(tx,stores.saved,scope,unitId,row);}
+                    if(remote?.provenance)row.provenance=copy(remote.provenance);
+                    if(pending?.mutationId===operation.mutationId && !pending.predecessor)row.englishIntent=copy(remote?.englishIntent || remote?.provenance?.englishIntent || {});
+                    put(tx,stores.saved,scope,unitId,row);}
                 if(!pending)return row;
                 if(pending.mutationId===operation.mutationId&&!pending.predecessor)del(tx,stores.outbox,scope,unitId);
                 else{

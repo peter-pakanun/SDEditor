@@ -21,7 +21,7 @@
   // v24 excludes pages/workers unaware of durable private workbook identities,
   // their local-only memory scope, restore readiness and original bindings.
   // No stores are removed and no authored records or retry bodies are rewritten.
-  const DB_VERSION = 24;
+  const DB_VERSION = 25;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
   const tmListeners = new Set();

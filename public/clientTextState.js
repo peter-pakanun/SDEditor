@@ -112,6 +112,90 @@
     // Marker-only workload also retains its existing parser/fact contract.
     const audioOnly = source => /^ ?\[NOAUDIO\] ?$/.test(String(source ?? ''));
     const sourceHash = source => hash(fingerprintSource(source));
+
+    const ENGLISH_INTENT_PROTOCOL = 'clienttext-use-english-v1';
+    const intentMap = saved => saved?.englishIntent || saved?.provenance?.englishIntent || {};
+    const intentHash = field => field.sourceHash || sourceHash(field.source);
+    function englishEligible(field) {
+        if (field?.kind !== 'text' || !field.required || field.audioOnly || audioOnly(field.source)) return false;
+        if (typeof field.source === 'string') {
+            if (!canonicalSource(field.source).trim() || /^(?:\[DNT|DNT )/.test(field.source)) return false;
+            if (tokenize(field.source).some(token => /^<[A-Za-z]/.test(token.full) && field.source[token.end] === '{'
+                && /^(?:\[DNT|DNT )/.test(field.source.slice(token.end + 1)))) return false;
+        }
+        return true;
+    }
+    function englishIntentFor(field, saved) {
+        const value = intentMap(saved)[field.id];
+        return !!value && value.state === 'active' && value.sourceHash === intentHash(field) && englishEligible(field)
+            && !String(own(saved?.values,field.id) ? saved.values[field.id] : field.target ?? '').trim();
+    }
+    function normalizeEnglishIntent(unit, input = {}, options = {}) {
+        if (!input || typeof input !== 'object' || Array.isArray(input)) throw new TypeError('Invalid Use English decisions.');
+        const fields = new Map(unit.fields.map(field => [field.id,field])), result = {};
+        for (const [id,value] of Object.entries(input)) {
+            const field=fields.get(id);
+            if (!field || !value || Object.keys(value).some(key=>!['state','sourceHash','decisionId','reason'].includes(key))
+                || !['active','revoked','needs_review'].includes(value.state) || !/^[a-f0-9]{64}$/.test(value.sourceHash)
+                || typeof value.decisionId!=='string' || !value.decisionId || value.decisionId.length>200
+                || value.reason!==undefined && (typeof value.reason!=='string' || value.reason.length>120))
+                throw new TypeError('Use English decision identity is invalid.');
+            if (value.state==='active' && !options.historical && (!englishEligible(field) || value.sourceHash!==intentHash(field)
+                || options.values && String(options.values[id] ?? '').trim())) throw new TypeError('Use English does not match the current blank text field.');
+            result[id]=copy(value);
+        }
+        return result;
+    }
+    function applyEnglishActions(unit, before, values, actions, decisionId, game) {
+        const result=normalizeEnglishIntent(unit,intentMap(before),{historical:true}), changes={};
+        if (actions!==undefined && (!actions || typeof actions!=='object' || Array.isArray(actions))) throw new TypeError('Invalid Use English actions.');
+        for (const [id,entry] of Object.entries(result)) {
+            const field=unit.fields.find(field=>field.id===id);
+            if (entry.state==='active' && entry.sourceHash!==intentHash(field)) result[id]={...entry,state:'needs_review',reason:'source_changed'};
+            if (String(values[id] ?? '').trim() && ['active','needs_review'].includes(result[id].state)) {
+                result[id]={...entry,state:'revoked',decisionId,reason:'translation_saved'};changes[id]={action:'revoke',reason:'translation_saved'};
+            }
+        }
+        for (const [id,action] of Object.entries(actions || {})) {
+            const field=unit.fields.find(field=>field.id===id);
+            if (game!=='poe2' || !field || !englishEligible(field) || !action
+                || Object.keys(action).some(key=>!['action','sourceHash','previousValue'].includes(key))
+                || !['set','revoke'].includes(action.action) || action.sourceHash!==intentHash(field))
+                throw new TypeError('Use English is supported only for the current ordinary PoE2 text field.');
+            if (action.action==='set' && values[id]!=='') throw new TypeError('Use English must explicitly save an empty target.');
+            if (action.previousValue!==undefined && (typeof action.previousValue!=='string' || action.previousValue.length>131072)) throw new TypeError('Invalid previous translation.');
+            if (action.action==='revoke' && !intentMap(before)[id]) throw new TypeError('There is no Use English decision to revoke.');
+            result[id]={state:action.action==='set'?'active':'revoked',sourceHash:intentHash(field),decisionId,
+                ...(action.action==='revoke'?{reason:'explicit_revocation'}:{})};
+            changes[id]={action:action.action,...(action.previousValue!==undefined?{previousValue:action.previousValue}:{})};
+        }
+        normalizeEnglishIntent(unit,result,{values});
+        return {englishIntent:result,changes};
+    }
+    function carryEnglishIntent(previousUnit, nextUnit, previousSaved, state) {
+        if (previousUnit.id!==nextUnit.id) return state;
+        const next=new Map(nextUnit.fields.map(field=>[field.id,field])), result={};
+        for (const [id,value] of Object.entries(intentMap(previousSaved))) {
+            const field=next.get(id);if(!field)continue;
+            let entry=copy(value);
+            if (entry.state==='active') {
+                if (!englishEligible(field) || entry.sourceHash!==intentHash(field)) entry={...entry,state:'needs_review',reason:'source_changed'};
+                else if (String(field.target ?? '').trim()) {
+                    entry={...entry,state:'needs_review',reason:'upstream_translation'};state.values[id]=field.target;
+                    if(!state.conflicts.some(value=>value.fieldId===id))state.conflicts.push({fieldId:id,base:previousUnit.fields.find(f=>f.id===id)?.target ?? '',local:'',upstream:field.target});
+                } else {state.values[id]='';state.reviewed[id]=intentHash(field);}
+            }
+            if (String(field.target ?? '').trim() && state.values[id]==='') {
+                state.values[id]=field.target;
+                if (value.state==='active' || entry.state==='needs_review') {
+                    if(!state.conflicts.some(value=>value.fieldId===id))state.conflicts.push({fieldId:id,base:previousUnit.fields.find(f=>f.id===id)?.target ?? '',local:'',upstream:field.target});
+                }
+            }
+            result[id]=entry;
+        }
+        if(Object.keys(result).length)state.englishIntent=result;
+        return state;
+    }
     function normalizeUnit(input) {
         if (!input || typeof input !== 'object') throw new TypeError('Invalid ClientText unit.');
         const role = String(input.role || 'normal'), sheet = String(input.sheet ?? ''), recordId = String(input.recordId ?? '');
@@ -383,7 +467,7 @@
         for (const field of previousUnit.fields) if (!nextUnit.fields.some(next => next.id === field.id)) removed.push({ field: copy(field), value: previous[field.id] });
         const outdated = nextUnit.fields.filter(field => before.has(field.id) && !audioOnly(field.source) && needsSourceReview(field, values[field.id])
             && canonicalSource(before.get(field.id).source) !== canonicalSource(field.source)).map(field => field.id);
-        return { values, reviewed, outdated, conflicts, removed, saved: !!previousSaved && previousSaved.saved !== false, dropped: [] };
+        return carryEnglishIntent(previousUnit,nextUnit,previousSaved,{ values, reviewed, outdated, conflicts, removed, saved: !!previousSaved && previousSaved.saved !== false, dropped: [] });
     }
     // Only verified predecessor/current originals establish marker-only changes.
     // Shared publication and disposable test sheets use the same review rule.
@@ -562,5 +646,6 @@
     return { FORMAT, TRUSTED_FORMAT, STORAGE_PROTOCOL, PARSER_VERSION, PARSER_VERSIONS, FILLS, SHEET_COLORS, fillFor, emptyColorCounts, colorCountsFor, sheetColorFor, unitColorFor, CLASS_FORMS, isClassForm, isNamedForm, allowsNonexistent, canonical, stableStringify, sha256, hash, canonicalSource, audioOnly, audioMarkerTooltip, sourceHash,
         clientFacts, originalValues, emptySummary, addOriginalSummary, originalCacheKey, buildDescriptors,
         normalizeUnit, compactUnit, normalizeCompact, leafHash, nodeHash, buildManifest, proofFor, verifyWitness,
+        ENGLISH_INTENT_PROTOCOL, englishEligible, englishIntentFor, normalizeEnglishIntent, applyEnglishActions, carryEnglishIntent,
         normalizeValues, normalizeReviewed, valuesFor, needsSourceReview, statusFor, counts, carryForward, reviewAudioMarkerChanges, tokenize, maskAudioMarkers, tokenInsertion, extractVariables, variableIdentityKey, diagnose, suggestions, copy };
 });

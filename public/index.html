@@ -470,7 +470,11 @@
               </tr>
             </tbody></table>
           </section>
-          <label class="ctTestHistoryToggle"><input type="checkbox" :checked="ctUploadHistory" @change="ctSetHistoryComparison($event.target.checked)" :disabled="ctUploading" aria-controls="ctPreviousWorkbooks">Add history workbook for comparison</label>
+          <label class="ctUploadField">Carry Use English decisions from a saved local workbook
+            <select v-model="ctUploadEnglishPrevious" :disabled="ctUploading || ctUploadHistory"><option value="">Start independently</option><option v-for="workspace in ctLocalWorkspaces.filter(row=>String(row.groupId).startsWith('local:test:') && row.game===gameVersion && !row.localComparisonOnly)" :key="workspace.groupId" :value="workspace.groupId">{{ workspace.version?.name || workspace.groupId }} · {{ workspace.language }}</option></select>
+            <small>Choose the same language. Current workbooks supply translations; only explicit English decisions carry forward. Unrelated imports stay independent.</small>
+          </label>
+          <label class="ctTestHistoryToggle"><input type="checkbox" :checked="ctUploadHistory" @change="ctSetHistoryComparison($event.target.checked)" :disabled="ctUploading || !!ctUploadEnglishPrevious" aria-controls="ctPreviousWorkbooks">Add history workbook for comparison</label>
           <section v-if="ctUploadHistory" id="ctPreviousWorkbooks" class="ctTestWorkbookGroup" aria-label="Previous workbooks">
             <h3>Previous workbooks</h3><p class="versionMuted">Choose older files for the same language and roles. These provide the earlier English and translations for comparison.</p>
             <div class="ctUploadSelectors">

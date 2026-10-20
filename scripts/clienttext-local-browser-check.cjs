@@ -14,7 +14,8 @@ const executablePath=process.env.FIXTURE_BROWSER_PATH || ['C:/Program Files (x86
 const sources={poe1:process.env.CLIENTTEXT_LOCAL_POE1 || 'C:/Users/lpeac/Downloads/2026-10-19_POE1/Thai_PoE1.xlsm',poe2:process.env.CLIENTTEXT_LOCAL_POE2 || 'C:/Users/lpeac/Downloads/2026-10-13_POE2/Thai.xlsx'};
 const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const originals=Object.fromEntries(Object.entries(sources).map(([key,file])=>[key,{file,hash:hash(file),bytes:fs.statSync(file).size}]));
-const inputCopies=Object.fromEntries(Object.keys(sources).map(game=>[game,path.join(temp,'local-browser-input-'+game,path.basename(sources[game]))]));
+const inputRun=process.pid+'-'+Date.now();
+const inputCopies=Object.fromEntries(Object.keys(sources).map(game=>[game,path.join(temp,'local-browser-input-'+game+'-'+inputRun,path.basename(sources[game]))]));
 const profile=path.join(temp,'local-workbook-profile-'+Date.now());fs.mkdirSync(profile,{recursive:true});
 const reports=[],errors=[],networkWrites=[];
 reports.push=function(...items){for(const item of items)console.log('PASS '+JSON.stringify(item));return Array.prototype.push.apply(this,items);};
@@ -170,7 +171,7 @@ async function reviewFixes(){
         try{const result=await vm.ctFlushDraft();otherUnitRetry={failed:failedOtherUnit,result,error:vm.ctError,selection:vm.ctSelection,otherUnitId:otherUnit.id};}finally{local.putDraft=nativePut;vm.ctDraftDirty=false;vm.ctSelection=beforeUnit;}
         return{stamped:{localProtocol:stamped.localProtocol,storageProtocol:stamped.storageProtocol},protocolCases,atomicRaces,retry,unrelatedRetry,otherUnitRetry};
     });
-    assert.deepEqual(result.stamped,{localProtocol:'clienttext-local-v1',storageProtocol:'clienttext-trusted-v1'});
+    assert.deepEqual(result.stamped,{localProtocol:'clienttext-local-v2',storageProtocol:'clienttext-trusted-v1'});
     for(const item of result.protocolCases){if(item.variant==='current'){assert.equal(item.value,item.expected);assert.equal(item.reopen,true);}else for(const probe of item.probes){assert.equal(probe.rejected,true,JSON.stringify({field:item.field,variant:item.variant,...probe}));assert.equal(probe.unchanged,true,JSON.stringify({field:item.field,variant:item.variant,...probe}));}}
     for(const probe of result.atomicRaces){assert.equal(probe.injected,true,JSON.stringify(probe));assert.equal(probe.rejected,true,JSON.stringify(probe));assert.equal(probe.unchanged,true,JSON.stringify(probe));}
     assert.equal(result.retry.failed.result,false);assert.equal(result.retry.failed.injected,true);assert.match(result.retry.failed.error,/not stored/);assert.equal(result.retry.retried,true);assert.equal(result.retry.error,'');assert.equal(result.retry.state,'checkpointed');assert.equal(result.retry.stored,'Exact retry draft');
@@ -181,12 +182,54 @@ async function reviewFixes(){
     reports.push({case:'native transient checkpoint retry clears its owned warning; unrelated and different-unit errors remain',ok:true});
     const report={ok:true,origin,profile,reports,result,errors,networkWrites};assert.deepEqual(errors,[]);assert.deepEqual(networkWrites,[]);fs.writeFileSync(path.join(temp,'clienttext-local-review-fixes-results.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
 }
+async function englishIntentCheck(){
+    const imported=await importReal('poe2');
+    const chosen=await page.evaluate(async()=>{
+        const vm=window.__localApp,u=vm.ctUnits.find(unit=>vm.ctFieldsFor(unit).some(field=>vm.ctEnglishEligible(field) && field.target.trim()));
+        await vm.ctSelect(u,true);vm.ctEditor=true;await vm.$nextTick();const field=vm.ctFieldsFor(u).find(field=>vm.ctEnglishEligible(field));
+        vm.ctValues[field.id]=field.source;vm.ctDraftDirty=true;vm.ctQueueDraft();
+        if(!await vm.ctSave(false))throw new Error(vm.ctError || 'Identical translation save failed');
+        if(vm.ctSaved[u.id].englishIntent?.[field.id])throw new Error('Identical Save inferred Use English');
+        window.__englishChoice={unitId:u.id,fieldId:field.id,previousValue:field.source,scope:JSON.parse(JSON.stringify(vm.ctWorkspace.scope))};
+        return{unitId:u.id,fieldId:field.id,scope:window.__englishChoice.scope,offer:vm.ctEnglishOffer(field)};
+    });
+    assert.equal(chosen.offer,true);
+    const offer=page.locator('.ctEnglishIntent').filter({hasText:'This translation matches English.'});
+    await offer.scrollIntoViewIfNeeded();await page.screenshot({path:path.join(temp,'use-english-offer.png')});
+    await offer.getByRole('button',{name:'Use English and save ID',exact:true}).click();
+    await page.waitForFunction(()=>{const vm=window.__localApp,c=window.__englishChoice;return !vm.ctBusy && vm.ctSaved[c.unitId]?.englishIntent?.[c.fieldId]?.state==='active';});
+    const applied=await page.evaluate(async()=>{const vm=window.__localApp,c=window.__englishChoice,h=await vm.ctStorage(c.scope).listHistory(c.scope,c.unitId);return{blank:vm.ctSaved[c.unitId].values[c.fieldId]==='',history:h.length,prior:h.some(e=>e.intentChanges?.[c.fieldId]?.previousValue===c.previousValue),outbox:await vm._ctStore.getOutbox(c.scope)};});
+    assert.equal(applied.blank,true);assert.equal(applied.prior,true);assert.equal(applied.history,2);assert.deepEqual(applied.outbox,[]);
+    const output=await page.evaluate(async chosen=>{const vm=window.__localApp,native=window.saveAs;let result;window.saveAs=(blob,name)=>{result={blob,name};};try{if(!await vm.ctDownload())throw new Error(vm.ctError);}finally{window.saveAs=native;}
+        const parsed=await vm._ctWorker.parseWorkbook(await result.blob.arrayBuffer(),{filename:result.name,role:'normal',language:'Thai',game:'poe2',parserVersion:vm.ctWorkspace.metadata.descriptors[0].parserVersion});
+        return{name:result.name,target:parsed.units.find(u=>u.id===chosen.unitId).fields.find(f=>f.id===chosen.fieldId).target,colors:ClientTextCodec.TAB_COLORS};},chosen);
+    assert.equal(output.target,'');assert.match(output.name,/_Translated\.xlsx$/);assert.equal(output.colors.revised,'793BB6');assert.equal(output.colors.filled,'626B7A');
+    await page.getByRole('button',{name:'Close',exact:true}).last().click();
+    await page.locator('.ctEnglishIntent').filter({hasText:'Use English recorded'}).scrollIntoViewIfNeeded();
+    for(const theme of ['light','grey','dark','modern-dark']){await page.evaluate(theme=>document.documentElement.setAttribute('data-theme',theme),theme);await page.screenshot({path:path.join(temp,'use-english-'+theme+'.png')});}
+    await page.reload();await bootstrap();
+    const recovered=await page.evaluate(async chosen=>{const vm=window.__localApp,meta=await vm._ctStore.getMetadata(chosen.scope);if(!await vm.ctOpenCached(meta))throw new Error(vm.ctError);await vm.ctSelect(vm.ctUnits.find(u=>u.id===chosen.unitId),true);vm.ctEditor=true;const active=vm.ctUsesEnglish(vm.ctCurrentUnit.fields.find(f=>f.id===chosen.fieldId));
+        const blob=await vm._ctLocalStore.backup(chosen.scope),scope=await vm._ctLocalStore.restore(blob,vm.ctRequestScope(),vm._ctWorker);const restored=await vm._ctStore.getSaved(scope);return{active,scope,backupBytes:blob.size,restored:restored[chosen.unitId].englishIntent[chosen.fieldId].state};},chosen);
+    assert.equal(recovered.active,true);assert.equal(recovered.restored,'active');assert.notEqual(recovered.scope.groupId,chosen.scope.groupId);
+    await page.getByRole('button',{name:'Require translation and save ID',exact:true}).click();
+    await page.waitForFunction(chosen=>{const vm=window.__localApp;return !vm.ctBusy && !vm._ctSaveJob && vm.ctSaved[chosen.unitId]?.englishIntent?.[chosen.fieldId]?.state==='revoked';},chosen);
+    const predecessor=await page.evaluate(async()=>{const vm=window.__localApp,u=vm.ctUnits.find(unit=>vm.ctFieldsFor(unit).some(field=>vm.ctEnglishEligible(field) && !field.target.trim()));await vm.ctSelect(u,true);const field=vm.ctFieldsFor(u).find(field=>vm.ctEnglishEligible(field) && !field.target.trim());if(!await vm.ctChooseEnglish(field))throw new Error(vm.ctError || 'Blank decision failed');
+        const scope=JSON.parse(JSON.stringify(vm.ctWorkspace.scope)),asset=await vm.ctStorage(scope).getAsset(scope,'normal');window.__englishNextFile=new File([asset.blob],asset.name || 'Thai.xlsx');await vm.ctShowVersionChooser();await vm.ctOpenOfflineTest();vm.ctAddUploadFiles([window.__englishNextFile]);return{scope,unitId:u.id,fieldId:field.id};});
+    await page.getByLabel('Carry Use English decisions from a saved local workbook',{exact:false}).selectOption(predecessor.scope.groupId);
+    const successor=await page.evaluate(async predecessor=>{const vm=window.__localApp;vm.ctUploadName='Explicit English successor';if(!await vm.ctOpenTestSheet())throw new Error(vm.ctUploadError || vm.ctError);return{scope:JSON.parse(JSON.stringify(vm.ctWorkspace.scope)),state:vm.ctSaved[predecessor.unitId]?.englishIntent?.[predecessor.fieldId]?.state,previous:vm.ctWorkspace.metadata.previousScope?.groupId,saved:vm.ctSaved[predecessor.unitId]?.saved};},predecessor);
+    assert.equal(successor.state,'active');assert.equal(successor.previous,predecessor.scope.groupId);assert.equal(successor.saved,false);assert.notEqual(successor.scope.groupId,predecessor.scope.groupId);
+    for(const [game,value]of Object.entries(originals))assert.equal(hash(value.file),value.hash,game+' original unchanged');
+    assert.deepEqual(errors,[]);assert.deepEqual(networkWrites,[]);
+    const report={ok:true,case:'Use English real PoE2 text: optional offer, ordinary identical save, explicit conversion/history, blank export, reload, backup/restore, revocation and explicit local successor',units:imported.count,applied,output,recovered,successor,errors,networkWrites,originals};
+    fs.writeFileSync(path.join(temp,'clienttext-use-english-browser-results.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
+}
 async function run(){
     await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));origin='http://127.0.0.1:'+server.address().port;await launch();
     try{
         await page.goto(origin+'/fixture/blank');await page.evaluate(()=>new Promise((resolve,reject)=>{const req=indexedDB.open('sdeditor',23);req.onupgradeneeded=()=>{const db=req.result;db.createObjectStore('kv',{keyPath:'key'});const revisions=db.createObjectStore('revisions_poe1',{keyPath:'id',autoIncrement:true});revisions.createIndex('by_file_lang_time',['filepath','lang','savedAt']);revisions.createIndex('by_file_time',['filepath','savedAt']);};req.onerror=()=>reject(req.error);req.onsuccess=()=>{const db=req.result,tx=db.transaction(['kv','revisions_poe1'],'readwrite');tx.objectStore('kv').put({key:'local-browser-legacy-sentinel',value:{preserve:'legacy SD evidence'}});tx.objectStore('revisions_poe1').put({id:7777,filepath:'fixture/sentinel.txt',lang:'Thai',savedAt:1,translations:['Preserve prior SD history']});tx.oncomplete=()=>{db.close();resolve();};tx.onabort=()=>reject(tx.error);};}));
-        await bootstrap();const legacy=await page.evaluate(async()=>{const db=await OfflineStore.openClientTextDb();return new Promise((resolve,reject)=>{const tx=db.transaction(['kv','revisions_poe1'],'readonly'),a=tx.objectStore('kv').get('local-browser-legacy-sentinel'),b=tx.objectStore('revisions_poe1').get(7777);tx.oncomplete=()=>resolve({version:db.version,kv:a.result,history:b.result});tx.onabort=()=>reject(tx.error);});});assert.equal(legacy.version,24);assert.equal(legacy.kv.value.preserve,'legacy SD evidence');assert.deepEqual(legacy.history.translations,['Preserve prior SD history']);reports.push({case:'native v23 to v24 migration preserves legacy SD KV and history',ok:true});
+        await bootstrap();const legacy=await page.evaluate(async()=>{const db=await OfflineStore.openClientTextDb();return new Promise((resolve,reject)=>{const tx=db.transaction(['kv','revisions_poe1'],'readonly'),a=tx.objectStore('kv').get('local-browser-legacy-sentinel'),b=tx.objectStore('revisions_poe1').get(7777);tx.oncomplete=()=>resolve({version:db.version,kv:a.result,history:b.result});tx.onabort=()=>reject(tx.error);});});assert.equal(legacy.version,25);assert.equal(legacy.kv.value.preserve,'legacy SD evidence');assert.deepEqual(legacy.history.translations,['Preserve prior SD history']);reports.push({case:'native v23 to v25 migration preserves legacy SD KV and history',ok:true});
         if(process.argv.includes('--review-fixes-only')){await reviewFixes();return;}
+        if(process.argv.includes('--use-english-only')){await englishIntentCheck();return;}
         if(process.argv.includes('--lease-probe-only')){
             const lease=await page.evaluate(async()=>{
                 const vm=window.__localApp,store=vm._ctLocalStore,scope={...vm.ctRequestScope(),language:'Thai',versionId:'local:test:'+crypto.randomUUID(),groupId:'local:test:'+crypto.randomUUID()},fieldId=JSON.stringify(['Text',null]);

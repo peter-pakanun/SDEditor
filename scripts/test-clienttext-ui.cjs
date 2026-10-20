@@ -45,6 +45,16 @@ function harness(changes={}){
     app.ctLoadHistory=()=>{};app.ctPresence=async()=>{};app.ctRefreshDiagnostics=()=>{};
     return {app,mixin,window,original};
 }
+test('Use English offer is optional, exact, text-only and carries an explicit conversion without mutating the live draft first',async()=>{
+    const h=harness(),{app,original}=h,field=original.fields[0];app.ctPolicy.clientTextEnglishIntent=S.ENGLISH_INTENT_PROTOCOL;
+    app.ctValues[field.id]=field.source;assert.equal(app.ctEnglishOffer(field),true);
+    let submitted;app.ctSave=async(close,options)=>{submitted=options;return true;};
+    assert.equal(await app.ctChooseEnglish(field),true);assert.equal(app.ctValues[field.id],field.source,'conversion failure can retain the original editor text');
+    assert.equal(submitted.englishValues[field.id],'');assert.equal(submitted.englishActions[field.id].previousValue,field.source);
+    app.ctValues[field.id]=field.source+' ';assert.equal(app.ctEnglishOffer(field),false);
+    assert.equal(app.ctEnglishEligible({...field,kind:'form',form:'MS'}),false);
+    app.gameVersion='poe1';assert.equal(app.ctEnglishOffer(field),false);
+});
 function assignmentHarness(changes={}){
     const managed=require('../public/managedVersions.js').mixin.methods,
         h=harness({managedCatalogAccess:true,cloudCanAccessAllLanguages:true,managedTeamSort:'language',managedTeamSortDir:'asc',
