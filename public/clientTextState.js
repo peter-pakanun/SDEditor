@@ -114,9 +114,11 @@
     const sourceHash = source => hash(fingerprintSource(source));
 
     const ENGLISH_INTENT_PROTOCOL = 'clienttext-use-english-v1';
+    const ENGLISH_ELIGIBILITY_PROTOCOL = 'clienttext-english-eligibility-v1';
     const intentMap = saved => saved?.englishIntent || saved?.provenance?.englishIntent || {};
     const intentHash = field => field.sourceHash || sourceHash(field.source);
     function englishEligible(field) {
+        if (field?.englishEligible===false) return false;
         if (field?.kind !== 'text' || !field.required || field.audioOnly || audioOnly(field.source)) return false;
         if (typeof field.source === 'string') {
             if (!canonicalSource(field.source).trim() || /^(?:\[DNT|DNT )/.test(field.source)) return false;
@@ -140,9 +142,9 @@
                 || typeof value.decisionId!=='string' || !value.decisionId || value.decisionId.length>200
                 || value.reason!==undefined && (typeof value.reason!=='string' || value.reason.length>120))
                 throw new TypeError('Use English decision identity is invalid.');
-            if (value.state==='active' && !options.historical && (!englishEligible(field) || value.sourceHash!==intentHash(field)
-                || options.values && String(options.values[id] ?? '').trim())) throw new TypeError('Use English does not match the current blank text field.');
-            result[id]=copy(value);
+            const incompatible=value.state==='active' && (!englishEligible(field) || value.sourceHash!==intentHash(field) || options.values && String(options.values[id] ?? '').trim());
+            if(incompatible && !options.historical && !options.received)throw new TypeError('Use English does not match the current blank text field.');
+            result[id]=options.received && incompatible?{...copy(value),state:'needs_review',reason:!englishEligible(field)?'unsupported_field':value.sourceHash!==intentHash(field)?'source_changed':'target_changed'}:copy(value);
         }
         return result;
     }
@@ -158,10 +160,11 @@
         }
         for (const [id,action] of Object.entries(actions || {})) {
             const field=unit.fields.find(field=>field.id===id);
-            if (game!=='poe2' || !field || !englishEligible(field) || !action
+            if (!field || !action
                 || Object.keys(action).some(key=>!['action','sourceHash','previousValue'].includes(key))
                 || !['set','revoke'].includes(action.action) || action.sourceHash!==intentHash(field))
                 throw new TypeError('Use English is supported only for the current ordinary PoE2 text field.');
+            if(action.action==='set' && (game!=='poe2' || !englishEligible(field)))throw new TypeError('Use English is supported only for the current ordinary PoE2 text field.');
             if (action.action==='set' && values[id]!=='') throw new TypeError('Use English must explicitly save an empty target.');
             if (action.previousValue!==undefined && (typeof action.previousValue!=='string' || action.previousValue.length>131072)) throw new TypeError('Invalid previous translation.');
             if (action.action==='revoke' && !intentMap(before)[id]) throw new TypeError('There is no Use English decision to revoke.');
@@ -646,6 +649,6 @@
     return { FORMAT, TRUSTED_FORMAT, STORAGE_PROTOCOL, PARSER_VERSION, PARSER_VERSIONS, FILLS, SHEET_COLORS, fillFor, emptyColorCounts, colorCountsFor, sheetColorFor, unitColorFor, CLASS_FORMS, isClassForm, isNamedForm, allowsNonexistent, canonical, stableStringify, sha256, hash, canonicalSource, audioOnly, audioMarkerTooltip, sourceHash,
         clientFacts, originalValues, emptySummary, addOriginalSummary, originalCacheKey, buildDescriptors,
         normalizeUnit, compactUnit, normalizeCompact, leafHash, nodeHash, buildManifest, proofFor, verifyWitness,
-        ENGLISH_INTENT_PROTOCOL, englishEligible, englishIntentFor, normalizeEnglishIntent, applyEnglishActions, carryEnglishIntent,
+        ENGLISH_INTENT_PROTOCOL, ENGLISH_ELIGIBILITY_PROTOCOL, englishEligible, englishIntentFor, normalizeEnglishIntent, applyEnglishActions, carryEnglishIntent,
         normalizeValues, normalizeReviewed, valuesFor, needsSourceReview, statusFor, counts, carryForward, reviewAudioMarkerChanges, tokenize, maskAudioMarkers, tokenInsertion, extractVariables, variableIdentityKey, diagnose, suggestions, copy };
 });

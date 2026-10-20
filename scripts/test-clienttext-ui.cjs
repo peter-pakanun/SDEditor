@@ -30,7 +30,7 @@ function harness(changes={}){
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/clientTextComparisons.js'),'utf8'),context);
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/clientTextUi.js'),'utf8'),context);
     const mixin=window.ClientTextUI.mixin,original=unit(),app={...mixin.data(),managedCatalogScope:'alice:poe2',cloudProfileId:scope.accountId,gameVersion:scope.game,branchId:scope.branchId,
-        ctPolicy:{clientTextStorageProtocols:[S.STORAGE_PROTOCOL],clientTextParserVersions:S.PARSER_VERSIONS,clientTextSaveOrigins:['save','restore']},ctWorkspace:{scope:clone(scope)},ctActive:true,ctSelection:original.id,ctUnits:[original],ctSaved:{},ctValues:S.valuesFor(original),ctReviewed:{},
+        ctPolicy:{clientTextEnglishEligibility:S.ENGLISH_ELIGIBILITY_PROTOCOL,clientTextStorageProtocols:[S.STORAGE_PROTOCOL],clientTextParserVersions:S.PARSER_VERSIONS,clientTextSaveOrigins:['save','restore']},ctWorkspace:{scope:clone(scope)},ctActive:true,ctSelection:original.id,ctUnits:[original],ctSaved:{},ctValues:S.valuesFor(original),ctReviewed:{},
         appConfirm:async()=>true,
         _ctUnitIndex:new Map([[original.id,original]]),_ctWorkUnits:new Map(),_ctEditRevision:0,_ctDraftRevision:null,...changes};
     for(const[name,method]of Object.entries(mixin.methods))app[name]=method.bind(app);
@@ -3224,6 +3224,37 @@ test('uncertain saves replay the exact receipt command and retain subsequently t
     assert.equal(await app.ctSave(),true);assert.notEqual(commands[2].jobId,commands[0].jobId);
     assert.equal((await f.store.getSaved(scope))[original.id].values[fieldId],'Newer unsaved editor text');
 });
+test('a known shared recovery rejection clears the Save job and normal blocked Save creates none',async()=>{
+    const {app,original}=harness();app.ctFlushDraft=async()=>true;app.ctSync=()=>{};
+    app._ctStore={async save(){throw Object.assign(new Error('Explicit shared recovery required'),{code:'CLIENTTEXT_PENDING_RESOLUTION_REQUIRED'});}};
+    assert.equal(await app.ctSave(),false);assert.equal(app._ctSaveJob,null);assert.equal(app.ctBusy,false);
+    app.ctSaved={[original.id]:{syncRecovery:{state:'rejected'}}};
+    assert.equal(await app.ctSave(),false);assert.equal(app._ctSaveJob,null);assert.match(app.ctError,/explicitly reapply/);
+});
+
+test('explicit reapply archives editor text typed while its draft checkpoint is still pending',async()=>{
+    const {app,original}=harness(),gate=deferred(),entered=deferred();let command;
+    app.ctSync=()=>{};app.ctFlushDraft=async()=>{entered.resolve();await gate.promise;return true;};
+    app._ctStore={async save(captured,id,input){command=clone(input);return{saved:{unitId:id,values:input.values,reviewed:{},revision:1}};}};
+    const saving=app.ctSave(false,{englishValues:{[fieldId]:'Retained work'},pendingResolution:{mode:'reapply',mutationId:'old',editorBeforeValues:clone(app.ctValues)}});
+    await entered.promise;app.ctValues[fieldId]='Typed during checkpoint';gate.resolve();assert.equal(await saving,true);
+    assert.equal(command.pendingResolution.editorBeforeValues[fieldId],'Typed during checkpoint');assert.equal(app.ctValues[fieldId],'Retained work');
+});
+
+test('a lost local approval acknowledgement retries its exact receipt through a newer shared conflict before accepting peer',async()=>{
+    const f=fixture(),original=unit('Source','');await f.store.import(scope,{units:[original],assets:[asset]});
+    const {app}=harness({_ctUnitIndex:new Map([[original.id,original]]),ctUnits:[original],ctValues:S.valuesFor(original)});
+    app.ctPolicy.clientTextEnglishIntent=S.ENGLISH_INTENT_PROTOCOL;app.ctSync=()=>{};const commands=[];let fail=true;
+    app._ctStore={...f.store,async save(captured,id,command){commands.push(clone(command));const result=await f.store.save(captured,id,command);if(fail){fail=false;throw Error('Lost approval completion');}return result;}};
+    assert.equal(await app.ctChooseEnglish(original.fields[0]),false);assert.ok(app._ctSaveJob);
+    await f.store.applyRemote(scope,{events:[{unit:{unitId:original.id,revision:1,values:{[fieldId]:''},reviewed:{},saved:false,englishIntent:{[fieldId]:{state:'active',sourceHash:S.sourceHash('Source'),decisionId:'peer'}}}}],sequence:1});
+    app.ctSaved=await f.store.getSaved(scope);app.ctChoices=[{fieldId,local:'',remote:''}];
+    assert.equal(await app.ctSave(),true);assert.deepEqual(commands[1],commands[0]);assert.equal(app._ctSaveJob,null);
+    assert.equal(app.ctSaved[original.id].englishIntent[fieldId].decisionId,'peer');assert.ok(app.ctPendingSharedRecovery());
+    assert.equal(await app.ctResolveSharedPending('accept-peer'),true);assert.equal(app._ctRecoveryJob,null);assert.equal(app.ctRecoveryBusy,false);
+    assert.equal(app.ctPendingSharedRecovery(),null);assert.deepEqual(await f.store.getOutbox(scope),[]);
+});
+
 test('fencing clears pending job identities before another group opens the same sheet ID',async()=>{
     const {app,original}=harness();app._ctSaveJob={unitId:original.id,scopeKey:Store.scopeKey(scope),id:'old-job',command:{jobId:'old-job'}};
     app.ctFence();assert.equal(app._ctSaveJob,null);assert.equal(app.ctSelection,'');assert.equal(app._ctDraftRevision,null);

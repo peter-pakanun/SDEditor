@@ -182,6 +182,56 @@ async function reviewFixes(){
     reports.push({case:'native transient checkpoint retry clears its owned warning; unrelated and different-unit errors remain',ok:true});
     const report={ok:true,origin,profile,reports,result,errors,networkWrites};assert.deepEqual(errors,[]);assert.deepEqual(networkWrites,[]);fs.writeFileSync(path.join(temp,'clienttext-local-review-fixes-results.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
 }
+async function intentConflictCheck(){
+    const seeded=await page.evaluate(async()=>{
+        const vm=window.__localApp,S=ClientTextState,zip=new JSZip(),ns='http://schemas.openxmlformats.org/spreadsheetml/2006/main',cell=(r,v)=>`<c r="${r}" t="inlineStr"><is><t>${v}</t></is></c>`;
+        const specs=[['ClientStrings',['ID','Name','Translation','Gender'],['equal','Synthetic shared source','','M']],['Forms',['ID','Name','MS','FS'],['form','Synthetic form','','']],['DNT',['ID','Name','Translation'],['dnt','[DNT] Synthetic source','']]];
+        zip.file('[Content_Types].xml','<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>');
+        zip.file('xl/workbook.xml',`<workbook xmlns="${ns}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${specs.map((s,i)=>`<sheet name="${s[0]}" sheetId="${i+1}" r:id="r${i+1}"/>`).join('')}</sheets></workbook>`);
+        zip.file('xl/_rels/workbook.xml.rels',`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${specs.map((s,i)=>`<Relationship Id="r${i+1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/s${i}.xml"/>`).join('')}</Relationships>`);
+        for(const [i,s]of specs.entries())zip.file(`xl/worksheets/s${i}.xml`,`<worksheet xmlns="${ns}"><sheetData><row r="1">${s[1].map((v,j)=>cell(String.fromCharCode(65+j)+'1',v)).join('')}</row><row r="2">${s[2].map((v,j)=>cell(String.fromCharCode(65+j)+'2',v)).join('')}</row></sheetData></worksheet>`);
+        await vm.ctOpenOfflineTest();vm.ctAddUploadFiles([new File([await zip.generateAsync({type:'uint8array'})],'Thai.xlsx')]);if(!await vm.ctOpenTestSheet())throw new Error(vm.ctError || vm.ctUploadError);
+        const units=vm.ctUnits,unit=units.find(u=>u.sheet==='ClientStrings'),field=unit.fields[0],asset=await vm._ctLocalStore.getAsset(vm.ctWorkspace.scope,'normal'),scope={...vm.ctWorkspace.scope,versionId:'review-shared-version',groupId:'review-shared-group'};
+        const version={id:scope.versionId,game:'poe2',branchId:'default',name:'Synthetic shared recovery'},group={id:scope.groupId,versionId:scope.versionId,contentMode:'clienttext',language:'Thai',roles:['normal']};
+        await vm._ctStore.import(scope,{units,assets:[asset],descriptors:vm.ctWorkspace.metadata.descriptors,metadata:{version,group}});
+        const values=S.valuesFor(unit),hash=S.sourceHash(field.source),mark=jobId=>({jobId,intentProtocol:S.ENGLISH_INTENT_PROTOCOL,englishActions:{[field.id]:{action:'set',sourceHash:hash}},values,reviewed:{[field.id]:hash}});
+        const peer=(revision,decisionId)=>({unitId:unit.id,revision,values,reviewed:{[field.id]:hash},saved:false,englishIntent:{[field.id]:{state:'active',sourceHash:hash,decisionId}}});
+        window.__intentReview={scope,unit,field,units,asset,group,version,mark,peer};
+        window.__intentReload=async()=>{vm.ctWorkspace={scope,metadata:await vm._ctStore.getMetadata(scope)};vm.activeContentGroup=group;vm.ctPolicy={clientTextEnglishIntent:S.ENGLISH_INTENT_PROTOCOL,clientTextEnglishEligibility:S.ENGLISH_ELIGIBILITY_PROTOCOL};vm.ctSaved=Vue.markRaw(await vm._ctStore.getSaved(scope));vm.ctSelection='';vm.ctDraftDirty=false;vm._ctSaveJob=null;vm._ctSync=null;vm.ctActive=true;vm.ctEditor=true;await vm.ctSelect(unit,true);await vm.$nextTick();};
+        await vm._ctStore.save(scope,unit.id,mark('my-first'));await vm._ctStore.applyRemote(scope,{events:[{unit:peer(1,'peer-first')}],sequence:1});await window.__intentReload();
+        return{unitId:unit.id,fieldId:field.id};
+    });
+    assert.equal(await page.getByRole('button',{name:'Use English and save ID',exact:true}).count(),0);
+    await page.evaluate(()=>{const store=window.__localApp._ctStore,native=store.acceptPendingPeer;let once=true;store.acceptPendingPeer=async(...args)=>{const result=await native(...args);if(once){once=false;throw new Error('Synthetic lost recovery acknowledgement');}return result;};});
+    await page.getByRole('button',{name:'Accept shared version',exact:true}).click();
+    await page.waitForFunction(()=>{const vm=window.__localApp;return !vm.ctBusy && !vm.ctRecoveryBusy && !!vm._ctRecoveryJob;});
+    await page.getByRole('button',{name:'Accept shared version',exact:true}).click();
+    await page.waitForFunction(()=>{const vm=window.__localApp;return !vm.ctBusy && !vm.ctPendingSharedRecovery();});
+    const accepted=await page.evaluate(async()=>{const vm=window.__localApp,h=window.__intentReview;return{pending:(await vm._ctStore.getOutbox(h.scope)).length,decision:vm.ctSaved[h.unit.id].englishIntent[h.field.id].decisionId,job:!!vm._ctSaveJob};});
+    assert.equal(accepted.pending,0);assert.equal(accepted.decision,'peer-first');assert.equal(accepted.job,false);
+    await page.evaluate(async()=>{const vm=window.__localApp,h=window.__intentReview;await vm._ctStore.save(h.scope,h.unit.id,h.mark('my-second'));await vm._ctStore.applyRemote(h.scope,{events:[{unit:h.peer(2,'peer-second')}],sequence:2});await window.__intentReload();});
+    await page.getByRole('button',{name:'Reapply retained work and save ID',exact:true}).click();
+    await page.waitForFunction(()=>{const vm=window.__localApp;return !vm.ctBusy && !vm.ctPendingSharedRecovery() && !vm._ctSaveJob;});
+    const reapplied=await page.evaluate(async()=>{const vm=window.__localApp,h=window.__intentReview,p=(await vm._ctStore.getOutbox(h.scope))[0],history=await vm._ctStore.listHistory(h.scope,h.unit.id);return{fresh:p.mutationId!=='my-second',predecessor:!!p.predecessor,proof:p.englishEligibility?.protocol,archived:history.some(e=>e.syncRecovery?.operation.mutationId==='my-second')};});
+    assert.equal(reapplied.fresh,true);assert.equal(reapplied.predecessor,false);assert.equal(reapplied.archived,true);assert.equal(reapplied.proof,'clienttext-english-eligibility-v1');
+    assert.ok(await page.getByText('Use English is unavailable for Gender metadata.',{exact:true}).count());
+    const legacy=await page.evaluate(async()=>{const vm=window.__localApp,S=ClientTextState,h=window.__intentReview,scope={...h.scope,versionId:'review-legacy-version',groupId:'review-legacy-group'},version={...h.version,id:scope.versionId},group={...h.group,id:scope.groupId,versionId:scope.versionId};
+        await vm._ctStore.import(scope,{units:h.units,assets:[h.asset],descriptors:vm.ctWorkspace.metadata.descriptors,metadata:{version,group}});await vm._ctStore.save(scope,h.unit.id,{jobId:'legacy-rejected',values:S.valuesFor(h.unit)});const peer=h.peer(1,'legacy-peer');await vm._ctStore.applyRemote(scope,{events:[{unit:peer}],sequence:1});const sent=[];
+        const sync=ClientTextSync.create({scope,store:vm._ctStore,request:async(path,init)=>{sent.push(JSON.parse(JSON.stringify(init.body)));if(!init.body.intentProtocol)return new Response(JSON.stringify({error:{code:'CLIENTTEXT_INTENT_REQUIRED',message:'Update protocol'},current:peer}),{status:400,headers:{'content-type':'application/json'}});return{unit:{...peer,revision:2}};}});
+        try{await sync.flush();}catch(error){if(error.code!=='CLIENTTEXT_INTENT_REQUIRED')throw error;}await sync.flush();
+        h.scope=scope;h.group=group;h.version=version;window.__legacySync=sync;window.__legacySent=sent;
+        vm.ctWorkspace={scope,metadata:await vm._ctStore.getMetadata(scope)};vm.activeContentGroup=group;vm.ctSaved=Vue.markRaw(await vm._ctStore.getSaved(scope));vm.ctSelection='';vm.ctDraftDirty=false;await vm.ctSelect(h.unit,true);return{sent:sent.length,state:(await vm._ctStore.getOutbox(scope))[0].state};
+    });
+    assert.equal(legacy.sent,1);assert.equal(legacy.state,'rejected');
+    await page.getByRole('button',{name:'Reapply retained work and save ID',exact:true}).click();await page.waitForFunction(()=>!window.__localApp.ctBusy && !window.__localApp.ctRecoveryBusy && !window.__localApp._ctSaveJob && !window.__localApp.ctPendingSharedRecovery());
+    const recovered=await page.evaluate(async()=>{const vm=window.__localApp,h=window.__intentReview;await window.__legacySync.flush();const history=await vm._ctStore.listHistory(h.scope,h.unit.id);return{sent:window.__legacySent.length,pending:(await vm._ctStore.getOutbox(h.scope)).length,oldBody:history.find(e=>e.syncRecovery?.operation.mutationId==='legacy-rejected')?.syncRecovery.operation.requestBody};});
+    assert.equal(recovered.sent,2);assert.equal(recovered.pending,0);assert.equal(recovered.oldBody.mutationId,'legacy-rejected');assert.equal(recovered.oldBody.intentProtocol,undefined);
+    const unsupported=await page.evaluate(async()=>{const vm=window.__localApp,h=window.__intentReview,S=ClientTextState,dnt=h.units.find(u=>u.sheet==='DNT'),field=dnt.fields[0];vm.hideDNT=false;await vm._ctStore.applyRemote(h.scope,{events:[{unit:{unitId:dnt.id,revision:1,values:S.valuesFor(dnt),reviewed:{},saved:false,englishIntent:{[field.id]:{state:'active',sourceHash:S.sourceHash(field.source),decisionId:'unsupported-old-server'}}}}],sequence:3});
+        vm.ctSaved=Vue.markRaw(await vm._ctStore.getSaved(h.scope));await vm.ctSelect(dnt,true);await vm.$nextTick();return{state:vm.ctSaved[dnt.id].englishIntent[field.id].state,sequence:(await vm._ctStore.getMetadata(h.scope)).sequence};});
+    assert.equal(unsupported.state,'needs_review');assert.equal(unsupported.sequence,3);assert.ok(await page.getByText('Use English is unavailable for DNT fields.',{exact:true}).count());
+    await page.evaluate(async()=>{const vm=window.__localApp;await vm.ctSelect(window.__intentReview.units.find(u=>u.sheet==='Forms'),true);});assert.ok(await page.getByText('Use English is unavailable for grammatical and class forms until their fallback behavior is verified.',{exact:true}).count());
+    assert.deepEqual(errors,[]);assert.deepEqual(networkWrites,[]);const report={ok:true,seeded,accepted,reapplied,legacy,recovered,unsupported,errors,networkWrites};fs.writeFileSync(path.join(temp,'clienttext-use-english-conflicts.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
+}
 async function englishIntentCheck(){
     const imported=await importReal('poe2');
     const chosen=await page.evaluate(async()=>{
@@ -230,6 +280,7 @@ async function run(){
         await bootstrap();const legacy=await page.evaluate(async()=>{const db=await OfflineStore.openClientTextDb();return new Promise((resolve,reject)=>{const tx=db.transaction(['kv','revisions_poe1'],'readonly'),a=tx.objectStore('kv').get('local-browser-legacy-sentinel'),b=tx.objectStore('revisions_poe1').get(7777);tx.oncomplete=()=>resolve({version:db.version,kv:a.result,history:b.result});tx.onabort=()=>reject(tx.error);});});assert.equal(legacy.version,25);assert.equal(legacy.kv.value.preserve,'legacy SD evidence');assert.deepEqual(legacy.history.translations,['Preserve prior SD history']);reports.push({case:'native v23 to v25 migration preserves legacy SD KV and history',ok:true});
         if(process.argv.includes('--review-fixes-only')){await reviewFixes();return;}
         if(process.argv.includes('--use-english-only')){await englishIntentCheck();return;}
+        if(process.argv.includes('--intent-conflicts-only')){await intentConflictCheck();return;}
         if(process.argv.includes('--lease-probe-only')){
             const lease=await page.evaluate(async()=>{
                 const vm=window.__localApp,store=vm._ctLocalStore,scope={...vm.ctRequestScope(),language:'Thai',versionId:'local:test:'+crypto.randomUUID(),groupId:'local:test:'+crypto.randomUUID()},fieldId=JSON.stringify(['Text',null]);

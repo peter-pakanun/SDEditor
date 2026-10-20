@@ -25,6 +25,9 @@
     }
     const scopeKey = input => { const scope = normalizeScope(input); return key(scope.accountId, scope.game, scope.branchId, scope.versionId, scope.groupId, scope.language); };
     const isLocal = scope => String(scope?.groupId || '').startsWith('local:test:');
+    const pendingError = message => Object.assign(new Error(message),{code:'CLIENTTEXT_PENDING_RESOLUTION_REQUIRED'});
+    const pendingChain = value => {const result=[];for(let item=value;item;item=item.predecessor)result.push(item);return result;};
+    const blockedPending = value => pendingChain(value).some(item=>item.state==='rejected' || item.state==='conflict' && !!item.englishActions);
     const LOCAL_PROTOCOL = 'clienttext-local-v2';
     const scopeFromKey = id => Object.fromEntries(['accountId','game','branchId','versionId','groupId','language'].map((name,index)=>[name,JSON.parse(id)[index]]));
     const corrupt = message => Object.assign(new Error('Local workbook recovery data is invalid: ' + message + '. The stored data has been retained.'), {code:'CLIENTTEXT_LOCAL_INVALID'});
@@ -765,9 +768,12 @@
             const metadata=await requireReady(scope,options);
             const unit=await getUnit(rawScope,unitId,options);if(!unit)throw new Error('ClientText save source is unavailable.');
             const values=S.normalizeValues(unit,input.values), reviewed=S.normalizeReviewed(unit,input.reviewed||{});
+            const recoveryEditorValues=input.pendingResolution?.editorBeforeValues?S.normalizeValues(unit,input.pendingResolution.editorBeforeValues):null;
             const command={scope:captured.scope,unitId,values,reviewed,
                 ...(own(input,'intentProtocol')?{intentProtocol:input.intentProtocol}:{}),
                 ...(own(input,'englishActions')?{englishActions:copy(input.englishActions)}:{}),
+                ...(own(input,'englishEligibility')?{englishEligibility:copy(input.englishEligibility)}:{}),
+                ...(own(input,'pendingResolution')?{pendingResolution:copy(input.pendingResolution)}:{}),
                 ...(input.mtlAcceptances?.length ? {mtlAcceptances:copy(input.mtlAcceptances)} : {}),
                 ...(own(input,'origin')?{origin:input.origin}:{}),
                 ...(own(input,'baseRevision')?{baseRevision:input.baseRevision}:{}),
@@ -783,6 +789,11 @@
                 const original=await get(tx,stores.cacheUnits,key(cacheForUnit(currentMetadata,unitId),unitId));
                 if(!original || currentMetadata.signature!==metadata.signature)throw new Error('ClientText original changed while saving.');
                 const before=await get(tx,stores.saved,key(scope,unitId)),draft=await get(tx,stores.drafts,key(scope,unitId));
+                const priorPending=!isLocal(captured.scope)?await get(tx,stores.outbox,key(scope,unitId)):null;
+                if(blockedPending(priorPending)){
+                    if(input.pendingResolution?.mutationId!==priorPending.mutationId || input.pendingResolution?.mode!=='reapply')throw pendingError('Resolve the retained shared operation explicitly: accept the shared version or reapply your retained work.');
+                    if(pendingChain(priorPending).some(item=>['sending','uncertain'].includes(item.state)))throw pendingError('An earlier operation still needs its exact receipt before recovery.');
+                }else if(input.pendingResolution)throw pendingError('The pending operation changed. Reload its recovery choices.');
                 if(isLocal(rawScope)){validateLocalRecord(unit,before);validateLocalRecord(unit,draft,{draft:true});}
                 if(own(input,'expectedRevision')&&(before?.revision||0)!==input.expectedRevision)throw Object.assign(new Error('Another tab changed the ClientText saved translation.'),{code:'UNIT_CHANGED'});
                 if(own(input,'expectedDraftRevision')&&(draft?.revision||null)!==input.expectedDraftRevision)throw Object.assign(new Error('Another tab changed this ClientText draft.'),{code:'DRAFT_CHANGED'});
@@ -804,14 +815,14 @@
                 if(mtl)await mtl.resolveAcceptancesTx(tx,captured.scope,acceptedMtl,{jobId:input.jobId,now:after.savedAt});
                 put(tx,stores.saved,scope,unitId,after);
                 await learnMemory(tx,captured.scope,unit,after,input.jobId,after.origin);
-                put(tx,stores.history,scope,input.jobId,{id:input.jobId,unitId,before:before||null,after,origin:after.origin,createdAt:after.savedAt,...(Object.keys(intent.changes).length?{intentChanges:intent.changes}:{})},{unitKey:key(scope,unitId)});
+                put(tx,stores.history,scope,input.jobId,{id:input.jobId,unitId,before:before||null,after,origin:after.origin,createdAt:after.savedAt,...(Object.keys(intent.changes).length?{intentChanges:intent.changes}:{}),...(input.pendingResolution?{syncRecovery:{resolution:'reapply',operation:copy(priorPending),...(recoveryEditorValues?{editorBeforeValues:recoveryEditorValues}:{})}}:{})},{unitKey:key(scope,unitId)});
                 if(own(input,'expectedDraftRevision'))del(tx,stores.drafts,scope,unitId);
                 if(!isLocal(captured.scope) && options.sync!==false){
-                    const pending=await get(tx,stores.outbox,key(scope,unitId));
-                    if(pending?.state==='conflict' && pending.englishActions && !input.englishActions && Object.keys(pending.englishActions).some(id=>!values[id]?.trim()))throw new TypeError('Resolve the conflicting Use English choice explicitly before saving a blank field.');
+                    const pending=input.pendingResolution?null:priorPending;
                     const operation={unitId,mutationId:input.jobId,storageProtocol:S.STORAGE_PROTOCOL,role:unit.role,assetHash:descriptor.assetHash,parserVersion:descriptor.parserVersion,
                         ...(own(input,'intentProtocol')?{intentProtocol:input.intentProtocol}:{}),
                         ...(own(input,'englishActions')?{englishActions:copy(input.englishActions)}:{}),
+                        ...(own(input,'englishEligibility')?{englishEligibility:copy(input.englishEligibility)}:{}),
                         ...(acceptedMtl.length ? {mtlAcceptances:copy(input.mtlAcceptances)} : {}),
                         ...(own(input,'origin')?{origin:input.origin}:{}),
                         clientFacts:S.clientFacts(unit),originalValues:S.originalValues(unit),values:copy(values),reviewed:copy(after.reviewed),baseRevision:after.serverRevision,
@@ -845,15 +856,57 @@
                 .filter(row=>Object.entries(input).every(([field,value])=>!['profile','accountId'].includes(field)?row[field]===value:true)),options);
         }
         const getOutbox=(rawScope,options)=>isLocal(rawScope)?Promise.resolve([]):rows(capture(rawScope).id,stores.outbox,options);
+        async function getPendingRecovery(rawScope,unitId,options={}){
+            if(isLocal(rawScope))return null;
+            const pending=await one(capture(rawScope).id,stores.outbox,unitId,options);
+            return blockedPending(pending)?copy(pending):null;
+        }
+        async function rejectOperation(rawScope,unitId,mutationId,rejection,body,options={}){
+            if(isLocal(rawScope))throw new TypeError('Private workbooks have no shared operations.');
+            const scope=capture(rawScope).id;
+            return transaction([stores.outbox,stores.saved],'readwrite',async tx=>{
+                const pending=await get(tx,stores.outbox,key(scope,unitId));let target=pending;
+                while(target && target.mutationId!==mutationId)target=target.predecessor;
+                if(!target)return false;
+                target.state='rejected';target.rejection=copy(rejection);if(!target.requestBody)target.requestBody=copy(body);
+                put(tx,stores.outbox,scope,unitId,pending,{unitKey:key(scope,unitId)});
+                const saved=await get(tx,stores.saved,key(scope,unitId));
+                if(saved){saved.syncRecovery={mutationId:pending.mutationId,code:rejection.code,state:'rejected'};if(rejection.current?.revision===0)saved.remoteBase={...copy(rejection.current),englishIntent:{},saved:false};put(tx,stores.saved,scope,unitId,saved);}
+                return true;
+            },options);
+        }
+        async function acceptPendingPeer(rawScope,unitId,input,options={}){
+            if(isLocal(rawScope))throw new TypeError('Private workbooks have no shared operations.');
+            const scope=capture(rawScope).id,signature=S.hash({unitId,...input});
+            return transaction([stores.saved,stores.outbox,stores.history,stores.receipts],'readwrite',async tx=>{
+                const receipt=await get(tx,stores.receipts,key(scope,input.jobId));
+                if(receipt){if(receipt.signature!==signature)throw pendingError('Recovery job ID was reused.');return {saved:receipt.saved,replayed:true};}
+                const before=await get(tx,stores.saved,key(scope,unitId)),pending=await get(tx,stores.outbox,key(scope,unitId));
+                if(!blockedPending(pending) || pending.mutationId!==input.mutationId || before?.revision!==input.expectedRevision)throw pendingError('The shared recovery state changed. Reload its choices.');
+                if(pendingChain(pending).some(item=>['sending','uncertain'].includes(item.state)))throw pendingError('An earlier operation still needs its exact receipt before recovery.');
+                const peer=before.remoteBase;if(!peer?.values || !Number.isSafeInteger(peer.revision) || peer.revision<0)throw pendingError('Load the current shared version before accepting it.');
+                const after={...before,...copy(peer),unitId,revision:before.revision+1,serverRevision:peer.revision,baseRevision:peer.revision,remoteBase:copy(peer),conflicts:copy(peer.conflicts || []),origin:'sync_resolution'};
+                delete after.syncRecovery;
+                put(tx,stores.saved,scope,unitId,after);del(tx,stores.outbox,scope,unitId);
+                put(tx,stores.history,scope,input.jobId,{id:input.jobId,unitId,before,after,origin:'sync_resolution',createdAt:Date.now(),syncRecovery:{resolution:'accept-peer',operation:copy(pending)}},{unitKey:key(scope,unitId)});
+                put(tx,stores.receipts,scope,input.jobId,{jobId:input.jobId,signature,unitId,saved:after,committedAt:Date.now()});
+                return {saved:after,replayed:false};
+            },options);
+        }
         async function markSending(rawScope,unitId,mutationId,state='sending',options={}){
             if(isLocal(rawScope))throw new TypeError('Local workbook state cannot enter shared synchronization.');
             const scope=capture(rawScope).id;
-            return transaction([stores.outbox],'readwrite',async tx=>{
+            return transaction([stores.outbox,stores.saved],'readwrite',async tx=>{
                 const operation=await get(tx,stores.outbox,key(scope,unitId));
                 if(!operation)return null;
                 let target=operation;while(target.predecessor)target=target.predecessor;
                 if(target.mutationId!==mutationId)return null;
-                target.state=state;put(tx,stores.outbox,scope,unitId,operation,{unitKey:key(scope,unitId)});return copy(target);
+                target.state=state;put(tx,stores.outbox,scope,unitId,operation,{unitKey:key(scope,unitId)});
+                if(blockedPending(operation)){
+                    const saved=await get(tx,stores.saved,key(scope,unitId));
+                    if(saved){saved.syncRecovery={mutationId:operation.mutationId,state:'conflict',code:'CLIENTTEXT_INTENT_CONFLICT'};put(tx,stores.saved,scope,unitId,saved);}
+                }
+                return copy(target);
             },options);
         }
         function mergeRemote(unit,local,base,remote){
@@ -880,11 +933,10 @@
                     if(before?.serverRevision>revision)continue;
                     if(before?.serverRevision===revision&&S.stableStringify(before.remoteBase?.values||before.values)===S.stableStringify(values))continue;
                     const sharedOrigin=remote.origin==='restore'?'restore':'shared';
-                    const accepted={unitId,values,reviewed,revision,...(own(remote,'origin')?{origin:remote.origin}:{})},merged=pending?mergeRemote(unit,before,pending.base,accepted):{values,conflicts:[]};
-                    const remoteIntent=S.normalizeEnglishIntent(unit,remote.englishIntent || remote.provenance?.englishIntent || {},{values});
+                    const remoteIntent=S.normalizeEnglishIntent(unit,remote.englishIntent || remote.provenance?.englishIntent || {},{values,received:true});
+                    const accepted={unitId,values,reviewed,revision,englishIntent:remoteIntent,provenance:copy(remote.provenance || {}),saved:remote.saved!==false,outdated:copy(remote.outdated || []),conflicts:copy(remote.conflicts || []),...(own(remote,'origin')?{origin:remote.origin}:{})},merged=pending?mergeRemote(unit,before,pending.base,accepted):{values,conflicts:[]};
                     const intentConflict=pending?.englishActions && !Object.keys(pending.englishActions).every(id=>remoteIntent[id]?.decisionId===pending.mutationId);
                     if(intentConflict){
-                        const id=Object.keys(pending.englishActions)[0];merged.conflicts.push({fieldId:id,base:pending.base?.values?.[id] || '',local:before?.values?.[id] || '',remote:values[id],reason:'Use English decision changed concurrently. Review the accepted copy.'});
                         if(!pending.predecessor && pending.state==='queued'){pending.state='conflict';put(tx,stores.outbox,scope,unitId,pending,{unitKey:key(scope,unitId)});}
                     }
                     const inherited=remote.conflicts||remote.provenance?.conflicts||[];
@@ -893,9 +945,11 @@
                         englishIntent:pending && !intentConflict?before?.englishIntent || remoteIntent:remoteIntent,
                         outdated:remote.outdated||Object.keys(remote.provenance?.requiredReview||{}),provenance:copy(remote.provenance||before?.provenance||{}),
                         revision:(before?.revision||0)+1,serverRevision:revision,baseRevision:revision,remoteBase:accepted,conflicts,savedAt:remote.updatedAt||Date.now(),origin:sharedOrigin};
+                    if(blockedPending(pending))after.syncRecovery={mutationId:pending.mutationId,state:'conflict',code:'CLIENTTEXT_INTENT_CONFLICT'};
+                    else delete after.syncRecovery;
                     put(tx,stores.saved,scope,unitId,after);
                     await learnMemory(tx,captured.scope,unit,{...after,values,reviewed,saved:remote.saved!==false,conflicts:inherited},'remote:'+revision+':'+unitId,'shared');
-                    if(pending&&!pending.englishActions&&!pending.predecessor&&!['sending','uncertain'].includes(pending.state)){
+                    if(pending&&!pending.englishActions&&!pending.predecessor&&!['sending','uncertain','rejected'].includes(pending.state)){
                         pending.values=copy(after.values);pending.reviewed=copy(after.reviewed);pending.baseRevision=revision;pending.base=accepted;
                         pending.state=merged.conflicts.length?'conflict':'queued';put(tx,stores.outbox,scope,unitId,pending,{unitKey:key(scope,unitId)});
                     }
@@ -913,26 +967,40 @@
                 if(!row)return null;
                 const revision=Number(remote?.revision||remote?.unit?.revision||0);
                 if(!Number.isSafeInteger(revision)||revision<1)throw new Error('ClientText save acknowledgement has no durable revision.');
-                const accepted={unitId,values:copy(remote?.values||remote?.unit?.values||operation.values),reviewed:copy(remote?.reviewed||remote?.unit?.reviewed||operation.reviewed),revision};
+                const response=remote?.unit||remote;
+                const accepted={unitId,values:copy(response?.values||operation.values),reviewed:copy(response?.reviewed||operation.reviewed),revision,
+                    englishIntent:copy(response?.englishIntent || response?.provenance?.englishIntent || {}),provenance:copy(response?.provenance || {}),
+                    saved:response?.saved!==false,outdated:copy(response?.outdated || []),conflicts:copy(response?.conflicts || [])};
                 if((row.serverRevision||0)<=revision){row.serverRevision=revision;row.baseRevision=revision;row.remoteBase=accepted;
                     if(remote?.outdated||remote?.provenance?.requiredReview)row.outdated=remote.outdated||Object.keys(remote.provenance.requiredReview);
                     if(remote?.provenance)row.provenance=copy(remote.provenance);
                     if(pending?.mutationId===operation.mutationId && !pending.predecessor)row.englishIntent=copy(remote?.englishIntent || remote?.provenance?.englishIntent || {});
-                    put(tx,stores.saved,scope,unitId,row);}
-                if(!pending)return row;
-                if(pending.mutationId===operation.mutationId&&!pending.predecessor)del(tx,stores.outbox,scope,unitId);
-                else{
+                }
+                if(!pending){delete row.syncRecovery;put(tx,stores.saved,scope,unitId,row);return row;}
+                if(pending.mutationId===operation.mutationId&&!pending.predecessor){
+                    del(tx,stores.outbox,scope,unitId);delete row.syncRecovery;
+                    // A late receipt proves this write preceded the newer peer
+                    // version. With no newer local command, settle on that peer.
+                    if(row.serverRevision>revision)Object.assign(row,copy(row.remoteBase),{revision:row.revision,serverRevision:row.serverRevision,baseRevision:row.serverRevision});
+                }else{
                     let cursor=pending;while(cursor.predecessor&&cursor.predecessor.mutationId!==operation.mutationId)cursor=cursor.predecessor;
                     if(cursor.predecessor?.mutationId===operation.mutationId)delete cursor.predecessor;
-                    pending.baseRevision=revision;pending.base=accepted;
-                    if(!pending.predecessor)pending.state='queued';
+                    const next=pendingChain(pending).at(-1),peerOvertookReceipt=row.serverRevision>revision;
+                    if(next.englishActions && peerOvertookReceipt){
+                        next.state='conflict';
+                        row.syncRecovery={mutationId:pending.mutationId,state:'conflict',code:'CLIENTTEXT_INTENT_CONFLICT'};
+                    }
+                    if(!pending.englishActions || !peerOvertookReceipt){pending.baseRevision=row.serverRevision;pending.base=copy(row.remoteBase);}
+                    if(!pending.predecessor&&!['rejected','conflict'].includes(pending.state))pending.state='queued';
+                    if(!blockedPending(pending))delete row.syncRecovery;
                     put(tx,stores.outbox,scope,unitId,pending,{unitKey:key(scope,unitId)});
                 }
+                put(tx,stores.saved,scope,unitId,row);
                 return row;
             },options);
         }
         return { import:importContent,importContent,save,getMetadata,getUnits,getUnitsByIds,getCompactUnits,getUnit,getSaved,getAsset,getProof,getCachedOriginal,migrateWorkspace,putDraft,getDraft,getDraftSummaries,discardDraft,
-            listHistory,listWorkspaces,getOutbox,markSending,applyRemote,acknowledge,putRequest,getRequest,listRequests,deleteRequest,seedMemory,seedPreviousVersion,getMemory,getMemoryHistory,normalizeScope,scopeKey };
+            listHistory,listWorkspaces,getOutbox,getPendingRecovery,rejectOperation,acceptPendingPeer,markSending,applyRemote,acknowledge,putRequest,getRequest,listRequests,deleteRequest,seedMemory,seedPreviousVersion,getMemory,getMemoryHistory,normalizeScope,scopeKey };
     }
     return { stores,names,upgrade,normalizeScope,scopeKey,LOCAL_PROTOCOL,validateLocalMetadata,validateLocalRecord,create };
 });

@@ -66,8 +66,81 @@ test('a competing shared edit holds an unsent English action for explicit resolu
     const pending=(await f.store.getOutbox(baseScope))[0];assert.equal(pending.state,'conflict');assert.equal(pending.baseRevision,0,'original command is not retargeted');
     assert.equal(S.englishIntentFor(u.fields[0],(await f.store.getSaved(baseScope))[u.id]),false);
     await assert.rejects(f.store.save(baseScope,u.id,{jobId:'implicit-blank',intentProtocol:protocol,values:values('')}),/explicitly/);
-    await f.store.save(baseScope,u.id,{jobId:'accept-peer',intentProtocol:protocol,values:values('Peer translation')});
-    assert.equal((await f.store.getOutbox(baseScope))[0].mutationId,'accept-peer');
+    const before=(await f.store.getSaved(baseScope))[u.id];
+    await f.store.acceptPendingPeer(baseScope,u.id,{jobId:'accept-peer',mutationId:pending.mutationId,expectedRevision:before.revision});
+    assert.deepEqual(await f.store.getOutbox(baseScope),[]);
+    assert.equal((await f.store.listHistory(baseScope,u.id)).find(entry=>entry.id==='accept-peer').syncRecovery.resolution,'accept-peer');
+});
+test('identical blank approvals can accept peer without losing drafts or explicitly reapply with a new command and retained evidence',async()=>{
+    const f=fixture(),u=unit('Source','');await f.store.import(baseScope,{units:[u],assets:[asset]});
+    const mark=jobId=>({jobId,intentProtocol:protocol,englishActions:action(),values:values(''),reviewed:{[id]:S.sourceHash('Source')}});
+    const peer=(revision,decisionId)=>({unitId:u.id,revision,values:values(''),reviewed:{[id]:S.sourceHash('Source')},saved:false,englishIntent:{[id]:{state:'active',sourceHash:S.sourceHash('Source'),decisionId}}});
+    await f.store.save(baseScope,u.id,mark('mine'));
+    await f.store.applyRemote(baseScope,{events:[{unit:peer(1,'peer')}],sequence:1});
+    const draft=await f.store.putDraft(baseScope,u.id,{values:values('Private draft')});
+    const accept={jobId:'accept-identical',mutationId:'mine',expectedRevision:(await f.store.getSaved(baseScope))[u.id].revision};
+    assert.equal((await f.store.acceptPendingPeer(baseScope,u.id,accept)).saved.englishIntent[id].decisionId,'peer');
+    assert.equal((await f.store.acceptPendingPeer(baseScope,u.id,accept)).replayed,true);assert.deepEqual(await f.store.getDraft(baseScope,u.id),draft);
+    await f.store.save(baseScope,u.id,mark('mine-again'));
+    await f.store.applyRemote(baseScope,{events:[{unit:peer(2,'peer-again')}],sequence:2});
+    const archived=await f.store.getPendingRecovery(baseScope,u.id);
+    const result=await f.store.save(baseScope,u.id,{...mark('fresh-choice'),pendingResolution:{mode:'reapply',mutationId:archived.mutationId,editorBeforeValues:values('Editor copy')}});
+    assert.equal(result.saved.englishIntent[id].decisionId,'fresh-choice');
+    const next=(await f.store.getOutbox(baseScope))[0];assert.equal(next.mutationId,'fresh-choice');assert.equal(next.baseRevision,2);assert.equal(next.predecessor,undefined);
+    const history=(await f.store.listHistory(baseScope,u.id)).find(entry=>entry.syncRecovery?.operation.mutationId==='mine-again');
+    assert.deepEqual(history.syncRecovery.editorBeforeValues,values('Editor copy'));
+});
+
+test('an older uncertain intent receipt preserves a newer peer version and clears the resolved queue',async()=>{
+    const f=fixture(),u=unit('Source','');await f.store.import(baseScope,{units:[u],assets:[asset]});
+    await f.store.save(baseScope,u.id,{jobId:'uncertain-mark',intentProtocol:protocol,englishActions:action(),values:values('')});
+    const pending=await f.store.markSending(baseScope,u.id,'uncertain-mark','uncertain');
+    await f.store.applyRemote(baseScope,{events:[{unit:{unitId:u.id,revision:2,values:values('Later peer'),reviewed:{},saved:true}}],sequence:2});
+    assert.equal((await f.store.getSaved(baseScope))[u.id].syncRecovery,undefined,'an unknown receipt cannot offer destructive recovery');
+    await f.store.acknowledge(baseScope,pending,{unitId:u.id,revision:1,values:values(''),reviewed:{},englishIntent:{[id]:{state:'active',sourceHash:S.sourceHash('Source'),decisionId:'uncertain-mark'}}});
+    const saved=(await f.store.getSaved(baseScope))[u.id];assert.equal(saved.values[id],'Later peer');assert.equal(saved.serverRevision,2);
+    assert.deepEqual(saved.englishIntent,{});assert.deepEqual(saved.conflicts,[]);assert.equal(saved.syncRecovery,undefined);assert.deepEqual(await f.store.getOutbox(baseScope),[]);
+});
+
+test('a late predecessor receipt cannot regress a newer queued command base or alter retained request evidence',async()=>{
+    const f=fixture(),u=unit('Source','');await f.store.import(baseScope,{units:[u],assets:[asset]});
+    await f.store.save(baseScope,u.id,{jobId:'old-mark',intentProtocol:protocol,englishActions:action(),values:values('')});
+    const previous=await f.store.markSending(baseScope,u.id,'old-mark','uncertain');
+    await f.store.save(baseScope,u.id,{jobId:'newer-target',intentProtocol:protocol,values:values('Current editor')});
+    await f.store.applyRemote(baseScope,{events:[{unit:{unitId:u.id,revision:2,values:values('Newer peer'),reviewed:{},saved:true}}],sequence:2});
+    await f.store.acknowledge(baseScope,previous,{unitId:u.id,revision:1,values:values(''),reviewed:{}});
+    const next=(await f.store.getOutbox(baseScope))[0];assert.equal(next.mutationId,'newer-target');assert.equal(next.baseRevision,2);assert.equal(next.base.values[id],'Newer peer');
+    assert.equal(next.predecessor,undefined);assert.equal(next.values[id],'Current editor');assert.equal(previous.values[id],'');
+});
+
+test('a queued approval behind an uncertain predecessor still requires explicit recovery after a newer peer',async()=>{
+    const f=fixture(),u=unit('Source','');await f.store.import(baseScope,{units:[u],assets:[asset]});
+    await f.store.save(baseScope,u.id,{jobId:'older-save',values:values('Older target')});
+    const previous=await f.store.markSending(baseScope,u.id,'older-save','uncertain');
+    await f.store.save(baseScope,u.id,{jobId:'queued-choice',intentProtocol:protocol,englishActions:action(),values:values('')});
+    await f.store.applyRemote(baseScope,{events:[{unit:{unitId:u.id,revision:2,values:values('Peer target'),reviewed:{},saved:true}}],sequence:2});
+    await f.store.acknowledge(baseScope,previous,{unitId:u.id,revision:1,values:values('Older target'),reviewed:{}});
+    const next=(await f.store.getOutbox(baseScope))[0];assert.equal(next.state,'conflict');assert.equal(next.baseRevision,0,'the original approval is not retargeted to the peer');
+    assert.equal(next.predecessor,undefined);assert.equal((await f.store.getSaved(baseScope))[u.id].syncRecovery.mutationId,'queued-choice');
+});
+
+test('a definitive English conflict exposes recovery even if its peer event was already applied',async()=>{
+    const f=fixture(),u=unit('Source','');await f.store.import(baseScope,{units:[u],assets:[asset]});
+    await f.store.save(baseScope,u.id,{jobId:'sending-mark',intentProtocol:protocol,englishActions:action(),values:values('')});
+    await f.store.markSending(baseScope,u.id,'sending-mark','sending');
+    const peer={unitId:u.id,revision:1,values:values(''),reviewed:{},englishIntent:{[id]:{state:'active',sourceHash:S.sourceHash('Source'),decisionId:'peer'}}};
+    await f.store.applyRemote(baseScope,{events:[{unit:peer}],sequence:1});
+    await f.store.applyRemote(baseScope,{events:[{unit:peer}]});
+    await f.store.markSending(baseScope,u.id,'sending-mark','conflict');
+    assert.equal((await f.store.getSaved(baseScope))[u.id].syncRecovery.mutationId,'sending-mark');
+    assert.equal((await f.store.getPendingRecovery(baseScope,u.id)).state,'conflict');
+});
+test('unsupported legacy intent is suspended while accepting later events and advancing the shared sequence',async()=>{
+    const f=fixture(),u=unit('[DNT] Source','Original');await f.store.import(baseScope,{units:[u],assets:[asset]});
+    await f.store.applyRemote(baseScope,{events:[{unit:{unitId:u.id,revision:1,values:values(''),reviewed:{},saved:true,englishIntent:{[id]:{state:'active',sourceHash:S.sourceHash(u.fields[0].source),decisionId:'legacy-unsupported'}}}}],sequence:1});
+    const saved=(await f.store.getSaved(baseScope))[u.id];assert.equal(saved.englishIntent[id].state,'needs_review');assert.equal(saved.englishIntent[id].reason,'unsupported_field');
+    assert.equal((await f.store.getMetadata(baseScope)).sequence,1);
+    await f.store.applyRemote(baseScope,{events:[{unit:{unitId:u.id,revision:2,values:values('Literal target'),reviewed:{},saved:true}}],sequence:2});assert.equal((await f.store.getMetadata(baseScope)).sequence,2);
 });
 test('forms, Gender, DNT and PoE1 cannot acquire new English decisions; raw text and metadata hashes remain untouched',()=>{
     const u=unit();for(const field of [{...u.fields[0],kind:'form',form:'MS'},{...u.fields[0],kind:'gender'},{...u.fields[0],source:'[DNT] Source'},{...u.fields[0],source:'<tag>{[DNT] Source}'}])assert.equal(S.englishEligible(field),false);

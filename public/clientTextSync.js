@@ -30,7 +30,7 @@
         function serialized(kind, action) {
             const result = queue.catch(() => {}).then(async () => {
                 guard();
-                try { const value = await action(); if(!value?.conflicts)errors[kind] = null; notify('onError',snapshot()); return value; }
+                try { const value = await action(); if(!value?.conflicts && !value?.rejected)errors[kind] = null; notify('onError',snapshot()); return value; }
                 catch(error) { if(!error.stale){errors[kind]=error;notify('onError',snapshot());} throw error; }
             });
             queue = result; return result;
@@ -63,20 +63,22 @@
                 let uploaded=0;
                 for(let round=0;round<10000;round++){
                     const operations=await store.getOutbox(scope,{guard:current});guard();
-                    const pending=operations.find(operation=>oldest(operation).state!=='conflict');
-                    if(!pending)return {uploaded,conflicts:operations.filter(operation=>oldest(operation).state==='conflict').length};
+                    const pending=operations.find(operation=>!['conflict','rejected'].includes(oldest(operation).state));
+                    if(!pending){const rejected=operations.filter(operation=>oldest(operation).state==='rejected').length;return {uploaded,conflicts:operations.filter(operation=>oldest(operation).state==='conflict').length,...(rejected?{rejected}:{})};}
                     const operation=oldest(pending);
                     const claimed=await store.markSending(scope,operation.unitId,operation.mutationId,'sending',{guard:current});guard();
                     if(!claimed)continue;
+                    let body;
                     try{
                         // Old uncertain requests retain their exact body and receipt
                         // signature. Migration captures that body before removing
                         // proof caches; new operations never transport originals.
-                        let body=claimed.requestBody;
+                        body=claimed.requestBody;
                         if(!body && claimed.storageProtocol===PROTOCOL){
                             body={storageProtocol:PROTOCOL,mutationId:claimed.mutationId,baseRevision:claimed.baseRevision||0,
                                 ...(claimed.intentProtocol?{intentProtocol:claimed.intentProtocol}:{}),
                                 ...(claimed.englishActions?{englishActions:claimed.englishActions}:{}),
+                                ...(claimed.englishEligibility?{englishEligibility:claimed.englishEligibility}:{}),
                                 ...(claimed.mtlAcceptances?.length?{mtlAcceptances:claimed.mtlAcceptances}:{}),
                                 ...(Object.prototype.hasOwnProperty.call(claimed,'origin')?{origin:claimed.origin}:{}),
                                 role:claimed.role,assetHash:claimed.assetHash,parserVersion:claimed.parserVersion,
@@ -93,7 +95,11 @@
                     }catch(error){
                         if(error.stale)throw error;
                         const accepted=error.current||error.details?.current||error.response?.current;
-                        if(error.status===409||error.statusCode===409||String(error.code||'').includes('CONFLICT')){
+                        if(['CLIENTTEXT_INTENT_REQUIRED','CLIENTTEXT_INTENT_ELIGIBILITY_REQUIRED'].includes(error.code)){
+                            if(accepted?.values && accepted.revision)await store.applyRemote(scope,{events:[{unitId:claimed.unitId,unit:accepted}]},{guard:current});
+                            await store.rejectOperation(scope,claimed.unitId,claimed.mutationId,{code:error.code,status:error.status||error.statusCode||400,message:error.message,...(accepted?.revision===0?{current:accepted}:{})},body,{guard:current});
+                            notify('onChange',{changed:[claimed.unitId],scope});
+                        }else if(error.status===409||error.statusCode===409||String(error.code||'').includes('CONFLICT')){
                             if(accepted?.values&&accepted.revision)await store.applyRemote(scope,{events:[{unitId:claimed.unitId,unit:accepted}]},{guard:current});
                             await store.markSending(scope,claimed.unitId,claimed.mutationId,'conflict',{guard:current});
                             notify('onChange',{changed:[claimed.unitId],scope});

@@ -131,6 +131,7 @@
         const key = origin + ':' + String(entry.id ?? entry.jobId ?? root.ClientTextState.hash([unitId, time, entry.before, record]));
         return { key, id: entry.id, unitId, origin, action: Object.keys(entry.intentChanges || record.intentChanges || entry.after?.intentChanges || {}).length ? 'Use English decision / translation change' : entry.origin || record.origin || 'save', createdAt: time,
             actor: copy(entry.actor || {}), intentChanges:Object.fromEntries(Object.entries(entry.intentChanges || record.intentChanges || {}).map(([id,change])=>[id,{...copy(change),label:unit.fields.find(field=>field.id===id)?.name || 'this field'}])), before: historySnapshot(unit, entry.before || null), after: historySnapshot(unit, record),
+            ...(entry.syncRecovery?{syncRecovery:copy(entry.syncRecovery),syncRecoveryText:JSON.stringify(entry.syncRecovery,null,2)}:{}),
             context: copy(ctx), provenance: copy(record.provenance || {}), sequence: entry.sequence };
     }
     const mixin = {
@@ -149,7 +150,7 @@
             ctScanResultsPage:1,ctScanResultsPageSize:20,
             ctHistory: [], ctHistoryLoading: false, ctHistoryPreviousLoading: false, ctHistoryError: '', ctHistoryCursor: null, ctHistoryLocalMore: false,
             ctHistoryCompareA: 'original', ctHistoryCompareB: 'current', ctHistoryWhitespace: false, ctHistoryCharacters: false, ctHistoryViewer: false,
-            ctTool: 'dictionary', ctLookup: '', ctFocusedField: '', ctMemory: raw([]), ctComments: [], ctCommentText: '', ctCommentGlobal: false, ctChoices: [],
+            ctTool: 'dictionary', ctLookup: '', ctFocusedField: '', ctMemory: raw([]), ctComments: [], ctCommentText: '', ctCommentGlobal: false, ctChoices: [], ctRecoveryBusy:false,
             ctDictionaryFilter:'',ctDictionaryPage:1,ctDictionaryEditingId:'',ctDictionaryEditOrder:[],
             ctPreviewGggVars: {}, ctPreviewAffixes:previewAffixesFor(null), ctPreviewAffixExamples:previewAffixExamples,
             ctDictionaryPack:null, ctDraftSummaries:[], ctCommentPostError:'',
@@ -1422,7 +1423,7 @@
                 this._ctEpoch = (this._ctEpoch || 0) + 1; this._ctAbort?.abort(); clearInterval(this._ctSyncTimer); clearTimeout(this._ctDraftTimer);clearTimeout(this._ctSearchTimer);
                 this._ctDictionaryRequest?.cancel?.();this._ctDictionaryRun=null;this.ctDictionaryPack=null;this._ctPendingDictionaryPack=null;this.ctDraftSummaries=[];
                 this._ctSync?.stop?.(); this._ctSync = null;
-                this._ctSaveJob = null; this._ctDraftRevision = null; this._ctEditRevision = 0; this._ctSyncError = '';this.ctCheckpointWarning=null;this._ctNavigationRun=null;this.ctNavigationBusy=false;
+                this._ctSaveJob = null; this._ctRecoveryJob=null;this._ctRecoveryRun=null;this.ctRecoveryBusy=false; this._ctDraftRevision = null; this._ctEditRevision = 0; this._ctSyncError = '';this.ctCheckpointWarning=null;this._ctNavigationRun=null;this.ctNavigationBusy=false;
                 this._ctInlineReturn=null;this._ctCloseRun=null;this._ctGenderInsertRun=null;this._ctFieldFocusRun=null;this._ctDictionaryReturn=null;this._ctDictionaryFocusRun=null;this.ctInlineClosed=false;
                 this.ctVariantSelections={};this._ctClassNameCache=null;this._ctReferenceIndexCache=null;
                 this._ctStatusCache = new WeakMap(); this._ctSortCache=new WeakMap();this._ctOrderCache=null;this._ctSelectRun={}; this.ctDraftDirty = false; this.ctDraftStageFailure=null; this.ctBusy = false;
@@ -2093,15 +2094,55 @@
             },
             ctEnglishEligible(field) {
                 return this.gameVersion==='poe2' && root.ClientTextState.englishEligible(field) && !isDNTSource(field.source)
-                    && (this.ctOfflineTest || this.ctPolicy?.clientTextEnglishIntent===root.ClientTextState.ENGLISH_INTENT_PROTOCOL);
+                    && (this.ctOfflineTest || this.ctPolicy?.clientTextEnglishIntent===root.ClientTextState.ENGLISH_INTENT_PROTOCOL && this.ctPolicy?.clientTextEnglishEligibility===root.ClientTextState.ENGLISH_ELIGIBILITY_PROTOCOL);
             },
+            ctEnglishUnavailableReason(field) {
+                if(this.gameVersion!=='poe2')return 'Use English is unavailable for PoE1. Ordinary translations and blank saves remain allowed.';
+                if(field.kind==='gender')return 'Use English is unavailable for Gender metadata.';
+                if(field.kind==='form')return 'Use English is unavailable for grammatical and class forms until their fallback behavior is verified.';
+                if(isDNTSource(field.source))return 'Use English is unavailable for DNT fields.';
+                if(!root.ClientTextState.englishEligible(field))return 'Use English requires an ordinary field with active English source text.';
+                if(!this.ctEnglishEligible(field))return 'Use English requires a compatible shared-service update.';
+                return '';
+            },
+            ctPendingSharedRecovery() { return this.ctSaved[this.ctSelection]?.syncRecovery || null; },
+            ctEnglishWitness(actions) {return {protocol:root.ClientTextState.ENGLISH_ELIGIBILITY_PROTOCOL,fields:Object.fromEntries(Object.keys(actions).map(id=>{const field=this.ctCurrentUnit.fields.find(field=>field.id===id);return [id,{sourceHash:this.ctReviewHash(field),eligible:root.ClientTextState.englishEligible(field) && !isDNTSource(field.source)}];}))};},
             ctEnglishDecision(field) { return this.ctSaved[this.ctSelection]?.englishIntent?.[field.id] || this.ctSaved[this.ctSelection]?.provenance?.englishIntent?.[field.id]; },
             ctUsesEnglish(field) { return root.ClientTextState.englishIntentFor(field,this.ctSaved[this.ctSelection]); },
             ctEnglishOffer(field) { return this.ctEnglishEligible(field) && !this.ctUsesEnglish(field) && this.ctValues[field.id]===field.source; },
             async ctChooseEnglish(field,revoke=false) {
-                if(!this.ctEnglishEligible(field) || this.ctBusy || this.ctHistoryViewer || this.ctMtlBusy?.(field) || this.ctMtlCandidate?.(field) || this._ctSaveJob)return false;
+                if((!this.ctEnglishEligible(field) && !(revoke && this.ctEnglishDecision(field))) || this.ctBusy || this.ctRecoveryBusy || this.ctHistoryViewer || this.ctMtlBusy?.(field) || this.ctMtlCandidate?.(field) || this._ctSaveJob)return false;
                 const action={action:revoke?'revoke':'set',sourceHash:this.ctReviewHash(field),previousValue:String(this.ctValues[field.id] ?? '')};
                 return this.ctSave(false,{englishActions:{[field.id]:action},englishValues:{...this.ctValues,...(!revoke?{[field.id]:''}:{})},englishReviewed:{...this.ctReviewed,...(!revoke?{[field.id]:this.ctReviewHash(field)}:{})}});
+            },
+            async ctResolveSharedPending(mode) {
+                if(this.ctRecoveryBusy)return false;const run=this._ctRecoveryRun={};this.ctRecoveryBusy=true;
+                try{return await this.ctResolveSharedPendingAction(mode);}finally{if(this._ctRecoveryRun===run){this._ctRecoveryRun=null;this.ctRecoveryBusy=false;}}
+            },
+            async ctResolveSharedPendingAction(mode) {
+                if(this.ctBusy || this.ctHistoryViewer || !['accept-peer','reapply'].includes(mode))return false;
+                if(this._ctSaveJob){this.ctError='Retry Save to confirm its receipt before resolving shared work.';return false;}
+                const ctx=this.ctContext(),unitId=this.ctSelection,store=this.ctStorage(ctx.scope),scopeKey=root.ClientTextStore.scopeKey(ctx.scope);
+                const retry=this._ctRecoveryJob?.unitId===unitId && this._ctRecoveryJob.scopeKey===scopeKey?this._ctRecoveryJob:null;let pending;
+                if(retry && mode!=='accept-peer'){this.ctError='Retry accepting the shared version first to confirm its receipt.';return false;}
+                try{if(!retry)pending=await store.getPendingRecovery(ctx.scope,unitId);}catch(error){if(this.ctCurrent(ctx))this.ctError=error.message;return false;}
+                if(!this.ctCurrent(ctx) || this.ctSelection!==unitId || !pending && !retry)return false;
+                if(mode==='reapply'){
+                    const actions=copy(pending.englishActions || pending.requestBody?.englishActions || {}),values=copy(pending.requestBody?.values || pending.values),reviewed=copy(pending.reviewed || {});
+                    for(const [id,action]of Object.entries(actions)){const field=this.ctCurrentUnit.fields.find(field=>field.id===id);action.sourceHash=this.ctReviewHash(field);if(action.action==='set'){values[id]='';reviewed[id]=action.sourceHash;}}
+                    return this.ctSave(false,{englishValues:values,englishReviewed:reviewed,...(Object.keys(actions).length?{englishActions:actions}:{}),pendingResolution:{mode:'reapply',mutationId:pending.mutationId,editorBeforeValues:copy(this.ctValues)}});
+                }
+                if(this.ctDraftDirty && !await this.ctFlushDraft())return false;
+                const job=this._ctRecoveryJob=retry || {jobId:uuid(),unitId,scopeKey,mutationId:pending.mutationId,expectedRevision:this.ctSaved[unitId]?.revision || this._ctEditRevision};this.ctBusy=true;
+                try{
+                    const result=await store.acceptPendingPeer(ctx.scope,unitId,job);
+                    const latest=await store.getSaved(ctx.scope);if(latest[unitId]?.revision>=result.saved.revision)result.saved=latest[unitId];
+                    if(!this.ctCurrent(ctx)||this.ctSelection!==unitId)return false;
+                    this.ctSaved=raw({...this.ctSaved,[unitId]:result.saved});this._ctEditRevision=result.saved.revision;this.ctChoices=copy(result.saved.conflicts || []);this.ctRevision++;
+                    if(!this.ctDraftDirty){this.ctValues=copy(result.saved.values);this.ctReviewed=copy(result.saved.reviewed);}
+                    this._ctRecoveryJob=null;this.ctError='';this.ctLoadHistory(ctx,unitId);this.ctSync(ctx);return true;
+                }catch(error){if(this.ctCurrent(ctx)){this.ctError=error.message;if(error.code==='CLIENTTEXT_PENDING_RESOLUTION_REQUIRED')this._ctRecoveryJob=null;}return false;}
+                finally{if(this.ctCurrent(ctx))this.ctBusy=false;}
             },
             ctMarkReviewed(field) { if(this.ctBusy || this.ctHistoryViewer || this.ctMtlBusy?.(field) || this.ctMtlCandidate?.(field))return false;this.ctReviewed[field.id] = this.ctReviewHash(field); this.ctDraftStageFailure=null;this.ctDraftDirty = true; this.ctQueueDraft(); },
             ctChoiceDisabled(choice) {
@@ -2315,8 +2356,11 @@
                 finally{head.pending--;}
             },
             async ctSave(close = false, options = {}) {
+                if(this.ctRecoveryBusy && !options.pendingResolution)return false;
                 if (this.ctBusy || this.ctBrowseBusy || !this.ctCurrentUnit) return false;
-                if(this.ctChoices.length){postNotice(this,'ctError','Choose between the retained alternatives before saving this ID.');return false;}
+                const receiptRetry=this._ctSaveJob?.unitId===this.ctSelection && !!this._ctSaveJob.command && this._ctSaveJob.scopeKey===root.ClientTextStore.scopeKey(this.ctWorkspace.scope);
+                if(this.ctPendingSharedRecovery() && !options.pendingResolution && !receiptRetry){postNotice(this,'ctError','Accept the shared version or explicitly reapply the retained work before saving this ID.');return false;}
+                if(this.ctChoices.length && !options.pendingResolution && !receiptRetry){postNotice(this,'ctError','Choose between the retained alternatives before saving this ID.');return false;}
                 const ctx=this.ctContext(),unitId=this.ctSelection,scopeKey=root.ClientTextStore.scopeKey(ctx.scope),generation=this._ctBrowseGeneration || 0;
                 const store=this.ctStorage(ctx.scope);
                 const existing=this._ctSaveJob, retry=existing?.unitId===unitId && existing.scopeKey===scopeKey && existing.command;
@@ -2331,15 +2375,19 @@
                 this._ctSaveJob=job;this.ctBusy = true;let submittedSignature;
                 try {
                     job.editorSignature ||= JSON.stringify([this.ctValues,this.ctReviewed]);
-                    const command=job.command ||= { jobId:job.id, intentProtocol:root.ClientTextState.ENGLISH_INTENT_PROTOCOL, values: copy(options.englishValues || this.ctValues), reviewed: copy(options.englishReviewed || this.ctReviewed), baseRevision: this.ctSaved[unitId]?.serverRevision || 0, expectedRevision: this._ctEditRevision || 0, expectedDraftRevision:this._ctDraftRevision || null,
+                    const command=job.command ||= { jobId:job.id, intentProtocol:root.ClientTextState.ENGLISH_INTENT_PROTOCOL, values: copy(options.englishValues || this.ctValues), reviewed: copy(options.englishReviewed || this.ctReviewed), baseRevision: this.ctSaved[unitId]?.serverRevision || 0, expectedRevision: (options.pendingResolution?this.ctSaved[unitId]?.revision:this._ctEditRevision) || 0, expectedDraftRevision:this._ctDraftRevision || null,
                         ...(options.englishActions?{englishActions:copy(options.englishActions)}:{}),
+                        ...(options.englishActions?{englishEligibility:this.ctEnglishWitness(options.englishActions)}:{}),
+                        ...(options.pendingResolution?{pendingResolution:{...copy(options.pendingResolution),editorBeforeValues:copy(this.ctValues)}}:{}),
                         ...(this.ctMtlAcceptances?.(unitId)?.length ? {mtlAcceptances:copy(this.ctMtlAcceptances(unitId))} : {}),
                         ...(options.origin ? {origin:options.origin}: {}) };
                     submittedSignature=JSON.stringify([command.values,command.reviewed]);
-                    const result = await store.save(ctx.scope, unitId, command);
+                    let result = await store.save(ctx.scope, unitId, command),receiptAdvanced=false;
+                    if(result.replayed){const latest=await store.getSaved(ctx.scope);if(latest[unitId]?.revision>result.saved.revision){result={...result,saved:latest[unitId]};receiptAdvanced=true;}}
                     if (!this.ctCurrent(ctx)) return false;
                     const sameEditor=JSON.stringify([this.ctValues,this.ctReviewed])===job.editorSignature;
-                    if(sameEditor && command.englishActions){this.ctValues=copy(result.saved.values);this.ctReviewed=copy(result.saved.reviewed);}
+                    if(sameEditor && (command.englishActions || command.pendingResolution || receiptAdvanced)){this.ctValues=copy(result.saved.values);this.ctReviewed=copy(result.saved.reviewed);}
+                    if(command.pendingResolution)this.ctChoices=copy(result.saved.conflicts || []);
                     this.ctLocalDraftState=sameEditor?'stored':'pending';this.ctSaved = raw({ ...this.ctSaved, [unitId]: result.saved }); this.ctRevision++; this.ctDraftDirty = !sameEditor;if(!sameEditor)this.ctQueueDraft();this.ctClearDraftStageFailure(ctx,unitId,submittedSignature); if(this._ctSaveJob===job)this._ctSaveJob = null;
                     this._ctEditRevision=result.saved.revision;
                     try{await this.ctMtlSaved?.(ctx,unitId);}catch(error){if(this.ctCurrent(ctx))this.ctMtlError='Saved, but MTL review state could not be refreshed: '+error.message;}
@@ -2359,7 +2407,7 @@
                     this.ctRememberDraftStageFailure(ctx,unitId,submittedSignature,'save');
                     if (this.ctCurrent(ctx)) {
                         postNotice(this, 'ctError', error.message);
-                        if(error.code==='DRAFT_CHANGED')this._ctSaveJob=null;
+                        if(['DRAFT_CHANGED','CLIENTTEXT_PENDING_RESOLUTION_REQUIRED'].includes(error.code))this._ctSaveJob=null;
                         if(error.code==='UNIT_CHANGED'){
                             this._ctSaveJob=null; const latest=await store.getSaved(ctx.scope);
                             if(this.ctCurrent(ctx)){
@@ -3547,7 +3595,8 @@
             <template v-if="side !== 'translation'">
                 <section v-if="host.ctNotes().length" class="ctDeveloperNotes editBlock"><strong>Developer notes</strong><pre v-for="(note,index) in host.ctNotes()" :key="index">{{ note }}</pre></section>
             </template>
-            <template v-if="side !== 'source'"><section v-for="(choice,index) in host.ctChoices" :key="index" class="ctDeveloperNotes editBlock"><strong>Translation choice · {{ host.ctHistoryFieldLabel(host.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId) || {name:choice.fieldId}) }}</strong><p>Incoming translation remains active. Choose the text to keep.</p><pre>{{ choice.upstream ?? choice.remote }}</pre><button :disabled="host.ctChoiceDisabled(choice)" @click="host.ctChooseAlternative(choice,'remote')">Keep incoming</button><pre>{{ choice.local }}</pre><button :disabled="host.ctChoiceDisabled(choice)" @click="host.ctChooseAlternative(choice,'local')">Use previous saved text</button></section></template>
+            <section v-if="side !== 'source' && host.ctPendingSharedRecovery()" class="ctDeveloperNotes editBlock" data-inline-focus-surface><strong>Shared work needs an explicit choice</strong><p>The rejected or conflicting command is retained. Accept the shared version, or save the latest retained work again with the current protocol. Both choices keep the old command in recovery history.</p><button type="button" :disabled="host.ctBusy || host.ctRecoveryBusy || host.ctHistoryViewer" @click="host.ctResolveSharedPending('accept-peer')">Accept shared version</button><button type="button" :disabled="host.ctBusy || host.ctRecoveryBusy || host.ctHistoryViewer" @click="host.ctResolveSharedPending('reapply')">Reapply retained work and save ID</button><small>Accepting shared work keeps your private draft. Reapplying preserves the previous editor text in recovery history.</small></section>
+            <template v-if="side !== 'source' && !host.ctPendingSharedRecovery()"><section v-for="(choice,index) in host.ctChoices" :key="index" class="ctDeveloperNotes editBlock"><strong>Translation choice · {{ host.ctHistoryFieldLabel(host.ctCurrentUnit.fields.find(field=>field.id===choice.fieldId) || {name:choice.fieldId}) }}</strong><p>Incoming translation remains active. Choose the text to keep.</p><pre>{{ choice.upstream ?? choice.remote }}</pre><button :disabled="host.ctChoiceDisabled(choice)" @click="host.ctChooseAlternative(choice,'remote')">Keep incoming</button><pre>{{ choice.local }}</pre><button :disabled="host.ctChoiceDisabled(choice)" @click="host.ctChooseAlternative(choice,'local')">Use previous saved text</button></section></template>
             </div></div>
             <section v-for="group in host.ctFieldGroups" :key="group.key" class="ctBlock editBlock" :class="{inlineFileBlock:side !== 'both',ctFormBlock:group.forms}" :data-field-group="group.key" :data-inline-block="side !== 'both' ? 'field:'+group.key : undefined" :data-inline-side="side === 'source' ? 'english' : side === 'translation' ? 'translation' : undefined"><div :class="{inlineBlockNatural:side !== 'both'}">
                 <h3 v-if="side === 'both'">{{ group.name }}</h3>
@@ -3611,12 +3660,13 @@
             <div v-if="host.ctMtlVisible && host.ctMtlPendingDismissal?.(field)" class="ctMtlReview ctMtlDismissal" data-inline-focus-surface role="status" @click.capture="host.ctMtlReviewFocus(field,$event)"><span>{{ host.ctMtlDismissalText(host.ctMtlPendingDismissal(field)) }}</span><small v-if="String(host.ctWorkspace?.scope?.groupId || '').startsWith('local:')">Keep this tab and workbook session open; closing or reloading loses unsent dismissal requests.</small><button type="button" @click="host.ctMtlRetryDismissals(host.ctMtlPendingDismissal(field))" :disabled="host.ctBusy">Retry dismissal upload</button></div>
             <div v-if="host.ctMtlVisible && (host.ctMtlPendingCandidate?.(field) || host.ctMtlAccepted?.(field))" class="ctMtlReview" data-inline-focus-surface @click.capture="host.ctMtlReviewFocus(field,$event)"><span class="ctMtlDot" aria-hidden="true"></span><span>MTL · {{ host.ctMtlAccepted?.(field) ? 'Accepted draft · Save to apply' : 'Needs review' }}</span><template v-if="host.ctMtlCandidate?.(field)"><button type="button" @click="host.ctMtlAccept(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)" title="Use as a reviewed draft. Save applies this text.">Accept</button><button type="button" @click="host.ctMtlDismiss(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Dismiss</button><small>Save and export use the underlying translation until you accept this text.</small></template><template v-else-if="host.ctMtlAccepted?.(field)"><button type="button" @click="host.ctMtlUndoAccept(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field)">Undo accept</button></template><template v-else><button type="button" @click="host.ctMtlShow(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Review MTL</button><button type="button" @click="host.ctMtlDismiss(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Dismiss</button></template><button v-if="host.ctMtlRecoveryReviews?.(field)?.length" type="button" @click="host.ctMtlRecoverReview(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Recover my review</button></div>
             <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated || diagnosticPresentation.warningCount || diagnosticPresentation.errorCount" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing && !host.ctUsesEnglish(field)">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || !!host.ctMtlCandidate?.(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button><editor-diagnostic-meta :presentation="diagnosticPresentation"></editor-diagnostic-meta></div>
-            <div v-if="host.ctEnglishEligible(field) || host.ctEnglishDecision(field)" class="ctEnglishIntent fieldMeta" data-inline-focus-surface>
+            <div v-if="!host.ctHistoryViewer" class="ctEnglishIntent fieldMeta" data-inline-focus-surface>
+                <template v-if="host.ctEnglishUnavailableReason(field)"><button type="button" disabled>Use English unavailable</button><small>{{ host.ctEnglishUnavailableReason(field) }}</small></template>
                 <span v-if="host.ctUsesEnglish(field)" role="status">Use English recorded · exports this field blank.</span>
                 <span v-else-if="host.ctEnglishDecision(field)?.state === 'needs_review'" role="status">Previous Use English decision needs review.</span>
                 <span v-else-if="host.ctEnglishOffer(field)" role="note">This translation matches English. You can keep it, or choose Use English.</span>
-                <button v-if="host.ctEnglishEligible(field) && !host.ctUsesEnglish(field)" type="button" :disabled="host.ctBusy || host.ctHistoryViewer || !!host._ctSaveJob || host.ctMtlBusy?.(field) || !!host.ctMtlCandidate?.(field)" @click="host.ctChooseEnglish(field)" title="Save this ID with this field blank and record an explicit Use English decision. Previous translation text stays in history.">Use English and save ID</button>
-                <button v-if="host.ctEnglishEligible(field) && host.ctEnglishDecision(field) && host.ctEnglishDecision(field).state!=='revoked'" type="button" :disabled="host.ctBusy || host.ctHistoryViewer || !!host._ctSaveJob || host.ctMtlBusy?.(field) || !!host.ctMtlCandidate?.(field)" @click="host.ctChooseEnglish(field,true)">Require translation and save ID</button>
+                <button v-if="host.ctEnglishEligible(field) && !host.ctUsesEnglish(field)" type="button" :disabled="host.ctBusy || host.ctRecoveryBusy || host.ctHistoryViewer || !!host._ctSaveJob || host.ctMtlBusy?.(field) || !!host.ctMtlCandidate?.(field)" @click="host.ctChooseEnglish(field)" title="Save this ID with this field blank and record an explicit Use English decision. Previous translation text stays in history.">Use English and save ID</button>
+                <button v-if="host.ctEnglishDecision(field) && host.ctEnglishDecision(field).state!=='revoked'" type="button" :disabled="host.ctBusy || host.ctRecoveryBusy || host.ctHistoryViewer || !!host._ctSaveJob || host.ctMtlBusy?.(field) || !!host.ctMtlCandidate?.(field)" @click="host.ctChooseEnglish(field,true)">{{ host.ctEnglishEligible(field) ? 'Require translation and save ID' : 'Remove English decision and save ID' }}</button>
                 <small v-if="host.ctEnglishDecision(field)">Raw Missing counts and the existing team progress calculation are unchanged.</small>
             </div>
             <div v-for="(issue,index) in diagnosticPresentation.notes" :key="index" :class="issue.kind === 'consistency' ? 'consistencyWarning' : 'terminologyWarning'" role="note">{{ issue.message }}</div>
