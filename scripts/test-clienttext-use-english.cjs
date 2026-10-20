@@ -102,14 +102,14 @@ test('an older uncertain intent receipt preserves a newer peer version and clear
     assert.deepEqual(saved.englishIntent,{});assert.deepEqual(saved.conflicts,[]);assert.equal(saved.syncRecovery,undefined);assert.deepEqual(await f.store.getOutbox(baseScope),[]);
 });
 
-test('a late predecessor receipt cannot regress a newer queued command base or alter retained request evidence',async()=>{
+test('a late predecessor receipt freezes ordinary successors without retargeting retained request evidence',async()=>{
     const f=fixture(),u=unit('Source','');await f.store.import(baseScope,{units:[u],assets:[asset]});
     await f.store.save(baseScope,u.id,{jobId:'old-mark',intentProtocol:protocol,englishActions:action(),values:values('')});
     const previous=await f.store.markSending(baseScope,u.id,'old-mark','uncertain');
     await f.store.save(baseScope,u.id,{jobId:'newer-target',intentProtocol:protocol,values:values('Current editor')});
     await f.store.applyRemote(baseScope,{events:[{unit:{unitId:u.id,revision:2,values:values('Newer peer'),reviewed:{},saved:true}}],sequence:2});
     await f.store.acknowledge(baseScope,previous,{unitId:u.id,revision:1,values:values(''),reviewed:{}});
-    const next=(await f.store.getOutbox(baseScope))[0];assert.equal(next.mutationId,'newer-target');assert.equal(next.baseRevision,2);assert.equal(next.base.values[id],'Newer peer');
+    const next=(await f.store.getOutbox(baseScope))[0];assert.equal(next.mutationId,'newer-target');assert.equal(next.baseRevision,0);assert.equal(next.state,'conflict');assert.equal(next.requiresResolution,true);
     assert.equal(next.predecessor,undefined);assert.equal(next.values[id],'Current editor');assert.equal(previous.values[id],'');
 });
 

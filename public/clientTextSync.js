@@ -95,7 +95,7 @@
                     }catch(error){
                         if(error.stale)throw error;
                         const accepted=error.current||error.details?.current||error.response?.current;
-                        if(['CLIENTTEXT_INTENT_REQUIRED','CLIENTTEXT_INTENT_ELIGIBILITY_REQUIRED'].includes(error.code)){
+                        if([400,422].includes(error.status||error.statusCode) || ['CLIENTTEXT_INTENT_REQUIRED','CLIENTTEXT_INTENT_ELIGIBILITY_REQUIRED'].includes(error.code)){
                             if(accepted?.values && accepted.revision)await store.applyRemote(scope,{events:[{unitId:claimed.unitId,unit:accepted}]},{guard:current});
                             await store.rejectOperation(scope,claimed.unitId,claimed.mutationId,{code:error.code,status:error.status||error.statusCode||400,message:error.message,...(accepted?.revision===0?{current:accepted}:{})},body,{guard:current});
                             notify('onChange',{changed:[claimed.unitId],scope});

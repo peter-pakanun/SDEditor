@@ -27,7 +27,7 @@
     const isLocal = scope => String(scope?.groupId || '').startsWith('local:test:');
     const pendingError = message => Object.assign(new Error(message),{code:'CLIENTTEXT_PENDING_RESOLUTION_REQUIRED'});
     const pendingChain = value => {const result=[];for(let item=value;item;item=item.predecessor)result.push(item);return result;};
-    const blockedPending = value => pendingChain(value).some(item=>item.state==='rejected' || item.state==='conflict' && !!item.englishActions);
+    const blockedPending = value => pendingChain(value).some(item=>item.state==='rejected' || item.state==='conflict' && (!!item.englishActions || item.requiresResolution===true));
     const LOCAL_PROTOCOL = 'clienttext-local-v2';
     const scopeFromKey = id => Object.fromEntries(['accountId','game','branchId','versionId','groupId','language'].map((name,index)=>[name,JSON.parse(id)[index]]));
     const corrupt = message => Object.assign(new Error('Local workbook recovery data is invalid: ' + message + '. The stored data has been retained.'), {code:'CLIENTTEXT_LOCAL_INVALID'});
@@ -940,7 +940,7 @@
                         if(!pending.predecessor && pending.state==='queued'){pending.state='conflict';put(tx,stores.outbox,scope,unitId,pending,{unitKey:key(scope,unitId)});}
                     }
                     const inherited=remote.conflicts||remote.provenance?.conflicts||[];
-                    const conflicts=[...new Map([...inherited,...merged.conflicts].map(conflict=>[S.stableStringify(conflict),copy(conflict)])).values()];
+                    const conflicts=[...new Map([...inherited,...merged.conflicts,...(blockedPending(pending)?before?.conflicts || []:[])].map(conflict=>[S.stableStringify(conflict),copy(conflict)])).values()];
                     const after={...before,unitId,values:merged.values,reviewed:pending?{...reviewed,...before?.reviewed}:reviewed,saved:pending?true:remote.saved!==false,
                         englishIntent:pending && !intentConflict?before?.englishIntent || remoteIntent:remoteIntent,
                         outdated:remote.outdated||Object.keys(remote.provenance?.requiredReview||{}),provenance:copy(remote.provenance||before?.provenance||{}),
@@ -949,7 +949,7 @@
                     else delete after.syncRecovery;
                     put(tx,stores.saved,scope,unitId,after);
                     await learnMemory(tx,captured.scope,unit,{...after,values,reviewed,saved:remote.saved!==false,conflicts:inherited},'remote:'+revision+':'+unitId,'shared');
-                    if(pending&&!pending.englishActions&&!pending.predecessor&&!['sending','uncertain','rejected'].includes(pending.state)){
+                    if(pending&&!blockedPending(pending)&&!pending.englishActions&&!pending.predecessor&&!['sending','uncertain','rejected'].includes(pending.state)){
                         pending.values=copy(after.values);pending.reviewed=copy(after.reviewed);pending.baseRevision=revision;pending.base=accepted;
                         pending.state=merged.conflicts.length?'conflict':'queued';put(tx,stores.outbox,scope,unitId,pending,{unitKey:key(scope,unitId)});
                     }
@@ -986,11 +986,11 @@
                     let cursor=pending;while(cursor.predecessor&&cursor.predecessor.mutationId!==operation.mutationId)cursor=cursor.predecessor;
                     if(cursor.predecessor?.mutationId===operation.mutationId)delete cursor.predecessor;
                     const next=pendingChain(pending).at(-1),peerOvertookReceipt=row.serverRevision>revision;
-                    if(next.englishActions && peerOvertookReceipt){
-                        next.state='conflict';
-                        row.syncRecovery={mutationId:pending.mutationId,state:'conflict',code:'CLIENTTEXT_INTENT_CONFLICT'};
+                    if(peerOvertookReceipt){
+                        next.state='conflict';next.requiresResolution=true;
+                        row.syncRecovery={mutationId:pending.mutationId,state:'conflict',code:'CLIENTTEXT_PEER_CONFLICT'};
                     }
-                    if(!pending.englishActions || !peerOvertookReceipt){pending.baseRevision=row.serverRevision;pending.base=copy(row.remoteBase);}
+                    if(!peerOvertookReceipt){pending.baseRevision=row.serverRevision;pending.base=copy(row.remoteBase);}
                     if(!pending.predecessor&&!['rejected','conflict'].includes(pending.state))pending.state='queued';
                     if(!blockedPending(pending))delete row.syncRecovery;
                     put(tx,stores.outbox,scope,unitId,pending,{unitKey:key(scope,unitId)});
