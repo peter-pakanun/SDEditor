@@ -1,4 +1,4 @@
-/* Optional account Dictionary/TM sync; workbook originals, drafts and history stay in memory. */
+/* Optional account Dictionary/TM sync; private workbook state stays in this browser. */
 (function (root, factory) {
     const api = factory(root);
     if (typeof module === 'object' && module.exports) module.exports = api;
@@ -61,7 +61,7 @@
                             await this.loadTranslationMemory?.();
                             this._cloud?.schedule(0);
                         } catch (error) {
-                            if (current()) this.ctResourceIssue = 'Workbook saved temporarily, but TM could not be queued. Keep this session open and use Sync now: ' + error.message;
+                            if (current()) this.ctResourceIssue = 'Workbook saved locally, but TM could not be queued. Keep this session open and use Sync now: ' + error.message;
                             return false;
                         }
                     }

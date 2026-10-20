@@ -52,8 +52,8 @@
                 code: failureCodes.has(error?.code) ? error.code : 'CLIENTTEXT_EXPORT_FAILED',
                 name: errorNames.has(error?.name) ? error.name : 'Error',
                 step: row?.detail || row?.label || 'Export setup',
-                message: this.state.memoryOnly
-                    ? 'Workbook edits remain only in this open tab. Keep it open and share Copy timings and the workspace error details. Make a local recovery copy before reloading or changing workbooks.'
+                message: this.state.localOnly
+                    ? 'Local workbook export failed. Keep this tab open if a draft checkpoint failed. Download a recovery backup or the current draft, then reopen the same local workspace and retry. Share Copy timings and the workspace error details if it still fails.'
                     : originalRead
                     ? 'Export could not read its original workbook data. Reopen the same content group and retry. If it fails again, share Copy timings and the workspace error details.'
                     : 'Share Copy timings and the workspace error details if retrying the export fails.'
@@ -93,7 +93,7 @@
                 const state = this.ctExportTiming;
                 if (!state) return '';
                 return [(state.contentMode === 'statdescription' ? 'StatDescription' : 'ClientText') + ' export timing', state.label, 'Status: ' + state.status, 'Total elapsed: ' + duration(state.elapsed),
-                    ...(state.memoryOnly ? ['Workbook storage: temporary; edits remain only in this open tab.'] : []),
+                    ...(state.localOnly ? ['Workbook storage: local IndexedDB; checkpoint failures remain in the open tab. Browser storage is not a backup.'] : []),
                     collectionText(state.collection), state.downloadStarted ? 'Browser download initiated; completion is not observable.' : 'Download not initiated.',
                     ...(state.failure ? ['Failure code: ' + state.failure.code, 'Error type: ' + state.failure.name, 'Failure step: ' + state.failure.step, 'Next action: ' + state.failure.message] : []),
                     'Request durations include network and server wall time; they are not server CPU measurements.',
@@ -114,7 +114,7 @@
                     if (added && follow) this.$nextTick?.(() => { if (log) log.scrollTop = log.scrollHeight; });
                 }, current, label);
                 run.state.contentMode = contentMode;
-                run.state.memoryOnly = contentMode === 'clienttext' && !!this.ctOfflineTest;
+                run.state.localOnly = contentMode === 'clienttext' && !!this.ctOfflineTest;
                 this._ctExportRun = this._ctExportReportId = run; this.ctBusy = true; this.ctError = '';
                 this.ctExportCopyMessage = ''; this.ctExportCopyBusy = false; this._ctExportCopyRequest = null; run.tick();
                 if (show) this.ctShowExport(); return run;

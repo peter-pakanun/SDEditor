@@ -5,7 +5,6 @@ const { createRequire } = require('node:module');
 const { resolve, join, sep } = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { mkdtempSync, readFileSync, existsSync, rmSync, mkdirSync, writeFileSync, copyFileSync } = require('node:fs');
-const { tmpdir } = require('node:os');
 const { createServer } = require('node:http');
 const { Readable } = require('node:stream');
 const { randomUUID, createHash } = require('node:crypto');
@@ -153,7 +152,7 @@ async function run() {
     const load = name => import(pathToFileURL(join(apiRoot, 'src', name)).href);
     const [{ loadConfig }, { openDatabase, CloudStore }, { createApp }] = await Promise.all([load('config.js'), load('database.js'), load('app.js')]);
     const express = fromApi('express'), JSZip = fromApi('jszip');
-    const directory = mkdtempSync(join(tmpdir(), 'sdeditor-clienttext-browser-')), secret = randomUUID();
+    const directory = mkdtempSync(join(__dirname, '../temp/sdeditor-clienttext-browser-')), secret = randomUUID();
     const frontend = express(), frontendServer = createServer(frontend);
     await new Promise(resolve => frontendServer.listen(0, '127.0.0.1', resolve));
     const origin = 'http://127.0.0.1:' + frontendServer.address().port;
@@ -2808,7 +2807,7 @@ async function run() {
         await browser?.close(); await api.locals.versions.idle(); await api.locals.collaborationRealtime.close();
         await Promise.all([new Promise(resolve => apiServer.close(resolve)), new Promise(resolve => frontendServer.close(resolve))]);
         if (database.isOpen) database.close();
-        const absolute = resolve(directory), expectedRoot = resolve(tmpdir()) + sep;
+        const absolute = resolve(directory), expectedRoot = resolve(__dirname,'../temp') + sep;
         if (!absolute.startsWith(expectedRoot) || !absolute.split(sep).pop().startsWith('sdeditor-clienttext-browser-')) throw new Error('Refusing cleanup outside fixture temporary directory.');
         if (process.env.KEEP_FIXTURE_ARTIFACTS === '1' || process.argv.includes('--keep')) console.log('Fixture artifacts: ' + absolute); else rmSync(absolute, { recursive: true, force: true });
     }

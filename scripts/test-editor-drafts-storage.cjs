@@ -75,7 +75,7 @@ test('draft writes are separate from committed workspace and only acknowledge tr
   assert.equal(result.status, 'saved'); assert.equal(result.record.translations[0], 'new');
   assert.equal(result.record.base.translations[0], 'old'); assert.equal(result.record.source.translations.English[0], 'Source');
   assert.deepEqual(f.kv.get('workspace_poe1'), before); assert.equal(f.revisions.length, 0);
-  assert.deepEqual(f.versions, [23], 'Draft writes must open the current schema that fences older Dropped writers.');
+  assert.deepEqual(f.versions, [24], 'Draft writes must open the current schema that fences older local workbook writers.');
 });
 
 test('English cannot create or replace an editable translation checkpoint', async () => {

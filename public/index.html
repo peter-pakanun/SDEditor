@@ -223,7 +223,7 @@
               <div class="cloudActions">
                 <button v-if="cloudSignedIn && cloudSyncIssue" @click="cloudRetry" :disabled="cloudBusy">Sync now</button>
                 <button @click="cloudOpenHistory()" :disabled="!cloudHistoryAvailable" :title="cloudHistoryUnavailableReason">Shared dictionary history</button>
-                <button @click="openTMManager" :disabled="ctOfflineTest && !ctResourceSyncEnabled" :title="ctOfflineTest && !ctResourceSyncEnabled ? 'ClientText test TM learns from temporary saves. Leave the test to manage shared TM.' : ''">Manage translation memory</button>
+                <button @click="openTMManager" :disabled="ctOfflineTest && !ctResourceSyncEnabled" :title="ctOfflineTest && !ctResourceSyncEnabled ? 'Local workbook TM stays in this browser. Leave the workbook to manage shared TM.' : ''">Manage translation memory</button>
                 <button v-if="cloudUser" @click="cloudLogout" :disabled="cloudBusy">{{ cloudSignedIn ? 'Sign out' : 'Return to local profile' }}</button>
                 <button v-if="cloudConflicts.length" @click="cloudOpenResolver">Resolve conflicts ({{ cloudConflicts.length }})</button>
                 <button v-if="cloudUser && cloudUser.isAdmin && cloudSignedIn" @click="cloudLoadUsers" :disabled="cloudBusy">Manage users</button>
@@ -400,8 +400,17 @@
             <button class="primaryAction" @click="managedImportOffline(false)" :disabled="managedVersionBusy">Import StatDescriptions.zip</button>
           </template>
           <div v-if="managedOfflineVersion" class="versionActions"><button @click="managedImportOffline(false)" :disabled="managedVersionBusy || !managedLocalVersionsLoaded">Import next/update</button><button @click="managedImportOffline(true)" :disabled="managedVersionBusy">Import translated</button></div>
-          <div class="versionActions"><button @click="ctOpenOfflineTest" :disabled="managedVersionBusy || ctBusy || ctUploading">Test Sheet Offline</button></div>
-          <p class="versionMuted versionWorkbookDropHint">Drop XLSX/XLSM workbooks here to open Test Sheet Offline.</p>
+          <div class="versionActions"><button @click="ctOpenOfflineTest" :disabled="managedVersionBusy || ctBusy || ctUploading">Local workbooks</button></div>
+          <p class="versionMuted">Local workbooks are stored only in this browser/profile for the selected account and game. Reopen a workspace below to recover its drafts. Download backups regularly. Old memory-only tabs cannot be recovered after they were closed or refreshed.</p>
+          <label>Restore local recovery backup <input type="file" accept=".zip" @change="ctRestoreLocalBackup" :disabled="ctLocalBackupBusy || ctBusy"></label>
+          <app-notice v-if="ctLocalIssue" tone="error" role="alert">{{ ctLocalIssue }}</app-notice>
+          <app-notice v-if="ctError" tone="error" role="alert">{{ ctError }}</app-notice>
+          <app-notice v-for="draft in ctLocalEmergencyDrafts.filter(draft=>draft.scope.accountId === ctRequestScope().accountId &amp;&amp; draft.scope.game === gameVersion &amp;&amp; draft.scope.branchId === (branchId || 'default'))" :key="draft.id" tone="error" role="alert">{{ draft.pending ? 'Checkpoint pending' : 'Draft was not stored' }} for {{ draft.scope.language }} · {{ draft.scope.groupId.slice(-8) }}. Keep this tab open. <button @click="ctDownloadEmergencyDraft(draft)">Download unstored draft</button></app-notice>
+          <div v-for="workspace in ctLocalWorkspaces.filter(row=>row.groupId.startsWith('local:test:'))" :key="workspace.groupId" class="versionActions">
+            <span>{{ workspace.version?.name || 'Local workbook' }} · {{ workspace.language }} · {{ new Date(workspace.createdAt).toLocaleString() }} · {{ workspace.groupId.slice(-8) }}</span>
+            <button @click="ctOpenCached(workspace)" :disabled="ctBusy || ctLocalBackupBusy">Reopen local workbook</button>
+          </div>
+          <p class="versionMuted versionWorkbookDropHint">Drop XLSX/XLSM workbooks here to open Local workbooks.</p>
           <div v-for="request in ctRequests.filter(request=>['publication','metadata'].includes(request.payload.kind))" :key="request.requestId"><button @click="ctResumePublication(request)">Resume {{ request.payload.name }} · {{ request.payload.kind === 'metadata' ? 'version draft' : 'content upload' }}</button></div>
         </section>
       </div>
@@ -428,9 +437,10 @@
     </section>
     <div v-if="ctUploadVisible" class="importDialogOverlay versionModalBackdrop" @click.self="ctCloseUpload">
       <section class="box ctUploadDialog" aria-label="Content upload">
-        <h2>{{ ctUploadTest ? 'Test Sheet Offline' : ctUploadLocal ? 'Import ClientText locally' : ctUploadVersion ? 'Add content groups to '+ctUploadVersion.name : 'Publish a new version' }}</h2>
+        <h2>{{ ctUploadTest ? 'Local workbooks' : ctUploadLocal ? 'Import ClientText locally' : ctUploadVersion ? 'Add content groups to '+ctUploadVersion.name : 'Publish a new version' }}</h2>
         <label v-if="!ctUploadLocal" class="ctUploadField">Predecessor version<input id="ctUploadPredecessor" type="text" :value="ctUploadPredecessor?.name || 'None — first version'" disabled></label>
-        <p v-if="ctUploadTest" class="versionMuted">Open local XLSM/XLSX files for one language. You can test a normal workbook, a Gender workbook, or both. Edits, saves, and history stay in memory. Download workbooks to keep saved edits; leaving the test or reloading clears the session.</p>
+        <p v-if="ctUploadTest" class="versionMuted">Open local XLSM/XLSX files for one language. You can test a normal workbook, a Gender workbook, or both. Original files, committed edits, history and drafts stay in this browser. Every import creates a separate workspace; reopen it under Offline after restarting. Download a recovery backup for protection outside this browser.</p>
+        <label v-if="ctUploadTest" class="ctUploadField">Local workspace name<input v-model="ctUploadName" placeholder="Workbook name"></label>
         <template v-if="!ctUploadVersion && !ctUploadTest">
           <label class="ctUploadField">Version name<input type="text" v-model="ctUploadName"></label>
           <div v-if="!ctUploadLocal" class="ctUploadField">
@@ -445,7 +455,7 @@
         </template>
         <template v-if="ctUploadTest">
           <label class="ctTestHistoryToggle"><input type="checkbox" v-model="ctUploadSyncResources" :disabled="ctUploading || !ctUploadResourceAccess">Sync Dictionary and TM</label>
-          <p class="versionMuted">When enabled for an authorized language, Dictionary edits and eligible TM pairs use your account's normal sync and local retry queue. Workbook edits, drafts and history remain temporary. Sign in and select a permitted workbook language to enable sync.</p>
+          <p class="versionMuted">When enabled for an authorized language, Dictionary edits and eligible TM pairs use your account's normal sync and local retry queue. Workbook edits, drafts and history stay local to this browser. Sign in and select a permitted workbook language to enable sync.</p>
           <section class="ctTestWorkbookGroup" aria-label="Current workbooks">
             <h3>Current workbooks</h3><p class="versionMuted">Choose the files to open and edit. You can add files from separate folders.</p>
             <div class="ctUploadSelectors">
@@ -527,7 +537,7 @@
           </div></fieldset>
           <app-notice-stack class="workspaceNoticeStack">
             <workspace-alerts></workspace-alerts>
-            <app-notice tone="info" v-if="ctOfflineTest" dismiss-key="ctOfflineTest" class="ctTestBanner" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Workbook edits are temporary. {{ ctResourceSyncEnabled ? 'Dictionary and TM use account sync; pending resource edits stay in this browser.' : 'Dictionary edits and learned TM are temporary.' }} Download workbooks to keep saved workbook edits. Leaving the test or reloading clears this session.</app-notice>
+            <app-notice tone="info" v-if="ctOfflineTest" class="ctTestBanner" role="note">Local workbook · {{ ctWorkspace.scope.language }} · {{ ctLocalDraftState === 'pending' ? 'Draft checkpoint pending — keep this tab open.' : ctLocalDraftState === 'failed' ? 'Draft is not stored — keep this tab open.' : ctDraftDirty ? 'Draft checkpointed in this browser; use Save to commit.' : 'Committed workbook work stored in this browser.' }} No workbook upload. {{ ctResourceSyncEnabled ? 'Dictionary and TM use account sync.' : 'Dictionary changes are temporary; workbook TM stays local.' }} Clearing browser data, profile loss, private browsing or eviction can remove local work. <button @click="ctBackupLocal" :disabled="ctLocalBackupBusy || ctBusy">Download recovery backup</button><button @click="ctDownloadDraftRecovery" :disabled="!ctSelection">Download current draft</button></app-notice>
             <app-notice tone="error" v-if="ctResourceIssue" dismiss-key="ctResourceIssue" role="alert">{{ ctResourceIssue }}</app-notice>
             <app-notice tone="error" v-if="ctMtlVisible && ctMtlError" dismiss-key="ctMtlError" role="alert">{{ ctMtlError }}</app-notice>
             <app-notice tone="warning" v-if="ctMtlVisible && ctMtlDismissals.length" data-inline-focus-surface role="status">{{ ctMtlDismissals.length }} MTL dismissal upload(s) pending. {{ String(ctWorkspace?.scope?.groupId || '').startsWith('local:') ? 'Keep this tab and workbook session open; closing or reloading loses unsent dismissal requests.' : 'Exact dismissal requests are retained in this browser for retry.' }}<button type="button" @click="ctMtlRetryDismissals()" :disabled="ctBusy">Retry dismissal uploads</button></app-notice>
@@ -647,7 +657,7 @@
         <template #notice>
           <workspace-alerts></workspace-alerts>
           <app-notice tone="error" v-if="ctResourceIssue" dismiss-key="ctResourceIssue" role="alert">{{ ctResourceIssue }}</app-notice>
-          <app-notice tone="info" v-if="ctOfflineTest" dismiss-key="ctOfflineTest" class="ctTestBanner" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Workbook edits are temporary. {{ ctResourceSyncEnabled ? 'Dictionary and TM use account sync; pending resource edits stay in this browser.' : 'Dictionary edits and learned TM are temporary.' }} Download workbooks to keep saved workbook edits. Leaving the test or reloading clears this session.</app-notice>
+          <app-notice tone="info" v-if="ctOfflineTest" class="ctTestBanner" role="note">Local workbook · {{ ctWorkspace.scope.language }} · {{ ctLocalDraftState === 'pending' ? 'Draft checkpoint pending — keep this tab open.' : ctLocalDraftState === 'failed' ? 'Draft is not stored — keep this tab open.' : ctDraftDirty ? 'Draft checkpointed in this browser; use Save to commit.' : 'Committed workbook work stored in this browser.' }} No workbook upload. {{ ctResourceSyncEnabled ? 'Dictionary and TM use account sync.' : 'Dictionary changes are temporary; workbook TM stays local.' }} Clearing browser data, profile loss, private browsing or eviction can remove local work. <button @click="ctBackupLocal" :disabled="ctLocalBackupBusy || ctBusy">Download recovery backup</button><button @click="ctDownloadDraftRecovery" :disabled="!ctSelection">Download current draft</button></app-notice>
           <app-notice tone="error" v-if="ctError" dismiss-key="ctError" class="collaborationError" role="alert">{{ ctError }}</app-notice>
           <app-notice tone="info" v-if="ctNotice" dismiss-key="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</app-notice>
         </template>
@@ -1512,6 +1522,7 @@
   <script src="clientTextMtlMemoryStore.js"></script>
   <script src="clientTextMtlSync.js"></script>
   <script src="clientTextMemoryStore.js"></script>
+  <script src="clientTextLocalStore.js"></script>
   <script src="clientTextSync.js"></script>
   <script src="vendor/fast-xml-parser-5.11.2.min.js"></script>
   <script src="clientTextCodec.js"></script>

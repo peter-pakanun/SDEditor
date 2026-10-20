@@ -24,6 +24,41 @@
         return scope;
     }
     const scopeKey = input => { const scope = normalizeScope(input); return key(scope.accountId, scope.game, scope.branchId, scope.versionId, scope.groupId, scope.language); };
+    const isLocal = scope => String(scope?.groupId || '').startsWith('local:test:');
+    const scopeFromKey = id => Object.fromEntries(['accountId','game','branchId','versionId','groupId','language'].map((name,index)=>[name,JSON.parse(id)[index]]));
+    const corrupt = message => Object.assign(new Error('Local workbook recovery data is invalid: ' + message + '. The stored data has been retained.'), {code:'CLIENTTEXT_LOCAL_INVALID'});
+    function validateLocalMetadata(scope, value) {
+        if (!value || !isLocal(scope)) return value;
+        if (scopeKey(value) !== scopeKey(scope) || value.state !== 'ready' || !Number.isSafeInteger(value.unitCount) || value.unitCount < 1
+            || !Array.isArray(value.descriptors) || !value.descriptors.length || value.descriptors.length > 2) throw corrupt('workspace identity or readiness');
+        const roles=new Set();let count=0;
+        for(const descriptor of value.descriptors){
+            if(roles.has(descriptor.role) || !Number.isSafeInteger(descriptor.unitCount) || descriptor.unitCount<1)throw corrupt('original descriptors');
+            let cache;try{cache=S.originalCacheKey(descriptor.assetHash,descriptor.parserVersion,descriptor.role,descriptor);}catch(_){throw corrupt('original identity');}
+            if(value.originalCaches?.[descriptor.role]!==cache)throw corrupt('original cache binding');
+            roles.add(descriptor.role);count+=descriptor.unitCount;
+        }
+        if(count!==value.unitCount || value.signature!==S.hash({descriptors:value.descriptors,unitCount:value.unitCount}))throw corrupt('workspace signature');
+        if(value.version && value.version.id!==scope.versionId || value.group && (value.group.id!==scope.groupId || value.group.versionId!==scope.versionId))throw corrupt('version binding');
+        return value;
+    }
+    function validateLocalUnit(unit, expectedId) {
+        if(!unit || typeof unit.id!=='string' || unit.id!==expectedId || unit.id!==JSON.stringify([unit.role,unit.sheet,unit.recordId])
+            || !['normal','gender'].includes(unit.role) || typeof unit.sheet!=='string' || typeof unit.recordId!=='string'
+            || !Array.isArray(unit.fields) || unit.fields.some(field=>!field || typeof field.source!=='string' || typeof field.target!=='string'
+                || typeof field.sourceCell!=='string' || typeof field.targetCell!=='string'))throw corrupt('original unit');
+        try{S.normalizeUnit(unit);}catch(_){throw corrupt('original fields');}
+        return unit;
+    }
+    function validateLocalRecord(unit, value, {draft=false, historical=false}={}) {
+        if(!value)return value;
+        if(!unit || value.unitId!==unit.id || !Number.isSafeInteger(value.revision) || value.revision<(historical?0:1)
+            || !draft && !historical && typeof value.saved!=='boolean')throw corrupt(draft?'draft identity':'saved record identity');
+        try{S.normalizeValues(unit,value.values);S.normalizeReviewed(unit,value.reviewed || {});}catch(_){throw corrupt(draft?'draft fields':'saved fields');}
+        if(value.outdated && (!Array.isArray(value.outdated) || value.outdated.some(id=>!unit.fields.some(field=>field.id===id))))throw corrupt('source review fields');
+        if(value.provenance?.requiredReview)try{S.normalizeReviewed(unit,value.provenance.requiredReview);}catch(_){throw corrupt('required source reviews');}
+        return value;
+    }
     function upgrade(db, tx) {
         for (const name of names) {
             const store = db.objectStoreNames.contains(name) ? tx.objectStore(name) : db.createObjectStore(name, { keyPath: 'key' });
@@ -50,7 +85,9 @@
         const memoryScope=input=>{
             const scope={accountId:String(input?.accountId||input?.profile||'guest'),game:String(input?.game||'poe2'),language:String(input?.language||'')};
             if(!['poe1','poe2'].includes(scope.game)||!scope.language)throw new TypeError('ClientText memory requires account, game and language.');
-            return {scope,id:key(scope.accountId,scope.game,scope.language)};
+            // Local workbook learning is private to this exact workspace. It
+            // must not become account TM merely because Dictionary/TM sync is on.
+            return {scope,id:isLocal(input)?scopeKey(input):key(scope.accountId,scope.game,scope.language)};
         };
         const guard = options => {
             if(options?.signal?.aborted)throw Object.assign(new Error('ClientText work was cancelled.'),{name:'AbortError',stale:true});
@@ -63,7 +100,12 @@
             guard(options);
             const db = await getDb(); guard(options);
             if (!db.objectStoreNames.contains(stores.meta)) throw new Error('ClientText storage upgrade is incomplete. Reload the editor.');
-            const tx = db.transaction([...new Set(selected)], mode), done = completed(tx);
+            const selectedNames=[...new Set(selected)];let tx;
+            // Request a disk-flushed commit where supported; completion, rather
+            // than the last successful request, remains the acknowledgement.
+            try{tx=db.transaction(selectedNames,mode,mode==='readwrite'?{durability:'strict'}:{});}
+            catch(error){if(!(error instanceof TypeError))throw error;tx=db.transaction(selectedNames,mode);}
+            const done = completed(tx);
             // Abort can arrive while an awaited request has not delivered its
             // callback. Observe completion immediately and reject that action.
             try { const result = await Promise.race([action(tx), done.then(() => new Promise(() => {}))]); guard(options); await done; return result; }
@@ -143,7 +185,26 @@
             const records=await transaction([stores.memoryHistory],'readonly',async tx=>(await request(tx.objectStore(stores.memoryHistory).index('by_unit').getAll(key(captured.id,memoryId)))).map(row=>row.value),options);
             return records.sort((a,b)=>b.createdAt-a.createdAt).slice(0,options.limit||100);
         }
-        async function getMetadata(rawScope, options) { return one(capture(rawScope).id, stores.meta, 'meta', options); }
+        async function getMetadata(rawScope, options) {
+            const captured=capture(rawScope),value=await one(captured.id,stores.meta,'meta',options);
+            return validateLocalMetadata(captured.scope,value);
+        }
+        async function seedMemory(rawScope, entries, options={}) {
+            const captured=capture(rawScope);
+            if(!isLocal(captured.scope))throw new TypeError('Only local workbooks accept a private TM seed.');
+            await requireReady(captured.id,options);
+            const accepted=(entries || []).filter(entry=>entry.context?.contentMode==='clienttext'
+                && (!entry.language || entry.language===captured.scope.language) && [captured.scope.game,'all'].includes(entry.gameScope));
+            return transaction([stores.meta,stores.memory],'readwrite',async tx=>{
+                const metadata=await get(tx,stores.meta,key(captured.id,'meta'));validateLocalMetadata(captured.scope,metadata);
+                if(metadata.memorySeeded)return;
+                for(const entry of accepted){
+                    if(typeof entry.id!=='string' || typeof entry.source!=='string' || typeof entry.target!=='string')throw corrupt('private TM seed');
+                    if(!await get(tx,stores.memory,key(captured.id,entry.id)))put(tx,stores.memory,captured.id,entry.id,copy(entry));
+                }
+                metadata.memorySeeded=true;put(tx,stores.meta,captured.id,'meta',metadata,{accountId:captured.scope.accountId});
+            },options);
+        }
         async function putRequest(rawScope,requestId,payload,options={}){
             if(typeof requestId!=='string'||!requestId||requestId.length>256)throw new TypeError('ClientText request requires a stable ID.');
             const captured=requestScope(rawScope),generation=generationId(),bucket=fragmentScope(captured.id,requestId);
@@ -278,10 +339,23 @@
         async function requireReady(scope, options) {
             let metadata = await one(scope, stores.meta, 'meta', options);
             if (!metadata || metadata.state !== 'ready') throw Object.assign(new Error('ClientText originals are still being prepared.'), { code: 'CLIENTTEXT_NOT_READY' });
+            validateLocalMetadata(scopeFromKey(scope),metadata);
             if (!metadata.originalCaches || metadata.cacheMigration!=='complete') metadata = await migrateWorkspace(metadata, options);
+            validateLocalMetadata(scopeFromKey(scope),metadata);
+            if(isLocal(metadata) && metadata.localRestorePending)throw Object.assign(new Error('Local workbook restoration is incomplete. Its recovery data is retained; restore the backup again as a new workspace.'),{code:'CLIENTTEXT_NOT_READY'});
             return metadata;
         }
         const cacheOptions = asset => ({schemaHash:asset.schemaHash || asset.descriptor?.schemaHash,importOptionsHash:asset.importOptionsHash || asset.descriptor?.importOptionsHash});
+        async function verifyLocalAsset(asset,descriptor) {
+            if(!asset || cacheIdentity(asset,descriptor).hash!==descriptor.assetHash)throw corrupt('original asset binding');
+            const binary=asset.blob || asset.bytes || asset.buffer;
+            if(!binary || !(binary instanceof Blob || binary instanceof ArrayBuffer || ArrayBuffer.isView(binary)))throw corrupt('original workbook bytes');
+            const bytes=binary instanceof Blob ? await binary.arrayBuffer() : ArrayBuffer.isView(binary)
+                ? binary.buffer.slice(binary.byteOffset,binary.byteOffset+binary.byteLength) : binary;
+            const hash=root.crypto?.subtle ? [...new Uint8Array(await root.crypto.subtle.digest('SHA-256',bytes))].map(value=>value.toString(16).padStart(2,'0')).join('') : S.sha256(bytes);
+            if(hash!==descriptor.assetHash)throw corrupt('original workbook byte hash');
+            return new Blob([bytes],{type:binary.type || ''});
+        }
         function cacheIdentity(asset, descriptor) {
             const hash=asset.hash || asset.assetHash || asset.artifactHash || descriptor?.assetHash;
             const parserVersion=asset.parserVersion || asset.parsed?.parserVersion || descriptor?.parserVersion || S.PARSER_VERSION;
@@ -417,36 +491,101 @@
             })();migrations.set(scope,migration);
             try{return await migration;}finally{migrations.delete(scope);}
         }
+        async function preparePreviousVersion(rawScope,units,rawPreviousScope,options={}) {
+            const captured=capture(rawScope),previous=capture(rawPreviousScope);
+            if(!isLocal(captured.scope) || !isLocal(previous.scope) || captured.id===previous.id
+                || ['accountId','game','branchId','language'].some(name=>captured.scope[name]!==previous.scope[name]))throw new TypeError('Previous local workbooks must match the account, game, branch and language.');
+            const previousUnits=new Map((await getUnits(previous.scope,options)).map(unit=>[unit.id,unit])),records=[];
+            for(let index=0;index<units.length;index++){
+                guard(options);const unit=units[index],old=previousUnits.get(unit.id);
+                if(old){
+                    const state=S.carryForward(old,unit,null),markerReview=S.reviewAudioMarkerChanges(old,unit,state);
+                    if(state.outdated.length || markerReview){
+                        const before=new Map(old.fields.map(field=>[field.id,field])),requiredReview={};
+                        for(const field of unit.fields)if(before.has(field.id) && S.sourceHash(before.get(field.id).source)!==S.sourceHash(field.source)
+                            && !S.audioOnly(field.source) && S.needsSourceReview(field,state.values[field.id]))requiredReview[field.id]=S.sourceHash(field.source);
+                        const provenance={groupId:previous.scope.groupId,unitId:unit.id,revision:0,sourceOnly:true,requiredReview,conflicts:state.conflicts,origin:'version_import'};
+                        const after={unitId:unit.id,values:state.values,reviewed:state.reviewed,saved:false,revision:1,serverRevision:0,provenance,conflicts:state.conflicts,
+                            outdated:Object.keys(requiredReview).filter(id=>state.reviewed[id]!==requiredReview[id])};
+                        records.push({id:'test-version-import:'+unit.id,unitId:unit.id,origin:'version_import',actor:{name:'Previous workbook sample'},createdAt:Date.now(),
+                            before:{unitId:unit.id,values:S.valuesFor(unit),reviewed:{},revision:0},after});
+                    }
+                }
+                if(index%256===255){options.onProgress?.({phase:'Comparing previous workbook',processed:index+1,total:units.length,sheet:unit.sheet});await pause();}
+            }
+            guard(options);return {previous,records};
+        }
+        async function writePreviousVersion(tx,captured,metadata,prepared){
+            if(metadata.previousScope){
+                if(scopeKey(metadata.previousScope)!==prepared.previous.id)throw new Error('The previous local workbook version is already selected.');
+                return metadata;
+            }
+            for(const name of [stores.saved,stores.history,stores.drafts])if(await request(tx.objectStore(name).index('by_scope').count(captured.id)))throw new Error('Prepare the previous local workbook version before editing.');
+            for(const entry of prepared.records){
+                put(tx,stores.saved,captured.id,entry.unitId,entry.after);
+                put(tx,stores.history,captured.id,entry.id,entry,{unitKey:key(captured.id,entry.unitId)});
+            }
+            metadata.previousScope=copy(prepared.previous.scope);return metadata;
+        }
+        async function seedPreviousVersion(rawScope,rawPreviousScope,options={}) {
+            const captured=capture(rawScope),metadata=await requireReady(captured.id,options),units=await getUnits(rawScope,options),
+                prepared=await preparePreviousVersion(rawScope,units,rawPreviousScope,options);
+            return transaction([stores.meta,stores.saved,stores.history,stores.drafts],'readwrite',async tx=>{
+                const current=await get(tx,stores.meta,key(captured.id,'meta'));
+                if(current?.signature!==metadata.signature)throw new Error('Local workbook changed while comparing previous sources.');
+                await writePreviousVersion(tx,captured,current,prepared);
+                put(tx,stores.meta,captured.id,'meta',current,{accountId:captured.scope.accountId});return current;
+            },options);
+        }
         async function importContent(rawScope,input,options={}) {
             const captured=capture(rawScope),scope=captured.id;guard(options);
             if(!Array.isArray(input?.units)||!input.units.length)throw new TypeError('ClientText import contains no units.');
-            const assets=Array.isArray(input.assets)?input.assets:Object.entries(input.assets||{}).map(([role,asset])=>({role,...asset}));
+            const assets=(Array.isArray(input.assets)?input.assets:Object.entries(input.assets||{}).map(([role,asset])=>({role,...asset}))).map(asset=>({...asset}));
+            if(isLocal(captured.scope))for(const unit of input.units)validateLocalUnit(unit,unit.id);
             const built=input.descriptors?{descriptors:input.descriptors,summaries:input.summaries}:input.manifest?{descriptors:input.manifest.descriptors}:await S.buildDescriptors(input.units,assets,options);
             const descriptors=built.descriptors,signature=S.hash({descriptors,unitCount:input.units.length});
             const existing=await one(scope,stores.meta,'meta',options);
             if(existing && existing.signature!==signature)throw new Error('ClientText originals are immutable. Import a changed workbook as a new source group.');
-            if(existing?.state==='ready')return migrateWorkspace(rawScope,options);
+            if(existing?.state==='ready'){
+                if(isLocal(captured.scope) && input.previousScope && (!existing.previousScope || scopeKey(existing.previousScope)!==scopeKey(input.previousScope)))throw new Error('Existing local workbook work is retained. Open a new version to choose another previous workbook.');
+                return isLocal(captured.scope)?requireReady(scope,options):migrateWorkspace(rawScope,options);
+            }
             const bindings={},summaries={};
             for(const asset of assets){
                 const descriptor=descriptors.find(value=>value.role===asset.role);if(!descriptor)throw new Error('ClientText original descriptor is unavailable.');
+                if(isLocal(captured.scope)){asset.blob=await verifyLocalAsset(asset,descriptor);guard(options);}
                 const cached=await cacheOriginal(input.units.filter(unit=>unit.role===asset.role),asset,descriptor,options);bindings[asset.role]=cached.cacheKey;summaries[asset.role]=cached.summary;
             }
             if(Object.values(summaries).reduce((total,value)=>total+value.loaded,0)!==input.units.length)throw new Error('ClientText original bundle has unassigned units.');
             await freezeLegacyOutbox(rawScope,input.units,options);
-            await transaction([stores.meta],'readwrite',async tx=>{
+            const previous=input.previousScope ? await preparePreviousVersion(rawScope,input.units,input.previousScope,options) : null;
+            await transaction([stores.meta,...(previous?[stores.saved,stores.history,stores.drafts]:[])],'readwrite',async tx=>{
                 const current=await get(tx,stores.meta,key(scope,'meta'));if(current && current.signature!==signature)throw new Error('ClientText import changed in another tab.');
-                put(tx,stores.meta,scope,'meta',{...copy(input.metadata||{}),...captured.scope,state:'ready',storageProtocol:S.STORAGE_PROTOCOL,signature,
-                    originalCaches:bindings,summaries,descriptors:copy(descriptors),assetNames:Object.fromEntries(assets.map(asset=>[asset.role,asset.name || asset.parsed?.filename])),imported:input.units.length,unitCount:input.units.length,createdAt:current?.createdAt||Date.now(),sequence:current?.sequence||0},{accountId:captured.scope.accountId});
+                // Another importer may have published and started editing while
+                // this one prepared immutable caches. Its metadata and work win.
+                if(current?.state==='ready'){
+                    if(isLocal(captured.scope) && previous && (!current.previousScope || scopeKey(current.previousScope)!==previous.previous.id))throw new Error('Existing local workbook work is retained. Open a new version to choose another previous workbook.');
+                    return;
+                }
+                const metadata={...copy(input.metadata||{}),...captured.scope,state:'ready',storageProtocol:S.STORAGE_PROTOCOL,signature,
+                    originalCaches:bindings,summaries,descriptors:copy(descriptors),assetNames:Object.fromEntries(assets.map(asset=>[asset.role,asset.name || asset.parsed?.filename])),imported:input.units.length,unitCount:input.units.length,createdAt:current?.createdAt||Date.now(),sequence:current?.sequence||0};
+                if(previous)await writePreviousVersion(tx,captured,metadata,previous);
+                validateLocalMetadata(captured.scope,metadata);
+                put(tx,stores.meta,scope,'meta',metadata,{accountId:captured.scope.accountId});
             },options);
             await cleanupLegacy(scope,options);
             return transaction([stores.meta],'readwrite',async tx=>{const current=await get(tx,stores.meta,key(scope,'meta'));current.cacheMigration='complete';put(tx,stores.meta,scope,'meta',current,{accountId:captured.scope.accountId});return current;},options);
         }
         async function getUnits(rawScope, options = {}) {
             const metadata=await requireReady(capture(rawScope).id,options),units=[];
+            const used=isLocal(rawScope)?new Set():null;
             for(const descriptor of metadata.descriptors){
                 const cached=await readOriginalCache(metadata.originalCaches[descriptor.role],options);
                 if(!cached || cached.units.length!==descriptor.unitCount)throw new Error('ClientText workspace original cache is incomplete.');
-                for(const unit of cached.units)units.push(unit);
+                for(const unit of cached.units){
+                    if(used){validateLocalUnit(unit,unit?.id);if(unit.role!==descriptor.role || used.has(unit.id))throw corrupt('duplicate or misplaced original unit');used.add(unit.id);}
+                    units.push(unit);
+                }
             }
             if(units.length!==metadata.unitCount)throw new Error('ClientText workspace original count differs.');return units;
         }
@@ -459,7 +598,8 @@
         const cacheForUnit=(metadata,unitId)=>metadata.originalCaches?.[JSON.parse(unitId)[0]];
         async function getUnit(rawScope, unitId, options) {
             const metadata=await requireReady(capture(rawScope).id,options),cache=cacheForUnit(metadata,unitId);
-            return cache ? (await one(cache,stores.cacheUnits,unitId,options))?.unit : undefined;
+            const unit=cache ? (await one(cache,stores.cacheUnits,unitId,options))?.unit : undefined;
+            return unit && isLocal(rawScope)?validateLocalUnit(unit,unitId):unit;
         }
         async function getUnitsByIds(rawScope, unitIds, options) {
             const metadata=await requireReady(capture(rawScope).id,options),ids=[...new Set(unitIds)];
@@ -470,6 +610,7 @@
                     const batch=await Promise.all(ids.slice(start,start+128).map(async unitId=>{
                         const cache=cacheForUnit(metadata,unitId),row=cache ? await get(tx,stores.cacheUnits,key(cache,unitId)) : null;
                         if(!row?.unit || row.unit.id!==unitId || row.unit.role!==JSON.parse(unitId)[0]) throw Object.assign(new Error('Saved ClientText unit is absent from its immutable original: '+unitId+'.'), {code:'CLIENTTEXT_ORIGINAL_UNIT_MISSING'});
+                        if(isLocal(rawScope))validateLocalUnit(row.unit,unitId);
                         return row.unit;
                     }));
                     units.push(...batch);
@@ -477,11 +618,19 @@
                 return units;
             },options);
         }
-        async function getSaved(rawScope, options) { return Object.fromEntries((await rows(capture(rawScope).id,stores.saved,options)).map(row => [row.unitId,row])); }
+        async function getSaved(rawScope, options) {
+            const saved=await rows(capture(rawScope).id,stores.saved,options);
+            if(isLocal(rawScope) && saved.length){
+                const originals=new Map((await getUnitsByIds(rawScope,saved.map(value=>value?.unitId),options)).map(unit=>[unit.id,unit]));
+                for(const value of saved)validateLocalRecord(originals.get(value.unitId),value);
+            }
+            return Object.fromEntries(saved.map(row=>[row.unitId,row]));
+        }
         async function getAsset(rawScope, role = 'normal', options) {
             const metadata=await requireReady(capture(rawScope).id,options),descriptor=metadata.descriptors.find(item=>item.role===role);
             const id=metadata.originalCaches?.[role];if(!id)return undefined;
             const asset=await one(id,stores.cacheAssets,'asset',options);if(!asset)throw Object.assign(new Error('ClientText retained original is unavailable.'), {code:'CLIENTTEXT_ORIGINAL_ASSET_MISSING'});
+            if(isLocal(rawScope)){await verifyLocalAsset(asset,descriptor);guard(options);}
             const name=metadata.assetNames?.[role] || metadata.group?.assets?.find(item=>item.role===role)?.filename || asset.name;
             return {...asset,name,parsed:{...asset.parsed,filename:name},descriptor,cacheKey:id};
         }
@@ -556,16 +705,22 @@
             const values=S.normalizeValues(unit,input.values),reviewed=S.normalizeReviewed(unit,input.reviewed||{});
             return transaction([stores.drafts],'readwrite',async tx=>{
                 const previous=await get(tx,stores.drafts,key(scope,unitId));
+                if(isLocal(rawScope) && previous)validateLocalRecord(unit,previous,{draft:true});
                 if(own(options,'expectedRevision')&&(previous?.revision||null)!==options.expectedRevision)throw Object.assign(new Error('Another tab changed this ClientText draft.'),{code:'DRAFT_CHANGED'});
                 const draft={unitId,values,reviewed,revision:(previous?.revision||0)+1,updatedAt:Date.now(),
                     ...(input.mtlAcceptances?.length ? {mtlAcceptances:copy(input.mtlAcceptances)} : {})};
                 put(tx,stores.drafts,scope,unitId,draft,{unitKey:key(scope,unitId)});return draft;
             },options);
         }
-        const getDraft=(rawScope,unitId,options)=>one(capture(rawScope).id,stores.drafts,unitId,options);
-        const getDraftSummaries=(rawScope,options)=>readRows(capture(rawScope).id,stores.drafts,row=>({
-            unitId:row.value.unitId,revision:row.value.revision,updatedAt:row.value.updatedAt
-        }),options);
+        async function getDraft(rawScope,unitId,options){
+            const draft=await one(capture(rawScope).id,stores.drafts,unitId,options);
+            if(isLocal(rawScope) && draft)validateLocalRecord(await getUnit(rawScope,unitId,options),draft,{draft:true});
+            return draft;
+        }
+        const getDraftSummaries=(rawScope,options)=>readRows(capture(rawScope).id,stores.drafts,row=>{
+            if(isLocal(rawScope) && (!row.value || typeof row.value.unitId!=='string' || !Number.isSafeInteger(row.value.revision) || row.value.revision<1))throw corrupt('draft summary');
+            return {unitId:row.value.unitId,revision:row.value.revision,updatedAt:row.value.updatedAt};
+        },options);
         async function discardDraft(rawScope,unitId,options={}){
             const scope=capture(rawScope).id;
             return transaction([stores.drafts],'readwrite',async tx=>{
@@ -591,11 +746,12 @@
             const mtl=input.mtlAcceptances?.length ? mtlStorage() : null;
             return transaction([stores.meta,stores.cacheUnits,stores.saved,stores.drafts,stores.history,stores.outbox,stores.receipts,stores.memory,stores.memoryHistory,...(mtl?.names || [])],'readwrite',async tx=>{
                 const receipt=await get(tx,stores.receipts,key(scope,input.jobId));
-                if(receipt){if(receipt.signature!==signature)throw Object.assign(new Error('ClientText job ID was reused for different content.'),{code:'SAVE_RECEIPT_MISMATCH'});return {saved:receipt.saved,receipt,replayed:true};}
+                if(receipt){if(receipt.signature!==signature)throw Object.assign(new Error('ClientText job ID was reused for different content.'),{code:'SAVE_RECEIPT_MISMATCH'});if(isLocal(rawScope))validateLocalRecord(unit,receipt.saved);return {saved:receipt.saved,receipt,replayed:true};}
                 const currentMetadata=await get(tx,stores.meta,key(scope,'meta'));
                 const original=await get(tx,stores.cacheUnits,key(cacheForUnit(currentMetadata,unitId),unitId));
                 if(!original || currentMetadata.signature!==metadata.signature)throw new Error('ClientText original changed while saving.');
                 const before=await get(tx,stores.saved,key(scope,unitId)),draft=await get(tx,stores.drafts,key(scope,unitId));
+                if(isLocal(rawScope)){validateLocalRecord(unit,before);validateLocalRecord(unit,draft,{draft:true});}
                 if(own(input,'expectedRevision')&&(before?.revision||0)!==input.expectedRevision)throw Object.assign(new Error('Another tab changed the ClientText saved translation.'),{code:'UNIT_CHANGED'});
                 if(own(input,'expectedDraftRevision')&&(draft?.revision||null)!==input.expectedDraftRevision)throw Object.assign(new Error('Another tab changed this ClientText draft.'),{code:'DRAFT_CHANGED'});
                 const descriptor=metadata.descriptors.find(value=>value.role===unit.role);
@@ -611,7 +767,7 @@
                 await learnMemory(tx,captured.scope,unit,after,input.jobId,after.origin);
                 put(tx,stores.history,scope,input.jobId,{id:input.jobId,unitId,before:before||null,after,origin:after.origin,createdAt:after.savedAt},{unitKey:key(scope,unitId)});
                 if(own(input,'expectedDraftRevision'))del(tx,stores.drafts,scope,unitId);
-                if(options.sync!==false){
+                if(!isLocal(captured.scope) && options.sync!==false){
                     const pending=await get(tx,stores.outbox,key(scope,unitId));
                     const operation={unitId,mutationId:input.jobId,storageProtocol:S.STORAGE_PROTOCOL,role:unit.role,assetHash:descriptor.assetHash,parserVersion:descriptor.parserVersion,
                         ...(acceptedMtl.length ? {mtlAcceptances:copy(input.mtlAcceptances)} : {}),
@@ -632,6 +788,13 @@
         async function listHistory(rawScope,unitId,options={}){
             const scope=capture(rawScope).id;
             const result=await transaction([stores.history],'readonly',async tx=>(await request(tx.objectStore(stores.history).index('by_unit').getAll(key(scope,unitId)))).map(row=>row.value),options);
+            if(isLocal(rawScope) && result.length){
+                const unit=await getUnit(rawScope,unitId,options);
+                for(const entry of result){
+                    if(entry?.unitId!==unitId || typeof entry.origin!=='string')throw corrupt('history identity');
+                    validateLocalRecord(unit,entry.after,{historical:true});validateLocalRecord(unit,entry.before,{historical:true});
+                }
+            }
             return result.sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)).slice(0,options.limit||100);
         }
         async function listWorkspaces(input={},options={}){
@@ -639,8 +802,9 @@
             return transaction([stores.meta],'readonly',async tx=>(await request(tx.objectStore(stores.meta).index('by_account').getAll(accountId))).map(row=>row.value)
                 .filter(row=>Object.entries(input).every(([field,value])=>!['profile','accountId'].includes(field)?row[field]===value:true)),options);
         }
-        const getOutbox=(rawScope,options)=>rows(capture(rawScope).id,stores.outbox,options);
+        const getOutbox=(rawScope,options)=>isLocal(rawScope)?Promise.resolve([]):rows(capture(rawScope).id,stores.outbox,options);
         async function markSending(rawScope,unitId,mutationId,state='sending',options={}){
+            if(isLocal(rawScope))throw new TypeError('Local workbook state cannot enter shared synchronization.');
             const scope=capture(rawScope).id;
             return transaction([stores.outbox],'readwrite',async tx=>{
                 const operation=await get(tx,stores.outbox,key(scope,unitId));
@@ -657,6 +821,7 @@
             return {values,conflicts};
         }
         async function applyRemote(rawScope,input,options={}){
+            if(isLocal(rawScope))throw new TypeError('Local workbook state cannot receive shared synchronization.');
             const captured=capture(rawScope),scope=captured.id,events=Array.isArray(input)?input:input.events||[];
             await requireReady(scope,options);
             return transaction([stores.meta,stores.cacheUnits,stores.saved,stores.outbox,stores.history,stores.memory,stores.memoryHistory],'readwrite',async tx=>{
@@ -692,6 +857,7 @@
             },options);
         }
         async function acknowledge(rawScope,operation,remote,options={}){
+            if(isLocal(rawScope))throw new TypeError('Local workbook state cannot receive shared acknowledgements.');
             const scope=capture(rawScope).id,unitId=operation.unitId;
             return transaction([stores.saved,stores.outbox],'readwrite',async tx=>{
                 const row=await get(tx,stores.saved,key(scope,unitId)),pending=await get(tx,stores.outbox,key(scope,unitId));
@@ -715,7 +881,7 @@
             },options);
         }
         return { import:importContent,importContent,save,getMetadata,getUnits,getUnitsByIds,getCompactUnits,getUnit,getSaved,getAsset,getProof,getCachedOriginal,migrateWorkspace,putDraft,getDraft,getDraftSummaries,discardDraft,
-            listHistory,listWorkspaces,getOutbox,markSending,applyRemote,acknowledge,putRequest,getRequest,listRequests,deleteRequest,getMemory,getMemoryHistory,normalizeScope,scopeKey };
+            listHistory,listWorkspaces,getOutbox,markSending,applyRemote,acknowledge,putRequest,getRequest,listRequests,deleteRequest,seedMemory,seedPreviousVersion,getMemory,getMemoryHistory,normalizeScope,scopeKey };
     }
-    return { stores,names,upgrade,normalizeScope,scopeKey,create };
+    return { stores,names,upgrade,normalizeScope,scopeKey,validateLocalRecord,create };
 });

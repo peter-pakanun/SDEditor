@@ -244,11 +244,11 @@ function openVersion(fixture, version) {
   });
 }
 
-test('v4 to v23 storage upgrade preserves every KV record and revision store and adds ClientText stores', async () => {
+test('v4 to v24 storage upgrade preserves every KV record and revision store and adds ClientText stores', async () => {
   const fixture = versionedStorage(), before = fixture.snapshot();
   const { store } = loadStore(fixture);
   assert.deepEqual(await store.getSettings(), before[0][1].find(([key]) => key === 'settings')[1].value);
-  assert.equal(fixture.version, 23); assert.equal(fixture.requests[0].version, 23);
+  assert.equal(fixture.version, 24); assert.equal(fixture.requests[0].version, 24);
   assert.deepEqual(fixture.createdStores, ['statdescription_zips', ...require('../public/clientTextStore.js').names, ...require('../public/clientTextMtlStore.js').names]); assert.deepEqual(fixture.snapshot(), before);
 });
 
@@ -267,7 +267,7 @@ test('v11 ClientText writers are fenced while original assets, work, history and
   const before = fixture.snapshot(), older = await openVersion(fixture, 11);
   older.onversionchange = () => older.close();
   await loadStore(fixture).store.getSettings();
-  assert.equal(fixture.version, 23); assert.equal(older.closed, true);
+  assert.equal(fixture.version, 24); assert.equal(older.closed, true);
   assert.throws(() => older.transaction(['clienttext_requests'], 'readwrite'), error => error.name === 'InvalidStateError');
   await assert.rejects(openVersion(fixture, 11), error => error.name === 'VersionError');
   assert.deepEqual(fixture.createdStores, ['statdescription_zips', ...require('../public/clientTextMtlStore.js').names]);
@@ -281,7 +281,7 @@ test('the existing v4 versionchange handler closes its connection and later lega
   let changed;
   legacy.onversionchange = event => { changed = event; legacy.close(); };
   const { store } = loadStore(fixture); await store.getSettings();
-  assert.deepEqual(changed, { oldVersion: 4, newVersion: 23 }); assert.equal(legacy.closed, true);
+  assert.deepEqual(changed, { oldVersion: 4, newVersion: 24 }); assert.equal(legacy.closed, true);
   const before = fixture.snapshot();
   assert.throws(() => legacy.transaction('kv', 'readwrite'), { name: 'InvalidStateError' });
   await assert.rejects(openVersion(fixture, 4), { name: 'VersionError' });
@@ -299,7 +299,7 @@ test('v6 writers are excluded without rewriting dictionary scopes or pending mut
   older.onversionchange = () => older.close();
   const { store } = loadStore(fixture);
   await store.getHybridState();
-  assert.equal(fixture.version, 23); assert.equal(older.closed, true);
+  assert.equal(fixture.version, 24); assert.equal(older.closed, true);
   await assert.rejects(openVersion(fixture, 6), { name: 'VersionError' });
   assert.deepEqual(fixture.snapshot(), before, 'The upgrade must not change pending requests, tokens, dictionaries, or recovery copies.');
 });
@@ -321,7 +321,7 @@ test('v12 editors are fenced without changing accepted parsing authority or frag
   const clientTextBefore = await snapshotStores(fixture, names);
   const before=fixture.snapshot(), older=await openVersion(fixture,12);older.onversionchange=()=>older.close();
   await loadStore(fixture).store.getSettings();
-  assert.equal(fixture.version, 23);assert.equal(older.closed,true);
+  assert.equal(fixture.version, 24);assert.equal(older.closed,true);
   await assert.rejects(openVersion(fixture,12),error=>error.name==='VersionError');
   assert.deepEqual(fixture.createdStores,['statdescription_zips',...require('../public/clientTextMtlStore.js').names]);assert.deepEqual(fixture.snapshot(),before);
   assert.deepEqual(await snapshotStores(fixture, names), clientTextBefore,
@@ -333,7 +333,7 @@ test('v13 proof-based writers close before reusable original caches are added wi
   const retained={key:'pending',scope:'scoped-owner',value:{mutationId:'same-id',state:'uncertain',values:{field:' raw\n translation '}}};
   fixture.tables.get('clienttext_outbox').set(retained.key,copy(retained));
   const older=await openVersion(fixture,13);older.onversionchange=()=>older.close();
-  await loadStore(fixture).store.getSettings();assert.equal(fixture.version, 23);assert.equal(older.closed,true);
+  await loadStore(fixture).store.getSettings();assert.equal(fixture.version, 24);assert.equal(older.closed,true);
   await assert.rejects(openVersion(fixture,13),error=>error.name==='VersionError');
   assert.deepEqual(fixture.tables.get('clienttext_outbox').get(retained.key),retained);
   for(const name of ['clienttext_original_caches','clienttext_original_assets','clienttext_original_units'])assert.ok(fixture.tables.has(name));
@@ -352,7 +352,7 @@ test('v14 carry writers are fenced without clearing normalized work, provenance 
   for (const [name, row] of retained) fixture.tables.get(name).set(row.key, copy(row));
   const older = await openVersion(fixture, 14); older.onversionchange = () => older.close();
   await loadStore(fixture).store.getSettings();
-  assert.equal(fixture.version, 23); assert.equal(older.closed, true);
+  assert.equal(fixture.version, 24); assert.equal(older.closed, true);
   await assert.rejects(openVersion(fixture, 14), error => error.name === 'VersionError');
   for (const [name, row] of retained) assert.deepEqual(fixture.tables.get(name).get(row.key), row);
 });
@@ -366,7 +366,7 @@ test('v15 carry writers close before blank-baseline cleanup while existing check
   fixture.tables.get('workspace_records').set(stage.key, copy(stage));
   const before = fixture.snapshot(), older = await openVersion(fixture, 15); older.onversionchange = () => older.close();
   await loadStore(fixture).store.getSettings();
-  assert.equal(fixture.version, 23); assert.equal(older.closed, true);
+  assert.equal(fixture.version, 24); assert.equal(older.closed, true);
   await assert.rejects(openVersion(fixture, 15), error => error.name === 'VersionError');
   assert.deepEqual(fixture.snapshot(), before);
 });
@@ -397,14 +397,14 @@ test('v21 Dropped coalescing writers are fenced while local and shared recovery 
   const before = fixture.snapshot(), older = await openVersion(fixture, 21);
   older.onversionchange = () => older.close();
   await loadStore(fixture).store.getSettings();
-  assert.equal(fixture.version, 23);
+  assert.equal(fixture.version, 24);
   assert.equal(older.closed, true);
   assert.deepEqual(fixture.snapshot(), before, 'The writer fence does not delete or rewrite snapshots, conflicts, retry bodies or edit history.');
   await assert.rejects(openVersion(fixture, 21), error => error.name === 'VersionError');
   assert.throws(() => older.transaction('kv', 'readwrite'), error => error.name === 'InvalidStateError');
 });
 
-test('a final pending v4 transaction commits before v23 workspace migration reads saved text', async () => {
+test('a final pending v4 transaction commits before v24 workspace migration reads saved text', async () => {
   const fixture = versionedStorage(), legacy = await openVersion(fixture, 4);
   legacy.onversionchange = () => legacy.close();
   const pending = legacy.transaction(['kv', 'revisions_poe1'], 'readwrite'); pending.held = true;
@@ -416,8 +416,8 @@ test('a final pending v4 transaction commits before v23 workspace migration read
   assert.equal(fixture.version, 4); assert.equal(legacy.closed, false);
   assert.equal(fixture.tables.get('kv').get('workspace_poe1').value.stagedVersion, undefined);
   pending.release(); await queued(); await queued();
-  assert.equal(legacy.closed, true); assert.equal(fixture.version, 23);
-  assert.ok(fixture.events.indexOf('commit:4') < fixture.events.indexOf('upgrade:4:23'));
+  assert.equal(legacy.closed, true); assert.equal(fixture.version, 24);
+  assert.ok(fixture.events.indexOf('commit:4') < fixture.events.indexOf('upgrade:4:24'));
   const reloaded = loadStore(fixture), migrated = await reloaded.store.getWorkspace('poe1', 'Thai');
   assert.equal(migrated.stagedVersion, 1);
   assert.deepEqual(Array.from(migrated.staged.Thai['a.txt'].translations), ['Final v4 save']);
@@ -431,12 +431,12 @@ test('a blocked upgrade gives reload guidance and never clears saved data', asyn
     && /reload this tab/.test(error.message) && /storage upgrade/.test(error.message) && /saved translations have been kept/.test(error.message));
   assert.equal(fixture.version, 4); assert.deepEqual(fixture.snapshot(), before);
   blocker.close(); await queued();
-  assert.equal(fixture.version, 23); assert.deepEqual(fixture.snapshot(), before);
+  assert.equal(fixture.version, 24); assert.deepEqual(fixture.snapshot(), before);
   assert.deepEqual(await loadStore(fixture).store.getSettings(), before[0][1].find(([key]) => key === 'settings')[1].value);
 });
 
 test('a cached frontend facing newer storage reports VersionError with upgrade guidance and performs no transaction', async () => {
-  const fixture = versionedStorage(24), before = fixture.snapshot();
+  const fixture = versionedStorage(25), before = fixture.snapshot();
   const { store } = loadStore(fixture);
   await assert.rejects(store.getSettings(), error => error.name === 'VersionError' && error.code === 'STORAGE_VERSION_OUTDATED'
     && error.cause.name === 'VersionError' && /latest editor/.test(error.message) && /reload this tab/.test(error.message)
@@ -444,7 +444,7 @@ test('a cached frontend facing newer storage reports VersionError with upgrade g
   assert.deepEqual(fixture.snapshot(), before); assert.equal(fixture.events.length, 0);
 });
 
-test('the save worker and page use the same v23 storage version and preserve existing work while saving', async () => {
+test('the save worker and page use the same v24 storage version and preserve existing work while saving', async () => {
   const fixture = versionedStorage();
   await loadStore(fixture).store.getSettings();
   const worker = loadStore(fixture, true);
@@ -454,7 +454,7 @@ test('the save worker and page use the same v23 storage version and preserve exi
     descriptions: copy(source), revisions: [{ filepath: 'a.txt', lang: 'Thai', savedAt: 2, translations: ['Worker translation'] }] } } });
   for (let attempt = 0; attempt < 10 && !worker.messages.some(message => message.type === 'saved'); attempt++) await queued();
   assert.equal(worker.messages.at(-1).type, 'saved');
-  assert.ok(fixture.requests.every(request => request.version === 23));
+  assert.ok(fixture.requests.every(request => request.version === 24));
   assert.deepEqual(fixture.tables.get('kv').get('workspace_poe1').value.staged.Thai['a.txt'].translations, ['Worker translation']);
   assert.deepEqual(fixture.tables.get('revisions_poe2').get(1).translations, ['German history']);
   assert.deepEqual(fixture.tables.get('kv').get('settings').value.dictionary, [{ find: 'one', replace: 'หนึ่ง' }]);
@@ -640,7 +640,7 @@ test('v18 writers are fenced before v22 quarantine while raw history, drafts and
   const { fixture } = storedPlaceholder({ shared: true }); fixture.version = 18;
   const before = fixture.snapshot(), older = await openVersion(fixture, 18); older.onversionchange = () => older.close();
   await loadStore(fixture).store.getSettings();
-  assert.equal(fixture.version, 23); assert.equal(older.closed, true);
+  assert.equal(fixture.version, 24); assert.equal(older.closed, true);
   await assert.rejects(openVersion(fixture, 18), { name: 'VersionError' });
   assert.deepEqual(fixture.snapshot(), before, 'Schema upgrade retains original evidence until the scoped quarantine transaction.');
 });

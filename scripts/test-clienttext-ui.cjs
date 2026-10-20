@@ -5,6 +5,16 @@ const S=require('../public/clientTextState.js'),Store=require('../public/clientT
 const {fixture,scope,fieldId,unit,asset}=require('./clienttext-storage-fixture.cjs');
 const clone=value=>structuredClone(value),settle=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};};
+// These focused UI tests use the store's transactional fixture. Native browser
+// Web Lock acquisition/exclusion is covered by clienttext-local-browser-check.
+const localAsset={...asset,hash:S.sha256(new TextEncoder().encode('original'))};
+function mockOwnedStore(store){
+    const leases=new Map();
+    return {...store,_leases:leases,async acquire(captured){leases.set(Store.scopeKey(captured),true);},
+        releaseCapturedExcept(keep){const retained=keep&&Store.scopeKey(keep),ids=[...leases.keys()].filter(id=>id!==retained);return()=>ids.forEach(id=>leases.delete(id));},
+        releaseExcept(keep){const retained=keep&&Store.scopeKey(keep);for(const id of leases.keys())if(id!==retained)leases.delete(id);}};
+}
+
 function harness(changes={}){
     let nextId=0;
     const window={StatDescCodec:require('../public/statDescCodec.js'),ClientTextCodec:require('../public/clientTextCodec.js'),ClientTextExportProgress:require('../public/clientTextExportProgress.js'),ClientTextState:S,ClientTextStore:Store,TranslationDiagnostics:require('../public/translationDiagnostics.js'),
@@ -3914,12 +3924,12 @@ test('cached ClientText opening uses the shared initialization owner and skips w
     assert.deepEqual(app.workspaceInitializationRows.map(row=>row.label),['Preserving unsaved edits','Selecting workbook language','Loading cached translations','Preparing context references','Preparing Dictionary matches','Opening ClientText workspace']);
     assert.equal(app.workspaceInitializationRows.every(row=>row.status==='done'),true);assert.equal(app.ctUnits[0].id,original.id);
 });
-test('cached and temporary workbooks select their language and settle watchers before incoming reads or activation',async()=>{
-    for(const temporary of [false,true]){
-        const selected={...scope,...(temporary?{groupId:'local:test:language',versionId:'local:test:version'}:{})},f=fixture(),started=deferred(),pending=deferred();
-        await f.store.import(selected,{units:[unit()],assets:[asset]});let reads=0,settled=false,language='German',watch=false;
+test('cached and private local workbooks select their language and settle watchers before incoming reads or activation',async()=>{
+    for(const local of [false,true]){
+        const selected={...scope,...(local?{groupId:'local:test:language',versionId:'local:test:version'}:{})},f=fixture(),started=deferred(),pending=deferred();
+        await f.store.import(selected,{units:[unit()],assets:[local?localAsset:asset]});let reads=0,settled=false,language='German',watch=false;
         const store={...f.store,async seedMemory(){assert.equal(settled,true);assert.equal(language,selected.language);},async getUnits(captured,options){reads++;assert.equal(language,selected.language);assert.equal(settled,true);assert.equal(app.ctActive,false);return f.store.getUnits(captured,options);}},
-            {app,mixin}=initializationHarness({_ctStore:store,_ctTestStores:new Map(temporary?[[selected.groupId,store]]:[])});
+            {app,mixin}=initializationHarness({_ctStore:store,_ctLocalStore:local?mockOwnedStore(store):undefined});
         Object.defineProperty(app,'lang',{get:()=>language,set:value=>{language=value;watch=true;}});
         app.$nextTick=async()=>{if(watch){watch=false;mixin.watch.lang.call(app);assert.equal(app.ctActive,false);app._cloudLanguageSwitch=pending.promise;started.resolve();}};
         const opening=app.ctActivate(selected,{});await started.promise;
@@ -3952,10 +3962,10 @@ test('cancellation during language selection cannot overwrite a newer account, p
     assert.equal(app.ctBusy,true);assert.equal(app.ctError,'');
 });
 test('Cancel during language selection releases its own busy state without reading or activating the workbook',async()=>{
-    for(const temporary of [false,true]){
-        const selected={...scope,...(temporary?{groupId:'local:test:cancel-language',versionId:'local:test:version'}:{})},
+    for(const local of [false,true]){
+        const selected={...scope,...(local?{groupId:'local:test:cancel-language',versionId:'local:test:version'}:{})},
             store={async getUnits(){reads++;return[];},async getSaved(){reads++;return{};}},
-            {app}=initializationHarness({lang:'German',_ctStore:store,_ctTestStores:new Map(temporary?[[selected.groupId,store]]:[])}),
+            {app}=initializationHarness({lang:'German',_ctStore:store,_ctLocalStore:local?mockOwnedStore(store):undefined}),
             started=deferred(),pending=deferred();let reads=0;
         app.$nextTick=async()=>{if(app.ctBusy&&app.lang===scope.language){app._cloudLanguageSwitch=pending.promise;started.resolve();}};
         const opening=app.ctActivate(selected,{});await started.promise;assert.equal(app.ctBusy,true);app.ctCancel();
@@ -4388,14 +4398,14 @@ test('offline test preparation accepts individual paired-language roles without 
     await h.app.ctPrepareUpload();assert.match(h.app.ctUploadError,/one language at a time/);assert.equal(h.parseCalls.length,0);
 });
 
-test('offline test activation, drafts, save/history and exit use memory and restore normal filters',async()=>{
-    const Memory=require('../public/clientTextMemoryStore.js'),store=Memory.create(),original=unit(),
+test('private local activation, drafts, save/history and exit retain durable work and restore normal filters',async()=>{
+    const f=fixture(),store=f.store,original=unit(),
         testScope={...scope,versionId:'local:test:version',groupId:'local:test:group',language:'French'},
-        metadata={version:{id:testScope.versionId,name:'Test Sheet Offline'},group:{id:testScope.groupId,contentMode:'clienttext',language:'French'}};
-    await store.import(testScope,{units:[original],assets:[asset],metadata});
+        metadata={version:{id:testScope.versionId,name:'Local workbook'},group:{id:testScope.groupId,versionId:testScope.versionId,contentMode:'clienttext',language:'French'}};
+    await store.import(testScope,{units:[original],assets:[localAsset],metadata});
     let memoryReads=0,dictionarySnapshots=0;
     const h=initializationHarness({lang:'Thai',managedManagerAccess:true,ctTool:'history',ctSelectedFilters:['saved'],dictionary:[{_id:'term',find:'Term',replace:'Normal',alts:[]}],
-        _ctTestStores:new Map([[testScope.groupId,store]]),_ctStore:new Proxy({}, {get(_target,name){if(name==='getMemory')return async captured=>{memoryReads++;assert.equal(captured.language,'French');return {units:[]};};assert.fail('Test operation must not access durable authoring storage: '+String(name));}})}),{app,mixin}=h;
+        _ctLocalStore:mockOwnedStore(store),_ctStore:new Proxy({}, {get(_target,name){if(name==='getMemory')return async captured=>{memoryReads++;assert.equal(captured.language,'French');return {units:[]};};assert.fail('Private workbook authoring must use its owned local adapter: '+String(name));}})}),{app,mixin}=h;
     app.ensureDictionarySnapshot=async()=>{dictionarySnapshots++;};
     app.managedOnlineAvailable=true;app.cloudCanAccessAllLanguages=true;app._cloud={request(){assert.fail('Test operation must not request cloud data');}};
     assert.equal(await app.ctActivate(testScope,metadata),true);assert.equal(app.lang,'French');assert.equal(app.ctOfflineTest,true);assert.ok(app._ctNpcIndex);assert.ok(app._ctConvoIndex);
@@ -4403,23 +4413,24 @@ test('offline test activation, drafts, save/history and exit use memory and rest
     assert.equal(memoryReads,1);assert.equal(dictionarySnapshots,1);app.dictionary[0].replace='Temporary';
     for(const method of ['ctFlushDraft','ctLoadHistory','ctLoadMemory','ctFlushCommentDraft'])app[method]=mixin.methods[method].bind(app);
     await app.ctSelect(app.ctUnits[0],true);app.ctValues[fieldId]='Exact @ text\\n\r\n';app.ctDraftDirty=true;
-    assert.equal(await app.ctSave(),true);await settle();
+    assert.equal(await app.ctSave(),true);await app.ctLoadHistory();await settle();
     assert.equal(app.ctSaved[original.id].values[fieldId],'Exact @ text\\n\r\n');assert.equal(app.ctHistory.length,1);
     app.ctCommentText='Private test text';assert.equal(await app.ctPostComment(),false);
     assert.equal(await app.ctLoadReplyCommentDraft(original.id),null);await app.ctFlushCommentDraft();
     const oldScope=clone(testScope);assert.equal(await app.ctShowVersionChooser(),true);
-    assert.equal(app.ctActive,false);assert.equal(app._ctTestStores.size,0);assert.deepEqual(clone(app.ctValues),{});assert.deepEqual(clone(app.ctReviewed),{});
+    assert.equal(app.ctActive,false);assert.deepEqual(clone(app.ctValues),{});assert.deepEqual(clone(app.ctReviewed),{});
     assert.deepEqual(Array.from(app.ctSelectedFilters),['saved']);assert.equal(app.ctTool,'history');assert.equal(app._ctDraftHeads.size,0);
     assert.equal(app.dictionary[0].replace,'Normal');assert.equal(app._ctTestDictionary,null);
-    assert.throws(()=>app.ctStorage(oldScope),/session has ended/);await assert.rejects(store.getSaved(oldScope),{code:'LOCAL_TEST_DISPOSED'});
+    assert.strictEqual(app.ctStorage(oldScope),app._ctLocalStore);assert.equal((await store.getSaved(oldScope))[original.id].values[fieldId],'Exact @ text\\n\r\n');assert.equal((await store.listHistory(oldScope,original.id)).length,1);
+    assert.equal(await app.ctActivate(oldScope,await store.getMetadata(oldScope)),true);assert.equal(app.ctSaved[original.id].values[fieldId],'Exact @ text\\n\r\n');
 });
 
 test('failed or cancelled test Dictionary preparation restores normal rows without ending another session',async()=>{
     for(const cancelled of [false,true]){
-        const store=require('../public/clientTextMemoryStore.js').create(),selected={...scope,groupId:'local:test:dictionary-setup'},pending=deferred(),started=deferred();
-        await store.import(selected,{units:[unit()],assets:[asset]});
+        const f=fixture(),store=f.store,selected={...scope,versionId:'local:test:dictionary-version',groupId:'local:test:dictionary-setup'},pending=deferred(),started=deferred();
+        await store.import(selected,{units:[unit()],assets:[localAsset]});
         const {app}=initializationHarness({lang:scope.language,dictionary:[{_id:'normal',find:'Term',replace:'Original',alts:[]}],
-            _ctTestStores:new Map([[selected.groupId,store]]),_ctStore:{async getMemory(){return {units:[]};}}});
+            _ctLocalStore:mockOwnedStore(store),_ctStore:{async getMemory(){return {units:[]};}}});
         app.ensureDictionarySnapshot=async()=>{app.dictionary[0].replace='Preparation-only';started.resolve();await pending.promise;if(!cancelled)throw new Error('Snapshot failed');};
         const opening=app.ctActivate(selected,{});await started.promise;
         if(cancelled)app.ctCancel();pending.resolve();assert.equal(await opening,false);
@@ -4478,7 +4489,7 @@ test('optional history toggle clears prepared state while retaining hidden selec
     app.ctChooseFiles({target:{files:[new File(['ignored'],'German.xlsx')]}},true);
     assert.equal(app.ctUploadHistoryFiles.length,1,'A hidden history selector cannot add a workbook');
     await app.ctPrepareUpload();assert.equal(app.ctUploadError,'');assert.equal(parseCalls.length,1);assert.equal(parseCalls[0].filename,'Thai.xlsx');
-    assert.equal(app.ctPrepared[0].previous,undefined,'Unchecked history is excluded from the prepared in-memory version');
+    assert.equal(app.ctPrepared[0].previous,undefined,'Unchecked history is excluded from the prepared local version');
     app.ctSetHistoryComparison(true);assert.equal(app.ctUploadHistory,true);assert.equal(app.ctPrepared.length,0);assert.strictEqual(app.ctUploadHistoryFiles[0],previous);
     app.ctUploadTest=false;app.ctChooseFiles({target:{files:[new File(['ignored'],'German.xlsx')]}},true);
     assert.equal(app.ctUploadHistoryFiles.length,1,'Ordinary importers cannot add to test history');
@@ -4491,15 +4502,15 @@ test('offline importer markup separates current and optional history selectors w
     assert.match(html,/ctUploadHistoryFiles/);assert.match(html,/ctSetHistoryComparison/);
 });
 
-test('offline Outdated import history exposes old English and removed fields through the field toolbar without durable or cloud access',async()=>{
-    const Memory=require('../public/clientTextMemoryStore.js'),store=Memory.create(),previous=unit('Previous English','Previous translation'),current=unit('Current English','Current translation'),
+test('local Outdated import history exposes retained old English and removed fields without cloud access',async()=>{
+    const f=fixture(),store=f.store,previous=unit('Previous English','Previous translation'),current=unit('Current English','Current translation'),
         testScope={...scope,versionId:'local:test:v2',groupId:'local:test:g2'},previousScope={...scope,versionId:'local:test:v1',groupId:'local:test:g1'};
-    previous.developerNotes='Old developer note';previous.fields.push({id:'removed',name:'Removed field',source:'Old removed English',target:'Old removed translation',kind:'text'});
-    await store.import(previousScope,{units:[previous],assets:[asset]});await store.import(testScope,{units:[current],assets:[asset]});await store.seedPreviousVersion(testScope,previousScope);
+    previous.developerNotes='Old developer note';previous.fields.push({id:'removed',name:'Removed field',source:'Old removed English',target:'Old removed translation',kind:'text',sourceCell:'D2',targetCell:'E2'});
+    await store.import(previousScope,{units:[previous],assets:[localAsset]});await store.import(testScope,{units:[current],assets:[{...localAsset,hash:S.sha256(new TextEncoder().encode('current')),blob:new Blob(['current'])}],previousScope});
     const {app}=enableHistory(harness({ctWorkspace:{scope:testScope},ctUnits:[current],ctSelection:current.id,_ctUnitIndex:new Map([[current.id,current]]),
-        ctValues:S.valuesFor(current),ctSaved:await store.getSaved(testScope),_ctTestStores:new Map([[testScope.groupId,store]]),
+        ctValues:S.valuesFor(current),ctSaved:await store.getSaved(testScope),_ctLocalStore:mockOwnedStore(store),
         managedOnlineAvailable:true,cloudCanAccessAllLanguages:true}));
-    app._ctStore=new Proxy({}, {get(){assert.fail('A test comparison must never touch IndexedDB');}});
+    app._ctStore=new Proxy({}, {get(){assert.fail('Private comparison must use its local store adapter');}});
     app._cloud={request(){assert.fail('A test comparison must never reach the API');}};
     assert.equal(app.ctStatus(current).outdated,true);assert.equal(app.ctStatus(current).saved,false);
     assert.equal(await app.ctLoadHistory(),true);assert.equal(app.ctHistory.length,1);assert.equal(app.ctHistory[0].action,'version_import');
@@ -4511,21 +4522,43 @@ test('offline Outdated import history exposes old English and removed fields thr
     assert.equal(oldText(rows[0].target),'Previous translation');assert.equal(newText(rows[0].target),'Current translation');
     assert.equal(rows.find(field=>field.id==='removed').removed,true);assert.equal(oldText(toolbar.detailNotes),'Old developer note');
     assert.equal(app.ctWorkspace.scope.groupId,testScope.groupId);assert.equal(app.ctValues[fieldId],'Current translation');
-    app.ctFence();assert.equal(app._ctTestStores.size,0);await assert.rejects(store.getUnit(previousScope,previous.id),{code:'LOCAL_TEST_DISPOSED'});
+    app.ctFence();await settle();assert.equal((await store.getUnit(previousScope,previous.id)).fields[0].source,'Previous English');assert.equal((await store.listHistory(testScope,current.id)).length,1);
 });
 
-test('late test draft work cannot fall back to durable storage after disposal',async()=>{
+test('context fencing waits for an in-flight local draft before releasing ownership and retains its old scope',async()=>{
     const pending=deferred(),started=deferred(),testScope={...scope,versionId:'local:test:v',groupId:'local:test:g'},
         {app}=harness({ctWorkspace:{scope:testScope},ctDraftDirty:true});
-    let disposed=false;
-    const memory={async putDraft(){started.resolve();await pending.promise;if(disposed)throw Object.assign(new Error('closed'),{stale:true});return{revision:1};},dispose(){disposed=true;}};
-    app._ctTestStores=new Map([[testScope.groupId,memory]]);
-    app._ctStore=new Proxy({}, {get(){assert.fail('A stale test must never use durable storage');}});
-    const saving=app.ctFlushDraft();await started.promise;app.ctFence();pending.resolve();assert.equal(await saving,false);
-    assert.equal(app.ctActive,false);assert.deepEqual(clone(app.ctValues),{});assert.equal(app._ctTestStores.size,0);
+    let released=false,writes=0;
+    const local={async putDraft(captured,id,input){assert.equal(released,false);assert.deepEqual(clone(captured),testScope);writes++;started.resolve();await pending.promise;return{revision:1};},
+        releaseCapturedExcept(){return()=>{released=true;};}};
+    app._ctLocalStore=local;app._ctStore=new Proxy({}, {get(){assert.fail('A captured private draft must never fall back to another store');}});
+    const saving=app.ctFlushDraft();await started.promise;app.ctFence();assert.equal(released,false);
+    pending.resolve();assert.equal(await saving,true);await settle();
+    assert.equal(released,true);assert.equal(writes,1);assert.equal(app.ctActive,false);assert.deepEqual(clone(app.ctValues),{});
 });
 
-test('changing Settings to the test language still ends the temporary session',()=>{
+test('local checkpoint indication waits for transaction completion and preserves failed editor text',async()=>{
+    const pending=deferred(),started=deferred(),testScope={...scope,versionId:'local:test:pending-v',groupId:'local:test:pending-g'},
+        {app,original}=harness({ctWorkspace:{scope:testScope},ctDraftDirty:true,ctValues:{[fieldId]:'active local text'}});
+    app._ctLocalStore={async putDraft(){started.resolve();await pending.promise;return{revision:1};}};
+    app.ctRefreshDraftSummaries=async()=>{};app.ctQueueDraft();assert.equal(app.ctLocalDraftState,'pending');
+    await started.promise;assert.equal(app.ctLocalDraftState,'pending');assert.equal(app.ctSaved[original.id],undefined);
+    pending.resolve();await app._ctDraftQueue;await settle();assert.equal(app.ctLocalDraftState,'checkpointed');assert.equal(app.ctDraftDirty,true);
+    app._ctLocalStore.putDraft=async()=>{throw Error('Quota exceeded');};app.ctValues[fieldId]='new text that failed';app.ctQueueDraft();
+    assert.equal(await app.ctFlushDraft(),false);assert.equal(app.ctLocalDraftState,'failed');assert.equal(app.ctSaved[original.id],undefined);
+    assert.equal(app.ctValues[fieldId],'new text that failed');assert.match(app.ctError,/Draft was not stored/);clearTimeout(app._ctDraftTimer);
+});
+
+test('local draft discard requires explicit confirmation scoped to the selected ID',async()=>{
+    const testScope={...scope,versionId:'local:test:discard-v',groupId:'local:test:discard-g'},
+        {app}=harness({ctWorkspace:{scope:testScope},ctDraftDirty:true,ctValues:{[fieldId]:'keep local draft'}});
+    let confirms=0;app.appConfirm=async(message,options)=>{confirms++;assert.match(message,/this ID/);assert.equal(options.confirmLabel,'Discard draft');return false;};
+    app.ctFlushDraft=async()=>assert.fail('Rejected discard cannot checkpoint or delete work');
+    app._ctLocalStore=new Proxy({}, {get(){assert.fail('Rejected discard cannot touch storage');}});
+    assert.equal(await app.ctDiscardDraft(),false);assert.equal(confirms,1);assert.equal(app.ctValues[fieldId],'keep local draft');assert.equal(app.ctDraftDirty,true);
+});
+
+test('changing Settings to the workbook language closes its editor without deleting durable work',()=>{
     const {app,mixin}=harness({lang:'French',ctWorkspace:{scope:{...scope,versionId:'local:test:v',groupId:'local:test:g',language:'French'}}});
     app._ctStore={};mixin.watch.lang.call(app);
     assert.equal(app.ctActive,false);assert.equal(app.ctWorkspace,null);assert.deepEqual(clone(app.ctValues),{});
@@ -4680,14 +4713,14 @@ test('unknown error names and codes cannot enter the copyable export report',asy
     assert.equal(h.app.ctExportTiming.failure.name,'Error');assert.equal(h.app.ctExportTiming.failure.code,'CLIENTTEXT_EXPORT_FAILED');
     assert(!h.mixin.computed.ctExportLogText.call(h.app).includes('PRIVATE'));
 });
-test('temporary workbook export failure keeps the tab open and never recommends reopening or reloading',async()=>{
+test('private local workbook export failure retains its workspace and reports durable recovery truthfully',async()=>{
     const h=exportHarness();h.group.id='local:test:group';h.version.id='local:test:version';
-    h.app.ctWorkspace={scope:{...scope,groupId:h.group.id,versionId:h.version.id}};h.app._ctTestStores=new Map([[h.group.id,h.app._ctStore]]);
-    h.app._ctStore.getUnitsByIds=async()=>{throw Error('Synthetic lookup failure');};
+    h.app.ctWorkspace={scope:{...scope,groupId:h.group.id,versionId:h.version.id}};h.app._ctLocalStore=mockOwnedStore(h.app._ctStore);
+    h.app._ctLocalStore.getUnitsByIds=async()=>{throw Error('Synthetic lookup failure');};
     assert.equal(await h.app.ctDownload(null,h.group,h.team.language,h.version),false);
     const report=h.mixin.computed.ctExportLogText.call(h.app);
-    assert.equal(h.app.ctExportTiming.memoryOnly,true);assert.match(report,/only in this open tab/);assert.match(report,/recovery copy before reloading/);assert(!report.includes('Reopen the same content group'));
-    assert.equal(h.downloads.length,0);assert.equal(h.app._ctTestStores.size,1);
+    assert.equal(h.app.ctExportTiming.localOnly,true);assert(!report.includes('only in this open tab'));assert(!report.includes('clears this session'));assert.match(report,/Local workbook/);
+    assert.equal(h.downloads.length,0);assert.ok(h.app._ctLocalStore);
 });
 test('unavailable file backing is reported at workbook byte read before any export worker starts',async()=>{
     for(const name of ['NotFoundError','NotReadableError']){

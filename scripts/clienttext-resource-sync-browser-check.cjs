@@ -14,7 +14,7 @@ module.exports=async function({page,bootstrap,files,failures}){
         await upload.getByRole('button',{name:'Open',exact:true}).click();
         await target.waitForFunction(()=>window.__clientFixtureApp.ctActive&&window.__clientFixtureApp.ctOfflineTest&&!window.__clientFixtureApp.ctBusy&&!window.__clientFixtureApp.workspaceInitializationActive);
         assert.equal(await target.evaluate(()=>window.__clientFixtureApp.ctResourceSyncEnabled),true);
-        console.log('Opened temporary workbook with authorized sync');
+        console.log('Opened durable local workbook with authorized resource sync');
         await target.evaluate(async()=>{
             const vm=window.__clientFixtureApp;vm.appConfirm=async()=>true;
             await vm.ctSelect(vm.ctUnits.find(unit=>unit.role==='normal'&&unit.recordId==='record'),true);
@@ -31,7 +31,7 @@ module.exports=async function({page,bootstrap,files,failures}){
                 return put.call(this,value,...rest);
             };
             const vm=window.__clientFixtureApp,request=vm._cloud.request.bind(vm._cloud);
-            vm._cloud.request=async(path,...rest)=>{if(/local(?::|%3A)test/.test(path))window.__resourceRequests.push(path);return request(path,...rest);};
+            vm._cloud.request=async(path,...rest)=>{if(/local(?::|%3A)test/.test(path) || JSON.stringify(rest[0]?.body || {}).includes('local:test:'))window.__resourceRequests.push(path);return request(path,...rest);};
             vm.dictionary=[{_id:'online-sword',find:'Sword',replace:'Online sword',alts:[],tlnote:'Online note'}];vm.dictionaryEntryInput(vm.dictionary[0]);
         });
         await app(async()=>{const vm=window.__clientFixtureApp;await vm.saveSettings();await vm._cloud.sync();});
@@ -89,9 +89,12 @@ module.exports=async function({page,bootstrap,files,failures}){
         await target.fill('Queued offline TM');assert.equal(await app(()=>window.__clientFixtureApp.ctSave()),true);
         const pending=await app(async()=>{
             const vm=window.__clientFixtureApp;
-            return {tm:(await OfflineStore.getTranslationMemoryPending(vm.tmScope())).length,workbook:vm.ctSaved[vm.ctSelection].values[vm.ctFocusedField],writes:window.__resourceWrites,requests:window.__resourceRequests};
+            return {scope:JSON.parse(JSON.stringify(vm.ctWorkspace.scope)),unitId:vm.ctSelection,fieldId:vm.ctFocusedField,tm:(await OfflineStore.getTranslationMemoryPending(vm.tmScope())).length,workbook:vm.ctSaved[vm.ctSelection].values[vm.ctFocusedField],writes:window.__resourceWrites,requests:window.__resourceRequests};
         });
-        assert.ok(pending.tm>0);assert.equal(pending.workbook,'Queued offline TM');assert.deepEqual(pending.writes,[]);assert.deepEqual(pending.requests,[]);
+        assert.ok(pending.tm>0);assert.equal(pending.workbook,'Queued offline TM');
+        assert.ok(pending.writes.length>0,'Workbook commits are durable independently of resource sync');
+        assert.ok(pending.writes.every(write=>['clienttext_memory','clienttext_memory_history','clienttext_workspaces','clienttext_saved','clienttext_drafts','clienttext_history','clienttext_receipts','clienttext_mtl_meta','clienttext_mtl_reviews','clienttext_mtl_candidates'].includes(write.store)),'Only private workbook stores receive local scope records');
+        assert.deepEqual(pending.requests,[],'Local workbook identity never enters resource transport');
         await app(()=>window.__clientFixtureApp.ctShowVersionChooser());
         assert.equal(await app(()=>window.__clientFixtureApp.ctActive),false);
         await app(async()=>{
@@ -105,9 +108,10 @@ module.exports=async function({page,bootstrap,files,failures}){
         await page.reload();await page.waitForFunction(()=>window.__clientFixtureApp?.offlineStoreReady&&!window.__clientFixtureApp.workspaceInitializationActive);
         assert.equal(await app(()=>window.__clientFixtureApp.ctActive),false);
         assert.equal(await app(()=>window.__clientFixtureApp.ctWorkspace),null);
+        assert.equal(await page.evaluate(async pending=>(await window.__clientFixtureApp._ctStore.getSaved(pending.scope))[pending.unitId].values[pending.fieldId],pending),'Queued offline TM');
         assert.deepEqual(inference,[]);assert.deepEqual(failures,[]);
         console.log(JSON.stringify({ok:true,checks:['explicit authorized resource sync with two real API clients','incoming Dictionary preserves unsaved workbook draft',
             'live context JSON refresh and immutable submitted snapshot','shared TM pairs/corrections retain ClientText field identity','SD suggestions exclude ClientText pairs',
-            'offline Dictionary/TM queues survive test exit and retry on reconnect','no temporary workbook IndexedDB writes or content-group uploads','reload clears temporary workbook; no inference']},null,2));
+            'offline Dictionary/TM queues survive workbook exit and retry on reconnect','private workbook writes remain separate from resource transport; no content-group uploads','reload retains durable workbook; no inference']},null,2));
     }finally{await peerContext.close();}
 };

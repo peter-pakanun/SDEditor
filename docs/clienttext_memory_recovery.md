@@ -1,5 +1,7 @@
 # Recovering values from a still-open temporary ClientText session
 
+This guide applies to older tabs running the memory-only release. New **Local workbooks** use [durable local recovery](clienttext_local_workbooks.md). A refreshed or closed old memory tab cannot be recovered from IndexedDB; it never wrote the workbook there.
+
 Keep the affected tab open. Do not reload, close it, change workbooks or accounts, or clear browser storage. Dictionary/TM synchronization does not persist the temporary workbook's edits. A deployed code fix cannot replace the code already running in that tab.
 
 The reviewed [local recovery script](../scripts/clienttext-memory-recovery-console.js) reads the active temporary session's committed values, all stored drafts and the active unsaved field values. It downloads `SDEditor-ClientText-memory-recovery.json` locally. It does not call the API, start a workbook worker, change saved/draft values, write browser storage, or switch or reload the workbook. The snapshot contains translation text; keep it local unless deliberately sharing it for recovery.

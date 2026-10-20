@@ -153,7 +153,7 @@
             ctDictionaryFilter:'',ctDictionaryPage:1,ctDictionaryEditingId:'',ctDictionaryEditOrder:[],
             ctPreviewGggVars: {}, ctPreviewAffixes:previewAffixesFor(null), ctPreviewAffixExamples:previewAffixExamples,
             ctDictionaryPack:null, ctDraftSummaries:[], ctCommentPostError:'',
-            ctPeers: [], ctLocalWorkspaces: [], ctRequests: [], ctUploadVisible: false, ctUploadLocal: false, ctUploadTest: false,
+            ctLocalEmergencyDrafts: [], ctLocalIssue: '', ctLocalDraftState: '', ctLocalBackupBusy: false, ctPeers: [], ctLocalWorkspaces: [], ctRequests: [], ctUploadVisible: false, ctUploadLocal: false, ctUploadTest: false,
             ctUploadVersion: null, ctUploadPredecessor: null, ctUploadName: '', ctUploadDeadline: '', ctUploadFiles: raw([]), ctPrepared: raw([]),
             ctUploadHistory: false, ctUploadHistoryFiles: raw([]), ctWorkbookDragDepth: 0,
             ctUploadAssignments: teams.slice(), ctPolicy: null, ctPolicyText: '', ctUploadError: '', ctUploading: false, ctDuplicateChoices: {},
@@ -678,8 +678,13 @@
                 else if(this.ctActive)this.$nextTick?.(()=>{if(this.ctActive && !this.versionChooserVisible)this.ctRefreshLayout();});
             }
         },
-        mounted() { this._ctStore = root.ClientTextStore.create(); this._ctWorker = root.ClientTextWorkerClient.create(); },
-        beforeUnmount() { this.ctFence(); this._ctWorker?.dispose(); clearTimeout(this._ctSearchTimer); },
+        mounted() {
+            this._ctStore = root.ClientTextStore.create(); this._ctLocalStore = root.ClientTextLocalStore.create(); this._ctWorker = root.ClientTextWorkerClient.create();
+            this._ctLocalVisibility = () => { if(root.document.hidden && this.ctOfflineTest)this.ctFlushDraft().catch(()=>{}); };
+            this._ctLocalUnload = event => {if(this.ctLocalEmergencyDrafts.length || this.ctOfflineTest && (this.ctLocalDraftState==='pending' || this.ctDraftBlocked)){event.preventDefault();event.returnValue='';}};
+            root.document.addEventListener('visibilitychange',this._ctLocalVisibility);root.addEventListener('beforeunload',this._ctLocalUnload);
+        },
+        beforeUnmount() { root.document.removeEventListener('visibilitychange',this._ctLocalVisibility);root.removeEventListener('beforeunload',this._ctLocalUnload);this.ctFence(); this._ctWorker?.dispose(); clearTimeout(this._ctSearchTimer); },
         methods: {
             ...exportProgress?.mixin.methods,
             ctFieldController(field) {return root.EditorSession.fieldController(this,field);},
@@ -1286,6 +1291,7 @@
             },
             async ctDiscardDraft() {
                 if(this.ctBusy || !this.ctCurrentUnit || !this.ctDraftDirty)return false;
+                if(this.ctOfflineTest && !await this.appConfirm('Discard the unsaved draft for this ID? Committed text and other drafts will be kept.',{title:'Discard this draft?',confirmLabel:'Discard draft'}))return false;
                 const ctx=this.ctContext(),unitId=this.ctSelection,signature=JSON.stringify([this.ctValues,this.ctReviewed]);
                 if(!await this.ctFlushDraft() || !this.ctCurrent(ctx) || this.ctSelection!==unitId)return false;
                 const revision=this._ctDraftRevision;this.ctBusy=true;
@@ -1337,11 +1343,42 @@
             },
             ctScope(versionId, groupId, language = this.lang) { return { accountId: this.cloudProfileId || this.cloudUser?.id || 'guest', game: this.gameVersion, branchId: this.branchId || 'default', versionId, groupId, language }; },
             ctStorage(scope) {
-                // A closed test scope must never fall back to durable storage.
-                if(!String(scope?.groupId || '').startsWith('local:test:'))return this._ctStore;
-                const store=this._ctTestStores?.get(scope.groupId);
-                if(!store)throw new Error('This in-memory test session has ended. Open Test Sheet Offline again.');
-                return store;
+                if(String(scope?.groupId || '').startsWith('local:test:'))return this._ctLocalStore;
+                return this._ctStore;
+            },
+            async ctBackupLocal() {
+                if(!this.ctOfflineTest || this.ctLocalBackupBusy)return false;
+                const ctx=this.ctContext();this.ctLocalBackupBusy=true;
+                try {
+                    const checkpointed=await this.ctFlushDraft();
+                    // Even a failed checkpoint can export durable work and a
+                    // detached current editor recovery file in the same ZIP.
+                    const blob=await this._ctLocalStore.backup(ctx.scope);
+                    if(!this.ctCurrent(ctx))return false;
+                    let output=blob;
+                    if(!checkpointed){const zip=await root.JSZip.loadAsync(blob);zip.file('uncheckpointed-editor.json',JSON.stringify({scope:ctx.scope,unitId:this.ctSelection,values:copy(this.ctValues),reviewed:copy(this.ctReviewed)}));output=await zip.generateAsync({type:'blob'});}
+                    root.saveAs(output,'SDEditor-local-workbook-'+ctx.scope.groupId.slice(-8)+'.zip');
+                    postNotice(this,'ctNotice',checkpointed?'Local recovery backup downloaded. It includes originals, history and drafts.':'Recovery backup downloaded with uncheckpointed-editor.json. Keep the tab open; those newest values need manual recovery.');return true;
+                } catch(error){postNotice(this,'ctError','Backup failed: '+error.message);return false;}
+                finally{this.ctLocalBackupBusy=false;}
+            },
+            ctDownloadDraftRecovery() {
+                if(!this.ctOfflineTest || !this.ctSelection)return;
+                root.saveAs(new Blob([JSON.stringify({format:'clienttext-editor-recovery-v1',scope:copy(this.ctWorkspace.scope),unitId:this.ctSelection,values:copy(this.ctValues),reviewed:copy(this.ctReviewed)},null,2)],{type:'application/json'}),'SDEditor-unsaved-editor.json');
+            },
+            ctDownloadEmergencyDraft(draft) {
+                root.saveAs(new Blob([JSON.stringify({format:'clienttext-editor-recovery-v1',...draft},null,2)],{type:'application/json'}),'SDEditor-unstored-'+draft.scope.groupId.slice(-8)+'.json');
+            },
+            async ctRestoreLocalBackup(event) {
+                const file=event.target.files?.[0];event.target.value='';if(!file)return;
+                if(this.ctActive && !await this.ctFlushDraft())return false;
+                this.ctLocalBackupBusy=true;this.ctLocalIssue='';const key=this.managedCatalogScope;
+                try {
+                    const scope=await this._ctLocalStore.restore(file,this.ctRequestScope(),this._ctWorker,{guard:()=>key===this.managedCatalogScope});
+                    if(key!==this.managedCatalogScope)return false;
+                    await this.ctRefreshLocal();return await this.ctOpenCached(await this._ctStore.getMetadata(scope));
+                } catch(error){this.ctLocalIssue='Backup was not restored: '+error.message;return false;}
+                finally{this.ctLocalBackupBusy=false;this._ctLocalStore.releaseExcept(this.ctWorkspace?.scope.groupId?.startsWith('local:test:')?this.ctWorkspace.scope:null);}
             },
             ctPersistentDictionary() { return this._ctTestDictionary?.base || this.dictionary; },
             ctBeginTestDictionary(scope) {
@@ -1367,7 +1404,16 @@
                 this.ctAbortExport?.();
                 const exitingTest=this.ctOfflineTest;
                 this.ctCloseScanDialog(false);this.ctClearScanResults();
-                this.ctFlushDraft().catch(()=>{});
+                const emergency=exitingTest && this.ctDraftDirty && this.ctSelection ? raw({id:uuid(),scope:copy(this.ctWorkspace.scope),unitId:this.ctSelection,values:copy(this.ctValues),reviewed:copy(this.ctReviewed),pending:true}) : null;
+                if(emergency)this.ctLocalEmergencyDrafts.push(emergency);
+                const localFlush=this.ctFlushDraft();localFlush.catch(()=>{});
+                if(emergency)localFlush.then(stored=>{
+                    if(stored)this.ctLocalEmergencyDrafts=this.ctLocalEmergencyDrafts.filter(draft=>draft.id!==emergency.id);
+                    else{emergency.pending=false;this.ctLocalIssue='A draft from the previous local workbook could not be stored. Keep this tab open and download its recovery copy.';}
+                },error=>{emergency.pending=false;this.ctLocalIssue='A draft from the previous local workbook could not be stored: '+error.message;});
+                const keepLocal=this._ctLocalKeepScope?.groupId===keepTestGroupId?this._ctLocalKeepScope:null;
+                const releaseLocal=this._ctLocalStore?.releaseCapturedExcept(keepLocal);
+                localFlush.finally(()=>releaseLocal?.()).catch(()=>{});
                 this.ctFlushCommentDraft().catch(()=>{});
                 this.ctFlushReplyCommentDrafts().catch(()=>{});
                 this.ctMtlReset?.();
@@ -1388,7 +1434,7 @@
                 this.ctConvoSelection='all';this.ctConvoFilter='';this.ctConvoExpanded=[];this.ctConvoFocusKey='';
                 this.ctActive = false; this.ctEditor = false; this.ctSelection = ''; this.ctComments = []; this.ctPeers = []; this.ctProgress = null;
                 this.ctPreviewGggVars={};this.ctPreviewAffixes=previewAffixesFor(null);this.ctFocusedField='';
-                this.ctWorkspace=null;this.ctUnits=raw([]);this.ctSaved=raw({});this.activeContentGroup=null;
+                this.ctLocalDraftState='';this.ctWorkspace=null;this.ctUnits=raw([]);this.ctSaved=raw({});this.activeContentGroup=null;
                 this._ctUnitIndex=raw(new Map());this._ctWorkUnits=raw(new Map());this._ctSheets=raw([]);this.ctSheetFilter='';
                 this.ctResetHistory();
                 this.ctUploadVisible=false;this.ctUploading=false;this.ctUploadPredecessor=null;this._ctUploadOpenRun=null;this.ctRequests=[];this.ctWorkbookDragDepth=0;
@@ -1664,7 +1710,7 @@
             async ctRefreshLocal() {
                 if (!this._ctStore) return;
                 const key = this.managedCatalogScope;
-                try { const [rows,requests] = await Promise.all([this._ctStore.listWorkspaces({ accountId: this.cloudProfileId || this.cloudUser?.id || 'guest', game: this.gameVersion }),this._ctStore.listRequests(this.ctRequestScope())]); if (key === this.managedCatalogScope) {this.ctLocalWorkspaces = raw(rows.filter(row => row.state === 'ready' && !row.groupId.startsWith('staged:')));this.ctRequests=raw(requests);} } catch (_) { /* Startup storage owns the actionable error. */ }
+                try { const [rows,requests] = await Promise.all([this._ctStore.listWorkspaces({ accountId: this.cloudProfileId || this.cloudUser?.id || 'guest', game: this.gameVersion,branchId:this.branchId || 'default' }),this._ctStore.listRequests(this.ctRequestScope())]); if (key === this.managedCatalogScope) {this.ctLocalWorkspaces = raw(rows.filter(row => row?.state === 'ready' && typeof row.groupId==='string' && !row.localRestorePending && !row.localComparisonOnly && !row.groupId.startsWith('staged:')));this.ctRequests=raw(requests);} this.ctLocalIssue='';} catch (error) { this.ctLocalIssue='Local workbooks could not be read. Browser data was retained. '+error.message; }
             },
             async ctActivate(scope, metadata, initializationSession) {
                 const owner=this.ctRequestScope();if(scope.accountId!==owner.accountId || scope.game!==owner.game || scope.branchId!==owner.branchId)return false;
@@ -1678,11 +1724,16 @@
                 try{
                 if(!await this.ctInitializationStep('Preserving unsaved edits',async()=>{if(!await this.ctFlushDraft())return false;await this.ctFlushCommentDraft();return true;},initialization)
                     || openingKey!==this.managedCatalogScope || openingEpoch!==(this._ctEpoch || 0))return false;
+                if(test){
+                    const lease=await store.acquire(scope);
+                    if(openingKey!==this.managedCatalogScope || openingEpoch!==(this._ctEpoch || 0)){store.releaseLease(lease);return false;}
+                    this._ctLocalKeepScope=scope;
+                }
                 this.ctFence(test ? scope.groupId : null);const controller=this._ctAbort=new AbortController(),signal=controller.signal;
                 const selectedEpoch=this._ctEpoch || 0;
                 openingOwns=()=>openingKey===this.managedCatalogScope && selectedEpoch===(this._ctEpoch || 0) && this._ctAbort===controller;
                 openingCurrent=()=>openingOwns() && !signal.aborted;
-                // Identify an incoming temporary session before language watchers
+                // Identify an incoming private local workspace before language watchers
                 // run, so they do not list/migrate unrelated durable SD drafts.
                 // Its contents and editor remain unloaded until selection settles.
                 this.ctWorkspace = { scope: copy(scope), metadata: metadata || {} };
@@ -1707,7 +1758,7 @@
                     },initialization);
                     check();
                     root.ClientTextCodec?.assertGame({units},scope.game);
-                    this.ctUnits = raw(units); this._ctUnitIndex = raw(new Map(units.map(unit => [unit.id, unit]))); this.ctSaved = raw(saved);this.ctDraftSummaries=raw(drafts || []); this.ctRevision++;
+                    this.ctLocalDraftState=test?'stored':'';this.ctUnits = raw(units); this._ctUnitIndex = raw(new Map(units.map(unit => [unit.id, unit]))); this.ctSaved = raw(saved);this.ctDraftSummaries=raw(drafts || []); this.ctRevision++;
                     const visibleUnits=units.filter(unit=>this.ctFieldsFor(unit).length);
                     this.ctRebuildSheets(visibleUnits);
                     this._ctWorkUnits=raw(new Map(units.filter(unit=>unit.fields.some(field=>field.originalMissing || field.outdated) || saved[unit.id]?.outdated?.length).map(unit=>[unit.id,unit])));
@@ -1725,7 +1776,7 @@
                         if(test){
                             if(await this.flushScheduledSettingsSave?.()===false)throw new Error('Save pending settings before opening a test sheet.');
                             check();if(!this.ctResourceSyncEnabled)this.ctBeginTestDictionary(scope);
-                            const memory=this.testMode ? {units:[]} : await this._ctStore.getMemory(scope,{guard:current});check();
+                            const memory=this.testMode ? {units:[]} : await this._ctStore.getMemory({accountId:scope.accountId,game:scope.game,language:scope.language},{guard:current});check();
                             await store.seedMemory(scope,memory.units,{guard:current});check();
                             if(this.ctResourceSyncEnabled){await this.loadTranslationMemory?.();check();this._cloud?.schedule(0);}
                         }
@@ -1824,7 +1875,7 @@
                 this.ctValues = root.ClientTextState.valuesFor(unit, this.ctSaved[unit.id]); this.ctReviewed = { ...(this.ctSaved[unit.id]?.reviewed || {}) }; this.ctDraftDirty = false;this.ctDraftStageFailure=null;
                 this.ctChoices = copy(this.ctSaved[unit.id]?.conflicts || []); this._ctEditRevision = this.ctSaved[unit.id]?.revision || 0;
                 this._ctDraftRevision = draft?.revision || null;
-                if (draft?.values) { this.ctValues = { ...this.ctValues, ...draft.values }; this.ctReviewed = { ...this.ctReviewed, ...draft.reviewed }; this.ctDraftDirty = true; }
+                if (draft?.values) { this.ctValues = { ...this.ctValues, ...draft.values }; this.ctReviewed = { ...this.ctReviewed, ...draft.reviewed }; this.ctDraftDirty = true;this.ctLocalDraftState='checkpointed'; }
                 await this.ctMtlLoadReviews?.(unit);if(!current())return false;
                 this.ctMtlRestoreAcceptances?.(draft);
                 this.ctInitializeVariants(unit);const displayed=this.ctDisplayedFields(unit);
@@ -2211,13 +2262,14 @@
                 if(failure && this.ctCurrent(ctx) && this.ctCurrent(failure.context) && failure.unitId===unitId
                     && failure.signature===signature && (!operation || failure.operation===operation))this.ctDraftStageFailure=null;
             },
-            ctQueueDraft() { clearTimeout(this._ctDraftTimer); this._ctDraftTimer = setTimeout(() => this.ctFlushDraft(), 250); },
+            ctQueueDraft() { if(this.ctOfflineTest)this.ctLocalDraftState='pending';clearTimeout(this._ctDraftTimer); this._ctDraftTimer = setTimeout(() => this.ctFlushDraft(), this.ctOfflineTest?0:250); },
             async ctFlushDraft() {
                 clearTimeout(this._ctDraftTimer);
                 if (!this.ctDraftDirty || !this.ctCurrentUnit || !this.ctWorkspace) return true;
                 const ctx = this.ctContext(), unitId = this.ctSelection, values = copy(this.ctValues), reviewed = copy(this.ctReviewed);
                 const mtlAcceptances=this.ctMtlCheckpointAcceptances ? this.ctMtlCheckpointAcceptances(unitId,values) : this.ctMtlAcceptances?.(unitId,values) || [];
                 const store=this.ctStorage(ctx.scope);
+                const localLease=store.captureLease?.(ctx.scope);
                 const id=JSON.stringify([root.ClientTextStore.scopeKey(ctx.scope),unitId]),heads=this._ctDraftHeads ||= new Map();
                 let head=heads.get(id);
                 if(!head){head={revision:this._ctDraftRevision||null,pending:0,queue:Promise.resolve(),signature:null};heads.set(id,head);}
@@ -2226,14 +2278,14 @@
                 try {
                     const pending = head.queue.catch(()=>{}).then(async()=>{
                         if(head.signature===signature)return;
-                        const saved = await store.putDraft(ctx.scope, unitId, { values, reviewed,...(mtlAcceptances.length?{mtlAcceptances}: {}) }, { expectedRevision: head.revision });
+                        const saved = await store.putDraft(ctx.scope, unitId, { values, reviewed,...(mtlAcceptances.length?{mtlAcceptances}: {}) }, { expectedRevision: head.revision,...(localLease?{localLease}:{}) });
                         head.revision=saved.revision;head.signature=signature;
                         if(this.ctCurrent(ctx) && this.ctSelection===unitId){this._ctDraftRevision=saved.revision;this.ctRefreshDraftSummaries(ctx);}
                     });head.queue=pending;
                     this._ctDraftQueue=Promise.all([...heads.values()].map(value=>value.queue));this._ctDraftQueue.catch(()=>{});
-                    await pending;this.ctClearDraftStageFailure(ctx,unitId,signature,'checkpoint'); return true;
+                    await pending;if(this.ctCurrent(ctx) && this.ctSelection===unitId && JSON.stringify([values,reviewed])===JSON.stringify([this.ctValues,this.ctReviewed]))this.ctLocalDraftState='checkpointed';this.ctClearDraftStageFailure(ctx,unitId,signature,'checkpoint'); return true;
                 }
-                catch (error) { if (this.ctCurrent(ctx)) this.ctError = 'Draft was not stored: ' + error.message;this.ctRememberDraftStageFailure(ctx,unitId,signature,'checkpoint'); return false; }
+                catch (error) { if (this.ctCurrent(ctx)) {this.ctLocalDraftState='failed';postNotice(this,'ctError',(this.ctOfflineTest?'Draft was not stored. Keep this tab open and download a recovery backup: ':'Draft was not stored: ') + error.message);}this.ctRememberDraftStageFailure(ctx,unitId,signature,'checkpoint'); return false; }
                 finally{head.pending--;}
             },
             async ctSave(close = false, options = {}) {
@@ -2259,7 +2311,7 @@
                     const result = await store.save(ctx.scope, unitId, command);
                     if (!this.ctCurrent(ctx)) return false;
                     const sameEditor=JSON.stringify([this.ctValues,this.ctReviewed])===JSON.stringify([command.values,command.reviewed]);
-                    this.ctSaved = raw({ ...this.ctSaved, [unitId]: result.saved }); this.ctRevision++; this.ctDraftDirty = !sameEditor;this.ctClearDraftStageFailure(ctx,unitId,submittedSignature); if(this._ctSaveJob===job)this._ctSaveJob = null;
+                    this.ctLocalDraftState=sameEditor?'stored':'pending';this.ctSaved = raw({ ...this.ctSaved, [unitId]: result.saved }); this.ctRevision++; this.ctDraftDirty = !sameEditor;if(!sameEditor)this.ctQueueDraft();this.ctClearDraftStageFailure(ctx,unitId,submittedSignature); if(this._ctSaveJob===job)this._ctSaveJob = null;
                     this._ctEditRevision=result.saved.revision;
                     try{await this.ctMtlSaved?.(ctx,unitId);}catch(error){if(this.ctCurrent(ctx))this.ctMtlError='Saved, but MTL review state could not be refreshed: '+error.message;}
                     if(!this.ctCurrent(ctx))return false;
@@ -2758,7 +2810,7 @@
                 const run = operation || this.ctBeginExport(collection ? 'Download collection' : 'Export saved ClientText');
                 if (!run) return false;
                 const signal = run.signal;
-                const lookupLabel = this.ctOfflineTest ? 'In-memory original lookup' : 'Indexed original lookup';
+                const lookupLabel = 'Indexed original lookup';
                 let scope, store;
                 const current = () => !signal.aborted && run.current() && this._ctExportRun === run;
                 const worker = () => {
@@ -3063,7 +3115,7 @@
                 const predecessorId=version ? version.parentVersionId : options.predecessor?.id || (!options.resume ? this.managedHeadVersion?.id : null);
                 this.ctUploadPredecessor=local ? null : copy(options.predecessor || this.managedVersions?.find(candidate=>candidate.id===predecessorId) || (predecessorId ? {id:predecessorId,name:predecessorId} : null));
                 this.ctUploadHistory=false;this.ctUploadHistoryFiles=raw([]);
-                const defaults = root.ManagedVersions.defaults(this.gameVersion); this.ctUploadName = version?.name || defaults.name; this.ctUploadDeadline = root.ManagedVersions.deadlineInput(version?.deadlineAt || defaults.deadlineAt);
+                const defaults = root.ManagedVersions.defaults(this.gameVersion); this.ctUploadName = test ? '' : version?.name || defaults.name; this.ctUploadDeadline = root.ManagedVersions.deadlineInput(version?.deadlineAt || defaults.deadlineAt);
                 if (!local) {
                     try { await this.ctRequireTrustedProtocol();if(!current())return false;this.ctPolicyText = JSON.stringify(this.ctPolicy.clientTextRoles, null, 2); }
                     catch (error) { if(current())this.ctUploadError = error.message; }
@@ -3288,24 +3340,25 @@
                     if(this.ctUploadTest){
                         if(this.ctPrepared.length!==1 || this.ctPrepared[0].contentMode!=='clienttext')throw new Error('Prepare one ClientText language for this test session.');
                         const prepared=this.ctPrepared[0],versionId='local:test:'+uuid(),groupId='local:test:'+uuid(),
-                            version={id:versionId,game:this.gameVersion,branchId:this.branchId || 'default',name:'Test Sheet Offline'},
+                            version={id:versionId,game:this.gameVersion,branchId:this.branchId || 'default',name:this.ctUploadName.trim() || prepared.assets.map(asset=>asset.name).join(' + ') || 'Local workbook'},
                             group={id:groupId,versionId,contentMode:'clienttext',language:prepared.language,roles:prepared.assets.map(asset=>asset.role)},
-                            scope=this.ctScope(versionId,groupId,prepared.language),metadata={version,group,descriptors:prepared.originals.descriptors,syncResources:!!this.ctUploadSyncResources};
-                        const store=root.ClientTextMemoryStore.create();this._ctTestStores ||= new Map();this._ctTestStores.set(groupId,store);
+                            scope=this.ctScope(versionId,groupId,prepared.language),metadata={version,group,localProtocol:root.ClientTextLocalStore.protocol,localWorkspaceId:versionId,descriptors:prepared.originals.descriptors,syncResources:!!this.ctUploadSyncResources};
+                        const store=this._ctLocalStore;
                         try{
                             const options={signal:this._ctAbort.signal,guard:()=>key===this.managedCatalogScope,
                                 onProgress:progress=>this.ctReport(progress)};
-                            await store.import(scope,{units:prepared.units,assets:prepared.assets,descriptors:prepared.originals.descriptors,summaries:prepared.originals.summaries,metadata},options);
+                            let previousScope;
                             if(prepared.previous){
                                 const previous=prepared.previous,previousVersion={...version,id:'local:test:'+uuid(),name:'Previous workbook sample'},
                                     previousGroup={...group,id:'local:test:'+uuid(),versionId:previousVersion.id,roles:previous.assets.map(asset=>asset.role)},
-                                    previousScope=this.ctScope(previousVersion.id,previousGroup.id,prepared.language);
+                                    comparisonScope=this.ctScope(previousVersion.id,previousGroup.id,prepared.language);
+                                previousScope=comparisonScope;
                                 await store.import(previousScope,{units:previous.units,assets:previous.assets,descriptors:previous.originals.descriptors,
-                                    summaries:previous.originals.summaries,metadata:{version:previousVersion,group:previousGroup}},options);
-                                await store.seedPreviousVersion(scope,previousScope,options);
+                                    summaries:previous.originals.summaries,metadata:{version:previousVersion,group:previousGroup,localProtocol:root.ClientTextLocalStore.protocol,localComparisonOnly:true}},options);
                             }
+                            const retained=await store.import(scope,{units:prepared.units,assets:prepared.assets,descriptors:prepared.originals.descriptors,summaries:prepared.originals.summaries,metadata,...(previousScope?{previousScope}:{})},options);
                             if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return false;
-                            const opened=await this.ctActivate(scope,metadata);
+                            const opened=await this.ctActivate(scope,retained);
                             if(!opened && key===this.managedCatalogScope && this.ctWorkspace?.scope.groupId===groupId){
                                 const message=this.ctError || 'The test sheet could not be opened. Prepare the workbook and try again.';
                                 this.ctFence();this.versionChooserVisible=true;this.ctUploadVisible=true;this.ctUploadError=message;
@@ -3313,7 +3366,7 @@
                                 this.ctUploadHistory=!!prepared.previous;this.ctUploadHistoryFiles=raw(prepared.previous?.candidates || []);
                             }
                             return opened;
-                        }finally{if(this.ctWorkspace?.scope.groupId!==groupId){store.dispose();this._ctTestStores.delete(groupId);}}
+                        }finally{store.releaseExcept(this.ctWorkspace?.scope.groupId?.startsWith('local:test:')?this.ctWorkspace.scope:null);await this.ctRefreshLocal();}
                     }
                     if(!this.ctUploadLocal && this.ctPrepared.some(group=>group.contentMode==='clienttext'))await this.ctRequireTrustedProtocol(this._ctAbort.signal,
                         this.ctPrepared.filter(group=>group.contentMode==='clienttext').flatMap(group=>[

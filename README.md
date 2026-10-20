@@ -16,6 +16,7 @@ Future UI design, bug fixes, and validation target desktop workflows, including 
 - Separate PoE1 and PoE2 source/workspace/history storage
 - Highlights and metadata to help catch mismatches (lines / `{}` variables / `[]` tags)
 - Saves your in-progress work to `indexedDB`
+- Private [local ClientText workbooks](docs/clienttext_local_workbooks.md) with retained original bytes, committed history, drafts and downloadable recovery backups
 - Optional Google account backup for personal settings and Regex rules
 - Shared dictionaries per language, with local/remote conflict choices; Translators use their assignment, while Managers/Admins use the selected language
 - Shared translation workspaces for the same game, accepted source baseline and language, with live presence, offline saves and audited history
