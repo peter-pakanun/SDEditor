@@ -516,7 +516,7 @@
             if (Object.keys(record.values).some(id => !valid.has(id)) || Object.keys(record.reviewed || {}).some(id => !valid.has(id))) throw error('Saved ClientText contains an unknown field.');
             if (record.outdated !== undefined && (!Array.isArray(record.outdated) || record.outdated.some(id => !valid.has(id)))) throw error('Saved ClientText contains an unknown outdated field.');
             try { State.normalizeReviewed(unit, record.reviewed || {}); } catch (cause) { throw error(cause.message); }
-            const originalColors = State.colorCountsFor(unit), status = State.statusFor(unit, record), colors = State.colorCountsFor(unit, record, status);
+            const originalColors = State.colorCountsFor(unit), status = State.statusFor(unit, record,{game:parsed.game}), colors = State.colorCountsFor(unit, record, status);
             if (!sheetChanges.has(unit.sheet)) sheetChanges.set(unit.sheet, State.emptyColorCounts());
             const change = sheetChanges.get(unit.sheet);
             for (const key of Object.keys(change)) change[key] += colors[key] - originalColors[key];

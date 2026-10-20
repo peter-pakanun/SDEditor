@@ -19,7 +19,9 @@ test('blank or identical ordinary saves never infer English intent; explicit met
     assert.equal((await g.store.save(g.scope,u.id,command)).replayed,true);assert.equal((await g.store.listHistory(g.scope,u.id)).length,1);
     assert.equal((await g.store.listHistory(g.scope,u.id))[0].intentChanges[id].previousValue,'Source');
     assert.deepEqual(await g.store.getOutbox(g.scope),[]);assert.deepEqual((await g.store.getMemory(g.scope)).units,[]);
-    assert.equal(S.statusFor(u,result.saved).missing,true,'raw Missing semantics are unchanged');
+    assert.equal(S.statusFor(u,result.saved).missing,false,'the normal Missing status is intentionally resolved');
+    assert.equal(S.statusFor(u,result.saved).fields[id].rawMissing,true,'raw target emptiness remains an internal fact');
+    assert.equal(S.unitColorFor(u,result.saved),'filled','completed original Missing work uses the established grey');
 });
 test('conversion preserves committed and editor text, revocation and normal translation cannot resurrect approvals',async()=>{
     const f=await local('Original translation'),u=f.original;
@@ -53,11 +55,24 @@ test('source change invalidates, source reversion does not reactivate, upstream 
     const old=unit('Source',''),saved={values:values(''),reviewed:{},saved:false,englishIntent:{[id]:{state:'active',sourceHash:S.sourceHash('Source'),decisionId:'mark'}}};
     const same=S.carryForward(old,unit('Source',''),saved);assert.equal(same.englishIntent[id].state,'active');
     const changed=S.carryForward(old,unit('Changed source',''),saved);assert.equal(changed.englishIntent[id].state,'needs_review');
+    assert.equal(S.statusFor(unit('Changed source',''),changed).missing,true,'source changes restore actionable Missing');
     const reverted=S.carryForward(unit('Changed source',''),old,{...changed});assert.equal(reverted.englishIntent[id].state,'needs_review');
+    assert.equal(S.statusFor(old,reverted).missing,true,'source reversion does not silently resolve the suspended decision');
     const upstream=S.carryForward(old,unit('Source','New upstream translation'),saved);assert.equal(upstream.values[id],'New upstream translation');assert.equal(upstream.englishIntent[id].reason,'upstream_translation');assert.equal(upstream.conflicts.length,1);
     assert.equal(S.carryForward(old,old,{...saved,englishIntent:{[id]:{...saved.englishIntent[id],state:'revoked'}}}).englishIntent[id].state,'revoked');
     const gender={...old,role:'gender',id:JSON.stringify(['gender',old.sheet,old.recordId])};assert.equal(S.carryForward(old,gender,saved).englishIntent,undefined,'Normal cannot mark a Gender workbook field');
     const changedUpstream=S.carryForward(unit('Source','Original upstream'),unit('Changed source','Original upstream'),saved);assert.equal(changedUpstream.values[id],'Original upstream','even changed-source carry never clears a nonblank incoming original');
+});
+
+test('explicit local reapproval resolves inherited conflict without losing its provenance history',async()=>{
+    const f=await local(),u=f.original;
+    await f.store.save(f.scope,u.id,{jobId:'first',intentProtocol:protocol,englishActions:action(),values:values(''),reviewed:{[id]:S.sourceHash('Source')}});
+    const next={...f.scope,versionId:'local:test:conflicted-v',groupId:'local:test:conflicted-g'},incoming=unit('Source','Upstream target'),blob=new Blob(['new original']);
+    await f.store.import(next,{units:[incoming],assets:[{...asset,blob,hash:S.sha256(await blob.arrayBuffer())}],previousScope:f.scope});
+    const carried=(await f.store.getSaved(next))[u.id];assert.equal(carried.conflicts.length,1);assert.equal(carried.provenance.conflicts.length,1);
+    const approved=await f.store.save(next,u.id,{jobId:'explicit-new-choice',intentProtocol:protocol,englishActions:action('set','Upstream target'),values:values(''),reviewed:{[id]:S.sourceHash('Source')}});
+    assert.equal(S.statusFor(incoming,approved.saved).missing,false);assert.deepEqual(approved.saved.provenance.conflicts,[]);
+    const history=(await f.store.listHistory(next,u.id)).find(entry=>entry.id==='explicit-new-choice');assert.equal(history.before.provenance.conflicts.length,1);assert.equal(history.before.values[id],'Upstream target');
 });
 test('a competing shared edit holds an unsent English action for explicit resolution instead of rebasing its approval',async()=>{
     const f=fixture(),u=unit();await f.store.import(baseScope,{units:[u],assets:[asset]});

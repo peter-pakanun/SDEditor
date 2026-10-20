@@ -508,10 +508,9 @@
                 let total = 0, resolved = 0;
                 for (const unit of this._ctWorkUnits?.values() || []) {
                     const status = this.ctStatus(unit);
-                    for (const field of unit.fields) if (field.originalMissing || field.outdated || this.ctSaved[unit.id]?.outdated?.includes(field.id)) {
+                    for (const field of unit.fields) if (!root.ClientTextState.audioOnly(field.source) && (field.originalMissing || field.outdated || this.ctSaved[unit.id]?.outdated?.includes(field.id))) {
                         const current = status.fields[field.id];
-                        if (current?.missing && !current.outdated) continue;
-                        total++; if (!current?.outdated) resolved++;
+                        total++; if (current && !current.missing && !current.outdated) resolved++;
                     }
                 }
                 return { total, resolved, percent: total ? Math.floor(100 * resolved / total) : 100 };
@@ -1315,11 +1314,10 @@
                 const counts=row.team.counts || {},count=value=>Number.isFinite(Number(value))?Math.max(0,Math.floor(Number(value))):0;
                 const known=counts.workloadFields!==undefined && counts.workloadFields!==null && Number.isFinite(Number(counts.workloadFields));
                 const initial=count(counts.workloadFields),saved=Math.min(initial,count(counts.resolvedFields));
-                // Blank Missing-only fields can intentionally use English.
-                // Keep Outdated review work, including Missing/Outdated overlap,
-                // and exclude only the unresolved remainder of initial work.
-                const outdated=Math.min(initial-saved,count(counts.outdatedFields)),total=saved+outdated,unresolved=outdated,missing=0;
-                const excludedMissing=initial-total;
+                // Explicit English decisions resolve work. Unmarked blanks
+                // remain in the fixed initial workload denominator.
+                const total=initial,unresolved=initial-saved,outdated=Math.min(unresolved,count(counts.outdatedFields)),missing=unresolved-outdated;
+                const excludedMissing=0;
                 const width=value=>total?100*value/total+'%':'0%';
                 return {saved,total,percent:total?Math.round(100*saved/total):0,ordinarySaved:saved,revised:0,missing,outdated,unresolved,excludedMissing,
                     savedWidth:width(saved),revisedWidth:'0%',missingWidth:width(missing),outdatedWidth:width(outdated),empty:!total,known,
@@ -1331,10 +1329,10 @@
                 if(row.contentMode!=='clienttext')return this.managedProgressTooltip(row.team);
                 const progress=this.ctAssignmentProgress(row),lines=[row.label+' progress',
                     progress.known?`Resolved workload fields: ${progress.saved} / ${progress.total} (${progress.percent}%)`:'Initial field workload counts are unavailable.',
-                    'Workload denominator: resolved initial fields + remaining Outdated fields, including carried source changes. Each field is counted once.'];
+                    'Workload denominator: all initial Missing/Outdated fields, including carried source changes. Each field is counted once.'];
                 if(progress.known && !progress.total)lines.push('No counted workload fields; the bar is neutral.');
-                lines.push(`Remaining Outdated fields: ${progress.outdated} · Missing-only fields excluded: ${progress.excludedMissing}`,
-                    'Missing-only fields are excluded from progress because blank ClientText values can intentionally use English. Orange Outdated fields still require review, including fields that are also Missing.',
+                lines.push(`Remaining Missing-only fields: ${progress.missing} · Remaining Outdated fields: ${progress.outdated}`,
+                    'A valid active Use English decision resolves its field. Unmarked blanks and unreviewed source changes remain work.',
                     `IDs: ${progress.loaded} loaded · Saved: ${progress.savedIds} · Revised: ${progress.revisedIds} · Missing: ${progress.missingIds} · Outdated: ${progress.outdatedIds}`,
                     `Field statuses: ${progress.fields} fields · Saved: ${progress.savedFields} · Revised corrections: ${progress.revisedFields} · Missing: ${progress.missingFields} · Outdated: ${progress.outdatedFields}`,
                     'Saved and Revised counts describe explicit accepted saves; status counts can overlap. They do not define this progress denominator.',
@@ -1452,8 +1450,8 @@
             ctStatus(unit = this.ctCurrentUnit) {
                 if(!unit)return {fields:{}};
                 const cache=this._ctStatusCache ||= new WeakMap(),saved=this.ctSaved[unit.id],previous=cache.get(unit);
-                if(previous && previous.saved===saved)return previous.status;
-                const status=root.ClientTextState.statusFor(unit,saved);cache.set(unit,{saved,status});return status;
+                if(previous && previous.saved===saved && previous.game===this.gameVersion)return previous.status;
+                const status=root.ClientTextState.statusFor(unit,saved,{game:this.gameVersion});cache.set(unit,{saved,game:this.gameVersion,status});return status;
             },
             ctFieldStatus(field) { return this.ctStatus().fields[field.id] || {}; },
             ctRowStatusClasses(unit) {
@@ -1505,7 +1503,7 @@
                 const values=this.ctValuesFor(unit);
                 return fields.map(field=>values[field.id]).filter(text=>String(text ?? '').trim().length>0).join('\n');
             },
-            ctDiagnose(unit) { const values = this.ctValuesFor(unit); return unit.fields.flatMap(field => root.ClientTextState.diagnose(field, values[field.id]).map(issue => ({ ...issue, severity: issue.level || issue.severity, fieldId: field.id }))); },
+            ctDiagnose(unit) { const values = this.ctValuesFor(unit); return unit.fields.flatMap(field => this.ctUsesEnglish(field,unit)?[]:root.ClientTextState.diagnose(field, values[field.id]).map(issue => ({ ...issue, severity: issue.level || issue.severity, fieldId: field.id }))); },
             ctTone(unit) { const s = this.ctStatus(unit); return s.missing ? 'missing' : s.outdated ? 'outdated' : s.revised ? 'revised' : s.saved ? 'saved' : ''; },
             ctStatusLabel(unit) { const s = this.ctStatus(unit); return ['Missing', 'Outdated', 'Revised', 'Saved'].filter(label => s[label.toLowerCase()]).join(' · ') || 'Unchanged'; },
             ctForm(group, form) { return group.fields.find(field => field.form === form); },
@@ -1815,6 +1813,18 @@
                 }
             },
             async ctOpenCached(row) { const scope = this._ctStore.normalizeScope(row.scope || row); return this.ctActivate(scope, row.metadata || row); },
+            async ctRefreshSharedSaved(ctx,sync=this._ctSync) {
+                const saved = await this._ctStore.getSaved(ctx.scope);
+                if (!this.ctCurrent(ctx)||this._ctSync!==sync) return;
+                const affected = [...new Set([...Object.keys(saved),...Object.keys(this.ctSaved)])].filter(id => JSON.stringify(saved[id]) !== JSON.stringify(this.ctSaved[id]));
+                if(affected.length){
+                    const next={...this.ctSaved};for(const id of affected){if(saved[id])next[id]=saved[id];else delete next[id];
+                        if(saved[id]?.outdated?.length){const unit=this._ctUnitIndex.get(id);if(unit)this._ctWorkUnits.set(id,unit);}}
+                    this.ctSaved=raw(next);this.ctRevision++;this.ctRefreshDiagnostics(affected);this.ctLoadMemory(ctx);
+                    if(affected.includes(this.ctSelection) && this.ctCurrentUnit && !this.ctDraftDirty){this.ctValues=root.ClientTextState.valuesFor(this.ctCurrentUnit,saved[this.ctSelection]);this.ctReviewed={...saved[this.ctSelection]?.reviewed};this.ctChoices=copy(saved[this.ctSelection]?.conflicts||[]);this._ctEditRevision=saved[this.ctSelection]?.revision||0;}
+                }
+                return true;
+            },
             async ctSync(ctx = this.ctContext()) {
                 if (!this._ctSync || !this.ctCurrent(ctx)) return;
                 const sync=this._ctSync;if(this._ctSyncRun?.sync===sync)return this._ctSyncRun.promise;
@@ -1824,21 +1834,17 @@
                         if(!this.ctCurrent(ctx)||this._ctSync!==sync)return;
                         const flushed=await sync.flush();if(!this.ctCurrent(ctx)||this._ctSync!==sync)return;
                         await sync.pull();if(!this.ctCurrent(ctx)||this._ctSync!==sync)return;
-                        const saved = await this._ctStore.getSaved(ctx.scope);
-                        if (!this.ctCurrent(ctx)||this._ctSync!==sync) return;
-                        const affected = [...new Set([...Object.keys(saved),...Object.keys(this.ctSaved)])].filter(id => JSON.stringify(saved[id]) !== JSON.stringify(this.ctSaved[id]));
-                        if(affected.length){
-                            const next={...this.ctSaved};for(const id of affected){if(saved[id])next[id]=saved[id];else delete next[id];
-                                if(saved[id]?.outdated?.length){const unit=this._ctUnitIndex.get(id);if(unit)this._ctWorkUnits.set(id,unit);}}
-                            this.ctSaved=raw(next);this.ctRevision++;this.ctRefreshDiagnostics(affected);this.ctLoadMemory(ctx);
-                            if(affected.includes(this.ctSelection) && this.ctCurrentUnit && !this.ctDraftDirty){this.ctValues=root.ClientTextState.valuesFor(this.ctCurrentUnit,saved[this.ctSelection]);this.ctReviewed={...saved[this.ctSelection]?.reviewed};this.ctChoices=copy(saved[this.ctSelection]?.conflicts||[]);this._ctEditRevision=saved[this.ctSelection]?.revision||0;}
-                        }
+                        if(!await this.ctRefreshSharedSaved(ctx,sync))return;
                         const issue=sync.snapshot?.().error || (flushed?.conflicts?'Shared translation conflicts require a reviewed choice.':'');
                         if(issue){this._ctSyncError=issue;this.ctError=issue;}
                         else {if(this.ctError===this._ctSyncError)this.ctError='';this._ctSyncError='';}
                         await this.ctPresence(ctx);
                         await this.ctMtlSync?.(ctx);
-                    } catch (error) { if (this.ctCurrent(ctx) && !error.stale){this._ctSyncError=error.message;this.ctError=error.message;} }
+                    } catch (error) { if (this.ctCurrent(ctx) && !error.stale){
+                        let message=error.message;
+                        try{await this.ctRefreshSharedSaved(ctx,sync);}catch(readError){message+=' Local saved state could not be refreshed: '+readError.message;}
+                        if(this.ctCurrent(ctx) && this._ctSync===sync){this._ctSyncError=message;this.ctError=message;}
+                    } }
                 })();
                 const run={sync,promise:operation};this._ctSyncRun=run;
                 try{return await operation;}finally{if(this._ctSyncRun===run)this._ctSyncRun=null;}
@@ -2108,7 +2114,14 @@
             ctPendingSharedRecovery() { return this.ctSaved[this.ctSelection]?.syncRecovery || null; },
             ctEnglishWitness(actions) {return {protocol:root.ClientTextState.ENGLISH_ELIGIBILITY_PROTOCOL,fields:Object.fromEntries(Object.keys(actions).map(id=>{const field=this.ctCurrentUnit.fields.find(field=>field.id===id);return [id,{sourceHash:this.ctReviewHash(field),eligible:root.ClientTextState.englishEligible(field) && !isDNTSource(field.source)}];}))};},
             ctEnglishDecision(field) { return this.ctSaved[this.ctSelection]?.englishIntent?.[field.id] || this.ctSaved[this.ctSelection]?.provenance?.englishIntent?.[field.id]; },
-            ctUsesEnglish(field) { return root.ClientTextState.englishIntentFor(field,this.ctSaved[this.ctSelection]); },
+            ctUsesEnglish(field,unit=this.ctCurrentUnit) { return root.ClientTextState.englishIntentFor(field,this.ctSaved[unit?.id],{game:this.gameVersion}); },
+            ctEnglishHint(field) {
+                if(this.ctPendingSharedRecovery())return 'Resolve the shared conflict or rejected save before changing Use English.';
+                if(this.ctUsesEnglish(field))return 'Use English is active. This field is resolved and exports blank. Activate to require translation and save this ID. Previous text remains in history.';
+                const unavailable=this.ctEnglishUnavailableReason(field);
+                if(unavailable)return unavailable+(this.ctEnglishDecision(field) && this.ctEnglishDecision(field).state!=='revoked'?' Activate to remove the previous decision and save this ID.':'');
+                return 'Use English: intentionally resolve this field using its current English source and export it blank. Saves this ID; previous text remains in history.'+(this.ctEnglishDecision(field)?.state==='needs_review'?' The previous decision needs review; activate to approve this source.':'');
+            },
             ctEnglishOffer(field) { return this.ctEnglishEligible(field) && !this.ctUsesEnglish(field) && this.ctValues[field.id]===field.source; },
             async ctChooseEnglish(field,revoke=false) {
                 if((!this.ctEnglishEligible(field) && !(revoke && this.ctEnglishDecision(field))) || this.ctBusy || this.ctRecoveryBusy || this.ctHistoryViewer || this.ctMtlBusy?.(field) || this.ctMtlCandidate?.(field) || this._ctSaveJob)return false;
@@ -2437,7 +2450,8 @@
             },
             ctNeedsAttention(unit) {
                 const status=this.ctStatus(unit);
-                return !!(status.missing || status.outdated || this.ctMtlUnitIds?.has(unit.id) || (this.ctDiagnostics[unit.id] || []).some(issue=>['error','warning'].includes(issue.severity)));
+                return !!(status.missing || status.outdated || this.ctSaved[unit.id]?.conflicts?.length || this.ctSaved[unit.id]?.syncRecovery
+                    || this.ctMtlUnitIds?.has(unit.id) || (this.ctDiagnostics[unit.id] || []).some(issue=>['error','warning'].includes(issue.severity)));
             },
             async ctSaveAndNavigate(reverse=false,options={}) {
                 if(this.ctKeyboardBlocked() || this._ctNavigationRun)return false;
@@ -2772,7 +2786,7 @@
                 const values=this.ctValuesFor(unit),state=root.ClientTextState,lang=this.ctWorkspace?.scope.language || this.lang;
                 return this.ctFieldsFor(unit).flatMap(field=>{
                     const text=String(values[field.id] ?? '');
-                    if(field.kind==='gender' || state.audioOnly(field.source) || state.allowsNonexistent(field) && text.trim()==='NONEXISTENT')return [];
+                    if(this.ctUsesEnglish(field,unit) || field.kind==='gender' || state.audioOnly(field.source) || state.allowsNonexistent(field) && text.trim()==='NONEXISTENT')return [];
                     const issues=state.diagnose(field,text,{tagSyntax:!!checks.tagSyntax,variables:!!checks.variables,keywords:!!checks.keywords,
                         decorations:!!checks.decorations,substitutions:!!checks.substitutions,controls:!!checks.controls});
                     if(checks.whitespace || checks.dash){
@@ -2818,7 +2832,7 @@
                         const unit=units[i];results[unit.id]=this.ctAnalyzeScanUnit(unit,checks,terminology);if(!check())return false;
                         if (checks.consistency) {
                             for (const field of this.ctFieldsFor(unit)) {
-                                if (field.kind==='gender' || !field.source.trim() || root.ClientTextState.audioOnly(field.source))continue;
+                                if (this.ctUsesEnglish(field,unit) || field.kind==='gender' || !field.source.trim() || root.ClientTextState.audioOnly(field.source))continue;
                                 const key = this.ctConsistencyKey(field),entries=consistencyMap.get(key) || [];entries.push({unitId:unit.id,fieldId:field.id});consistencyMap.set(key,entries);
                                 const keys=byUnit.get(unit.id)||new Set();keys.add(key);byUnit.set(unit.id,keys);
                             }
@@ -3648,7 +3662,7 @@
             field: {flush:'sync',handler() {this.genderMultilineLatched=this.genderMultilineRequired;}},
             genderMultilineRequired: {immediate:true,flush:'sync',handler(value) {if(value)this.genderMultilineLatched=true;}},
         }, template: `
-        <div class="ctTarget" :class="{missing:host.ctFieldStatus(field).missing && !host.ctUsesEnglish(field),outdated:host.ctFieldStatus(field).outdated,mtl:!!host.ctMtlCandidate?.(field)}">
+        <div class="ctTarget" :class="{missing:host.ctFieldStatus(field).missing,outdated:host.ctFieldStatus(field).outdated,mtl:!!host.ctMtlCandidate?.(field)}">
             <label :for="'ctfield-'+field.targetCell" :class="{srOnly:field.kind === 'form' || (field.kind === 'gender' ? !compact : compact)}">{{ field.kind === 'gender' ? 'Gender' : field.kind === 'form' ? field.name+' '+host.ctClassVariantLabel(field) : (host.ctWorkspace?.scope.language || host.lang)+' translation' }} <small>{{ field.required ? '' : 'Optional' }}</small></label>
             <component :is="host.ctFieldToolbar ? 'editor-field-toolbar' : 'div'" :controller="host.ctFieldToolbar ? host.ctFieldToolbar(field,'translation') : undefined">
             <template v-if="field.kind === 'gender'">
@@ -3659,16 +3673,7 @@
             </component>
             <div v-if="host.ctMtlVisible && host.ctMtlPendingDismissal?.(field)" class="ctMtlReview ctMtlDismissal" data-inline-focus-surface role="status" @click.capture="host.ctMtlReviewFocus(field,$event)"><span>{{ host.ctMtlDismissalText(host.ctMtlPendingDismissal(field)) }}</span><small v-if="String(host.ctWorkspace?.scope?.groupId || '').startsWith('local:')">Keep this tab and workbook session open; closing or reloading loses unsent dismissal requests.</small><button type="button" @click="host.ctMtlRetryDismissals(host.ctMtlPendingDismissal(field))" :disabled="host.ctBusy">Retry dismissal upload</button></div>
             <div v-if="host.ctMtlVisible && (host.ctMtlPendingCandidate?.(field) || host.ctMtlAccepted?.(field))" class="ctMtlReview" data-inline-focus-surface @click.capture="host.ctMtlReviewFocus(field,$event)"><span class="ctMtlDot" aria-hidden="true"></span><span>MTL · {{ host.ctMtlAccepted?.(field) ? 'Accepted draft · Save to apply' : 'Needs review' }}</span><template v-if="host.ctMtlCandidate?.(field)"><button type="button" @click="host.ctMtlAccept(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)" title="Use as a reviewed draft. Save applies this text.">Accept</button><button type="button" @click="host.ctMtlDismiss(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Dismiss</button><small>Save and export use the underlying translation until you accept this text.</small></template><template v-else-if="host.ctMtlAccepted?.(field)"><button type="button" @click="host.ctMtlUndoAccept(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field)">Undo accept</button></template><template v-else><button type="button" @click="host.ctMtlShow(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Review MTL</button><button type="button" @click="host.ctMtlDismiss(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Dismiss</button></template><button v-if="host.ctMtlRecoveryReviews?.(field)?.length" type="button" @click="host.ctMtlRecoverReview(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Recover my review</button></div>
-            <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated || diagnosticPresentation.warningCount || diagnosticPresentation.errorCount" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing && !host.ctUsesEnglish(field)">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || !!host.ctMtlCandidate?.(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button><editor-diagnostic-meta :presentation="diagnosticPresentation"></editor-diagnostic-meta></div>
-            <div v-if="!host.ctHistoryViewer" class="ctEnglishIntent fieldMeta" data-inline-focus-surface>
-                <template v-if="host.ctEnglishUnavailableReason(field)"><button type="button" disabled>Use English unavailable</button><small>{{ host.ctEnglishUnavailableReason(field) }}</small></template>
-                <span v-if="host.ctUsesEnglish(field)" role="status">Use English recorded · exports this field blank.</span>
-                <span v-else-if="host.ctEnglishDecision(field)?.state === 'needs_review'" role="status">Previous Use English decision needs review.</span>
-                <span v-else-if="host.ctEnglishOffer(field)" role="note">This translation matches English. You can keep it, or choose Use English.</span>
-                <button v-if="host.ctEnglishEligible(field) && !host.ctUsesEnglish(field)" type="button" :disabled="host.ctBusy || host.ctRecoveryBusy || host.ctHistoryViewer || !!host._ctSaveJob || host.ctMtlBusy?.(field) || !!host.ctMtlCandidate?.(field)" @click="host.ctChooseEnglish(field)" title="Save this ID with this field blank and record an explicit Use English decision. Previous translation text stays in history.">Use English and save ID</button>
-                <button v-if="host.ctEnglishDecision(field) && host.ctEnglishDecision(field).state!=='revoked'" type="button" :disabled="host.ctBusy || host.ctRecoveryBusy || host.ctHistoryViewer || !!host._ctSaveJob || host.ctMtlBusy?.(field) || !!host.ctMtlCandidate?.(field)" @click="host.ctChooseEnglish(field,true)">{{ host.ctEnglishEligible(field) ? 'Require translation and save ID' : 'Remove English decision and save ID' }}</button>
-                <small v-if="host.ctEnglishDecision(field)">Raw Missing counts and the existing team progress calculation are unchanged.</small>
-            </div>
+            <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated || diagnosticPresentation.warningCount || diagnosticPresentation.errorCount" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || !!host.ctMtlCandidate?.(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button><editor-diagnostic-meta :presentation="diagnosticPresentation"></editor-diagnostic-meta></div>
             <div v-for="(issue,index) in diagnosticPresentation.notes" :key="index" :class="issue.kind === 'consistency' ? 'consistencyWarning' : 'terminologyWarning'" role="note">{{ issue.message }}</div>
         </div>` };
     const comparisonMixin=root.ClientTextComparisons?.mixin;

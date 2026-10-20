@@ -201,7 +201,7 @@ async function intentConflictCheck(){
         await vm._ctStore.save(scope,unit.id,mark('my-first'));await vm._ctStore.applyRemote(scope,{events:[{unit:peer(1,'peer-first')}],sequence:1});await window.__intentReload();
         return{unitId:unit.id,fieldId:field.id};
     });
-    assert.equal(await page.getByRole('button',{name:'Use English and save ID',exact:true}).count(),0);
+    assert.equal(await page.getByRole('button',{name:'Use English',exact:true}).first().isDisabled(),true);
     await page.evaluate(()=>{const store=window.__localApp._ctStore,native=store.acceptPendingPeer;let once=true;store.acceptPendingPeer=async(...args)=>{const result=await native(...args);if(once){once=false;throw new Error('Synthetic lost recovery acknowledgement');}return result;};});
     await page.getByRole('button',{name:'Accept shared version',exact:true}).click();
     await page.waitForFunction(()=>{const vm=window.__localApp;return !vm.ctBusy && !vm.ctRecoveryBusy && !!vm._ctRecoveryJob;});
@@ -214,7 +214,7 @@ async function intentConflictCheck(){
     await page.waitForFunction(()=>{const vm=window.__localApp;return !vm.ctBusy && !vm.ctPendingSharedRecovery() && !vm._ctSaveJob;});
     const reapplied=await page.evaluate(async()=>{const vm=window.__localApp,h=window.__intentReview,p=(await vm._ctStore.getOutbox(h.scope))[0],history=await vm._ctStore.listHistory(h.scope,h.unit.id);return{fresh:p.mutationId!=='my-second',predecessor:!!p.predecessor,proof:p.englishEligibility?.protocol,archived:history.some(e=>e.syncRecovery?.operation.mutationId==='my-second')};});
     assert.equal(reapplied.fresh,true);assert.equal(reapplied.predecessor,false);assert.equal(reapplied.archived,true);assert.equal(reapplied.proof,'clienttext-english-eligibility-v1');
-    assert.ok(await page.getByText('Use English is unavailable for Gender metadata.',{exact:true}).count());
+    assert.ok(await page.getByTitle('Use English is unavailable for Gender metadata.',{exact:true}).count());
     const legacy=await page.evaluate(async()=>{const vm=window.__localApp,S=ClientTextState,h=window.__intentReview,scope={...h.scope,versionId:'review-legacy-version',groupId:'review-legacy-group'},version={...h.version,id:scope.versionId},group={...h.group,id:scope.groupId,versionId:scope.versionId};
         await vm._ctStore.import(scope,{units:h.units,assets:[h.asset],descriptors:vm.ctWorkspace.metadata.descriptors,metadata:{version,group}});await vm._ctStore.save(scope,h.unit.id,{jobId:'legacy-rejected',values:S.valuesFor(h.unit)});const peer=h.peer(1,'legacy-peer');await vm._ctStore.applyRemote(scope,{events:[{unit:peer}],sequence:1});const sent=[];
         const sync=ClientTextSync.create({scope,store:vm._ctStore,request:async(path,init)=>{sent.push(JSON.parse(JSON.stringify(init.body)));if(!init.body.intentProtocol)return new Response(JSON.stringify({error:{code:'CLIENTTEXT_INTENT_REQUIRED',message:'Update protocol'},current:peer}),{status:400,headers:{'content-type':'application/json'}});return{unit:{...peer,revision:2}};}});
@@ -228,14 +228,14 @@ async function intentConflictCheck(){
     assert.equal(recovered.sent,2);assert.equal(recovered.pending,0);assert.equal(recovered.oldBody.mutationId,'legacy-rejected');assert.equal(recovered.oldBody.intentProtocol,undefined);
     const unsupported=await page.evaluate(async()=>{const vm=window.__localApp,h=window.__intentReview,S=ClientTextState,dnt=h.units.find(u=>u.sheet==='DNT'),field=dnt.fields[0];vm.hideDNT=false;await vm._ctStore.applyRemote(h.scope,{events:[{unit:{unitId:dnt.id,revision:1,values:S.valuesFor(dnt),reviewed:{},saved:false,englishIntent:{[field.id]:{state:'active',sourceHash:S.sourceHash(field.source),decisionId:'unsupported-old-server'}}}}],sequence:3});
         vm.ctSaved=Vue.markRaw(await vm._ctStore.getSaved(h.scope));await vm.ctSelect(dnt,true);await vm.$nextTick();return{state:vm.ctSaved[dnt.id].englishIntent[field.id].state,sequence:(await vm._ctStore.getMetadata(h.scope)).sequence};});
-    assert.equal(unsupported.state,'needs_review');assert.equal(unsupported.sequence,3);assert.ok(await page.getByText('Use English is unavailable for DNT fields.',{exact:true}).count());
-    await page.evaluate(async()=>{const vm=window.__localApp;await vm.ctSelect(window.__intentReview.units.find(u=>u.sheet==='Forms'),true);});assert.ok(await page.getByText('Use English is unavailable for grammatical and class forms until their fallback behavior is verified.',{exact:true}).count());
+    assert.equal(unsupported.state,'needs_review');assert.equal(unsupported.sequence,3);assert.ok(await page.locator('.fieldEnglishTarget[title^="Use English is unavailable for DNT fields."]').count());
+    await page.evaluate(async()=>{const vm=window.__localApp;await vm.ctSelect(window.__intentReview.units.find(u=>u.sheet==='Forms'),true);});assert.ok(await page.getByTitle('Use English is unavailable for grammatical and class forms until their fallback behavior is verified.',{exact:true}).count());
     assert.deepEqual(errors,[]);assert.deepEqual(networkWrites,[]);const report={ok:true,seeded,accepted,reapplied,legacy,recovered,unsupported,errors,networkWrites};fs.writeFileSync(path.join(temp,'clienttext-use-english-conflicts.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
 }
 async function englishIntentCheck(){
     const imported=await importReal('poe2');
     const chosen=await page.evaluate(async()=>{
-        const vm=window.__localApp,u=vm.ctUnits.find(unit=>vm.ctFieldsFor(unit).some(field=>vm.ctEnglishEligible(field) && field.target.trim()));
+        const vm=window.__localApp,u=vm.ctUnits.find(unit=>!ClientTextState.statusFor(unit).missing && vm.ctFieldsFor(unit).some(field=>vm.ctEnglishEligible(field) && field.target.trim()));
         await vm.ctSelect(u,true);vm.ctEditor=true;await vm.$nextTick();const field=vm.ctFieldsFor(u).find(field=>vm.ctEnglishEligible(field));
         vm.ctValues[field.id]=field.source;vm.ctDraftDirty=true;vm.ctQueueDraft();
         if(!await vm.ctSave(false))throw new Error(vm.ctError || 'Identical translation save failed');
@@ -244,25 +244,26 @@ async function englishIntentCheck(){
         return{unitId:u.id,fieldId:field.id,scope:window.__englishChoice.scope,offer:vm.ctEnglishOffer(field)};
     });
     assert.equal(chosen.offer,true);
-    const offer=page.locator('.ctEnglishIntent').filter({hasText:'This translation matches English.'});
+    const offer=page.locator('.fieldEnglishTarget').first();
     await offer.scrollIntoViewIfNeeded();await page.screenshot({path:path.join(temp,'use-english-offer.png')});
-    await offer.getByRole('button',{name:'Use English and save ID',exact:true}).click();
+    await offer.getByRole('button',{name:'Use English',exact:true}).click();
     await page.waitForFunction(()=>{const vm=window.__localApp,c=window.__englishChoice;return !vm.ctBusy && vm.ctSaved[c.unitId]?.englishIntent?.[c.fieldId]?.state==='active';});
-    const applied=await page.evaluate(async()=>{const vm=window.__localApp,c=window.__englishChoice,h=await vm.ctStorage(c.scope).listHistory(c.scope,c.unitId);return{blank:vm.ctSaved[c.unitId].values[c.fieldId]==='',history:h.length,prior:h.some(e=>e.intentChanges?.[c.fieldId]?.previousValue===c.previousValue),outbox:await vm._ctStore.getOutbox(c.scope)};});
-    assert.equal(applied.blank,true);assert.equal(applied.prior,true);assert.equal(applied.history,2);assert.deepEqual(applied.outbox,[]);
+    const applied=await page.evaluate(async()=>{const vm=window.__localApp,c=window.__englishChoice,h=await vm.ctStorage(c.scope).listHistory(c.scope,c.unitId);return{blank:vm.ctSaved[c.unitId].values[c.fieldId]==='',normalMissingCounter:vm.ctCounts.missing,fieldMissing:vm.ctFieldStatus(vm.ctCurrentUnit.fields.find(f=>f.id===c.fieldId)).missing,history:h.length,prior:h.some(e=>e.intentChanges?.[c.fieldId]?.previousValue===c.previousValue),outbox:await vm._ctStore.getOutbox(c.scope)};});
+    assert.equal(applied.blank,true);assert.equal(applied.fieldMissing,false);assert.equal(applied.prior,true);assert.equal(applied.history,2);assert.deepEqual(applied.outbox,[]);
     const output=await page.evaluate(async chosen=>{const vm=window.__localApp,native=window.saveAs;let result;window.saveAs=(blob,name)=>{result={blob,name};};try{if(!await vm.ctDownload())throw new Error(vm.ctError);}finally{window.saveAs=native;}
         const parsed=await vm._ctWorker.parseWorkbook(await result.blob.arrayBuffer(),{filename:result.name,role:'normal',language:'Thai',game:'poe2',parserVersion:vm.ctWorkspace.metadata.descriptors[0].parserVersion});
         return{name:result.name,target:parsed.units.find(u=>u.id===chosen.unitId).fields.find(f=>f.id===chosen.fieldId).target,colors:ClientTextCodec.TAB_COLORS};},chosen);
     assert.equal(output.target,'');assert.match(output.name,/_Translated\.xlsx$/);assert.equal(output.colors.revised,'793BB6');assert.equal(output.colors.filled,'626B7A');
     await page.getByRole('button',{name:'Close',exact:true}).last().click();
-    await page.locator('.ctEnglishIntent').filter({hasText:'Use English recorded'}).scrollIntoViewIfNeeded();
+    await page.locator('.fieldEnglishButton.active').first().scrollIntoViewIfNeeded();
     for(const theme of ['light','grey','dark','modern-dark']){await page.evaluate(theme=>document.documentElement.setAttribute('data-theme',theme),theme);await page.screenshot({path:path.join(temp,'use-english-'+theme+'.png')});}
     await page.reload();await bootstrap();
     const recovered=await page.evaluate(async chosen=>{const vm=window.__localApp,meta=await vm._ctStore.getMetadata(chosen.scope);if(!await vm.ctOpenCached(meta))throw new Error(vm.ctError);await vm.ctSelect(vm.ctUnits.find(u=>u.id===chosen.unitId),true);vm.ctEditor=true;const active=vm.ctUsesEnglish(vm.ctCurrentUnit.fields.find(f=>f.id===chosen.fieldId));
-        const blob=await vm._ctLocalStore.backup(chosen.scope),scope=await vm._ctLocalStore.restore(blob,vm.ctRequestScope(),vm._ctWorker);const restored=await vm._ctStore.getSaved(scope);return{active,scope,backupBytes:blob.size,restored:restored[chosen.unitId].englishIntent[chosen.fieldId].state};},chosen);
-    assert.equal(recovered.active,true);assert.equal(recovered.restored,'active');assert.notEqual(recovered.scope.groupId,chosen.scope.groupId);
-    await page.getByRole('button',{name:'Require translation and save ID',exact:true}).click();
+        const blob=await vm._ctLocalStore.backup(chosen.scope),scope=await vm._ctLocalStore.restore(blob,vm.ctRequestScope(),vm._ctWorker);const restored=await vm._ctStore.getSaved(scope);return{active,normalMissingCounter:vm.ctCounts.missing,fieldMissing:vm.ctFieldStatus(vm.ctCurrentUnit.fields.find(f=>f.id===chosen.fieldId)).missing,restoredMissing:ClientTextState.statusFor(vm.ctCurrentUnit,restored[chosen.unitId]).fields[chosen.fieldId].missing,restoredCounter:ClientTextState.counts(vm.ctUnits,restored).missing,scope,backupBytes:blob.size,restored:restored[chosen.unitId].englishIntent[chosen.fieldId].state};},chosen);
+    assert.equal(recovered.active,true);assert.equal(recovered.fieldMissing,false);assert.equal(recovered.restoredMissing,false);assert.equal(recovered.normalMissingCounter,applied.normalMissingCounter);assert.equal(recovered.restoredCounter,applied.normalMissingCounter);assert.equal(recovered.restored,'active');assert.notEqual(recovered.scope.groupId,chosen.scope.groupId);
+    await page.getByRole('button',{name:'Use English',exact:true}).first().click();
     await page.waitForFunction(chosen=>{const vm=window.__localApp;return !vm.ctBusy && !vm._ctSaveJob && vm.ctSaved[chosen.unitId]?.englishIntent?.[chosen.fieldId]?.state==='revoked';},chosen);
+    assert.equal(await page.evaluate(()=>window.__localApp.ctCounts.missing),applied.normalMissingCounter+1,'revocation restores the visible normal Missing count');
     const predecessor=await page.evaluate(async()=>{const vm=window.__localApp,u=vm.ctUnits.find(unit=>vm.ctFieldsFor(unit).some(field=>vm.ctEnglishEligible(field) && !field.target.trim()));await vm.ctSelect(u,true);const field=vm.ctFieldsFor(u).find(field=>vm.ctEnglishEligible(field) && !field.target.trim());if(!await vm.ctChooseEnglish(field))throw new Error(vm.ctError || 'Blank decision failed');
         const scope=JSON.parse(JSON.stringify(vm.ctWorkspace.scope)),asset=await vm.ctStorage(scope).getAsset(scope,'normal');window.__englishNextFile=new File([asset.blob],asset.name || 'Thai.xlsx');await vm.ctShowVersionChooser();await vm.ctOpenOfflineTest();vm.ctAddUploadFiles([window.__englishNextFile]);return{scope,unitId:u.id,fieldId:field.id};});
     await page.getByLabel('Carry Use English decisions from a saved local workbook',{exact:false}).selectOption(predecessor.scope.groupId);

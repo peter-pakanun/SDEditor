@@ -808,7 +808,7 @@
                     throw Object.assign(new Error('MTL acceptance requires a normal Save reviewed against the current source.'),{code:'MTL_REVIEW_MISMATCH'});
                 const after={unitId,values,reviewed:{...before?.reviewed,...reviewed},saved:policyOnly?!!before && before.saved!==false:true,revision:(before?.revision||0)+1,
                     ...(Object.keys(intent.englishIntent).length?{englishIntent:intent.englishIntent}:{}),
-                    ...(before?.provenance?{provenance:copy(before.provenance)}:{}),
+                    ...(before?.provenance?{provenance:{...copy(before.provenance),conflicts:[]}}:{}),
                     serverRevision:before?.serverRevision||input.baseRevision||0,baseRevision:before?.serverRevision||input.baseRevision||0,
                     savedAt:Date.now(),jobId:input.jobId,origin:input.origin||options.origin||'save',outdated:before?.outdated||[],
                     ...(acceptedMtl.length ? {mtlAcceptances:copy(input.mtlAcceptances)} : {})};

@@ -176,9 +176,9 @@
     }
     const clienttext=Object.freeze({id:'clienttext',unitIdentity:unit=>unit.id,fields:unit=>unit.fields,
         values:(unit,saved)=>runtime().valuesFor(unit,saved),serialize:(unit,values)=>runtime().normalizeValues(unit,values),
-        status:(unit,saved)=>runtime().statusFor(unit,saved),
+        status:(unit,saved,options={})=>runtime().statusFor(unit,saved,options),
         history:(unit,saved)=>({unitId:unit.id,values:copy(runtime().valuesFor(unit,saved)),reviewed:copy(saved?.reviewed||{})}),
-        diagnose:(unit,values)=>unit.fields.flatMap(field=>runtime().diagnose(field,values[field.id]).map(issue=>({...issue,fieldId:field.id}))),
+        diagnose:(unit,values,options={})=>unit.fields.flatMap(field=>runtime().englishIntentFor(field,options.saved,{game:options.game}) && !String(values[field.id] ?? '').trim()?[]:runtime().diagnose(field,values[field.id]).map(issue=>({...issue,fieldId:field.id}))),
         contextFor,contextReferenceIndex,cachedContextReferenceIndex,referenceMetadata,memoryUnits,findMemory,compatibleContext,
     });
     const statdescription=Object.freeze({id:'statdescription',unitIdentity:unit=>unit.filepath,

@@ -64,6 +64,56 @@ function assignmentHarness(changes={}){
     Object.defineProperty(h.app,'ctAssignmentRows',{get:()=>h.mixin.computed.ctAssignmentRows.call(h.app)});
     return h;
 }
+
+test('Use English decrements the normal Missing counter/filter and resolves field, sheet, diagnostics and progress until revoked',async()=>{
+    const original=namedUnit('Approved','Source {0}',''),neutral=namedUnit('Neutral','Other','Complete'),f=fixture();
+    await f.store.import(scope,{units:[original,neutral],assets:[asset]});
+    const {app,mixin}=listHarness({ctUnits:[original,neutral],ctSelection:original.id,_ctUnitIndex:new Map([[original.id,original],[neutral.id,neutral]]),
+        _ctWorkUnits:new Map([[original.id,original]]),ctValues:S.valuesFor(original),_ctStore:f.store});
+    app.ctPolicy.clientTextEnglishIntent=S.ENGLISH_INTENT_PROTOCOL;app.ctSync=()=>{};app.ctLoadMemory=()=>{};app.ctSelectedFilters=['missing'];
+    const progress=()=>clone(mixin.computed.ctWorkProgress.call(app)),sheet=JSON.stringify(['normal',original.sheet]);
+    assert.equal(app.ctCounts.missing,1);assert.equal(app.ctRows.length,1);assert.equal(app.ctSheetSeverities.get(sheet),'error');assert.equal(progress().resolved,0);
+    assert.equal(await app.ctChooseEnglish(original.fields[0]),true);
+    assert.equal(app.ctCounts.missing,0);assert.equal(app.ctRows.length,0);assert.equal(app.ctStatus(original).fields[fieldId].rawMissing,true);
+    assert.equal(app.ctFieldStatus(original.fields[0]).missing,false);assert.equal(app.ctSheetSeverities.get(sheet),'filled');
+    assert.deepEqual(progress(),{total:1,resolved:1,percent:100});assert.equal(app.ctNeedsAttention(original),false);
+    assert.equal(app.ctFieldController(original.fields[0]).diagnosticPresentation.errorCount,0);assert.deepEqual(clone(app.ctAnalyzeScanUnit(original,{tagSyntax:true,variables:true,keywords:true,terminology:true},null)),[]);
+    const approved=clone(app.ctSaved[original.id]);
+    for(const changed of [
+        {...approved,englishIntent:{[fieldId]:{...approved.englishIntent[fieldId],state:'needs_review'}}},
+        {...approved,englishIntent:{[fieldId]:{...approved.englishIntent[fieldId],sourceHash:'a'.repeat(64)}}},
+        {...approved,conflicts:[{fieldId,local:'',remote:'Peer'}]},
+        {...approved,syncRecovery:{state:'conflict'}}
+    ]){app.ctSaved={[original.id]:changed};assert.equal(app.ctCounts.missing,1);assert.equal(app.ctRows.length,1);assert.equal(app.ctSheetSeverities.get(sheet),'error');assert.equal(progress().resolved,0);}
+    app.ctSaved={[original.id]:approved};assert.equal(await app.ctChooseEnglish(original.fields[0],true),true);
+    assert.equal(app.ctCounts.missing,1);assert.equal(app.ctRows.length,1);assert.equal(progress().resolved,0);assert.equal(app.ctSheetSeverities.get(sheet),'error');
+    const reopened=listHarness({ctUnits:[original,neutral],ctSaved:await f.store.getSaved(scope)}).app;assert.equal(reopened.ctCounts.missing,1);
+    app.gameVersion='poe1';app.ctSaved={[original.id]:approved};assert.equal(app.ctCounts.missing,1,'ineligible game cannot inherit resolution');
+});
+
+test('known shared rejection refreshes actionable Missing immediately while preserving a newer private draft',async()=>{
+    const original=namedUnit('Rejected','Source',''),f=fixture();await f.store.import(scope,{units:[original],assets:[asset]});
+    const {app}=listHarness({ctUnits:[original],ctSelection:original.id,_ctUnitIndex:new Map([[original.id,original]]),ctValues:S.valuesFor(original),_ctStore:f.store});
+    app.ctPolicy.clientTextEnglishIntent=S.ENGLISH_INTENT_PROTOCOL;app.ctSync=()=>{};app.ctLoadMemory=()=>{};
+    assert.equal(await app.ctChooseEnglish(original.fields[0]),true);assert.equal(app.ctCounts.missing,0);
+    const mutationId=(await f.store.getOutbox(scope))[0].mutationId;
+    await f.store.rejectOperation(scope,original.id,mutationId,{code:'INVALID_REQUEST',status:400,message:'Rejected'},{});
+    app.ctValues[fieldId]='Newer private draft';app.ctDraftDirty=true;
+    app._ctSync={async flush(){throw Error('Rejected');},async pull(){throw Error('Must not pull after rejection');}};
+    await require('../public/clientTextUi.js').mixin.methods.ctSync.call(app);
+    assert.equal(app.ctCounts.missing,1);assert.ok(app.ctPendingSharedRecovery());assert.equal(app.ctValues[fieldId],'Newer private draft');assert.equal(app.ctDraftDirty,true);
+});
+
+test('marker-only audio fields do not manufacture assigned progress',()=>{
+    const audio=namedUnit('Audio','[NOAUDIO]','');audio.fields[0].originalMissing=true;audio.fields[0].outdated=true;
+    const {app,mixin}=listHarness({ctUnits:[audio],_ctWorkUnits:new Map([[audio.id,audio]])});
+    assert.equal(mixin.computed.ctWorkProgress.call(app).total,0);assert.equal(app.ctCounts.missing,0);
+});
+
+test('a nonblank incoming translation remains truthful while its genuine conflict stays in attention navigation',()=>{
+    const original=namedUnit('Incoming','English','Incoming target'),{app}=listHarness({ctUnits:[original],ctSaved:{[original.id]:{values:S.valuesFor(original),conflicts:[{fieldId,local:'',upstream:'Incoming target'}]}}});
+    assert.equal(app.ctCounts.missing,0,'a real current translation is not mislabeled blank');assert.equal(app.ctNeedsAttention(original),true);
+});
 function cloudAccessHarness(h,language=null){
     h.window.CloudSync=require('../public/cloudSync.js');
     h.window.ManagedVersions=require('../public/managedVersions.js');
@@ -697,12 +747,12 @@ test('DNT mixed rows retain ordinary siblings and Gender; all-DNT rows hide with
     mixed.fields[0].source='[DNT] Main';mixed.fields[1].source='DNT form';mixed.fields[2].source='DNT form';
     mixed.fields[0].outdated=true;mixed.fields[0].originalMissing=true;
     all.fields.push({...base,id:'all-gender',kind:'gender',source:'',target:'F'});
-    const {app}=visibleFieldsHarness(mixed,{ctUnits:[mixed,all],_ctUnitIndex:new Map([[mixed.id,mixed],[all.id,all]]),
-        _ctWorkUnits:new Map([[mixed.id,mixed],[all.id,all]])}),counts=clone(app.ctCounts),progress=clone(require('../public/clientTextUi.js').mixin.computed.ctWorkProgress.call(app));
+    const {app,mixin}=visibleFieldsHarness(mixed,{ctUnits:[mixed,all],_ctUnitIndex:new Map([[mixed.id,mixed],[all.id,all]]),
+        _ctWorkUnits:new Map([[mixed.id,mixed],[all.id,all]])}),counts=clone(app.ctCounts),progress=clone(mixin.computed.ctWorkProgress.call(app));
     app.hideDNT=true;
     assert.deepEqual(Array.from(app.ctFieldsFor(),field=>field.name),['Later','Wide','Gender']);
     assert.deepEqual(Array.from(app.ctRows,unit=>unit.id),[mixed.id]);assert.equal(app.ctFieldsFor(all).length,0);
-    assert.deepEqual(clone(app.ctCounts),counts);assert.deepEqual(clone(require('../public/clientTextUi.js').mixin.computed.ctWorkProgress.call(app)),progress);
+    assert.deepEqual(clone(app.ctCounts),counts);assert.deepEqual(clone(mixin.computed.ctWorkProgress.call(app)),progress);
     assert.equal(app.ctRowStatusClasses(mixed).isOutdated,true,'row status still describes all committed fields');
     app.hideDNT=false;assert.equal(app.ctRows.length,2);
 });
@@ -2868,49 +2918,49 @@ test('manager upload offers every ClientText language independently of assignmen
         assert.equal(app.ctUploadVisible,false);assert.deepEqual(requests,['/v1/content-policy']);
     }
 });
-test('the shared assignment sort compares SD file progress against CT progress excluding Missing-only fields',()=>{
+test('the shared assignment sort compares SD progress against full CT assigned workload',()=>{
     const thai={language:'Thai',counts:{saved:2,missing:2,revised:1}},ctThai={language:'Thai',counts:{saved:200,missing:100,workloadFields:40,resolvedFields:3,outdatedFields:1}},
         german={language:'German',counts:{saved:500,missing:500,workloadFields:0,resolvedFields:0}},
         {app}=assignmentHarness({managedTeamSort:'progress',managedTeamSortDir:'desc',managedSelectedDetails:{version:{id:'v1'},teams:[thai],
             contentGroups:[{id:'legacy',legacyVersionId:'v1',contentMode:'statdescription',teams:[thai]},
                 {id:'ct-thai',contentMode:'clienttext',teams:[ctThai]},{id:'ct-german',contentMode:'clienttext',teams:[german]}]}});
     assert.deepEqual(Array.from(app.ctAssignmentRows,row=>[row.label,app.ctAssignmentProgress(row).percent]),
-        [['Thai — ClientText',75],['Thai — StatDescription',50],['German — ClientText',0]]);
+        [['Thai — StatDescription',50],['Thai — ClientText',8],['German — ClientText',0]]);
     app.managedTeamSortDir='asc';assert.equal(app.ctAssignmentRows[0].team,german);
     app.managedTeamSort='language';app.managedTeamSortDir='desc';assert.deepEqual(Array.from(app.ctAssignmentRows,row=>row.label),
         ['Thai — StatDescription','Thai — ClientText','German — ClientText']);
 });
-test('ClientText meters exclude Missing-only fields while retaining Outdated overlap and resolved work',()=>{
+test('ClientText meters retain Missing-only workload and separate Outdated overlap from resolved work',()=>{
     const {app}=assignmentHarness(),row={contentMode:'clienttext',label:'French — ClientText',team:{language:'French',counts:{
         loaded:100,fields:400,workloadFields:10,resolvedFields:4,outdatedFields:3,missingFields:8,
         saved:30,revised:2,missing:5,outdated:3,savedFields:120,revisedFields:12}}},progress=app.ctAssignmentProgress(row);
-    assert.equal(progress.total,7);assert.equal(progress.saved,4);assert.equal(progress.percent,57);
-    assert.equal(progress.missing,0);assert.equal(progress.outdated,3);assert.equal(progress.excludedMissing,3);
-    assert.equal(progress.savedWidth,100*4/7+'%');
-    assert.equal(progress.missingWidth,'0%');assert.equal(progress.outdatedWidth,100*3/7+'%');assert.equal(progress.revisedWidth,'0%');
+    assert.equal(progress.total,10);assert.equal(progress.saved,4);assert.equal(progress.percent,40);
+    assert.equal(progress.missing,3);assert.equal(progress.outdated,3);assert.equal(progress.excludedMissing,0);
+    assert.equal(progress.savedWidth,'40%');
+    assert.equal(progress.missingWidth,'30%');assert.equal(progress.outdatedWidth,'30%');assert.equal(progress.revisedWidth,'0%');
     assert.equal(progress.saved+progress.missing+progress.outdated,progress.total);assert.equal(progress.savedIds,30);assert.equal(progress.revisedFields,12);
     const tooltip=app.ctAssignmentProgressTooltip(row);
-    assert.match(tooltip,/Resolved workload fields: 4 \/ 7 \(57%\)/);assert.match(tooltip,/Saved: 30 · Revised: 2/);
+    assert.match(tooltip,/Resolved workload fields: 4 \/ 10 \(40%\)/);assert.match(tooltip,/Saved: 30 · Revised: 2/);
     assert.match(tooltip,/Revised corrections: 12 · Missing: 8 · Outdated: 3/);
-    assert.match(tooltip,/Missing-only fields excluded: 3/);assert.match(tooltip,/blank ClientText values can intentionally use English/);
-    assert.match(tooltip,/Outdated fields still require review, including fields that are also Missing/);
+    assert.match(tooltip,/Remaining Missing-only fields: 3/);assert.match(tooltip,/valid active Use English decision resolves its field/);
+    assert.match(tooltip,/Unmarked blanks and unreviewed source changes remain work/);
     assert.match(tooltip,/outside the initial workload and are excluded from the progress bar/);
     assert.match(tooltip,/unsaved drafts and pending offline saves are excluded/);
     row.team.counts.outdatedFields=100;row.team.counts.resolvedFields=100;
     assert.equal(app.ctAssignmentProgress(row).savedWidth,'100%');assert.equal(app.ctAssignmentProgress(row).outdatedWidth,'0%');
 });
-test('ClientText Missing-only and unavailable workloads remain neutral without using loaded IDs or Saved counts',()=>{
+test('ClientText Missing-only workload remains unresolved while unavailable workload stays neutral',()=>{
     const {app}=assignmentHarness(),row={contentMode:'clienttext',label:'Thai — ClientText',team:{language:'Thai',counts:{loaded:149550,saved:1000,missing:100,workloadFields:100,resolvedFields:0,outdatedFields:0}}},
         progress=app.ctAssignmentProgress(row);
-    assert.equal(progress.total,0);assert.equal(progress.saved,0);assert.equal(progress.percent,0);assert.equal(progress.empty,true);assert.equal(progress.known,true);
-    for(const name of ['savedWidth','revisedWidth','missingWidth','outdatedWidth'])assert.equal(progress[name],'0%');
-    assert.equal(progress.excludedMissing,100);assert.match(app.ctAssignmentProgressTooltip(row),/No counted workload fields; the bar is neutral/);
+    assert.equal(progress.total,100);assert.equal(progress.saved,0);assert.equal(progress.percent,0);assert.equal(progress.empty,false);assert.equal(progress.known,true);
+    for(const name of ['savedWidth','revisedWidth','outdatedWidth'])assert.equal(progress[name],'0%');assert.equal(progress.missingWidth,'100%');
+    assert.equal(progress.excludedMissing,0);assert.match(app.ctAssignmentProgressTooltip(row),/Remaining Missing-only fields: 100/);
     row.team.counts.workloadFields=0;assert.equal(app.ctAssignmentProgress(row).empty,true);
     delete row.team.counts.workloadFields;assert.equal(app.ctAssignmentProgress(row).known,false);
     assert.match(app.ctAssignmentProgressTooltip(row),/workload counts are unavailable/);
 });
 
-test('ClientText editor progress excludes blank fields, keeps review work and reflects committed values only',()=>{
+test('ClientText editor progress retains unmarked blanks and review work, using committed resolution only',()=>{
     const blank=namedUnit('fallback','English',''),whitespace=namedUnit('whitespace','English',' \t\n'),
         outdated=namedUnit('review','English','Old translation',true),overlap=namedUnit('blank-review','English','',true),
         correction=namedUnit('correction','English','Complete'),carried=namedUnit('carried','Changed English','Carried translation');
@@ -2919,22 +2969,22 @@ test('ClientText editor progress excludes blank fields, keeps review work and re
         {app,mixin}=harness({ctUnits:originals,_ctWorkUnits:new Map(originals.map(unit=>[unit.id,unit])),
             ctSaved:{[carried.id]:{values:S.valuesFor(carried),outdated:[fieldId],saved:false}}}),
         progress=()=>clone(mixin.computed.ctWorkProgress.call(app));
-    assert.deepEqual(progress(),{total:3,resolved:0,percent:0},'Only Outdated fields count before any saves');
+    assert.deepEqual(progress(),{total:5,resolved:0,percent:0},'Missing and Outdated fields count before any saves');
     app.ctValues={[fieldId]:'Unsaved fallback translation'};app.ctReviewed={[fieldId]:S.sourceHash('English')};
-    assert.deepEqual(progress(),{total:3,resolved:0,percent:0},'Private drafts cannot change committed progress');
+    assert.deepEqual(progress(),{total:5,resolved:0,percent:0},'Private drafts cannot change committed progress');
     app.ctSaved[blank.id]={values:{[fieldId]:'Saved translation'}};
     app.ctSaved[whitespace.id]={values:S.valuesFor(whitespace)};
     app.ctSaved[correction.id]={values:{[fieldId]:'Correction'}};
-    assert.deepEqual(progress(),{total:4,resolved:1,percent:25},'Filled Missing work counts as resolved; blank saves and Revised corrections add no work');
+    assert.deepEqual(progress(),{total:5,resolved:1,percent:20},'Filled Missing work resolves; ordinary blanks stay unresolved');
     app.ctSaved[overlap.id]={values:S.valuesFor(overlap),reviewed:{[fieldId]:S.sourceHash('English')}};
-    assert.deepEqual(progress(),{total:3,resolved:1,percent:33},'Reviewed blank Outdated fields leave the denominator');
+    assert.deepEqual(progress(),{total:5,resolved:1,percent:20},'Reviewed blanks remain Missing without an explicit English decision');
     app.ctSaved[outdated.id]={values:S.valuesFor(outdated),reviewed:{[fieldId]:S.sourceHash('English')}};
     app.ctSaved[carried.id]={...app.ctSaved[carried.id],reviewed:{[fieldId]:S.sourceHash('Changed English')}};
-    assert.deepEqual(progress(),{total:3,resolved:3,percent:100});
+    assert.deepEqual(progress(),{total:5,resolved:3,percent:60});
     app.ctSaved[blank.id]={values:{[fieldId]:' \t\n'}};
-    assert.deepEqual(progress(),{total:2,resolved:2,percent:100},'Intentionally blank saved work does not reduce completion');
+    assert.deepEqual(progress(),{total:5,resolved:2,percent:40},'Ordinary blank saved work is unresolved without approval');
     app._ctWorkUnits=new Map([[blank.id,blank],[whitespace.id,whitespace],[overlap.id,overlap]]);
-    assert.deepEqual(progress(),{total:0,resolved:0,percent:100});
+    assert.deepEqual(progress(),{total:3,resolved:0,percent:0});
     assert.equal(app.ctStatus(blank).missing,true);assert.equal(app.ctStatus(blank).saved,true);
     assert.deepEqual(originals,before,'Progress never mutates original field facts');
 });

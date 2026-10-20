@@ -195,7 +195,7 @@
           'aria-activedescendant':host.ctCompletion?.fieldId===fieldId && host.ctCompletion?.items?.length?'sharedEditorAutocompleteOption-'+(host.ctCompletion.selectedIndex || 0):undefined};}};
     const diagnostics=()=>{
       const text=value(),exempt=field.kind==='gender' || root.ClientTextState?.allowsNonexistent(field) && text.trim()==='NONEXISTENT' || root.ClientTextState?.audioOnly(field.source);
-      if(exempt)return [];
+      if(exempt || !text.trim() && host.ctUsesEnglish?.(field,unit))return [];
       const common=root.TranslationDiagnostics?.analyze(text,{lang:host.lang,contentMode:'clienttext',checks:{whitespace:true,dash:true,tagSyntax:false}})?.diagnostics || [],
         manualCurrent=!host.ctValuesFor || host.ctValuesFor(unit)[fieldId]===text;
       return [...(root.ClientTextState?.diagnose(field,text) || []),...common,

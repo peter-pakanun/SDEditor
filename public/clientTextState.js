@@ -127,8 +127,11 @@
         }
         return true;
     }
-    function englishIntentFor(field, saved) {
+    function englishIntentFor(field, saved, options = {}) {
         const value = intentMap(saved)[field.id];
+        if(options.game && options.game!=='poe2' || saved?.syncRecovery)return false;
+        if([...(saved?.conflicts || []),...(saved?.provenance?.conflicts || [])].some(conflict=>!conflict.fieldId || conflict.fieldId===field.id))return false;
+        if((field.outdated || (saved?.outdated || []).includes(field.id)) && saved?.reviewed?.[field.id]!==intentHash(field))return false;
         return !!value && value.state === 'active' && value.sourceHash === intentHash(field) && englishEligible(field)
             && !String(own(saved?.values,field.id) ? saved.values[field.id] : field.target ?? '').trim();
     }
@@ -388,13 +391,14 @@
     }
     const isAbsent = (field, value) => !!field.required && !audioOnly(field.source) && !String(value ?? '').trim();
     const needsSourceReview = (field, value) => field.kind !== 'form' || !!field.required || !!field.outdated || !!String(value ?? '').trim();
-    function statusFor(unit, saved = null) {
+    function statusFor(unit, saved = null, options = {}) {
         const values = valuesFor(unit, saved), reviewed = saved?.reviewed || {}, fields = {}, savedPresent = !!saved && saved.saved !== false;
         for (const field of unit.fields) {
             const originalMissing = isAbsent(field,field.target) || !!field.originalMissing;
             const assignedOutdated = (!!field.outdated || (saved?.outdated || []).includes(field.id)) && !audioOnly(field.source);
-            const missing = isAbsent(field,values[field.id]), outdated = assignedOutdated && reviewed[field.id] !== sourceHash(field.source);
-            fields[field.id] = { missing,outdated,saved:savedPresent,
+            const rawMissing = isAbsent(field,values[field.id]), english = englishIntentFor(field,saved,options);
+            const missing = rawMissing && !english, outdated = assignedOutdated && reviewed[field.id] !== sourceHash(field.source);
+            fields[field.id] = { missing,rawMissing,english,outdated,saved:savedPresent,
                 revised:savedPresent && !originalMissing && !assignedOutdated && !audioOnly(field.source) && values[field.id] !== field.target,
                 unchanged:!missing && !outdated && !savedPresent };
         }
@@ -408,10 +412,10 @@
     function fillFor(field, value, saved, status) {
         const assignedOutdated = (field.outdated || (saved?.outdated || []).includes(field.id)) && !audioOnly(field.source);
         const reviewed = saved?.reviewed?.[field.id] === sourceHash(field.source);
-        if (saved?.saved === false && value === field.target && !assignedOutdated && !reviewed) return null;
+        if (saved?.saved === false && value === field.target && !assignedOutdated && !reviewed && !status.english) return null;
         if (status.missing) return FILLS.missing;
         if (status.outdated) return FILLS.outdated;
-        if ((field.originalMissing || isAbsent(field, field.target)) && value.trim()) return FILLS.filled;
+        if ((field.originalMissing || isAbsent(field, field.target)) && (value.trim() || status.english)) return FILLS.filled;
         if (assignedOutdated || reviewed && field.originalFill === FILLS.outdated) return FILLS.reviewed;
         if (status.revised) return FILLS.revised;
         if (field.originalFill === FILLS.missing && value.trim() && !audioOnly(field.source)) return FILLS.filled;
