@@ -47,6 +47,40 @@ const tabColor = async (bytes, path = 'xl/worksheets/sheet1.xml') => {
 };
 const withTab = (raw, color) => raw.replace('<sheetData>', `<sheetPr codeName="NativeSheet" enableFormatConditionsCalculation="0"><tabColor rgb="FF${color}"/><outlinePr summaryRight="0"/><pageSetUpPr fitToPage="1"/></sheetPr><sheetData>`);
 
+test('darker tab RGB round trips independently of cell fills for every status, workbook type and role', async t => {
+    const cases=[
+        {color:'missing',source:'English',target:'',style:2,value:' ',tab:'FA8072',fill:'FA8072'},
+        {color:'outdated',source:'New English',target:'Old',style:3,value:'Still needs review',tab:'FF9966',fill:'FF9966'},
+        {color:'revised',source:'English',target:'Original',style:1,value:'Correction',tab:'793BB6',fill:'D9D2E9'},
+        {color:'reviewed',source:'New English',target:'Old',style:3,value:'Old',review:true,tab:'C6EFCE',fill:'C6EFCE'},
+        {color:'filled',source:'English',target:'',style:2,value:'Completed',tab:'626B7A',fill:'D9D9D9'},
+        {color:'',source:'[NOAUDIO]',target:'Metadata',style:1,value:'Changed metadata',tab:null,fill:'FFFFFF'}
+    ];
+    for(const macro of [false,true])for(const role of ['normal','gender'])for(const item of cases)await t.test(`${macro?'xlsm':'xlsx'}/${role}/${item.color || 'no colour'}`,async()=>{
+        const filename='French'+(role==='gender'?'_Gender':'')+(macro?'.xlsm':'.xlsx');
+        const formula='<c r="E2"><f>1+1</f><v>2</v></c>';
+        const normal=withTab(sheet([row(1,[cell('A1','ID'),cell('B1','Name'),cell('C1','Translation')]),
+            row(2,[cell('A2','palette'),cell('B2',item.source),cell('C2',item.target,item.style),formula])]),'D9D2E9');
+        const bytes=await workbook({macro,normal}),parsed=await Codec.parseWorkbook(bytes,{filename,role}),unit=get(parsed,'palette'),current=field(unit,'Name');
+        const saved={[unit.id]:{values:{[current.id]:item.value},reviewed:item.review?{[current.id]:State.sourceHash(current.source)}:{}}};
+        const output=await Codec.exportWorkbook(bytes,{...parsed,units:[unit]},saved),reopened=await Codec.parseWorkbook(output,{filename,role});
+        const exportedField=field(get(reopened,'palette'),'Name');
+        assert.equal(await tabColor(output),item.tab,'Only the purple and grey tab RGB differs from the established palette');
+        assert.equal(exportedField.originalFill,item.fill,'The standard cell fill is independent of the tab RGB');
+        assert.equal(exportedField.target,item.value);assert.equal(State.unitColorFor(get(reopened,'palette')),item.color);
+        assert.deepEqual(await Codec.exportWorkbook(output,reopened,{}),output,'Reimport does not reinterpret darker tabs or change a no-op export');
+        const before=await JSZip.loadAsync(bytes),after=await JSZip.loadAsync(output);
+        for(const name of Object.keys(before.files))if(!before.files[name].dir && !['xl/worksheets/sheet1.xml','xl/styles.xml'].includes(name))assert.deepEqual(await after.file(name).async('uint8array'),await before.file(name).async('uint8array'),name);
+        const raw=await after.file('xl/worksheets/sheet1.xml').async('string');
+        assert.ok(raw.includes(formula),'Formula XML and cached result remain exact');
+        assert.ok(raw.includes('<outlinePr summaryRight="0"/><pageSetUpPr fitToPage="1"/>'));
+        const Parser=require('../public/vendor/fast-xml-parser-5.11.2.min.js').default;
+        assert.doesNotThrow(()=>new Parser().parse(raw,true),'Worksheet XML remains well formed');
+        assert.equal((raw.match(/<tabColor\b/g) || []).length,item.tab?1:0);
+        if(item.tab)assert.match(raw,new RegExp('<tabColor rgb="FF'+item.tab+'"/>'),'Explicit opaque ARGB without theme/indexed/tint alternatives');
+    });
+});
+
 test('workbook game detection uses internal identities and corroborated tables, never filenames or translated names', () => {
     const characters = ids => ({units:ids.map(recordId=>({sheet:'Characters',recordId}))});
     const one='Metadata/Characters/Str/Str', two='Metadata/Characters/Str/StrFour';
@@ -88,7 +122,7 @@ test('export resolves red cells and tabs from current content while retaining un
     const output = await Codec.exportWorkbook(bytes, parsed, saved), reopened = await Codec.parseWorkbook(output, { filename: 'French.xlsm' });
     assert.equal(field(get(reopened, 'missing'), 'Name').originalFill, Codec.FILLS.filled);
     assert.equal(field(get(reopened, 'stale-red'), 'Name').originalFill, Codec.FILLS.filled, 'Saved nonblank content cannot retain an obsolete red Missing fill');
-    assert.equal(await tabColor(output), Codec.FILLS.filled, 'A completed red sheet must reflect its resolved content');
+    assert.equal(await tabColor(output), Codec.TAB_COLORS.filled, 'A completed red sheet must reflect its resolved content');
     const before = await JSZip.loadAsync(bytes), after = await JSZip.loadAsync(output);
     assert.deepEqual(Object.keys(after.files), Object.keys(before.files));
     for (const name of Object.keys(before.files)) if (!before.files[name].dir && !['xl/styles.xml', 'xl/worksheets/sheet1.xml'].includes(name))
@@ -97,7 +131,7 @@ test('export resolves red cells and tabs from current content while retaining un
     assert.equal(omitEdits(await after.file('xl/worksheets/sheet1.xml').async('string')), omitEdits(normal), 'Only selected targets and the tab colour may change, including formula caches and sheetPr options');
     const corrected = await Codec.exportWorkbook(bytes, parsed, { ...saved, [stale.id]: { values: { [field(stale, 'Name').id]: 'Revised red cell' } } });
     assert.equal(field(get(await Codec.parseWorkbook(corrected, { filename: 'French.xlsm' }), 'stale-red'), 'Name').originalFill, Codec.FILLS.revised);
-    assert.equal(await tabColor(corrected), Codec.FILLS.revised, 'A correction of complete original text is Revised even if its original fill was red');
+    assert.equal(await tabColor(corrected), Codec.TAB_COLORS.revised, 'A correction of complete original text is Revised even if its original fill was red');
 });
 
 test('sheet tabs include untouched Missing and Outdated fields, then reviewed and revised saved content', async () => {
@@ -112,17 +146,17 @@ test('sheet tabs include untouched Missing and Outdated fields, then reviewed an
     const save = (unit, value, reviewed = {}) => records[unit.id] = { values: { [field(unit, 'Name').id]: value }, reviewed };
     const exported = () => Codec.exportWorkbook(bytes, { ...parsed, units: parsed.units.filter(unit => records[unit.id]) }, records);
     save(complete, 'Revised');
-    assert.equal(await tabColor(await exported()), Codec.FILLS.missing, 'An untouched missing row keeps a mixed sheet red');
+    assert.equal(await tabColor(await exported()), Codec.TAB_COLORS.missing, 'An untouched missing row keeps a mixed sheet red');
     save(missing, 'Filled');
-    assert.equal(await tabColor(await exported()), Codec.FILLS.outdated, 'Untouched Outdated work outranks completed or revised work');
+    assert.equal(await tabColor(await exported()), Codec.TAB_COLORS.outdated, 'Untouched Outdated work outranks completed or revised work');
     save(outdated, 'Old', { [field(outdated, 'Name').id]: State.sourceHash(field(outdated, 'Name').source) });
     const output = await exported();
-    assert.equal(await tabColor(output), Codec.FILLS.revised, 'An eligible correction remains visible after all workload is resolved');
+    assert.equal(await tabColor(output), Codec.TAB_COLORS.revised, 'An eligible correction remains visible after all workload is resolved');
     const reopened = await Codec.parseWorkbook(output, { filename: 'French.xlsm' });
     assert.equal(field(get(reopened, 'outdated'), 'Name').originalFill, Codec.FILLS.reviewed);
     assert.equal(field(get(reopened, 'complete'), 'Name').originalFill, Codec.FILLS.revised);
     save(complete, 'Original');
-    assert.equal(await tabColor(await exported()), Codec.FILLS.reviewed, 'Reverting a correction leaves reviewed completion');
+    assert.equal(await tabColor(await exported()), Codec.TAB_COLORS.reviewed, 'Reverting a correction leaves reviewed completion');
     assert.deepEqual(await Codec.exportWorkbook(bytes, parsed, {}), bytes, 'Unmodified workbooks keep their exact bytes');
     assert.deepEqual(await Codec.exportWorkbook(bytes, parsed, { [complete.id]: records[complete.id] }), bytes, 'An unchanged complete save preserves original formatting and tabs');
 });
@@ -135,7 +169,7 @@ test('legacy affected-only headers rederive whole-sheet workload with their acce
         const unit = get(parsed, 'dialogue'), current = field(unit, 'Text', 'MS'), saved = { [unit.id]: { values: { [current.id]: 'Revised' } } };
         const legacy = { ...parsed, sheets: parsed.sheets.map(({ originalStatusCounts, ...sheet }) => sheet), units: [unit] };
         assert.deepEqual(await Codec.exportWorkbook(bytes, legacy, saved), await Codec.exportWorkbook(bytes, parsed, saved), parserVersion);
-        assert.equal(await tabColor(await Codec.exportWorkbook(bytes, legacy, saved)), parserVersion === 'clienttext-v1' ? Codec.FILLS.revised : Codec.FILLS.missing);
+        assert.equal(await tabColor(await Codec.exportWorkbook(bytes, legacy, saved)), parserVersion === 'clienttext-v1' ? Codec.TAB_COLORS.revised : Codec.TAB_COLORS.missing);
         const oldCounts = { ...legacy, sheets: parsed.sheets.map(sheet => ({ ...sheet, originalStatusCounts: {
             missing: sheet.originalStatusCounts.missing, outdated: sheet.originalStatusCounts.outdated } })) };
         assert.deepEqual(await Codec.exportWorkbook(bytes, oldCounts, saved), await Codec.exportWorkbook(bytes, parsed, saved), 'Two-colour cached counts are upgraded from the same accepted original');
@@ -148,7 +182,7 @@ test('exported grey completion is distinct from no colour, with retained higher 
     const bytes = await workbook({ macro: true, normal: plain }), parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsm' });
     const unit = get(parsed, 'plain'), current = field(unit, 'Name');
     const saved = { [unit.id]: { values: { [current.id]: 'Correction' } } };
-    assert.equal(await tabColor(await Codec.exportWorkbook(bytes, parsed, saved)), Codec.FILLS.revised);
+    assert.equal(await tabColor(await Codec.exportWorkbook(bytes, parsed, saved)), Codec.TAB_COLORS.revised);
     saved[unit.id].values[current.id] = current.target;
     const reverted = await Codec.exportWorkbook(bytes, parsed, saved);
     assert.equal(await tabColor(reverted), null, 'An unchanged complete original has no colour, not grey');
@@ -166,7 +200,7 @@ test('exported grey completion is distinct from no colour, with retained higher 
         const baseline = await Codec.parseWorkbook(original, { filename: 'French.xlsm' }), missing = get(baseline, 'missing');
         const work = { [missing.id]: { values: { [field(missing, 'Name').id]: 'Completed' } } };
         const exported = await Codec.exportWorkbook(original, { ...baseline, units: [missing] }, work);
-        assert.equal(await tabColor(exported), Codec.FILLS[expected], 'Untouched completion fills participate in whole-sheet priority');
+        assert.equal(await tabColor(exported), Codec.TAB_COLORS[expected], 'Untouched completion fills participate in whole-sheet priority');
         const reopened = await Codec.parseWorkbook(exported, { filename: 'French.xlsm' });
         assert.equal(field(get(reopened, 'missing'), 'Name').originalFill, Codec.FILLS.filled);
         assert.equal(State.unitColorFor(get(reopened, 'missing')), 'filled', 'Reimported completion-grey remains distinct');
@@ -175,7 +209,7 @@ test('exported grey completion is distinct from no colour, with retained higher 
 });
 
 test('an affected uncoloured sheet removes obsolete status tabs, including grey, while retaining unrelated tab formatting', async () => {
-    for (const color of [...Object.values(Codec.FILLS), '123456']) {
+    for (const color of [...new Set([...Object.values(Codec.FILLS), ...Object.values(Codec.TAB_COLORS)]), '123456']) {
         const normal = withTab(sheet([row(1, [cell('A1', 'ID'), cell('B1', 'Name'), cell('C1', 'Translation')]),
             row(2, [cell('A2', 'audio'), cell('B2', '[NOAUDIO]'), cell('C2', 'Original metadata', 1)])]), color);
         const bytes = await workbook({ macro: true, normal }), parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsm' });
@@ -199,17 +233,17 @@ test('review-only and source-only exports update tabs without manufacturing Revi
     const unit = get(parsed, 'complete'), current = field(unit, 'Name');
     const sourceOnly = { values: {}, outdated: [current.id], saved: false };
     const orange = await Codec.exportWorkbook(bytes, parsed, { [unit.id]: sourceOnly });
-    assert.equal(await tabColor(orange), Codec.FILLS.outdated);
+    assert.equal(await tabColor(orange), Codec.TAB_COLORS.outdated);
     const reviewed = { ...sourceOnly, reviewed: { [current.id]: State.sourceHash(current.source) } };
     const green = await Codec.exportWorkbook(bytes, parsed, { [unit.id]: reviewed });
-    assert.equal(await tabColor(green), Codec.FILLS.reviewed);
+    assert.equal(await tabColor(green), Codec.TAB_COLORS.reviewed);
     assert.equal(field(get(await Codec.parseWorkbook(green, { filename: 'French.xlsm' }), 'complete'), 'Name').originalFill, Codec.FILLS.reviewed);
     assert.equal(State.statusFor(unit, reviewed).saved, false);
 
     const orangeBytes = await workbook({ macro: true, normal: normal.replace(cell('C2', 'Original', 1), cell('C2', 'Original', 3)) });
     const originalOrange = await Codec.parseWorkbook(orangeBytes, { filename: 'French.xlsm' });
     const tabOnly = await Codec.exportWorkbook(orangeBytes, originalOrange, { [unit.id]: { values: { [current.id]: 'Original' } } });
-    assert.equal(await tabColor(tabOnly), Codec.FILLS.outdated, 'A tab can change even when target XML and its existing orange fill need no change');
+    assert.equal(await tabColor(tabOnly), Codec.TAB_COLORS.outdated, 'A tab can change even when target XML and its existing orange fill need no change');
     const before = await JSZip.loadAsync(orangeBytes), after = await JSZip.loadAsync(tabOnly);
     assert.equal((await after.file('xl/worksheets/sheet1.xml').async('string')).replace(/<tabColor\b[^>]*\/>/, ''), normal.replace(cell('C2', 'Original', 1), cell('C2', 'Original', 3)).replace(/<tabColor\b[^>]*\/>/, ''));
     assert.deepEqual(await after.file('xl/styles.xml').async('uint8array'), await before.file('xl/styles.xml').async('uint8array'));
@@ -233,7 +267,7 @@ test('tab patches support absent, empty and prefixed sheet properties and retain
         const bytes = await workbook({ macro: true, normal }), parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsm' });
         const unit = get(parsed, 'complete'), current = field(unit, 'Name');
         const output = await Codec.exportWorkbook(bytes, parsed, { [unit.id]: { values: { [current.id]: 'Revised' } } });
-        assert.equal(await tabColor(output), Codec.FILLS.revised, name + prefix);
+        assert.equal(await tabColor(output), Codec.TAB_COLORS.revised, name + prefix);
         const raw = await (await JSZip.loadAsync(output)).file('xl/worksheets/sheet1.xml').async('string');
         assert.equal((raw.match(/<(?:x:)?tabColor\b/g) || []).length, 1, name + prefix);
         assert.equal(raw.includes('theme="4"'), false); assert.equal(raw.includes('tint="0.5"'), false);
@@ -688,8 +722,8 @@ test('complete XLSM exports patch only targets and cloned status styles', async 
     assert.equal(field(get(result, 'complete'), 'Name').target, '=Literal _x0020_ & <angle>\r\nnext');
     assert.equal(field(get(result, 'record', 'Words_Gender'), 'Text', 'FS').target, 'Forte');
     assert.equal(field(get(result, 'record'), 'Name').source, 'Sword');
-    assert.equal(await tabColor(output), Codec.FILLS.revised, 'Resolved normal sheet reflects its eligible saved correction');
-    assert.equal(await tabColor(output, 'xl/worksheets/sheet2.xml'), Codec.FILLS.missing, 'Unresolved forms keep their own sheet red independently');
+    assert.equal(await tabColor(output), Codec.TAB_COLORS.revised, 'Resolved normal sheet reflects its eligible saved correction');
+    assert.equal(await tabColor(output, 'xl/worksheets/sheet2.xml'), Codec.TAB_COLORS.missing, 'Unresolved forms keep their own sheet red independently');
     const before = await JSZip.loadAsync(bytes), after = await JSZip.loadAsync(output);
     for (const name of ['xl/vbaProject.bin', 'xl/native.bin', 'xl/metadata', 'xl/workbook.xml', '[Content_Types].xml', 'xl/_rels/workbook.xml.rels']) assert.deepEqual(await after.file(name).async('uint8array'), await before.file(name).async('uint8array'), name);
     assert.ok((await after.file('xl/styles.xml').async('string')).includes('<alignment wrapText="1"/>'));

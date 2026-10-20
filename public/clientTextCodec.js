@@ -11,6 +11,8 @@
     const VERSION = 1, RED = 'FA8072', ORANGE = 'FF9966';
     const PARSER_VERSION = 'clienttext-v4', PARSER_VERSIONS = Object.freeze(['clienttext-v1', 'clienttext-v2', 'clienttext-v3', PARSER_VERSION]);
     const FILLS = State.FILLS;
+    // Stronger worksheet tabs are display-only; cell fills remain the status contract.
+    const TAB_COLORS = Object.freeze({ ...FILLS, revised: '793BB6', filled: '626B7A' });
     const FORMS = ['MS', 'FS', 'NS', 'MP', 'FP', 'NP'];
     const CLASS_FORMS = Object.freeze(['StrFour', 'IntFour', 'DexFour', 'StrDexFour', 'DexIntFour', 'StrIntFour',
         'StrFourb', 'IntFourb', 'DexFourb', 'StrDexFourb', 'DexIntFourb', 'StrIntFourb']);
@@ -478,7 +480,7 @@
         if (tab) {
             const opening = /^<[^>]+>/.exec(tab[0])[0], attrs = startTagAttrs(opening);
             if (color && String(attrs.rgb || '').toUpperCase() === 'FF' + color && !['theme','indexed','auto','tint'].some(key => own(attrs, key))) return original;
-            if (!color && !Object.values(FILLS).includes(String(attrs.rgb || '').slice(-6).toUpperCase())) return original;
+            if (!color && ![...Object.values(FILLS), ...Object.values(TAB_COLORS)].includes(String(attrs.rgb || '').slice(-6).toUpperCase())) return original;
             let replacement = '';
             if (color) {
                 let updated = opening;
@@ -557,7 +559,7 @@
             if (!counts || !keys.every(key => Number.isSafeInteger(counts[key]) && counts[key] >= 0)) throw error('Workbook sheet workload is unavailable.');
             const change = sheetChanges.get(sheet.name), current = Object.fromEntries(keys.map(key => [key, counts[key] + change[key]]));
             if (keys.some(key => current[key] < 0)) throw error('Workbook sheet workload differs from its original.');
-            const color = FILLS[State.sheetColorFor(current)] || null;
+            const color = TAB_COLORS[State.sheetColorFor(current)] || null;
             const original = await part(zip, sheet.path), patched = patchTabColor(edits.size ? patchSheet(original, edits) : original, color);
             if (patched !== original) {
                 if (Object.keys(zip.files).some(name => name.startsWith('_xmlsignatures/'))) throw error('A signed workbook cannot be edited without invalidating its document signature.');
@@ -571,5 +573,5 @@
         progress({ phase: 'complete', processed: parsed.sheets.length, total: parsed.sheets.length, percent: 100, sheet: '' });
         return result;
     }
-    return { VERSION, PARSER_VERSION, PARSER_VERSIONS, FORMS, CLASS_FORMS, FILLS, detectGame, assertGame, parseWorkbook, exportWorkbook };
+    return { VERSION, PARSER_VERSION, PARSER_VERSIONS, FORMS, CLASS_FORMS, FILLS, TAB_COLORS, detectGame, assertGame, parseWorkbook, exportWorkbook };
 });

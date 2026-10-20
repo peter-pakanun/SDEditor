@@ -81,8 +81,8 @@ async function validateTargetedPatches(bytes, parsed) {
         }
         const sheetName = parsed.sheets.find(sheet => sheet.path === name)?.name;
         const statuses = parsed.units.filter(unit => unit.sheet === sheetName).map(unit => State.statusFor(unit, records[unit.id]));
-        const expectedColor = statuses.some(status => status.missing) ? Codec.FILLS.missing : statuses.some(status => status.outdated) ? Codec.FILLS.outdated
-            : statuses.some(status => status.revised) ? Codec.FILLS.revised : Codec.FILLS.filled;
+        const expectedColor = statuses.some(status => status.missing) ? Codec.TAB_COLORS.missing : statuses.some(status => status.outdated) ? Codec.TAB_COLORS.outdated
+            : statuses.some(status => status.revised) ? Codec.TAB_COLORS.revised : Codec.TAB_COLORS.filled;
         const tabColor = /<(?:[\w.-]+:)?tabColor\b[^>]*\brgb="FF([A-F0-9]{6})"/i.exec(changed)?.[1];
         assert.equal(tabColor, expectedColor, 'Tab color uses the whole committed sheet: ' + name);
         const withoutTab = raw => raw.replace(/<((?:[\w.-]+:)?tabColor)\b[^>]*?(?:\/>|>[\s\S]*?<\/\1\s*>)/, '')

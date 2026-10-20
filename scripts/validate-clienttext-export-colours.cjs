@@ -63,12 +63,12 @@ async function check(filename) {
         const edits = bySheet.get(sheet.name).filter(unit => records[unit.id]);
         if (!edits.length) continue;
         const statuses = bySheet.get(sheet.name).map(unit => State.statusFor(unit, records[unit.id]));
-        const expected = statuses.some(status => status.missing) ? Codec.FILLS.missing : statuses.some(status => status.outdated) ? Codec.FILLS.outdated
-            : sheet.name === revisionUnit.sheet ? Codec.FILLS.revised : hasReview ? Codec.FILLS.reviewed : Codec.FILLS.filled;
+        const expected = statuses.some(status => status.missing) ? Codec.TAB_COLORS.missing : statuses.some(status => status.outdated) ? Codec.TAB_COLORS.outdated
+            : sheet.name === revisionUnit.sheet ? Codec.TAB_COLORS.revised : hasReview ? Codec.TAB_COLORS.reviewed : Codec.TAB_COLORS.filled;
         assert.equal(tab(await after.file(sheet.path).async('string')), expected, 'Sheet tab reflects its whole current content');
         paths.set(sheet.path, edits);
     }
-    assert.equal(tab(await after.file(selected.path).async('string')), hasReview ? Codec.FILLS.reviewed : Codec.FILLS.filled, 'Resolving a previously red sheet removes its red tab');
+    assert.equal(tab(await after.file(selected.path).async('string')), hasReview ? Codec.TAB_COLORS.reviewed : Codec.TAB_COLORS.filled, 'Resolving a previously red sheet removes its red tab');
     const oldStyles = parser.parse(await before.file('xl/styles.xml').async('string')).styleSheet;
     const newStyles = parser.parse(await after.file('xl/styles.xml').async('string')).styleSheet;
     const originalXfs = array(oldStyles.cellXfs.xf), exportedXfs = array(newStyles.cellXfs.xf);

@@ -1,24 +1,36 @@
 // Local-only collection endpoints, native IndexedDB and production dialog/worker. No real team is ended.
+// Matrix: FIXTURE_TAB_STATUS=revised|filled and FIXTURE_WORKBOOK_EXTENSION=xlsx|xlsm.
 'use strict';
 const assert=require('node:assert/strict');
 const {readFileSync,existsSync,mkdirSync,writeFileSync}=require('node:fs');
 const {join,resolve}=require('node:path');
 const express=require('express'),JSZip=require('jszip');
+const Codec=require('../public/clientTextCodec.js');
 const runtime='C:/Users/lpeac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules';
 const {chromium}=require(require.resolve('playwright',{paths:[runtime]}));
 const executablePath=process.env.FIXTURE_BROWSER_PATH || ['C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Google/Chrome/Application/chrome.exe'].find(existsSync);
-const output=resolve(__dirname,'../temp/clienttext-export-browser');mkdirSync(output,{recursive:true});process.env.TEMP=output;process.env.TMP=output;
+const tabStatus=process.env.FIXTURE_TAB_STATUS || 'revised',extension=process.env.FIXTURE_WORKBOOK_EXTENSION || 'xlsx';
+assert.ok(['revised','filled'].includes(tabStatus));assert.ok(['xlsx','xlsm'].includes(extension));
+const expectedTab=tabStatus==='filled'?'626B7A':'793BB6';
+const output=resolve(__dirname,'../temp/clienttext-export-browser',tabStatus+'-'+extension);mkdirSync(output,{recursive:true});process.env.TEMP=output;process.env.TMP=output;
 const publicDir=resolve(__dirname,'../public'),html=readFileSync(join(publicDir,'index.html'),'utf8');
 const dialog=html.slice(html.indexOf('    <dialog ref="ctExportDialog"'),html.indexOf('    <section v-if="workspaceInitializationActive'));
 async function workbook(){
  const zip=new JSZip(),ns='http://schemas.openxmlformats.org/spreadsheetml/2006/main';
  const cell=(r,v)=>`<c r="${r}" t="inlineStr"><is><t>${v}</t></is></c>`;
- zip.file('[Content_Types].xml','<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>');
+ zip.file('[Content_Types].xml',`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/xl/workbook.xml" ContentType="${extension==='xlsm'?'application/vnd.ms-excel.sheet.macroEnabled.main+xml':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml'}"/></Types>`);
  zip.file('xl/workbook.xml',`<workbook xmlns="${ns}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Normal" sheetId="1" r:id="rId1"/></sheets></workbook>`);
  zip.file('xl/_rels/workbook.xml.rels','<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>');
- zip.file('xl/worksheets/sheet1.xml',`<worksheet xmlns="${ns}"><sheetPr codeName="ExportFixture"><tabColor rgb="FFFA8072"/><outlinePr summaryBelow="0"/></sheetPr><sheetData><row r="1">${cell('A1','ID')+cell('C1','Name')+cell('D1','Translation')}</row><row r="2">${cell('A2','fixture')+cell('C2','Source')+cell('D2','Original')}</row></sheetData></worksheet>`);
+ zip.file('xl/worksheets/sheet1.xml',`<worksheet xmlns="${ns}"><sheetPr codeName="ExportFixture"><tabColor rgb="FFFA8072"/><outlinePr summaryBelow="0"/></sheetPr><sheetData><row r="1">${cell('A1','ID')+cell('C1','Name')+cell('D1','Translation')}</row><row r="2">${cell('A2','fixture')+cell('C2','Source')+cell('D2',tabStatus==='filled'?'':'Original')}</row></sheetData></worksheet>`);
  zip.file('xl/styles.xml',`<styleSheet xmlns="${ns}"><fonts count="1"><font/></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>`);
- zip.file('xl/native.bin',new Uint8Array([0,255,7,8,9]));return zip.generateAsync({type:'nodebuffer'});
+ zip.file('xl/native.bin',new Uint8Array([0,255,7,8,9]));if(extension==='xlsm')zip.file('xl/vbaProject.bin',new Uint8Array([1,9,255]));return zip.generateAsync({type:'nodebuffer'});
+}
+async function assertCellFillsAndPackage(bytes,name,target){
+ const parsed=await Codec.parseWorkbook(bytes,{filename:name,role:name.includes('_Gender')?'gender':'normal'});
+ assert.equal(parsed.units[0].fields[0].target,target);
+ assert.equal(parsed.units[0].fields[0].originalFill,tabStatus==='filled'?'D9D9D9':'D9D2E9','Darker tabs never replace standard cell fills');
+ const original=await JSZip.loadAsync(await workbook()),output=await JSZip.loadAsync(bytes);
+ for(const name of Object.keys(original.files))if(!original.files[name].dir && !['xl/styles.xml','xl/worksheets/sheet1.xml'].includes(name))assert.deepEqual(await output.file(name).async('uint8array'),await original.file(name).async('uint8array'),name+' remains byte exact');
 }
 async function main(){
  let mode='success',manifest,collection={id:'fixture-collection'},posts=0,abortedConnections=0,held=[];
@@ -46,7 +58,7 @@ async function main(){
   browser=await chromium.launch({executablePath,headless:true,args:['--disable-gpu']});
   const context=await browser.newContext({viewport:{width:1440,height:1000},acceptDownloads:true});
   const page=await context.newPage();page.on('console',message=>{if(message.type()==='error')console.error(message.text());});page.on('pageerror',e=>errors.push(e.message));await page.goto('http://127.0.0.1:'+server.address().port);
-  manifest=await page.evaluate(async()=>{
+  manifest=await page.evaluate(async({extension})=>{
    const app=window.app;const opening=indexedDB.open('export-fixture',1);
    const db=await new Promise((resolve,reject)=>{opening.onupgradeneeded=()=>ClientTextStore.upgrade(opening.result,opening.transaction);opening.onsuccess=()=>resolve(opening.result);opening.onerror=()=>reject(opening.error);});
    app._ctStore=ClientTextStore.create({openDb:async()=>db});app.ctFlushDraft=async()=>true;app.managedReadDetails=async()=>{};
@@ -54,7 +66,7 @@ async function main(){
    const bytes=await(await fetch('/fixture.xlsx')).arrayBuffer(),worker=ClientTextWorkerClient.create();
    const assets=[],units=[],descriptors=[];
    for(const role of ['normal','gender']){
-    const name=role==='normal'?'French.xlsx':'French_Gender.xlsx';const parsed=await worker.parseWorkbook(bytes,{filename:name,role,language:'French'});
+    const name=(role==='normal'?'French':'French_Gender')+'.'+extension;const parsed=await worker.parseWorkbook(bytes,{filename:name,role,language:'French'});
     units.push(...parsed.units);const descriptor={role,assetHash:parsed.artifactHash,parserVersion:parsed.parserVersion};descriptors.push(descriptor);
     assets.push({role,name,blob:new Blob([bytes]),parsed:{...parsed,units:undefined},descriptor});
    }
@@ -66,7 +78,7 @@ async function main(){
    window.workers=[];const create=ClientTextWorkerClient.create;ClientTextWorkerClient.create=(...args)=>{const worker=create(...args);window.workers.push(worker);return worker;};
    window.savedBlobs=[];window.saveAs=(blob,name)=>{savedBlobs.push({blob,name});const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
    return{groupId:app.group.id,versionId:app.version.id,language:'French',assets:assets.map(asset=>({role:asset.role,artifactHash:asset.parsed.artifactHash,descriptor:asset.descriptor})),units:units.map(unit=>({id:unit.id,values:Object.fromEntries(unit.fields.map(field=>[field.id,'Frozen target @ value']))}))};
-  });
+  },{extension});
   const waitFinished=()=>page.waitForFunction(()=>app.ctExportTiming?.status!=='running' && !app.ctBusy);
   // Keep a real fetch pending long enough to inspect the compact dialog and keyboard focus.
   mode='manifest-hold';await page.locator('#collect').click();await page.waitForFunction(()=>app.ctExportTiming?.rows.at(-1)?.label==='Manifest retrieval (network + server)');
@@ -89,12 +101,14 @@ async function main(){
   mode='success';let download=page.waitForEvent('download').catch(()=>null);await page.locator('#collect').click();await waitFinished();if(await page.evaluate(()=>app.ctExportTiming.status!=='done'))throw Error(await page.evaluate(()=>app.ctError+' '+app.ctExportLogText));let downloaded=await download;await downloaded.saveAs(join(output,'paired.zip'));await waitFinished();
   assert.equal(posts,1,'Accepted collection retry sends no new end request');
   assert.equal(downloaded.suggestedFilename(),'Fixture_French_ClientText_Translated.zip');
-  const zip=await JSZip.loadAsync(readFileSync(join(output,'paired.zip')));assert.deepEqual(Object.keys(zip.files),['French_Translated.xlsx','French_Gender_Translated.xlsx']);
+  const zip=await JSZip.loadAsync(readFileSync(join(output,'paired.zip')));assert.deepEqual(Object.keys(zip.files),['French_Translated.'+extension,'French_Gender_Translated.'+extension]);
   for(const name of Object.keys(zip.files)){
+   await assertCellFillsAndPackage(await zip.file(name).async('nodebuffer'),name,'Frozen target @ value');
    const workbookZip=await JSZip.loadAsync(await zip.file(name).async('nodebuffer'));
    assert.deepEqual(await workbookZip.file('xl/native.bin').async('uint8array'),new Uint8Array([0,255,7,8,9]));
    assert((await workbookZip.file('xl/worksheets/sheet1.xml').async('string')).includes('Frozen target @ value'));
-   assert((await workbookZip.file('xl/worksheets/sheet1.xml').async('string')).includes('<tabColor rgb="FFD9D2E9"/>'),'Frozen collection revises the formerly red sheet tab');
+   assert((await workbookZip.file('xl/worksheets/sheet1.xml').async('string')).includes('<tabColor rgb="FF'+expectedTab+'"/>'),'Frozen collection uses the darker '+tabStatus+' sheet tab');
+   if(extension==='xlsm')assert.deepEqual(await workbookZip.file('xl/vbaProject.bin').async('uint8array'),new Uint8Array([1,9,255]));
    assert((await workbookZip.file('xl/worksheets/sheet1.xml').async('string')).includes('<outlinePr summaryBelow="0"/>'));
   }
   assert.equal(await page.evaluate(()=>workers.every(w=>w.disposed && !w.worker && w.pending.size===0)),true);
@@ -109,7 +123,8 @@ async function main(){
   results.push('Abort during collection fetch reports unknown server outcome; failed manifest retains an accepted receipt and readable timings.');
   mode='success';download=page.waitForEvent('download').catch(()=>null);await page.locator('#collect').click();await download;await waitFinished();await page.getByRole('button',{name:'Close',exact:true}).click();
   download=page.waitForEvent('download').catch(()=>null);await page.locator('#export').click();const localDownload=await download;await localDownload.saveAs(join(output,'local-paired.zip'));await waitFinished();
-  const localZip=await JSZip.loadAsync(readFileSync(join(output,'local-paired.zip')));for(const name of Object.keys(localZip.files)){const packageZip=await JSZip.loadAsync(await localZip.file(name).async('nodebuffer'));const raw=await packageZip.file('xl/worksheets/sheet1.xml').async('string');assert(raw.includes('Local Saved target'));assert(raw.includes('<tabColor rgb="FFD9D2E9"/>'),'Local Saved export revises the formerly red sheet tab');}
+  const localZip=await JSZip.loadAsync(readFileSync(join(output,'local-paired.zip')));for(const name of Object.keys(localZip.files)){const packageZip=await JSZip.loadAsync(await localZip.file(name).async('nodebuffer'));const raw=await packageZip.file('xl/worksheets/sheet1.xml').async('string');assert(raw.includes('Local Saved target'));assert(raw.includes('<tabColor rgb="FF'+expectedTab+'"/>'),'Local Saved export uses the darker '+tabStatus+' sheet tab');if(extension==='xlsm')assert.deepEqual(await packageZip.file('xl/vbaProject.bin').async('uint8array'),new Uint8Array([1,9,255]));}
+  for(const name of Object.keys(localZip.files))await assertCellFillsAndPackage(await localZip.file(name).async('nodebuffer'),name,'Local Saved target');
   await page.getByRole('button',{name:'Close',exact:true}).click();results.push('Local export reads durable Saved targets independently of frozen collection content and preserves both workbook packages.');
   // Report an absent reference without deleting any immutable data.
   const beforeFailure=await page.evaluate(()=>savedBlobs.length);
