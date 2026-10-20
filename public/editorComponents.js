@@ -490,21 +490,16 @@
             <button class="tmUseButton" @click="useTMMatch()" :disabled="editorTranslationReadOnly || editorCompareActive || tmLastMatchKey !== tmEditorKey">Use translation</button>
           </section>
         </section>`);
-  // Vue 3.0 resolves even a disabled Teleport's target at mount. Use the existing
-  // body until the sibling dialog host is mounted; the panel stays in its sidebar.
-  const Lookup = sharedSurface('EditorLookup', String.raw`<dialog ref="lookupDialog" class="lookupDialog" aria-labelledby="lookupDialogTitle" @cancel.prevent="lookupCloseExpanded()" @close="lookupExpandedClosed" @keydown.stop="lookupPanelKeydown">
-          <header class="lookupDialogHeading"><h2 id="lookupDialogTitle">Lookup</h2><button type="button" @click="lookupCloseExpanded()">Close Lookup</button></header>
-          <div id="editorLookupExpandedHost" class="lookupExpandedHost"></div>
-        </dialog>
-        <teleport :to="lookupExpanded ? '#editorLookupExpandedHost' : 'body'" :disabled="!lookupExpanded">
-        <section v-show="sideTab === 'lookup' && editorReady" id="editorLookupPanel" class="editorLookupPanel" aria-label="Reference lookup" @keydown.stop="lookupPanelKeydown">
+  const Lookup = sharedSurface('EditorLookup', String.raw`<section v-show="sideTab === 'lookup' && editorReady" id="editorLookupPanel" class="editorLookupPanel" aria-label="Reference lookup" @keydown.stop="lookupPanelKeydown">
           <div class="lookupControls sideControls">
-            <div class="lookupToolbar" v-show="!lookupExpanded || lookupCopyStatus"><button v-show="!lookupExpanded" type="button" aria-haspopup="dialog" aria-controls="editorLookupExpandedHost" @click="lookupOpenExpanded">Expand Lookup</button><span role="status" class="lookupCopyStatus">{{ lookupCopyStatus }}</span></div>
-            <div class="sideSearchRow">
+            <div class="searchField lookupSearch">
               <label class="srOnly" for="editorLookupSearch">Search reference files</label>
-              <input id="editorLookupSearch" class="sideFilter" type="search" ref="lookupSearchInput" v-model="lookupQuery" @input="lookupSearchChanged" placeholder="Filename, stat, English, or translation…" autocomplete="off">
-              <button v-if="lookupQuery" type="button" @click="lookupClearSearch">Clear</button>
+              <input id="editorLookupSearch" type="search" ref="lookupSearchInput" v-model="lookupQuery" @input="lookupSearchChanged" placeholder="Filename, stat, English, or translation…" autocomplete="off">
+              <button type="button" class="clearSearch" @click="lookupClearSearch" :disabled="!lookupQuery">Clear</button>
+              <button type="button" ref="lookupFiltersButton" class="filterToggle" :class="{ active: lookupFiltersVisible }" @click="lookupFiltersVisible = !lookupFiltersVisible" :aria-expanded="lookupFiltersVisible" aria-controls="editorLookupFilters" aria-label="Lookup filters" v-tooltip="'Lookup filters'"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h2m6 0h8M4 17h8m6 0h2"></path><circle cx="9" cy="7" r="3"></circle><circle cx="15" cy="17" r="3"></circle></svg></button>
             </div>
+          </div>
+          <fieldset v-show="lookupFiltersVisible" id="editorLookupFilters" class="lookupFilters fileFilters" aria-label="Reference search filters">
             <div class="lookupOptions">
               <label for="editorLookupMode">Content mode<select id="editorLookupMode" v-model="lookupModeFilter"><option value="all">All modes</option><option value="statdescription">StatDescription</option><option value="clienttext">ClientText</option></select></label>
               <label for="editorLookupGroup">Content group<select id="editorLookupGroup" v-model="lookupGroupFilter"><option value="">All prepared groups</option><option v-for="group in lookupGroups" :key="group.id" :value="group.id">{{ group.label }}</option></select></label>
@@ -512,17 +507,18 @@
               <label for="editorLookupScope">Search in<select id="editorLookupScope" v-model="lookupScope"><option value="all">All text</option><option value="path">Filename / ID / metadata</option><option value="english">English</option><option value="translation">Translation</option></select></label>
             </div>
             <label class="lookupTranslationFilter"><input type="checkbox" v-model="lookupTranslatedOnly"> Only with translation</label>
-            <div v-if="lookupPreparationAvailable || lookupPreparing" class="lookupPreparation">
+            <div v-if="lookupPreparationAvailable || lookupPreparing" class="lookupPreparation" ref="lookupPreparation">
               <button v-if="!lookupPreparing" type="button" @click="lookupPrepareReferences">Prepare missing references<template v-if="lookupMissingReferenceCount"> ({{ lookupMissingReferenceCount }})</template></button>
               <template v-else><span role="status">Preparing reference groups…</span><button type="button" @click="lookupCancelPreparation">Cancel</button></template>
             </div>
             <app-notice v-if="lookupPreparationError" class="cloudWarning" tone="error">{{ lookupPreparationError }}</app-notice>
+          </fieldset>
             <div class="lookupPagination sidePagination" aria-label="Reference result pages">
-              <span role="status">{{ lookupRangeLabel }}</span>
-              <button type="button" @click="lookupGoToPage(lookupPage - 1)" :disabled="lookupPage <= 1" aria-label="Previous reference results">Previous</button>
-              <button type="button" @click="lookupGoToPage(lookupPage + 1)" :disabled="lookupPage >= lookupPageCount" aria-label="Next reference results">Next</button>
+              <span class="lookupRange" role="status">{{ lookupRangeLabel }}</span>
+              <span v-if="lookupCopyStatus" role="status" class="lookupCopyStatus" tabindex="0" v-tooltip="lookupCopyStatus">{{ lookupCopyStatus }}</span>
+              <button type="button" @click="lookupGoToPage(lookupPage - 1, $event)" :disabled="lookupPage <= 1" aria-label="Previous reference results" v-tooltip="'Previous reference results'"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6"></path></svg></button>
+              <button type="button" @click="lookupGoToPage(lookupPage + 1, $event)" :disabled="lookupPage >= lookupPageCount" aria-label="Next reference results" v-tooltip="'Next reference results'"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m10 6 6 6-6 6"></path></svg></button>
             </div>
-          </div>
           <div class="lookupBody">
           <div class="lookupResults" ref="lookupResultsList" tabindex="0" aria-label="Reference search results">
             <button v-for="result in lookupVisibleResults" :key="result.key || result.filepath" type="button" class="lookupResult" :class="{ active: lookupSelectedKey === (result.key || result.filepath) }" :aria-pressed="lookupSelectedKey === (result.key || result.filepath)" @click="lookupSelect(result.key || result.filepath)">
@@ -553,8 +549,7 @@
             <p v-else class="lookupEmpty">Select a result to read its full text. You can select and copy reference text.</p>
           </section>
           </div>
-        </section>
-        </teleport>`);
+        </section>`);
   const Comments = sharedSurface('EditorComments', String.raw`<section v-if="sideTab === 'comments' && editorReady" class="fileCommentsPanel" aria-label="File comments" @keydown.stop>
           <header class="commentsPanelHeader"><div><h2>File comments</h2><p class="commentsFilepath">{{ commentsFileLabel || commentsFilepath }}</p></div></header>
           <p v-if="!commentsEligible && commentsUnavailableReason" class="commentsEmpty">{{ commentsUnavailableReason }}</p>

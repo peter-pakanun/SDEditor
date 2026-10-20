@@ -5143,13 +5143,12 @@ function formatPageRange(total, page, pageSize) {
     },
     lookupPanelKeydown(e) {
       if (this.isImeComposingEvent(e)) return;
-      if (this.lookupExpanded && e.key === 'Tab') { this.lookupTrapFocus(e); return; }
       if (this.isFilterFocusShortcut(e)) {
         e.preventDefault();
         this.lookupFocusSearch?.();
       } else if (e.key === 'Escape') {
         e.preventDefault();
-        if (this.lookupExpanded) this.lookupCloseExpanded();
+        if (this.lookupFiltersVisible) this.lookupCloseFilters();
         else if (this.lookupQuery) this.lookupClearSearch?.();
       } else if (((e.ctrlKey || e.metaKey) && e.code === 'KeyS')
         || e.code === 'F1' || e.code === 'F2') {

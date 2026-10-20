@@ -17,7 +17,7 @@ function loadEditor() {
   const document = { activeElement: null, body: { tagName: 'BODY' } };
   const window = { location: { search: '?testMode=1&lang=Thai' }, CloudUI: { mixin: {} } };
   const context = vm.createContext({
-    window, document, URLSearchParams, console, setTimeout, clearTimeout,
+    window, document, URLSearchParams, console, setTimeout, clearTimeout, AbortController,
     Vue: {
       defineComponent(value) { config = value; return value; },
       createApp() { return { component() {}, directive() {}, mount() {} }; },
@@ -188,38 +188,44 @@ test('native selection, copying, and ordinary control keys remain available in L
   }
 });
 
-test('expanded Lookup closes with Escape, restores focus and retains search, selection and draft', async () => {
+test('Lookup filters close with Escape, restore focus and retain query, choices, selection and draft', () => {
   const { editor, document, calls } = loadEditor();
   const opener = { isConnected: true, focus() { document.activeElement = this; } };
-  const dialog = editor.$refs.lookupDialog = { open: false,
-    showModal() { this.open = true; }, close() { this.open = false; editor.lookupExpandedClosed(); } };
+  editor.$refs.lookupFiltersButton = opener;
   editor.sideTab = 'lookup'; editor.lookupQuery = 'Retained query'; editor.lookupSelectedFilepath = 'reference.txt';
+  editor.lookupFiltersVisible = true; editor.lookupScope = 'english'; editor.lookupTranslatedOnly = true;
   editor.editorBlocks = [{ translation: 'Unsaved draft' }]; document.activeElement = opener;
-  await editor.lookupOpenExpanded();
-  assert.equal(dialog.open, true);
   dispatchLookupKey(editor, event('Escape', { isComposing: true }));
-  assert.equal(dialog.open, true, 'IME Escape must not dismiss Lookup');
+  assert.equal(editor.lookupFiltersVisible, true, 'IME Escape must not close filters');
   dispatchLookupKey(editor, event('Escape'));
-  assert.equal(dialog.open, false); assert.equal(editor.lookupExpanded, false);
+  assert.equal(editor.lookupFiltersVisible, false);
   assert.equal(document.activeElement, opener);
   assert.equal(editor.lookupQuery, 'Retained query'); assert.equal(editor.lookupSelectedFilepath, 'reference.txt');
+  assert.equal(editor.lookupScope, 'english'); assert.equal(editor.lookupTranslatedOnly, true);
   assert.equal(editor.editorBlocks[0].translation, 'Unsaved draft');
   assert.equal(calls.save + calls.exit + calls.navigate, 0);
 });
 
-test('Lookup expansion fails safely and scope changes never restore old focus', async () => {
-  const { editor, config, document } = loadEditor();
-  const opener = { isConnected: true, focus() { assert.fail('Do not focus a previous session'); } };
-  editor.sideTab = 'lookup'; document.activeElement = opener;
-  const dialog = editor.$refs.lookupDialog = { open: false, showModal() { this.open = true; },
-    close() { this.open = false; editor.lookupExpandedClosed(); } };
-  await editor.lookupOpenExpanded();
+test('inactive Lookup and scope changes close filters without restoring focus to another session', () => {
+  const { editor, config } = loadEditor();
+  editor.$refs.lookupFiltersButton = { focus() { assert.fail('Do not focus a previous session'); } };
+  editor.sideTab = 'lookup'; editor.lookupFiltersVisible = true;
   config.mixins.find(mixin => mixin.watch?.lookupPanelActive).watch.lookupPanelActive.call(editor, false);
-  assert.equal(dialog.open, false); assert.equal(editor.lookupExpanded, false);
-  editor.$refs.lookupDialog.showModal = () => { throw new Error('Unavailable dialog'); };
-  document.activeElement = null;
-  await editor.lookupOpenExpanded();
-  assert.equal(editor.lookupExpanded, false);
+  assert.equal(editor.lookupFiltersVisible, false);
+  editor.lookupFiltersVisible = true;
+  config.mixins.find(mixin => mixin.watch?.lookupSessionKey).watch.lookupSessionKey.call(editor);
+  assert.equal(editor.lookupFiltersVisible, false);
+});
+
+test('Lookup uses the main-search filter pattern and removes expansion without duplicating panel ownership', () => {
+  assert.doesNotMatch(lookupPanel, /Expand Lookup|lookupDialog|lookupExpanded|<teleport/);
+  assert.match(lookupPanel, /ref="lookupFiltersButton" class="filterToggle"/);
+  assert.match(lookupPanel, /:aria-expanded="lookupFiltersVisible" aria-controls="editorLookupFilters"/);
+  assert.match(lookupPanel, /v-tooltip="'Lookup filters'"/);
+  assert.match(lookupPanel, /<fieldset v-show="lookupFiltersVisible" id="editorLookupFilters"/);
+  assert.ok(lookupPanel.indexOf('</fieldset>') < lookupPanel.indexOf('class="lookupPagination'));
+  assert.match(lookupPanel, /class="clearSearch" @click="lookupClearSearch" :disabled="!lookupQuery"/);
+  assert.match(lookupPanel, /aria-label="Previous reference results" v-tooltip="'Previous reference results'"/);
 });
 
 test('copy preserves exact literal text, reports clipboard failure and ignores stale completion', async () => {
@@ -238,6 +244,45 @@ test('copy preserves exact literal text, reports clipboard failure and ignores s
   const copy = editor.lookupCopyText(literal, 'English text');
   editor.lookupSelectedFilepath = 'another-reference.txt'; finish(); await copy;
   assert.equal(editor.lookupCopyStatus, '', 'An old copy must not announce success for another reference');
+});
+
+test('Lookup boundary paging moves focus before disabling its arrow and never saves a draft', () => {
+  const { editor, calls, document } = loadEditor();
+  editor.sideTab = 'lookup'; editor.descs = Array.from({ length: 23 }, (_, i) => description(String(i)));
+  editor.lookupQuery = 'Blade'; editor.lookupApplySearch();
+  const arrow = { matches: selector => selector === ':focus' };
+  const list = editor.$refs.lookupResultsList = { focus() { document.activeElement = this; } };
+  document.activeElement = arrow;
+  editor.lookupGoToPage(2, { currentTarget: arrow });
+  assert.equal(editor.lookupCurrentPage, 2); assert.equal(document.activeElement, list);
+  document.activeElement = arrow;
+  editor.lookupGoToPage(1, { currentTarget: arrow });
+  assert.equal(editor.lookupCurrentPage, 1); assert.equal(document.activeElement, list);
+  assert.equal(calls.save + calls.navigate + calls.exit, 0);
+});
+
+test('cancelling preparation retains focus before its control disappears, while background cancellation leaves focus alone', () => {
+  const { editor, document } = loadEditor();
+  editor.sideTab = 'lookup'; editor.lookupPreparing = true;
+  const aborter = editor._lookupPreparationAbort = new AbortController();
+  const toggle = editor.$refs.lookupFiltersButton = { focus() { assert.equal(editor.lookupPreparing, true); document.activeElement = this; } };
+  editor.lookupCancelPreparation({ currentTarget: { matches: () => true } });
+  assert.equal(document.activeElement, toggle); assert.equal(aborter.signal.aborted, true); assert.equal(editor.lookupPreparing, false);
+  document.activeElement = null; editor.lookupCancelPreparation(); assert.equal(document.activeElement, null);
+});
+
+test('finishing preparation retains focus before a focused Cancel control disappears', async () => {
+  const { window, document } = loadEditor(); window.document = document;
+  let finish;
+  const cancel = { matches: () => true };
+  const model = { ...window.EditorLookup.mixin.data(), ...window.EditorLookup.mixin.methods,
+    editorVisible: true, sideTab: 'lookup', lang: 'Thai', lookupPreparationAvailable: true,
+    lookupLoadCatalog: () => new Promise(done => { finish = done; }), $refs: {} };
+  const toggle = model.$refs.lookupFiltersButton = { focus() { assert.equal(model.lookupPreparing, true); document.activeElement = this; } };
+  model.$refs.lookupPreparation = { contains: node => node === cancel };
+  const work = model.lookupPrepareReferences();
+  document.activeElement = cancel; finish(true); assert.equal(await work, true);
+  assert.equal(model.lookupPreparing, false); assert.equal(document.activeElement, toggle);
 });
 
 test('reference language and selection leave saved text, editor language, and draft untouched', () => {

@@ -207,7 +207,7 @@
         lookupPage: 1, lookupPageSize: PAGE_SIZE, lookupSelectedFilepath: '', lookupRevision: 0,
         lookupModeFilter: 'all', lookupGroupFilter: '', lookupCatalogSources: [], lookupCatalogGroups: [],
         lookupMissingReferences: [], lookupPreparing: false, lookupPreparationError: '', lookupCatalogKey: '',
-        lookupExpanded: false, lookupCopyStatus: '',
+        lookupFiltersVisible: false, lookupCopyStatus: '',
       };
     },
     computed: {
@@ -344,8 +344,8 @@
       lookupSelectedFilepath() { this.lookupCopyStatus = ''; },
       lookupModeFilter() { this.lookupApplySearch(); },
       lookupGroupFilter() { this.lookupApplySearch(); },
-      lookupSessionKey() { this.lookupCloseExpanded(false); this.lookupCopyStatus = ''; this.lookupResetCatalog(); if (lookupActive(this)) this.lookupLoadCatalog(); },
-      lookupPanelActive(active) { if (active) this.lookupLoadCatalog(); else this.lookupCloseExpanded(false); },
+      lookupSessionKey() { this.lookupCloseFilters(false); this.lookupCopyStatus = ''; this.lookupResetCatalog(); if (lookupActive(this)) this.lookupLoadCatalog(); },
+      lookupPanelActive(active) { if (active) this.lookupLoadCatalog(); else this.lookupCloseFilters(false); },
       ctRevision() { this.invalidateEditorLookupIndex(); if (lookupActive(this) && !this.lookupPreparing) this.lookupLoadCatalog(); },
       lookupScope() { this.lookupApplySearch(); },
       lookupTranslatedOnly() { this.lookupApplySearch(); },
@@ -360,50 +360,14 @@
           && !results.some(entry => (entry.key || entry.filepath) === this.lookupSelectedFilepath)) this.lookupSelectedFilepath = '';
       },
     },
-    beforeUnmount() { this.lookupCloseExpanded(false); clearTimeout(this._editorLookupSearchTimer); this.lookupCancelPreparation(); this._editorReferenceCatalog?.dispose(); caches.delete(this); languageCaches.delete(this); },
+    beforeUnmount() { clearTimeout(this._editorLookupSearchTimer); this.lookupCancelPreparation(); this._editorReferenceCatalog?.dispose(); caches.delete(this); languageCaches.delete(this); },
     methods: {
-      async lookupOpenExpanded() {
-        const dialog = componentRef(this, 'lookupDialog');
-        if (!lookupActive(this) || !dialog || dialog.open || this.lookupExpanded) return;
-        this._lookupExpandedScope = sessionKey(this);
-        this._lookupReturnFocus = document.activeElement;
-        this.lookupExpanded = true;
-        await this.$nextTick();
-        if (!this.lookupExpanded || !lookupActive(this) || this._lookupExpandedScope !== sessionKey(this)) return;
-        try {
-          dialog.showModal();
-          componentRef(this, 'lookupSearchInput')?.focus({ preventScroll: true });
-        } catch (error) {
-          this.lookupExpandedClosed();
-        }
+      lookupRetainFocus(event, name = 'lookupFiltersButton') {
+        if (lookupActive(this) && event?.currentTarget?.matches?.(':focus')) componentRef(this, name)?.focus({ preventScroll: true });
       },
-      lookupCloseExpanded(restoreFocus = true) {
-        if (!restoreFocus) this._lookupReturnFocus = null;
-        const dialog = componentRef(this, 'lookupDialog');
-        if (dialog?.open) dialog.close();
-        else this.lookupExpandedClosed();
-      },
-      lookupExpandedClosed() {
-        if (componentRef(this, 'lookupDialog')?.open) return;
-        const target = this._lookupReturnFocus, scope = this._lookupExpandedScope;
-        this._lookupReturnFocus = null; this._lookupExpandedScope = null;
-        this.lookupExpanded = false;
-        this.$nextTick(() => {
-          if (!this.lookupExpanded && lookupActive(this) && scope === sessionKey(this) && target?.isConnected) target.focus({ preventScroll: true });
-        });
-      },
-      lookupTrapFocus(event) {
-        const dialog = componentRef(this, 'lookupDialog');
-        if (!dialog?.open) return;
-        const controls = [...dialog.querySelectorAll('a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]')]
-          .filter(node => node.tabIndex >= 0 && node.getClientRects().length);
-        const first = controls[0], last = controls[controls.length - 1];
-        if (!first) { event.preventDefault(); dialog.focus(); }
-        else if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
-          event.preventDefault(); last.focus();
-        } else if (!event.shiftKey && document.activeElement === last) {
-          event.preventDefault(); first.focus();
-        }
+      lookupCloseFilters(restoreFocus = true) {
+        this.lookupFiltersVisible = false;
+        if (restoreFocus && lookupActive(this)) componentRef(this, 'lookupFiltersButton')?.focus();
       },
       async lookupCopyText(text, label) {
         const scope = sessionKey(this), selected = this.lookupSelectedFilepath, language = this.lookupActiveLanguage;
@@ -448,8 +412,9 @@
           return false;
         }
       },
-      async lookupPrepareReferences() {
+      async lookupPrepareReferences(event) {
         if (this.lookupPreparing || !this.lookupPreparationAvailable) return false;
+        this.lookupRetainFocus(event);
         const aborter = this._lookupPreparationAbort = new AbortController(), key = sessionKey(this);
         this.lookupPreparing = true;
         const work = String(this._lookupPreparationSequence = (this._lookupPreparationSequence || 0) + 1);
@@ -457,10 +422,18 @@
         try { return await this.lookupLoadCatalog({ prepare: true, signal: aborter.signal }); }
         finally {
           this.setBrowserWork?.('references', { key: work, active: false });
-          if (this._lookupPreparationAbort === aborter) { this._lookupPreparationAbort = null; if (key === sessionKey(this)) this.lookupPreparing = false; }
+          if (this._lookupPreparationAbort === aborter) {
+            this._lookupPreparationAbort = null;
+            if (key === sessionKey(this)) {
+              const active = window.document?.activeElement;
+              if (componentRef(this, 'lookupPreparation')?.contains(active)) this.lookupRetainFocus({ currentTarget: active });
+              this.lookupPreparing = false;
+            }
+          }
         }
       },
-      lookupCancelPreparation() {
+      lookupCancelPreparation(event) {
+        this.lookupRetainFocus(event);
         this._lookupPreparationAbort?.abort(); this._lookupPreparationAbort = null; this.lookupPreparing = false;
       },
       lookupSearchChanged() {
@@ -491,10 +464,13 @@
           if (sessionKey(this) === key && this.lookupSelectedFilepath === filepath && reference) reference.scrollTop = 0;
         });
       },
-      lookupGoToPage(value) {
+      lookupGoToPage(value, event) {
         const page = Number(value);
         const next = Math.max(1, Math.min(this.lookupPageCount, Number.isFinite(page) ? Math.trunc(page) : 1));
         if (next === this.lookupPage) return;
+        // A boundary arrow becomes disabled on this render. Move its focus
+        // before that happens, so inline focusout cannot promote the draft.
+        if (next === 1 || next === this.lookupPageCount) this.lookupRetainFocus(event, 'lookupResultsList');
         this.lookupPage = next;
         const key = sessionKey(this);
         this.$nextTick(() => { const list = componentRef(this, 'lookupResultsList'); if (sessionKey(this) === key && list) list.scrollTop = 0; });

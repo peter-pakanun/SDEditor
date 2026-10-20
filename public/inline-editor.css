@@ -16,8 +16,6 @@
 .inlineEditorSidebar .fileCommentsPanel { border: 0; }
 .inlineEditorSidebar .commentsPanelHeader { padding: 10px; }
 .inlineEditorSidebar .commentsComposer { padding: 10px; }
-.inlineEditorSidebar .lookupControls { padding: 10px; }
-.inlineEditorSidebar .lookupResults { max-height: 34vh; }
 .inlineEditorSidebar .lookupOptions { flex-wrap: wrap; }
 .editor > .editorSidebarHost { overflow: hidden; }
 .editorSidebarHost > .sharedEditorSidebar { height: 100%; min-height: 0; overflow-y: auto; overflow-x: hidden; }
