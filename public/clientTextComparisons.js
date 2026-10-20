@@ -308,10 +308,9 @@
                     get formattingDisabled() { return side === 'source' || this.disabled || this.mtlBusy; },
                     get english() { return side==='translation' && typeof host.ctChooseEnglish==='function'; },
                     get englishActive() { return valid() && !!host.ctUsesEnglish?.(field); },
-                    get englishHint() { return host.ctEnglishHint?.(field) || 'Use English'; },
-                    get englishDisabled() { return this.disabled || host.ctRecoveryBusy || host.ctHistoryViewer || !!host._ctSaveJob || !!host.ctPendingSharedRecovery?.() || this.mtlBusy || !!host.ctMtlCandidate?.(field)
-                        || !host.ctEnglishEligible?.(field) && !(host.ctEnglishDecision?.(field) && host.ctEnglishDecision(field).state!=='revoked'); },
-                    englishToggle() { return !this.englishDisabled && valid() && host.ctChooseEnglish(field,this.englishActive || !host.ctEnglishEligible(field) && !!host.ctEnglishDecision(field)); },
+                    get englishHint() { return valid() ? host.ctEnglishHint?.(field) || 'Use English' : 'This field is no longer active. Return to the current record before changing Use English.'; },
+                    get englishDisabled() { return this.disabled || !!host.ctEnglishActionReason(field); },
+                    englishToggle() { return !this.englishDisabled && valid() && host.ctChooseEnglish(field,host.ctEnglishRemovesDecision(field)); },
                     styleActive: style => side === 'translation' && valid() && host.ctStyleActive(field, style),
                     get reference() { return host.ctComparisonReference(field, side); }, get choices() { return host.ctComparisonChoices(field, side); },
                     get groups() { return [...new Set(this.choices.map(value => value.group))]; },

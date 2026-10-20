@@ -38,7 +38,7 @@ module.exports=async function({page,api,files,Codec,ClientState:S,failures,direc
     const visibleMissing=async()=>Number(await page.locator('.ctWorkspace .statusPill.missing strong').textContent());
     const beforeMissing=await visibleMissing();
     const placement=await english().evaluate(button=>({text:button.textContent.trim(),separator:button.parentElement.previousElementSibling.getAttribute('role'),previous:button.parentElement.previousElementSibling.previousElementSibling.getAttribute('aria-label')}));
-    assert.deepEqual(placement,{text:'E',separator:'separator',previous:'Underline'});
+    assert.deepEqual(placement,{text:'Eng',separator:'separator',previous:'Underline'});
     await clickSave(english(),'Space');
     assert.equal(await english().getAttribute('aria-pressed'),'true');assert.equal(await visibleMissing(),beforeMissing-1);
     assert.equal(await page.getByText('Raw Missing counts and the existing team progress calculation are unchanged.',{exact:true}).count(),0);
@@ -53,6 +53,7 @@ module.exports=async function({page,api,files,Codec,ClientState:S,failures,direc
     assert.equal((await flush()).uploaded,1);assert.equal(current('record').englishIntent[chosen.fieldId].state,'active');
     await page.locator('[data-ct-target]').filter({visible:true}).first().fill('Ordinary HTTP editor save');await clickSave(save());assert.equal((await flush()).uploaded,1);assert.equal(current('record').values[chosen.fieldId],'Ordinary HTTP editor save');
     // Exercise a real validation response from an actual current-editor command.
+    await page.locator('[data-ct-target]').filter({visible:true}).first().fill(await page.evaluate(()=>window.__clientFixtureApp.ctCurrentUnit.fields.find(f=>f.kind==='text').source));
     await page.evaluate(()=>{const vm=window.__clientFixtureApp;window.__eligibleHttp=vm.ctEnglishWitness;vm.ctEnglishWitness=actions=>{const result=window.__eligibleHttp(actions);for(const field of Object.values(result.fields))field.eligible=false;return result;};});
     await clickSave(english(),'Enter');await page.evaluate(()=>{window.__clientFixtureApp.ctEnglishWitness=window.__eligibleHttp;});
     const rejected=await page.evaluate(async()=>{const vm=window.__clientFixtureApp;await window.__syncHttpUI();const pending=(await vm._ctStore.getOutbox(vm.ctWorkspace.scope))[0],code=pending.rejection.code,retry=await vm._ctSync.flush();return{code,retry};});
@@ -61,7 +62,7 @@ module.exports=async function({page,api,files,Codec,ClientState:S,failures,direc
     assert.equal((await flush()).uploaded,1);assert.equal(current('record').englishIntent[chosen.fieldId].state,'active');
     const conflicts=[];
     for(const [recordId,resolution]of [['complete','accept-peer'],['second','reapply']]){
-        const choice=await select(recordId);await clickSave(english());
+        const choice=await select(recordId);await page.locator('[data-ct-target]').filter({visible:true}).first().fill(await page.evaluate(()=>window.__clientFixtureApp.ctCurrentUnit.fields.find(f=>f.kind==='text').source));await clickSave(english());
         await page.evaluate(()=>{window.__loseHttpReceipt=true;});
         assert.equal(await page.evaluate(async()=>{try{await window.__clientFixtureApp._ctSync.flush();return '';}catch(error){return error.message;}}),'Synthetic lost committed HTTP receipt');
         await page.locator('[data-ct-target]').filter({visible:true}).first().fill('Local queued successor');await clickSave(save());
