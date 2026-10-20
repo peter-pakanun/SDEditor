@@ -122,11 +122,26 @@
                     this.ctCurrentUnit?.fields.map(field => [field.id, field.source])]);
             },
         },
-        watch: { ctMtlDebugOrigin() { this.ctMtlDebugReset(); } },
+        watch: {
+            ctMtlDebugOrigin() { this.ctMtlDebugReset(); },
+            editorDictionaryRevision() {
+                clearTimeout(this._ctMtlDebugPreviewTimer);
+                if(this.ctMtlDebugWindow?.record.status==='preview')this._ctMtlDebugPreviewTimer=setTimeout(()=>this.ctMtlDebugRefreshPreview(),150);
+            },
+        },
         beforeUnmount() { this.ctMtlDebugReset(); },
         methods: {
-            ctMtlDebugReset() { for(const info of this._ctMtlTimingRuns?.values()||[])for(const frame of info.frames||[])root.cancelAnimationFrame?.(frame); this._ctMtlTimingRuns?.clear(); this._ctMtlDebugLoad?.abort(); this._ctMtlDebugLoad = null; this.ctMtlDebugWindow = null; this.ctMtlDebugRecords = raw({}); },
+            ctMtlDebugReset() { clearTimeout(this._ctMtlDebugPreviewTimer); for(const info of this._ctMtlTimingRuns?.values()||[])for(const frame of info.frames||[])root.cancelAnimationFrame?.(frame); this._ctMtlTimingRuns?.clear(); this._ctMtlDebugLoad?.abort(); this._ctMtlDebugLoad = null; this.ctMtlDebugWindow = null; this.ctMtlDebugRecords = raw({}); },
+            ctMtlDebugRefreshPreview() {
+                const window=this.ctMtlDebugWindow,field=this.ctCurrentUnit?.fields.find(field=>field.id===window?.fieldId);
+                if(!allowed(this)||!this.ctActive||!field||window.record.status!=='preview'||window.record.requestId)return;
+                let record;
+                try { record={status:'preview',snapshot:this.ctMtlDebugSnapshot(field,this.ctMtlBuildContext(field).initial)}; }
+                catch (_) { record={status:'preview',error:{code:'CONTEXT_UNAVAILABLE'}}; }
+                this.ctMtlDebugWindow={...window,record};
+            },
             ctMtlDebugClose() {
+                clearTimeout(this._ctMtlDebugPreviewTimer);
                 const anchor = this.ctMtlDebugWindow?.anchor;
                 this._ctMtlDebugLoad?.abort(); this.ctMtlDebugWindow = null;
                 if (anchor?.isConnected) anchor.focus({ preventScroll: true });

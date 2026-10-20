@@ -688,6 +688,12 @@
                 if (!profile || String(state.activeProfile) !== String(ctx.scope.accountId)) return [];
                 return copy(profile.dictionaries?.[ctx.scope.language]?.base?.entries || []);
             },
+            ctMtlContextGlossary(ctx = this.ctContext()) {
+                if (!this.ctCurrent(ctx) || ctx.scope.accountId !== this.cloudProfileId || this.lang && this.lang !== ctx.scope.language) return [];
+                // Capture the selected live Dictionary, including unsent local
+                // edits. Context.create and request snapshots own detached copies.
+                return Array.isArray(this.dictionary) ? copy(this.dictionary) : this.ctMtlCommittedGlossary(ctx);
+            },
             ctMtlPendingGeneration(field, unit = this.ctCurrentUnit) {
                 const descriptor = this.ctMtlDescriptor(unit);
                 if (!unit || !field || !descriptor) return null;
@@ -769,7 +775,7 @@
             },
             ctMtlBuildContext(field,unit=this.ctCurrentUnit,ctx=this.ctContext()) {
                 return Context.create({ unit, field, units: this.ctUnits, npcIndex: this._ctNpcIndex, convoIndex: this._ctConvoIndex,
-                    skillResolver: this.ctSkillResolver, dictionary: this.ctMtlCommittedGlossary(ctx), saved: this.ctSaved, scope: ctx.scope,
+                    skillResolver: this.ctSkillResolver, dictionary: this.ctMtlContextGlossary(ctx), saved: this.ctSaved, scope: ctx.scope,
                     ...(this.ctToneNotesSnapshot?{toneNotes:this.ctToneNotesSnapshot(root.ClientTextToneNotes?.roleKeys(this,unit)||[])}: {}) });
             },
             async ctMtlGenerate(field) {

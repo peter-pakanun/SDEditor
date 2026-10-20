@@ -845,6 +845,28 @@ test('committed glossary excludes editable Dictionary and other accounts',()=>{
     assert.deepEqual(h.app.ctMtlCommittedGlossary(),[{find:'Hello',replace:'Approved'}]);
     h.app._cloud.state.activeProfile='other';assert.deepEqual(h.app.ctMtlCommittedGlossary(),[]);
 });
+
+test('new MTL contexts and open unsent previews follow live Dictionary edits while submitted records remain immutable',async()=>{
+    const h=harness(),app=h.app;app.cloudUser={id:h.scope.accountId,role:'admin',isAdmin:true};app.lang=h.scope.language;
+    app.dictionary=[{_id:'hello',find:'Hello',replace:'Live definition',alts:[],tlnote:'Live note'}];
+    const captured=app.ctMtlContextGlossary();app.dictionary[0].replace='Updated definition';
+    assert.equal(captured[0].replace,'Live definition');assert.equal(app.ctMtlContextGlossary()[0].replace,'Updated definition');
+    Object.assign(app,Debug.mixin.data());for(const[name,method]of Object.entries(Debug.mixin.methods))app[name]=method.bind(app);
+    for(const[name,getter]of Object.entries(Debug.mixin.computed))Object.defineProperty(app,name,{get:()=>getter.call(app)});
+    app._cloud.request=async()=>assert.fail('Opening or refreshing context must never send inference or diagnostics requests');
+    assert.equal(await app.ctMtlDebugOpen(h.field),true);
+    const before=app.ctMtlDebugWindow.record;assert.match(JSON.stringify(before),/Updated definition/);
+    app.dictionary[0].replace='Newest definition';app.dictionary[0].tlnote='Newest note';app.ctMtlDebugRefreshPreview();
+    assert.match(JSON.stringify(app.ctMtlDebugWindow.record),/Newest definition/);assert.match(JSON.stringify(app.ctMtlDebugWindow.record),/Newest note/);
+    assert.doesNotMatch(JSON.stringify(before),/Newest definition/);
+    const context=app.ctMtlBuildContext(h.field).initial;
+    app.ctMtlDebugBegin(h.field,{requestId:'frozen-request',context});
+    const sent=app.ctMtlDebugWindow.record,json=JSON.stringify(sent);
+    app.dictionary[0].replace='After submission';app.ctMtlDebugRefreshPreview();
+    assert.equal(app.ctMtlDebugWindow.record,sent);assert.equal(JSON.stringify(sent),json);
+    assert.equal(JSON.stringify(app.ctMtlBuildContext(h.field).initial).includes('After submission'),true);
+    h.changeEpoch();assert.deepEqual(app.ctMtlContextGlossary({scope:{...h.scope,accountId:'other'},epoch:-1}),[]);
+});
 test('MTL hotkey is exact, focused, IME safe and disabled by default',()=>{
     const h=harness();let calls=0;h.app.ctMtlGenerate=()=>{calls++;};h.app.ctFocusedField=h.field.id;
     const event=extra=>({key:'F8',target:{dataset:{ctTarget:h.field.id}},preventDefault(){this.defaultPrevented=true;},...extra});

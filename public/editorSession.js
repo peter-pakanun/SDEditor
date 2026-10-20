@@ -327,14 +327,14 @@
       dictionaryFilter:()=>host.ctDictionaryFilter,dictionaryPage:()=>host.ctDictionaryPage,dictionaryPageCount:()=>host.ctDictionaryPageCount,
       dictionaryRangeLabel:()=>host.ctDictionaryRangeLabel,visibleDictionary:()=>host.ctDictionaryVisible,
       sideAddClicked:()=>()=>host.ctDictionaryAdd(),setDictionaryPage:()=>page=>host.ctSetDictionaryPage(page),
-      tmConflicts:()=>[],tmUnits:()=>host.ctMemory,tmBusy:()=>host.ctBusy,tmLocalIssue:()=>host.ctError,tmIssue:()=>'',
+      tmConflicts:()=>host.ctResourceSyncEnabled ? host.tmConflicts : [],tmUnits:()=>host.ctEditorMemory || host.ctMemory,tmBusy:()=>host.ctBusy,tmLocalIssue:()=>host.ctResourceIssue || host.ctError,tmIssue:()=>host.ctResourceSyncEnabled ? host.tmIssue : '',
       tmEditorKey:()=>host.ctPreviewField?.id || '',tmLastMatchKey:()=>host.ctPreviewField?.id || '',tmMatches:()=>host.ctMemoryResults,
       tmSelectedMatch:()=>host.ctMemoryResults[host.tmSelectedIndex || 0] || null,tmText:()=>text=>String(text ?? ''),
       tmMatchLabel:()=>match=>match.score===101?'Context match':match.kind==='exact'?'Exact match':'Fuzzy match',
       tmMatchContext:()=>unit=>[unit.context?.role,unit.context?.sheet,unit.context?.recordId,unit.context?.fieldName,unit.context?.form].filter(Boolean).join(' · '),
       useTMMatch:()=>match=>host.ctApplyMemory(match || host.ctMemoryResults[host.tmSelectedIndex || 0]),
       tmPanelKeydown:()=>event=>memoryKeydown(proxy,event),
-      tmManageAvailable:()=>false,tmPrefillAvailable:()=>false,inlineRowFocusOut:()=>event=>host.ctInlineFocusOut(event),
+      tmManageAvailable:()=>!!host.ctResourceSyncEnabled,tmPrefillAvailable:()=>false,inlineRowFocusOut:()=>event=>host.ctInlineFocusOut(event),
     };
     const setters={sideTab:value=>{host.ctTool=value;},dictionaryFilter:value=>{host.ctDictionaryFilter=value;},dictionaryPage:value=>{host.ctDictionaryPage=value;}};
     const adapters={statdescription:formatAdapter(host,'statdescription'),clienttext:formatAdapter(host,'clienttext')};

@@ -39,6 +39,8 @@ Entry history includes this profile's local edits and, when authorized online, t
 
 ## Local storage and team synchronization
 
+ClientText **Test Sheet Offline** offers **Sync Dictionary and TM**, initially unchecked. When selected for an authorized account/language, Dictionary changes and eligible explicitly saved ClientText pairs use normal account synchronization and durable retry queues. Whole workbook values, drafts, originals and history remain in memory. ClientText pairs retain field/form identity and raw text; StatDescription suggestions exclude them. Shared corrections, deletion suppression and reviewed restoration use the existing TM manager. See [Test Mode](test-mode.md) for the fully local alternative and API-first rollout.
+
 Local TM belongs to the active profile/account and selected language. Translator cloud access follows the assigned language; Manager/Admin access follows the selected language. Other languages can still be edited locally. Healthy synchronization and same-browser tab updates are silent; conflicting corrections remain available for an explicit choice.
 
 IndexedDB v10 adds separate TM units, metadata, outbox and history/receipt stores. Save learning joins the same transaction as staged text, history, retry operations and the save receipt. Retries reuse their original identifiers. Older stores and private Regex settings remain available; close older tabs for a blocked upgrade rather than clearing storage.

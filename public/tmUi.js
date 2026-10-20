@@ -122,6 +122,7 @@
       tmGameLabel(game) { return ({ poe1: 'PoE1', poe2: 'PoE2', all: 'All' })[game] || game; },
       tmMatchContext(unit) {
         const context = unit?.context;
+        if(context?.contentMode==='clienttext')return [context.role,context.sheet,context.recordId,context.fieldName,context.form].filter(Boolean).join(' · ');
         return context?.filepath ? `${context.filepath} · Entry ${context.entryIndex + 1}${context.condition ? ' · ' + context.condition : ''}` : 'No file context';
       },
       async loadTranslationMemory() {
@@ -144,7 +145,7 @@
         this.tmUnits = mark(state.units || []); this.tmTombstones = mark(state.tombstones || []); this.tmConflicts = mark(state.conflicts || []);
         this.tmGeneration++;
         const worker = this.ensureTMWorker();
-        worker.submitSnapshot({ generation: this.tmGeneration, game: this.gameVersion, units: this.tmUnits });
+        worker.submitSnapshot({ generation: this.tmGeneration, game: this.gameVersion, units: this.tmUnits.filter(unit => unit.context?.contentMode !== 'clienttext') });
         this.queryTranslationMemory();
       },
       ensureTMWorker() {
@@ -296,7 +297,7 @@
         this.getEditorRef('translation', index, block?.isTable ? Math.min(column, block.tableColumns.length - 1) : null)?.focus?.({ preventScroll: true });
       },
       async openTMManager() {
-        if (this.ctOfflineTest) return;
+        if (this.ctOfflineTest && !this.ctResourceSyncEnabled) return;
         const key = this.tmScopeKey;
         this.tmManagerVisible = true; this.tmEditing = null;
         await this.$nextTick();
@@ -330,7 +331,7 @@
       async saveTMUnit() {
         if (!this.tmEditing || this.tmBusy) return;
         const key = this.tmScopeKey, unit = clone(this.tmEditing), base = this.tmEditingBase;
-        const validation = TM().validatePair(unit.source, unit.target, this.lang);
+        const validation = this.tmValidateUnit(unit);
         if (!validation.valid) { this.tmSetIssue('save', validation.errors.map(error => error.message).join(' ')); return; }
         this.tmBusy = true;
         try {
@@ -350,6 +351,13 @@
           } else await window.OfflineStore.deleteTranslationMemoryUnit(this.tmScope(), unit.id, { expectedRevision: unit.revision, expectedLocalRevision: unit.localRevision, guard: () => this.tmCurrent(key) });
           if (this.tmCurrent(key)) { await this.loadTranslationMemory(); this._cloud?.schedule(0); this.tmSetIssue('delete'); }
         } catch (error) { if (!error.stale && this.tmCurrent(key)) this.tmSetIssue('delete', 'Could not delete TM entry: ' + error.message); }
+      },
+      tmValidateUnit(unit) {
+        if(unit.context?.contentMode!=='clienttext')return TM().validatePair(unit.source,unit.target,this.lang);
+        const errors=window.ClientTextState.diagnose({id:unit.context.fieldId,source:unit.source,kind:unit.context.fieldKind,form:unit.context.form},unit.target)
+          .filter(issue=>issue.level==='error'||issue.code==='clienttext-token-identity'||issue.code==='clienttext-unknown-syntax');
+        if(!unit.source.trim()||!unit.target.trim())errors.push({message:'Source and translation must contain text.'});
+        return {valid:!errors.length,errors};
       },
       async previewTMSeed() {
         if (this.tmBusy) return;
@@ -428,7 +436,7 @@
           for (const raw of data.units) {
             if (Date.now() - sliceStart >= 4) { await new Promise(resolve => setTimeout(resolve, 0)); sliceStart = Date.now(); if (!current()) return; }
             const unit = TM().normalizeUnit(raw), identity = TM().identityFor(unit);
-            if (!TM().validatePair(unit.source, unit.target, this.lang).valid) { skipped++; continue; }
+            if (!this.tmValidateUnit(unit).valid) { skipped++; continue; }
             if (identities.has(identity)) throw new Error('The backup contains duplicate source/context identities.');
             identities.add(identity);
             const previous = existing.get(identity), deleted = suppressed.get(identity);

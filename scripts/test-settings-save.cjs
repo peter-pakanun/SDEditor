@@ -468,3 +468,17 @@ test('an account/access snapshot closes the temporary Dictionary before applying
   assert.equal(e._ctTestDictionary, null); assert.equal(e.dictionary[0].replace, 'Other account');
   assert.equal(state.writes.length, 0);
 });
+
+test('temporary resource sync fences active account changes but preserves an unopened importer during language rollback', async () => {
+  for (const active of [false, true]) {
+    const state = startupStore(), h = startupHarness(state, startupLegacy(state.state)), { e } = h;
+    await h.start(); let fenced = 0;
+    e.ctOfflineTest = true; e.ctActive = active; e._ctTestDictionary = null;
+    e.ctFence = () => { fenced++; e.ctOfflineTest = false; e.ctActive = false; };
+    const snapshot = e._cloud.snapshot();
+    if (active) snapshot.profileId = 'other'; else e.lang = 'French';
+    await e.cloudApply(snapshot);
+    assert.equal(fenced, active ? 1 : 0);
+    assert.equal(e.lang, 'Thai');
+  }
+});

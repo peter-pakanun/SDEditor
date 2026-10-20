@@ -42,6 +42,7 @@
         return this.cloudSignedIn && window.CloudSync.canAccessAllLanguages(this.cloudUser);
       },
       cloudSyncIssue() {
+        if (this.ctResourceIssue) return this.ctResourceIssue;
         if (this.tmIssue) return this.tmIssue;
         if (this.cloudError || this.cloudWarning) return this.cloudStatus;
         if (this.cloudSignedIn && !this.cloudCanAccessAllLanguages && !this.cloudUser?.language) return 'Not configured — awaiting admin language assignment';
@@ -91,7 +92,9 @@
         const scopeChanged = this.cloudSignedIn !== snapshot.signedIn || this.lang !== settings.lang
           || (this.cloudProfileId || oldUser.id || 'guest') !== nextProfile
           || ['id', 'language', 'assignmentVersion', 'role', 'isAdmin'].some(key => oldUser[key] !== nextUser[key]);
-        if (scopeChanged && this._ctTestDictionary) this.ctFence();
+        // An opening workbook selects/rolls back its personal language before
+        // activation. Keep that importer alive so it can report a failed choice.
+        if (scopeChanged && this.ctOfflineTest && (this.ctActive || this._ctTestDictionary)) this.ctFence();
         // Same-account background refreshes may update the real Dictionary,
         // but must never replace or publish the temporary editor copy.
         const temporaryDictionary = this._ctTestDictionary;
@@ -322,6 +325,7 @@
         finally { this.cloudBusy = false; }
       },
       async cloudRetry() {
+        if(await this.ctFlushResourceMemory?.()===false)return;
         if (!await this.saveSettings()) return;
         await this._cloud.refreshSession(true);
         await this._cloud.sync();

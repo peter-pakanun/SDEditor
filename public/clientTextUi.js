@@ -498,7 +498,7 @@
                 }
                 return output;
             },
-            ctMemoryResults() {const unit=this.ctCurrentUnit,field=this.ctPreviewField;return field ? root.ContentAdapters.clienttext.findMemory(this.ctMemory,unit,field,{game:this.gameVersion,limit:20,threshold:this.tmThreshold || 75}) : [];},
+            ctMemoryResults() {const unit=this.ctCurrentUnit,field=this.ctPreviewField;return field ? root.ContentAdapters.clienttext.findMemory(this.ctEditorMemory || this.ctMemory,unit,field,{game:this.gameVersion,limit:20,threshold:this.tmThreshold || 75}) : [];},
             ctDictionaryMatches() {
                 return (this.dictionary || []).filter(entry=>this.ctDictionaryMatchedDefinitions.has(String(entry?._id || '')));
             },
@@ -568,7 +568,7 @@
                 };
                 return {
                     get editorReady(){return current() && host.ctDictionaryReady;},get visibleDictionary(){return current() ? host.ctDictionaryVisible : [];},
-                    get dictionaryTemporary(){return host.ctOfflineTest;},
+                    get dictionaryTemporary(){return host.ctOfflineTest && !host.ctResourceSyncEnabled;},
                     get dictionaryFlashId(){return host.dictionaryFlashId;},get translationEditorBcp47(){return host.translationEditorBcp47;},
                     get dictionaryCanUse(){return current() && host.ctDictionaryReady && host.ctCurrentUnit?.fields.some(field=>field.id===host.ctFocusedField && field.kind!=='gender');},
                     get cloudEntryHistoryAvailable(){return current() && host.cloudEntryHistoryAvailable;},get cloudEntryHistoryHint(){return host.cloudEntryHistoryHint;},
@@ -1322,6 +1322,7 @@
                 this.ctFlushCommentDraft().catch(()=>{});
                 this.ctFlushReplyCommentDrafts().catch(()=>{});
                 this.ctMtlReset?.();
+                this.ctClearResourceSync?.();
                 this.ctEndTestDictionary();
                 this._ctEpoch = (this._ctEpoch || 0) + 1; this._ctAbort?.abort(); clearInterval(this._ctSyncTimer); clearTimeout(this._ctDraftTimer);clearTimeout(this._ctSearchTimer);
                 this._ctDictionaryRequest?.cancel?.();this._ctDictionaryRun=null;this.ctDictionaryPack=null;this._ctPendingDictionaryPack=null;this.ctDraftSummaries=[];
@@ -1659,9 +1660,10 @@
                         await this.$nextTick?.();check();await this._cloudLanguageSwitch;check();
                         if(test){
                             if(await this.flushScheduledSettingsSave?.()===false)throw new Error('Save pending settings before opening a test sheet.');
-                            check();this.ctBeginTestDictionary(scope);
+                            check();if(!this.ctResourceSyncEnabled)this.ctBeginTestDictionary(scope);
                             const memory=this.testMode ? {units:[]} : await this._ctStore.getMemory(scope,{guard:current});check();
                             await store.seedMemory(scope,memory.units,{guard:current});check();
+                            if(this.ctResourceSyncEnabled){await this.loadTranslationMemory?.();check();this._cloud?.schedule(0);}
                         }
                         await this.ensureDictionarySnapshot?.();check();
                     },initialization);
@@ -2200,6 +2202,8 @@
                     const head=this._ctDraftHeads?.get(JSON.stringify([scopeKey,unitId]));
                     if(this._ctDraftRevision===command.expectedDraftRevision){this._ctDraftRevision=null;if(head&&!head.pending){head.revision=null;head.signature=null;}}
                     this.ctRefreshDiagnostics([unitId]); this.ctError = ''; this.ctLoadHistory(ctx, unitId);this.ctLoadMemory(ctx);this.ctRefreshDraftSummaries(ctx);
+                    await this.ctQueueResourceMemory?.(ctx,this._ctUnitIndex.get(unitId),result.saved);
+                    if(!this.ctCurrent(ctx))return false;
                     if (close && sameEditor && generation===(this._ctBrowseGeneration || 0)) {
                         this.ctEditor = false;this.ctInlineClosed=false;this._ctInlineReturn=null;this.ctCompletion=null;await this.$nextTick?.();
                         if(!this.ctCurrent(ctx) || generation!==(this._ctBrowseGeneration || 0) || this.ctSelection!==unitId)return false;
@@ -2981,6 +2985,7 @@
                     this.managedSetOperationError('next-version','');
                 }
                 this._ctPublicationRequest=null;this._ctReleaseRequest=null;this._ctReleaseCommand=null;this.ctDuplicateChoices={};
+                this.ctUploadSyncResources=false;
                 this.ctUploadVisible = true; this.ctUploadVersion = version; this.ctUploadLocal = local; this.ctUploadTest = test; this.ctUploadFiles = raw([]); this.ctPrepared = raw([]); this.ctUploadError = ''; this.ctUploadAssignments = teams.slice();
                 const predecessorId=version ? version.parentVersionId : options.predecessor?.id || (!options.resume ? this.managedHeadVersion?.id : null);
                 this.ctUploadPredecessor=local ? null : copy(options.predecessor || this.managedVersions?.find(candidate=>candidate.id===predecessorId) || (predecessorId ? {id:predecessorId,name:predecessorId} : null));
@@ -3208,7 +3213,7 @@
                         const prepared=this.ctPrepared[0],versionId='local:test:'+uuid(),groupId='local:test:'+uuid(),
                             version={id:versionId,game:this.gameVersion,branchId:this.branchId || 'default',name:'Test Sheet Offline'},
                             group={id:groupId,versionId,contentMode:'clienttext',language:prepared.language,roles:prepared.assets.map(asset=>asset.role)},
-                            scope=this.ctScope(versionId,groupId,prepared.language),metadata={version,group,descriptors:prepared.originals.descriptors};
+                            scope=this.ctScope(versionId,groupId,prepared.language),metadata={version,group,descriptors:prepared.originals.descriptors,syncResources:!!this.ctUploadSyncResources};
                         const store=root.ClientTextMemoryStore.create();this._ctTestStores ||= new Map();this._ctTestStores.set(groupId,store);
                         try{
                             const options={signal:this._ctAbort.signal,guard:()=>key===this.managedCatalogScope,

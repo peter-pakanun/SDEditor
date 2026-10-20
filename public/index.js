@@ -167,7 +167,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
   const config = Vue.defineComponent({
-  mixins: [window.PrivateMediaUI?.mixin || {}, window.PreviewFonts?.mixin || {}, window.ClientTextSkillCardUI?.mixin || {}, window.KeywordPopups?.mixin || {}, window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.ClientTextMtlUI?.mixin || {}, window.ClientTextMtlSettingsUI?.mixin || {}, window.ClientTextToneNotesUI?.mixin || {}, window.ClientTextMtlDebug?.mixin || {}, window.MtlConnectionUI?.mixin || {}, window.MtlLimitsUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}],
+  mixins: [window.PrivateMediaUI?.mixin || {}, window.PreviewFonts?.mixin || {}, window.ClientTextSkillCardUI?.mixin || {}, window.KeywordPopups?.mixin || {}, window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.ClientTextResourceSync?.mixin || {}, window.ClientTextMtlUI?.mixin || {}, window.ClientTextMtlSettingsUI?.mixin || {}, window.ClientTextToneNotesUI?.mixin || {}, window.ClientTextMtlDebug?.mixin || {}, window.MtlConnectionUI?.mixin || {}, window.MtlLimitsUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -7652,7 +7652,7 @@ function formatPageRange(total, page, pageSize) {
       };
     },
     scheduleSettingsSave() {
-      if (this._settingsSaveDisposed || this._cloudApplying || !offlineStoreReady || this._ctTestDictionary || this.ctOfflineTest) return;
+      if (this._settingsSaveDisposed || this._cloudApplying || !offlineStoreReady || this._ctTestDictionary || this.ctOfflineTest && !this.ctResourceSyncEnabled) return;
       const settings = this.settingsSavePayload();
       if (this._ctTestRestoredDictionary === this.dictionary && this._cloud?.matchesLocalSettings?.(settings)) return;
       const context = this._cloud?.context();

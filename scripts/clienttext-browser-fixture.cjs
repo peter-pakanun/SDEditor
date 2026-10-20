@@ -193,7 +193,7 @@ async function run() {
     frontend.get('/index.js', (req, res) => res.type('js').send(readFileSync(join(__dirname, '../public/index.js'), 'utf8').replace("app.mount('#app');", "window.__clientFixtureApp = app.mount('#app');")));
     frontend.use(express.static(join(__dirname, '../public')));
     const classOpeningOnly = process.argv.includes('--class-editor-opening-only');
-    const genderOnly = process.argv.includes('--gender-only'), classOnly = classOpeningOnly || process.argv.includes('--class-variants-only'), dictionaryOnly = process.argv.includes('--dictionary-only'), turkishOnly = process.argv.includes('--turkish-forms-only'), progressOnly = process.argv.includes('--progress-only');
+    const genderOnly = process.argv.includes('--gender-only'), classOnly = classOpeningOnly || process.argv.includes('--class-variants-only'), dictionaryOnly = process.argv.includes('--dictionary-only') || process.argv.includes('--resource-sync-only'), turkishOnly = process.argv.includes('--turkish-forms-only'), progressOnly = process.argv.includes('--progress-only');
     let classSample = classOnly ? { recordId: 'UnaLuteQuestStart', character: 'Una', source: 'English dialogue', values: { MS: 'Ihr habt die Laute gefunden.', FS: 'Ihr habt die Laute gefunden.', StrFourb: 'Du hast die Laute gefunden.' } } : null, classCorpus = null;
     if (classOnly) {
         const source = resolve(process.env.CLIENTTEXT_PRODUCTION_DIRECTORY || 'C:/Users/lpeac/Downloads/2026-10-05_POE2', 'German_Gender.xlsm');
@@ -1125,6 +1125,10 @@ async function run() {
             if (allStatuses) await showAllClientStatuses();
         };
         await openCached({ allStatuses: dictionaryOnly });
+        if(process.argv.includes('--resource-sync-only')){
+            await require('./clienttext-resource-sync-browser-check.cjs')({page,bootstrap,files,failures});
+            return;
+        }
         const workspace = page.getByRole('region', { name: 'ClientText workspace' }), navigation = workspace.getByRole('navigation', { name: 'Workbook navigation' });
         await navigation.getByRole('button', { name: 'All sheets', exact: true }).click();
         const clientChrome = new Map();

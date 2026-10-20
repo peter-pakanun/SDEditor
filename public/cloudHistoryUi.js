@@ -15,11 +15,11 @@
     }; },
     computed: {
       cloudHistoryLanguage() { return this.cloudCanAccessAllLanguages ? this.lang : this.cloudUser?.language; },
-      cloudHistoryAvailable() { return !this.testMode && !this.ctOfflineTest && this.cloudSignedIn && !!(this.cloudCanAccessAllLanguages ? this.lang : this.cloudUser?.language); },
+      cloudHistoryAvailable() { return !this.testMode && (!this.ctOfflineTest || this.ctResourceSyncEnabled) && this.cloudSignedIn && !!(this.cloudCanAccessAllLanguages ? this.lang : this.cloudUser?.language); },
       cloudEntryHistoryAvailable() { return this.cloudHistoryAvailable && (this.cloudCanAccessAllLanguages || this.lang === this.cloudUser.language); },
       cloudHistoryContext() { return [this.cloudSignedIn, this.cloudUser?.id, this.cloudUser?.language, this.cloudUser?.assignmentVersion, this.cloudUser?.role, this.cloudCanAccessAllLanguages, this.lang].join('|'); },
       cloudHistoryUnavailableReason() {
-        if (this.ctOfflineTest) return 'Dictionary edits are temporary in this test session. Shared history is available after leaving the test.';
+        if (this.ctOfflineTest && !this.ctResourceSyncEnabled) return 'Dictionary edits are temporary in this test session. Shared history is available after leaving the test.';
         if (this.testMode) return 'Shared history is disabled in test mode.';
         if (!this.cloudSignedIn) return 'Sign in to view shared dictionary history.';
         if (this.cloudCanAccessAllLanguages && !this.lang) return 'Choose a translation language to view its shared dictionary history.';
