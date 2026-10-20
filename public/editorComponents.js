@@ -490,6 +490,7 @@
             <button class="tmUseButton" @click="useTMMatch()" :disabled="editorTranslationReadOnly || editorCompareActive || tmLastMatchKey !== tmEditorKey">Use translation</button>
           </section>
         </section>`);
+  const lookupFocusStates = new WeakMap();
   const Lookup = sharedSurface('EditorLookup', String.raw`<section v-show="sideTab === 'lookup' && editorReady" id="editorLookupPanel" class="editorLookupPanel" aria-label="Reference lookup" @keydown.stop="lookupPanelKeydown">
           <div class="lookupControls sideControls">
             <div class="searchField lookupSearch">
@@ -550,6 +551,36 @@
           </section>
           </div>
         </section>`);
+  Lookup.mixins = [{
+    mounted() { lookupFocusStates.set(this, { scope: this.$props.controller.lookupSessionKey, pending: null }); },
+    beforeUpdate() {
+      const state = lookupFocusStates.get(this), host = this.$props.controller, panel = this.$el;
+      if (!state) return;
+      state.pending = null;
+      const doc = panel?.ownerDocument, active = doc?.activeElement;
+      if (state.scope !== host.lookupSessionKey || !host.lookupPanelActive || !host.editorReady
+        || doc?.hasFocus?.() === false || !panel?.contains(active)) return;
+      const target = active.closest('.lookupResults, .lookupPagination') ? 'lookupResultsList'
+        : active.closest('.lookupReference') ? 'lookupReference' : active.closest('.lookupFilters') ? 'lookupFiltersButton' : 'lookupSearchInput';
+      state.pending = { element: active, scope: state.scope, panel, doc, target };
+    },
+    updated() {
+      const state = lookupFocusStates.get(this), host = this.$props.controller;
+      if (!state) return;
+      const pending = state.pending; state.pending = null; state.scope = host.lookupSessionKey;
+      if (!pending || pending.scope !== state.scope || !host.lookupPanelActive || !host.editorReady
+        || pending.panel !== this.$el || !pending.panel.isConnected || pending.doc.hasFocus?.() === false) return;
+      const old = pending.element;
+      // Restore only focus lost by this render. A user-selected external target,
+      // a still-valid control, a closed tool or a replacement session owns focus.
+      if (old.isConnected && !old.disabled && !old.closest('[inert]') && old.getClientRects().length) return;
+      const active = pending.doc.activeElement;
+      if (active && active !== old && active !== pending.doc.body && active !== pending.doc.documentElement) return;
+      const target = this.$refs[pending.target] || this.$refs.lookupSearchInput;
+      if (target?.isConnected && !target.disabled && !target.closest('[inert]') && target.getClientRects().length) target.focus({ preventScroll: true });
+    },
+    beforeUnmount() { lookupFocusStates.delete(this); },
+  }];
   const Comments = sharedSurface('EditorComments', String.raw`<section v-if="sideTab === 'comments' && editorReady" class="fileCommentsPanel" aria-label="File comments" @keydown.stop>
           <header class="commentsPanelHeader"><div><h2>File comments</h2><p class="commentsFilepath">{{ commentsFileLabel || commentsFilepath }}</p></div></header>
           <p v-if="!commentsEligible && commentsUnavailableReason" class="commentsEmpty">{{ commentsUnavailableReason }}</p>

@@ -10,6 +10,59 @@ vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/editorCompone
 vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/clientTextUi.js'), 'utf8'), { window });
 const { NativeField, TextField, Tools, Preview, Autocomplete, TranslationMemory, Lookup, Comments, History, DiagnosticScan, DictionaryEntries } = window.EditorComponents;
 
+function lookupFocusFixture(region = 'pager') {
+  const hooks = Lookup.mixins[0], moves = [], body = {}, html = {}, outside = {};
+  const doc = { activeElement: null, body, documentElement: html, focused: true, hasFocus() { return this.focused; } };
+  const element = name => ({ isConnected: true, disabled: false, hidden: false, inert: false,
+    closest(selector) { return selector === '[inert]' ? this.inert : selector === '.lookupResults, .lookupPagination' ? region === 'pager'
+      : selector === '.lookupReference' ? region === 'reference' : selector === '.lookupFilters' ? region === 'filters' : false; },
+    getClientRects() { return this.hidden ? [] : [{}]; }, focus() { moves.push(name); doc.activeElement = this; } });
+  const old = element('old'), refs = Object.fromEntries(['lookupSearchInput', 'lookupFiltersButton', 'lookupResultsList', 'lookupReference'].map(name => [name, element(name)]));
+  const panel = { ownerDocument: doc, isConnected: true, contains: node => node === old || Object.values(refs).includes(node) };
+  const host = { lookupSessionKey: 'scope-a', lookupPanelActive: true, editorReady: true }, component = { $props: { controller: host }, $el: panel, $refs: refs };
+  doc.activeElement = old; hooks.mounted.call(component);
+  return { hooks, moves, doc, old, refs, host, component, panel, outside };
+}
+
+test('Lookup retains focus after asynchronous controls disable, disappear or hide during rendering', () => {
+  for (const [region, target, change] of [['pager', 'lookupResultsList', 'disabled'], ['filters', 'lookupFiltersButton', 'isConnected'],
+    ['reference', 'lookupReference', 'disabled'], ['filters', 'lookupFiltersButton', 'hidden']]) {
+    const f = lookupFocusFixture(region); f.hooks.beforeUpdate.call(f.component);
+    f.old[change] = change === 'isConnected' ? false : true; f.doc.activeElement = f.doc.body;
+    f.hooks.updated.call(f.component); assert.equal(f.doc.activeElement, f.refs[target]); assert.deepEqual(f.moves, [target]);
+    f.hooks.updated.call(f.component); assert.deepEqual(f.moves, [target], 'A render can restore focus only once');
+  }
+  const hidden = lookupFocusFixture('filters'); hidden.hooks.beforeUpdate.call(hidden.component); hidden.old.hidden = true;
+  hidden.hooks.updated.call(hidden.component);
+  assert.equal(hidden.doc.activeElement, hidden.refs.lookupFiltersButton, 'A hidden control cannot retain focus even before the browser reports BODY');
+});
+
+test('Lookup update focus protection leaves deliberate exits and valid controls alone', () => {
+  for (const kind of ['outside-before', 'outside-after', 'body-valid-control', 'document-blur']) {
+    const f = lookupFocusFixture(); if (kind === 'outside-before') f.doc.activeElement = f.outside;
+    f.hooks.beforeUpdate.call(f.component);
+    if (kind !== 'body-valid-control') f.old.disabled = true;
+    f.doc.activeElement = kind.startsWith('outside') ? f.outside : f.doc.body;
+    if (kind === 'document-blur') f.doc.focused = false;
+    const active = f.doc.activeElement; f.hooks.updated.call(f.component);
+    assert.equal(f.doc.activeElement, active, kind); assert.deepEqual(f.moves, []);
+  }
+});
+
+test('Lookup never restores update focus after close, unmount, scope replacement or target removal', () => {
+  for (const kind of ['close', 'scope-before', 'scope-after', 'unmount', 'panel-replaced', 'target-hidden']) {
+    const f = lookupFocusFixture();
+    if (kind === 'scope-before') f.host.lookupSessionKey = 'scope-b';
+    f.hooks.beforeUpdate.call(f.component); f.old.disabled = true; f.doc.activeElement = f.doc.body;
+    if (kind === 'close') f.host.lookupPanelActive = false;
+    if (kind === 'scope-after') f.host.lookupSessionKey = 'scope-b';
+    if (kind === 'unmount') f.hooks.beforeUnmount.call(f.component);
+    if (kind === 'panel-replaced') f.component.$el = {};
+    if (kind === 'target-hidden') f.refs.lookupResultsList.hidden = true;
+    f.hooks.updated.call(f.component); assert.deepEqual(f.moves, [], kind);
+  }
+});
+
 test('MTL moves keyboard focus to its stable wrapper before disabling and leaves pointer field focus alone', () => {
   const calls=[],button={parentElement:{focus(){calls.push('focus');}}},toolbar={controller:{generate(){calls.push('generate');}}};
   window.document={activeElement:button};window.EditorComponents.FieldToolbar.methods.generateMtl.call(toolbar,{currentTarget:button});

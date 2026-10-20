@@ -325,6 +325,10 @@ async function run() {
     });
     await page.waitForSelector('.editor [data-editor-ref="translation_1"]:not([readonly])');
     console.log('SD full editor and native fields mounted.');
+    if (process.env.SDEDITOR_LOOKUP_FOCUS_ONLY === '1') {
+      await require('./lookup-focus-browser-check.cjs')({ page, directory: join(__dirname, '../temp/lookup-focus') });
+      assert.deepEqual(failures, []); return;
+    }
     if (process.env.SDEDITOR_LOOKUP_LAYOUT_ONLY === '1') {
       await require('./lookup-layout-browser-check.cjs')({ page, context, directory: join(__dirname, '../temp/lookup-layout') });
       assert.deepEqual(failures, []); return;
