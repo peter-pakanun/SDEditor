@@ -188,6 +188,58 @@ test('native selection, copying, and ordinary control keys remain available in L
   }
 });
 
+test('expanded Lookup closes with Escape, restores focus and retains search, selection and draft', async () => {
+  const { editor, document, calls } = loadEditor();
+  const opener = { isConnected: true, focus() { document.activeElement = this; } };
+  const dialog = editor.$refs.lookupDialog = { open: false,
+    showModal() { this.open = true; }, close() { this.open = false; editor.lookupExpandedClosed(); } };
+  editor.sideTab = 'lookup'; editor.lookupQuery = 'Retained query'; editor.lookupSelectedFilepath = 'reference.txt';
+  editor.editorBlocks = [{ translation: 'Unsaved draft' }]; document.activeElement = opener;
+  await editor.lookupOpenExpanded();
+  assert.equal(dialog.open, true);
+  dispatchLookupKey(editor, event('Escape', { isComposing: true }));
+  assert.equal(dialog.open, true, 'IME Escape must not dismiss Lookup');
+  dispatchLookupKey(editor, event('Escape'));
+  assert.equal(dialog.open, false); assert.equal(editor.lookupExpanded, false);
+  assert.equal(document.activeElement, opener);
+  assert.equal(editor.lookupQuery, 'Retained query'); assert.equal(editor.lookupSelectedFilepath, 'reference.txt');
+  assert.equal(editor.editorBlocks[0].translation, 'Unsaved draft');
+  assert.equal(calls.save + calls.exit + calls.navigate, 0);
+});
+
+test('Lookup expansion fails safely and scope changes never restore old focus', async () => {
+  const { editor, config, document } = loadEditor();
+  const opener = { isConnected: true, focus() { assert.fail('Do not focus a previous session'); } };
+  editor.sideTab = 'lookup'; document.activeElement = opener;
+  const dialog = editor.$refs.lookupDialog = { open: false, showModal() { this.open = true; },
+    close() { this.open = false; editor.lookupExpandedClosed(); } };
+  await editor.lookupOpenExpanded();
+  config.mixins.find(mixin => mixin.watch?.lookupPanelActive).watch.lookupPanelActive.call(editor, false);
+  assert.equal(dialog.open, false); assert.equal(editor.lookupExpanded, false);
+  editor.$refs.lookupDialog.showModal = () => { throw new Error('Unavailable dialog'); };
+  document.activeElement = null;
+  await editor.lookupOpenExpanded();
+  assert.equal(editor.lookupExpanded, false);
+});
+
+test('copy preserves exact literal text, reports clipboard failure and ignores stale completion', async () => {
+  const { editor, window } = loadEditor();
+  editor.sideTab = 'lookup'; editor.lookupSelectedFilepath = 'reference.txt';
+  const literal = 'Raw \\n\r\n@<img> ภาษาไทย ' + 'long '.repeat(1000);
+  let copied;
+  window.navigator = { clipboard: { async writeText(text) { copied = text; } } };
+  await editor.lookupCopyText(literal, 'English text');
+  assert.equal(copied, literal); assert.equal(editor.lookupCopyStatus, 'Copied English text.');
+  window.navigator.clipboard.writeText = async () => { throw new Error('Clipboard denied'); };
+  await editor.lookupCopyText(literal, 'English text');
+  assert.match(editor.lookupCopyStatus, /Select the text/);
+  let finish;
+  window.navigator.clipboard.writeText = () => new Promise(done => { finish = done; });
+  const copy = editor.lookupCopyText(literal, 'English text');
+  editor.lookupSelectedFilepath = 'another-reference.txt'; finish(); await copy;
+  assert.equal(editor.lookupCopyStatus, '', 'An old copy must not announce success for another reference');
+});
+
 test('reference language and selection leave saved text, editor language, and draft untouched', () => {
   const { editor, window } = loadEditor();
   const current = description('current');

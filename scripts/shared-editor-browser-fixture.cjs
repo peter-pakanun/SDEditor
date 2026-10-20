@@ -12,7 +12,7 @@ const executablePath = process.env.FIXTURE_BROWSER_PATH || [
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
 ].find(existsSync);
-const publicDir = join(__dirname, '../public');
+const publicDir = process.env.SDEDITOR_FIXTURE_PUBLIC_DIR || join(__dirname, '../public');
 const vueScriptPath = process.env.FIXTURE_VUE_PATH || join(__dirname, '../temp/clienttext-fixture-vue.min.js');
 const { checkHighlightGeometry } = require('./highlight-geometry-browser-check.cjs');
 const { checkInlineDictionaryScroll } = require('./dictionary-scroll-browser-check.cjs');
@@ -325,6 +325,10 @@ async function run() {
     });
     await page.waitForSelector('.editor [data-editor-ref="translation_1"]:not([readonly])');
     console.log('SD full editor and native fields mounted.');
+    if (process.env.SDEDITOR_LOOKUP_LAYOUT_ONLY === '1') {
+      await require('./lookup-layout-browser-check.cjs')({ page, context, directory: join(__dirname, '../temp/lookup-layout') });
+      assert.deepEqual(failures, []); return;
+    }
     if (process.env.SDEDITOR_TOOLBAR_ONLY === '1') {
       await require('./toolbar-tooltip-browser-check.cjs')({ page, context, failures, directory: join(__dirname, '../temp/toolbar-tooltips') });
       assert.deepEqual(failures, []); return;

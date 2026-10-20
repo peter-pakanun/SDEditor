@@ -207,6 +207,7 @@
         lookupPage: 1, lookupPageSize: PAGE_SIZE, lookupSelectedFilepath: '', lookupRevision: 0,
         lookupModeFilter: 'all', lookupGroupFilter: '', lookupCatalogSources: [], lookupCatalogGroups: [],
         lookupMissingReferences: [], lookupPreparing: false, lookupPreparationError: '', lookupCatalogKey: '',
+        lookupExpanded: false, lookupCopyStatus: '',
       };
     },
     computed: {
@@ -339,11 +340,12 @@
         if (lookupActive(this) && this.lookupSelectedFilepath
           && !this.lookupResults.some(entry => (entry.key || entry.filepath) === this.lookupSelectedFilepath)) this.lookupSelectedFilepath = '';
       }},
-      lookupLanguage() { this.lookupCancelPreparation(); this.lookupApplySearch(); this.lookupLoadCatalog(); },
+      lookupLanguage() { this.lookupCopyStatus = ''; this.lookupCancelPreparation(); this.lookupApplySearch(); this.lookupLoadCatalog(); },
+      lookupSelectedFilepath() { this.lookupCopyStatus = ''; },
       lookupModeFilter() { this.lookupApplySearch(); },
       lookupGroupFilter() { this.lookupApplySearch(); },
-      lookupSessionKey() { this.lookupResetCatalog(); if (lookupActive(this)) this.lookupLoadCatalog(); },
-      lookupPanelActive(active) { if (active) this.lookupLoadCatalog(); },
+      lookupSessionKey() { this.lookupCloseExpanded(false); this.lookupCopyStatus = ''; this.lookupResetCatalog(); if (lookupActive(this)) this.lookupLoadCatalog(); },
+      lookupPanelActive(active) { if (active) this.lookupLoadCatalog(); else this.lookupCloseExpanded(false); },
       ctRevision() { this.invalidateEditorLookupIndex(); if (lookupActive(this) && !this.lookupPreparing) this.lookupLoadCatalog(); },
       lookupScope() { this.lookupApplySearch(); },
       lookupTranslatedOnly() { this.lookupApplySearch(); },
@@ -358,8 +360,63 @@
           && !results.some(entry => (entry.key || entry.filepath) === this.lookupSelectedFilepath)) this.lookupSelectedFilepath = '';
       },
     },
-    beforeUnmount() { clearTimeout(this._editorLookupSearchTimer); this.lookupCancelPreparation(); this._editorReferenceCatalog?.dispose(); caches.delete(this); languageCaches.delete(this); },
+    beforeUnmount() { this.lookupCloseExpanded(false); clearTimeout(this._editorLookupSearchTimer); this.lookupCancelPreparation(); this._editorReferenceCatalog?.dispose(); caches.delete(this); languageCaches.delete(this); },
     methods: {
+      async lookupOpenExpanded() {
+        const dialog = componentRef(this, 'lookupDialog');
+        if (!lookupActive(this) || !dialog || dialog.open || this.lookupExpanded) return;
+        this._lookupExpandedScope = sessionKey(this);
+        this._lookupReturnFocus = document.activeElement;
+        this.lookupExpanded = true;
+        await this.$nextTick();
+        if (!this.lookupExpanded || !lookupActive(this) || this._lookupExpandedScope !== sessionKey(this)) return;
+        try {
+          dialog.showModal();
+          componentRef(this, 'lookupSearchInput')?.focus({ preventScroll: true });
+        } catch (error) {
+          this.lookupExpandedClosed();
+        }
+      },
+      lookupCloseExpanded(restoreFocus = true) {
+        if (!restoreFocus) this._lookupReturnFocus = null;
+        const dialog = componentRef(this, 'lookupDialog');
+        if (dialog?.open) dialog.close();
+        else this.lookupExpandedClosed();
+      },
+      lookupExpandedClosed() {
+        if (componentRef(this, 'lookupDialog')?.open) return;
+        const target = this._lookupReturnFocus, scope = this._lookupExpandedScope;
+        this._lookupReturnFocus = null; this._lookupExpandedScope = null;
+        this.lookupExpanded = false;
+        this.$nextTick(() => {
+          if (!this.lookupExpanded && lookupActive(this) && scope === sessionKey(this) && target?.isConnected) target.focus({ preventScroll: true });
+        });
+      },
+      lookupTrapFocus(event) {
+        const dialog = componentRef(this, 'lookupDialog');
+        if (!dialog?.open) return;
+        const controls = [...dialog.querySelectorAll('a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]')]
+          .filter(node => node.tabIndex >= 0 && node.getClientRects().length);
+        const first = controls[0], last = controls[controls.length - 1];
+        if (!first) { event.preventDefault(); dialog.focus(); }
+        else if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+          event.preventDefault(); last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault(); first.focus();
+        }
+      },
+      async lookupCopyText(text, label) {
+        const scope = sessionKey(this), selected = this.lookupSelectedFilepath, language = this.lookupActiveLanguage;
+        const current = () => lookupActive(this) && scope === sessionKey(this)
+          && selected === this.lookupSelectedFilepath && language === this.lookupActiveLanguage;
+        this.lookupCopyStatus = '';
+        try {
+          await window.navigator.clipboard.writeText(String(text ?? ''));
+          if (current()) this.lookupCopyStatus = 'Copied ' + label + '.';
+        } catch (error) {
+          if (current()) this.lookupCopyStatus = 'Copy unavailable. Select the text and use your copy shortcut.';
+        }
+      },
       invalidateEditorLookupIndex() {
         caches.delete(this);
         this.lookupRevision++;

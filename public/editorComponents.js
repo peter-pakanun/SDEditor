@@ -490,8 +490,16 @@
             <button class="tmUseButton" @click="useTMMatch()" :disabled="editorTranslationReadOnly || editorCompareActive || tmLastMatchKey !== tmEditorKey">Use translation</button>
           </section>
         </section>`);
-  const Lookup = sharedSurface('EditorLookup', String.raw`<section v-show="sideTab === 'lookup' && editorReady" id="editorLookupPanel" class="editorLookupPanel" aria-label="Reference lookup" @keydown.stop="lookupPanelKeydown">
+  // Vue 3.0 resolves even a disabled Teleport's target at mount. Use the existing
+  // body until the sibling dialog host is mounted; the panel stays in its sidebar.
+  const Lookup = sharedSurface('EditorLookup', String.raw`<dialog ref="lookupDialog" class="lookupDialog" aria-labelledby="lookupDialogTitle" @cancel.prevent="lookupCloseExpanded()" @close="lookupExpandedClosed" @keydown.stop="lookupPanelKeydown">
+          <header class="lookupDialogHeading"><h2 id="lookupDialogTitle">Lookup</h2><button type="button" @click="lookupCloseExpanded()">Close Lookup</button></header>
+          <div id="editorLookupExpandedHost" class="lookupExpandedHost"></div>
+        </dialog>
+        <teleport :to="lookupExpanded ? '#editorLookupExpandedHost' : 'body'" :disabled="!lookupExpanded">
+        <section v-show="sideTab === 'lookup' && editorReady" id="editorLookupPanel" class="editorLookupPanel" aria-label="Reference lookup" @keydown.stop="lookupPanelKeydown">
           <div class="lookupControls sideControls">
+            <div class="lookupToolbar" v-show="!lookupExpanded || lookupCopyStatus"><button v-show="!lookupExpanded" type="button" aria-haspopup="dialog" aria-controls="editorLookupExpandedHost" @click="lookupOpenExpanded">Expand Lookup</button><span role="status" class="lookupCopyStatus">{{ lookupCopyStatus }}</span></div>
             <div class="sideSearchRow">
               <label class="srOnly" for="editorLookupSearch">Search reference files</label>
               <input id="editorLookupSearch" class="sideFilter" type="search" ref="lookupSearchInput" v-model="lookupQuery" @input="lookupSearchChanged" placeholder="Filename, stat, English, or translation…" autocomplete="off">
@@ -515,6 +523,7 @@
               <button type="button" @click="lookupGoToPage(lookupPage + 1)" :disabled="lookupPage >= lookupPageCount" aria-label="Next reference results">Next</button>
             </div>
           </div>
+          <div class="lookupBody">
           <div class="lookupResults" ref="lookupResultsList" tabindex="0" aria-label="Reference search results">
             <button v-for="result in lookupVisibleResults" :key="result.key || result.filepath" type="button" class="lookupResult" :class="{ active: lookupSelectedKey === (result.key || result.filepath) }" :aria-pressed="lookupSelectedKey === (result.key || result.filepath)" @click="lookupSelect(result.key || result.filepath)">
               <strong><template v-for="(part, pi) in result.filepathParts" :key="pi"><mark v-if="part.matched" class="lookupQueryMatch">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></strong>
@@ -531,17 +540,21 @@
             <template v-if="lookupSelectedReference">
               <header><h3>{{ lookupSelectedReference.filepath }}</h3><p v-if="lookupSelectedReference.isDNT">Do not translate</p><details v-if="lookupSelectedReference.stats.length"><summary>Stat identifiers</summary><pre class="lookupStats">{{ lookupSelectedReference.stats.join('\n') }}</pre></details></header>
               <ct-context :host="$props.controller" :items="lookupSelectedReference.referenceMetadata || []"></ct-context>
-              <section v-if="lookupSelectedReference.developerNotes" class="lookupReferenceBlock"><h4>Developer notes</h4><pre class="lookupText">{{ lookupSelectedReference.developerNotes }}</pre></section>
+              <section v-if="lookupSelectedReference.developerNotes" class="lookupReferenceBlock"><div class="lookupTextLabel"><span>Developer notes</span><button type="button" @click="lookupCopyText(lookupSelectedReference.developerNotes, 'developer notes')" aria-label="Copy developer notes">Copy</button></div><pre class="lookupText">{{ lookupSelectedReference.developerNotes }}</pre></section>
               <article v-for="block in lookupSelectedReference.blocks" :key="block.index" class="lookupReferenceBlock">
                 <h4>{{ block.label || ('Block ' + (block.index + 1)) }}<span v-if="block.form"> · {{ block.form }}</span><span v-if="block.isTable"> · Table (@ separates columns)</span></h4>
-                <div class="lookupTextLabel">English</div><pre class="lookupText" lang="en">{{ block.english || '(No English text)' }}</pre>
-                <div class="lookupTextLabel">{{ lookupActiveLanguage }}</div><pre class="lookupText" :lang="lookupReferenceBcp47">{{ block.translation || '(No translation)' }}</pre>
+                <div class="lookupTextPair">
+                  <section><div class="lookupTextLabel"><span>English</span><button type="button" :disabled="!block.english" :aria-label="'Copy English text, ' + (block.label || ('Block ' + (block.index + 1)))" @click="lookupCopyText(block.english, 'English text')">Copy</button></div><pre class="lookupText" lang="en">{{ block.english || '(No English text)' }}</pre></section>
+                  <section><div class="lookupTextLabel"><span>{{ lookupActiveLanguage }}</span><button type="button" :disabled="!block.translation" :aria-label="'Copy ' + lookupActiveLanguage + ' text, ' + (block.label || ('Block ' + (block.index + 1)))" @click="lookupCopyText(block.translation, lookupActiveLanguage + ' text')">Copy</button></div><pre class="lookupText" :lang="lookupReferenceBcp47">{{ block.translation || '(No translation)' }}</pre></section>
+                </div>
               </article>
               <p v-if="!lookupSelectedReference.blocks.length" class="lookupEmpty">This file has no text blocks.</p>
             </template>
             <p v-else class="lookupEmpty">Select a result to read its full text. You can select and copy reference text.</p>
           </section>
-        </section>`);
+          </div>
+        </section>
+        </teleport>`);
   const Comments = sharedSurface('EditorComments', String.raw`<section v-if="sideTab === 'comments' && editorReady" class="fileCommentsPanel" aria-label="File comments" @keydown.stop>
           <header class="commentsPanelHeader"><div><h2>File comments</h2><p class="commentsFilepath">{{ commentsFileLabel || commentsFilepath }}</p></div></header>
           <p v-if="!commentsEligible && commentsUnavailableReason" class="commentsEmpty">{{ commentsUnavailableReason }}</p>
