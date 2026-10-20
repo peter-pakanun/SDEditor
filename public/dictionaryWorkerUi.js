@@ -112,10 +112,12 @@
     methods: {
       dictionaryWorkerScopeKey() {
         const user = this.cloudUser || {};
-        return JSON.stringify([this.cloudProfileId || user.id || 'guest',
+        const scope = [this.cloudProfileId || user.id || 'guest',
           this.lang || '', this.gameVersion || '', !!this.cloudSignedIn,
           user.id || '', user.role || '', !!user.isAdmin,
-          user.language || '', user.assignmentVersion ?? '']);
+          user.language || '', user.assignmentVersion ?? ''];
+        if (this.ctOfflineTest) scope.push(this.ctWorkspace?.scope.groupId);
+        return JSON.stringify(scope);
       },
       ensureDictionaryWorker() {
         const state = stateFor(this);

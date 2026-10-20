@@ -3720,7 +3720,7 @@ test('cached and temporary workbooks select their language and settle watchers b
     for(const temporary of [false,true]){
         const selected={...scope,...(temporary?{groupId:'local:test:language',versionId:'local:test:version'}:{})},f=fixture(),started=deferred(),pending=deferred();
         await f.store.import(selected,{units:[unit()],assets:[asset]});let reads=0,settled=false,language='German',watch=false;
-        const store={...f.store,async getUnits(captured,options){reads++;assert.equal(language,selected.language);assert.equal(settled,true);assert.equal(app.ctActive,false);return f.store.getUnits(captured,options);}},
+        const store={...f.store,async seedMemory(){assert.equal(settled,true);assert.equal(language,selected.language);},async getUnits(captured,options){reads++;assert.equal(language,selected.language);assert.equal(settled,true);assert.equal(app.ctActive,false);return f.store.getUnits(captured,options);}},
             {app,mixin}=initializationHarness({_ctStore:store,_ctTestStores:new Map(temporary?[[selected.groupId,store]]:[])});
         Object.defineProperty(app,'lang',{get:()=>language,set:value=>{language=value;watch=true;}});
         app.$nextTick=async()=>{if(watch){watch=false;mixin.watch.lang.call(app);assert.equal(app.ctActive,false);app._cloudLanguageSwitch=pending.promise;started.resolve();}};
@@ -4195,12 +4195,14 @@ test('offline test activation, drafts, save/history and exit use memory and rest
         testScope={...scope,versionId:'local:test:version',groupId:'local:test:group',language:'French'},
         metadata={version:{id:testScope.versionId,name:'Test Sheet Offline'},group:{id:testScope.groupId,contentMode:'clienttext',language:'French'}};
     await store.import(testScope,{units:[original],assets:[asset],metadata});
-    const h=initializationHarness({lang:'Thai',managedManagerAccess:true,ctTool:'history',ctSelectedFilters:['saved'],
-        _ctTestStores:new Map([[testScope.groupId,store]]),_ctStore:new Proxy({}, {get(){assert.fail('Test operation must not access durable storage');}})}),{app,mixin}=h;
-    app.ensureDictionarySnapshot=()=>assert.fail('Test activation must not load/sync Dictionary');
+    let memoryReads=0,dictionarySnapshots=0;
+    const h=initializationHarness({lang:'Thai',managedManagerAccess:true,ctTool:'history',ctSelectedFilters:['saved'],dictionary:[{_id:'term',find:'Term',replace:'Normal',alts:[]}],
+        _ctTestStores:new Map([[testScope.groupId,store]]),_ctStore:new Proxy({}, {get(_target,name){if(name==='getMemory')return async captured=>{memoryReads++;assert.equal(captured.language,'French');return {units:[]};};assert.fail('Test operation must not access durable authoring storage: '+String(name));}})}),{app,mixin}=h;
+    app.ensureDictionarySnapshot=async()=>{dictionarySnapshots++;};
     app.managedOnlineAvailable=true;app.cloudCanAccessAllLanguages=true;app._cloud={request(){assert.fail('Test operation must not request cloud data');}};
     assert.equal(await app.ctActivate(testScope,metadata),true);assert.equal(app.lang,'French');assert.equal(app.ctOfflineTest,true);assert.ok(app._ctNpcIndex);assert.ok(app._ctConvoIndex);
-    assert.ok(app.ctSelectedFilters.includes('unchanged'));assert.equal(mixin.computed.ctDictionaryReady.call(app),false);
+    assert.ok(app.ctSelectedFilters.includes('unchanged'));assert.equal(mixin.computed.ctDictionaryReady.call(app),true);
+    assert.equal(memoryReads,1);assert.equal(dictionarySnapshots,1);app.dictionary[0].replace='Temporary';
     for(const method of ['ctFlushDraft','ctLoadHistory','ctLoadMemory','ctFlushCommentDraft'])app[method]=mixin.methods[method].bind(app);
     await app.ctSelect(app.ctUnits[0],true);app.ctValues[fieldId]='Exact @ text\\n\r\n';app.ctDraftDirty=true;
     assert.equal(await app.ctSave(),true);await settle();
@@ -4210,7 +4212,21 @@ test('offline test activation, drafts, save/history and exit use memory and rest
     const oldScope=clone(testScope);assert.equal(await app.ctShowVersionChooser(),true);
     assert.equal(app.ctActive,false);assert.equal(app._ctTestStores.size,0);assert.deepEqual(clone(app.ctValues),{});assert.deepEqual(clone(app.ctReviewed),{});
     assert.deepEqual(Array.from(app.ctSelectedFilters),['saved']);assert.equal(app.ctTool,'history');assert.equal(app._ctDraftHeads.size,0);
+    assert.equal(app.dictionary[0].replace,'Normal');assert.equal(app._ctTestDictionary,null);
     assert.throws(()=>app.ctStorage(oldScope),/session has ended/);await assert.rejects(store.getSaved(oldScope),{code:'LOCAL_TEST_DISPOSED'});
+});
+
+test('failed or cancelled test Dictionary preparation restores normal rows without ending another session',async()=>{
+    for(const cancelled of [false,true]){
+        const store=require('../public/clientTextMemoryStore.js').create(),selected={...scope,groupId:'local:test:dictionary-setup'},pending=deferred(),started=deferred();
+        await store.import(selected,{units:[unit()],assets:[asset]});
+        const {app}=initializationHarness({lang:scope.language,dictionary:[{_id:'normal',find:'Term',replace:'Original',alts:[]}],
+            _ctTestStores:new Map([[selected.groupId,store]]),_ctStore:{async getMemory(){return {units:[]};}}});
+        app.ensureDictionarySnapshot=async()=>{app.dictionary[0].replace='Preparation-only';started.resolve();await pending.promise;if(!cancelled)throw new Error('Snapshot failed');};
+        const opening=app.ctActivate(selected,{});await started.promise;
+        if(cancelled)app.ctCancel();pending.resolve();assert.equal(await opening,false);
+        assert.equal(app._ctTestDictionary,null);assert.equal(app.dictionary[0].replace,'Original');assert.equal(app.ctActive,false);assert.equal(app.ctBusy,false);
+    }
 });
 
 function offlinePreparationHarness(currentNames,previousNames=[],enabled=previousNames.length>0){

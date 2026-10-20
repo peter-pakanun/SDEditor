@@ -296,6 +296,7 @@
         this.getEditorRef('translation', index, block?.isTable ? Math.min(column, block.tableColumns.length - 1) : null)?.focus?.({ preventScroll: true });
       },
       async openTMManager() {
+        if (this.ctOfflineTest) return;
         const key = this.tmScopeKey;
         this.tmManagerVisible = true; this.tmEditing = null;
         await this.$nextTick();

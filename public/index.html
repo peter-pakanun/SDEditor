@@ -223,7 +223,7 @@
               <div class="cloudActions">
                 <button v-if="cloudSignedIn && cloudSyncIssue" @click="cloudRetry" :disabled="cloudBusy">Sync now</button>
                 <button @click="cloudOpenHistory()" :disabled="!cloudHistoryAvailable" :title="cloudHistoryUnavailableReason">Shared dictionary history</button>
-                <button @click="openTMManager">Manage translation memory</button>
+                <button @click="openTMManager" :disabled="ctOfflineTest" :title="ctOfflineTest ? 'ClientText test TM learns from temporary saves. Leave the test to manage shared TM.' : ''">Manage translation memory</button>
                 <button v-if="cloudUser" @click="cloudLogout" :disabled="cloudBusy">{{ cloudSignedIn ? 'Sign out' : 'Return to local profile' }}</button>
                 <button v-if="cloudConflicts.length" @click="cloudOpenResolver">Resolve conflicts ({{ cloudConflicts.length }})</button>
                 <button v-if="cloudUser && cloudUser.isAdmin && cloudSignedIn" @click="cloudLoadUsers" :disabled="cloudBusy">Manage users</button>
@@ -525,7 +525,7 @@
           </div></fieldset>
           <app-notice-stack class="workspaceNoticeStack">
             <workspace-alerts></workspace-alerts>
-            <app-notice tone="info" v-if="ctOfflineTest" dismiss-key="ctOfflineTest" class="ctTestBanner" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Saves are temporary. Download workbooks to keep saved edits. Leaving the test or reloading clears this session.</app-notice>
+            <app-notice tone="info" v-if="ctOfflineTest" dismiss-key="ctOfflineTest" class="ctTestBanner" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Saves, Dictionary edits and learned TM are temporary. Download workbooks to keep saved workbook edits. Leaving the test or reloading clears this session.</app-notice>
             <app-notice tone="error" v-if="ctMtlVisible && ctMtlError" dismiss-key="ctMtlError" role="alert">{{ ctMtlError }}</app-notice>
             <app-notice tone="warning" v-if="ctMtlVisible && ctMtlDismissals.length" data-inline-focus-surface role="status">{{ ctMtlDismissals.length }} MTL dismissal upload(s) pending. {{ String(ctWorkspace?.scope?.groupId || '').startsWith('local:') ? 'Keep this tab and workbook session open; closing or reloading loses unsent dismissal requests.' : 'Exact dismissal requests are retained in this browser for retry.' }}<button type="button" @click="ctMtlRetryDismissals()" :disabled="ctBusy">Retry dismissal uploads</button></app-notice>
             <app-notice tone="error" v-if="ctError" dismiss-key="ctError" class="collaborationError" role="alert">{{ ctError }}</app-notice>
@@ -643,7 +643,7 @@
       <editor-full-shell v-if="ctEditor" class="ctFull ctFullEditor" :controller="sharedEditorController" preview-host-id="ctFullEditorPreviewHost" sidebar-host-id="ctFullEditorSidebarHost">
         <template #notice>
           <workspace-alerts></workspace-alerts>
-          <app-notice tone="info" v-if="ctOfflineTest" dismiss-key="ctOfflineTest" class="ctTestBanner" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Saves are temporary. Download workbooks to keep saved edits. Leaving the test or reloading clears this session.</app-notice>
+          <app-notice tone="info" v-if="ctOfflineTest" dismiss-key="ctOfflineTest" class="ctTestBanner" role="note">In-memory test · {{ ctWorkspace.scope.language }} · Saves, Dictionary edits and learned TM are temporary. Download workbooks to keep saved workbook edits. Leaving the test or reloading clears this session.</app-notice>
           <app-notice tone="error" v-if="ctError" dismiss-key="ctError" class="collaborationError" role="alert">{{ ctError }}</app-notice>
           <app-notice tone="info" v-if="ctNotice" dismiss-key="ctNotice" class="collaborationNotice" role="status">{{ ctNotice }}</app-notice>
         </template>

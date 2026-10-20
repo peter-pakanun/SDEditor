@@ -5,6 +5,7 @@ const vm = require('node:vm');
 const S = require('../public/clientTextState.js');
 const CT = require('../public/clientTextStore.js');
 const Memory = require('../public/clientTextMemoryStore.js');
+const A = require('../public/contentAdapters.js');
 
 const scope = { accountId: 'manager', game: 'poe2', branchId: 'default', versionId: 'local-version', groupId: 'local:test:first', language: 'Thai' };
 const textId = JSON.stringify(['Text', null]);
@@ -86,7 +87,7 @@ test('previous comparisons fence every scope and cancel atomically without publi
 });
 
 test('browser and Node adapters never access durable storage, workers or networking', async () => {
-    const sandbox = { ClientTextState: S, ClientTextStore: CT, setTimeout, Map, Blob, console };
+    const sandbox = { ClientTextState: S, ClientTextStore: CT, ContentAdapters: A, setTimeout, Map, Blob, console };
     for (const name of ['indexedDB', 'OfflineStore', 'localStorage', 'sessionStorage', 'fetch', 'WebSocket', 'Worker']) {
         Object.defineProperty(sandbox, name, { get() { throw new Error('Forbidden offline side effect: ' + name); } });
     }
@@ -98,7 +99,42 @@ test('browser and Node adapters never access durable storage, workers or network
     assert.equal((await store.listHistory(scope, unit().id)).length, 1);
     assert.equal(store.getOutbox, undefined);
     assert.equal(store.putRequest, undefined);
-    assert.equal((await store.getMemory(scope)).counts.total, 0);
+    assert.equal((await store.getMemory(scope)).counts.total, 2);
+});
+
+test('temporary TM seeds detached cached rows and learns only eligible saved fields within the exact workbook scope', async () => {
+    const { store, original } = await prepared();
+    const cached = A.clienttext.memoryUnits(original, values(original, 'Cached {0}'), scope.language, { game: scope.game });
+    await store.seedMemory(scope, cached);
+    cached[0].target = 'Mutated caller';
+    assert.equal((await store.getMemory(scope)).units[0].target, 'Cached {0}');
+    await store.putDraft(scope, original.id, { values: values(original, 'Private draft {0}') });
+    assert.equal((await store.getMemory(scope)).units[0].target, 'Cached {0}', 'drafts never teach memory');
+    const command = { jobId: 'learn', values: values(original, 'Saved {0}'), reviewed: {} };
+    await store.save(scope, original.id, command);
+    let memory = await store.getMemory(scope);
+    const learned = memory.units.find(entry => entry.context.fieldId === textId);
+    assert.equal(learned.target, 'Saved {0}'); assert.equal(learned.localRevision, 1);
+    await store.save(scope, original.id, command);
+    assert.deepEqual(await store.getMemory(scope), memory, 'receipt replay does not learn twice');
+    await store.seedMemory(scope, cached);
+    assert.deepEqual(await store.getMemory(scope), memory, 'late seeding never replaces learned edits');
+    memory.units[0].target = 'Mutated read';
+    assert.notEqual((await store.getMemory(scope)).units[0].target, 'Mutated read');
+    for (const other of [{ ...scope, accountId: 'other' }, { ...scope, language: 'French' }, { ...scope, game: 'poe1' },
+        { ...scope, branchId: 'other' }, { ...scope, groupId: 'local:test:new' }, { ...scope, versionId: 'new' }]) {
+        assert.equal((await store.getMemory(other)).counts.total, 0);
+    }
+    const bad = { ...values(original), [textId]: 'Missing protected variable' };
+    await store.save(scope, original.id, { jobId: 'invalid-pair', values: bad, reviewed: {} });
+    assert.equal((await store.getMemory(scope)).units.find(entry => entry.context.fieldId === textId).target, 'Saved {0}');
+    const fresh = await prepared();
+    const changed = unit(); changed.fields[0].outdated = true;
+    const unreviewed = await prepared({ original: changed });
+    await unreviewed.store.save(scope, changed.id, { jobId: 'unreviewed', values: values(changed), reviewed: {} });
+    assert.equal((await unreviewed.store.getMemory(scope)).units.some(entry => entry.context.fieldId === textId), false);
+    assert.equal((await fresh.store.getMemory(scope)).counts.total, 0, 'new sessions retain no temporary memory');
+    store.dispose(); await assert.rejects(store.seedMemory(scope, cached), { code: 'LOCAL_TEST_DISPOSED' });
 });
 
 test('local test group scopes reject managed groups and isolate every authored-work dimension', async () => {

@@ -7628,7 +7628,7 @@ function formatPageRange(total, page, pageSize) {
     settingsSavePayload() {
       return {
         editorRegexes: this.editorRegexes,
-        dictionary: this.dictionary,
+        dictionary: this.ctPersistentDictionary?.() || this.dictionary,
         editorClipboard: this.editorClipboard,
         lang: this.lang,
         theme: this.theme,
@@ -7652,8 +7652,9 @@ function formatPageRange(total, page, pageSize) {
       };
     },
     scheduleSettingsSave() {
-      if (this._settingsSaveDisposed || this._cloudApplying || !offlineStoreReady) return;
+      if (this._settingsSaveDisposed || this._cloudApplying || !offlineStoreReady || this._ctTestDictionary || this.ctOfflineTest) return;
       const settings = this.settingsSavePayload();
+      if (this._ctTestRestoredDictionary === this.dictionary && this._cloud?.matchesLocalSettings?.(settings)) return;
       const context = this._cloud?.context();
       const jobs = this._settingsSaveJobs ||= [];
       const last = jobs.at(-1);

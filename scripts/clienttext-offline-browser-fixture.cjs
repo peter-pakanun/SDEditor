@@ -269,11 +269,11 @@ async function run() {
             if (url.origin === origin || !/\/auth\/|\/v1\//.test(url.pathname)) return route.continue();
             throw new Error('Fixture unexpectedly attempted an actual API request: ' + url.pathname);
         });
-        async function bootstrap(role = 'manager', selectedLanguage = 'French') {
+        async function bootstrap(role = 'manager', selectedLanguage = 'French', preserveProfile = false) {
             await page.evaluate(() => window.OfflineStore?.updateHybridState?.(state => { state.auth = null; state.activeProfile = 'guest'; return state; }));
             await page.goto(origin);
             await page.waitForFunction(() => window.__offlineTestApp?.offlineStoreReady && window.__offlineTestApp?._cloud?.state && !window.__offlineTestApp.workspaceInitializationActive);
-            await page.evaluate(async ({ role, selectedLanguage, fixtureAudioPath }) => {
+            await page.evaluate(async ({ role, selectedLanguage, fixtureAudioPath, preserveProfile }) => {
                 const vm = window.__offlineTestApp;
                 // Keep the actual cloud client for scope guards. Destroy its
                 // scheduling and replace API transport. Only empty catalogs,
@@ -324,7 +324,7 @@ async function run() {
                 const id = role === 'guest' ? 'guest' : 'fixture-' + role;
                 const user = role === 'guest' ? null : { id, role, isAdmin: role === 'admin', language: role === 'translator' ? 'French' : null, assignmentVersion: 1 };
                 vm._cloud.state = await OfflineStore.updateHybridState(state => {
-                    if (role !== 'guest') {
+                    if (role !== 'guest' && (!preserveProfile || !state.profiles[id])) {
                         state.profiles[id] = JSON.parse(JSON.stringify(state.profiles.guest));
                         state.profiles[id].settings.lang = selectedLanguage;
                     }
@@ -339,7 +339,7 @@ async function run() {
                 await vm.activateGameVersion('poe2', { checkMigration: false });
                 await vm.ctRefreshLocal();
                 await vm.$nextTick();
-            }, { role, selectedLanguage, fixtureAudioPath:'/audio/poe2db?path='+encodeURIComponent(audioReference.toLowerCase()) });
+            }, { role, selectedLanguage, preserveProfile, fixtureAudioPath:'/audio/poe2db?path='+encodeURIComponent(audioReference.toLowerCase()) });
             await page.getByRole('region', { name: 'Source versions' }).waitFor();
             // Scope changes may queue ordinary settings/account preparation;
             // complete those fixture tasks before measuring test activity.
@@ -490,6 +490,11 @@ async function run() {
             if(hiddenPreviousFiles.length)assert.equal(await page.evaluate(async()=>!!(await window.__offlineTestApp.ctStorage(window.__offlineTestApp.ctWorkspace.scope).getMetadata(window.__offlineTestApp.ctWorkspace.scope)).previousScope),false,
                 'Unchecked retained history workbooks are excluded from the in-memory version');
         }
+        if(process.argv.includes('--assistance-only'))await page.evaluate(async()=>{
+            const app=window.__offlineTestApp;
+            app.dictionary=[{_id:'cached-sword',find:'Sword',replace:'Cached sword',alts:[],tlnote:''}];
+            await app.saveSettings();
+        });
         await monitor(page, true);
         // A French Normal workbook alone is allowed here even though a
         // published French content group normally requires its Gender pair.
@@ -503,6 +508,10 @@ async function run() {
         await workspace.getByRole('button', { name: 'offline-test-record', exact: true }).click();
         const translation = workspace.locator('.ctFullEditor textarea[data-ct-target]').first();
         await translation.waitFor();
+        if(process.argv.includes('--assistance-only')){
+            await require('./clienttext-offline-assistance-check.cjs')({page,workspace,translation,unit,normal,openTest,bootstrap,monitor,assertLocal,failures});
+            return;
+        }
         assert.equal(await workspace.locator('.ctFullEditor [data-ct-target][aria-label="Gender"]').count(), 1, 'Legacy non-italic Gender remains editable');
         await layout(page, workspace.locator('.ctFullEditor'), 'Offline ClientText full editor', true);
         layoutChecked = true;

@@ -430,3 +430,41 @@ test('an unsafe account change from another tab leaves the unsaved Dictionary vi
   assert.equal(e.dictionary[0].replace, 'Keep this draft'); assert.equal(e.pendingSettingsSaves, 1);
   assert.equal(e._cloud.epoch, 1); assert.match(e.cloudStorageError, /export your settings/);
 });
+
+test('offline test Dictionary edits never enter settings jobs or cloud payloads, and normal writes resume after cleanup', async () => {
+  const state = startupStore(), h = startupHarness(state, startupLegacy(state.state)), { e } = h;
+  await h.start(); state.writes.length = 0;
+  const methods = require('../public/clientTextUi.js').mixin.methods;
+  for (const name of ['ctPersistentDictionary', 'ctBeginTestDictionary', 'ctEndTestDictionary']) e[name] = methods[name];
+  e.ctCloseCompletion = e.ctDictionaryEndEdit = () => {};
+  e.ctBeginTestDictionary({ accountId: 'guest', language: 'Thai' }); e.ctOfflineTest = true;
+  e.dictionary[0].replace = 'Temporary correction'; e.dictionary[0].alts.push({ _id: 'temp-alt', find: 'Temporary', replace: 'Private' });
+  e.scheduleSettingsSave(); assert.equal(await e.saveSettings(), true);
+  assert.equal(e.pendingSettingsSaves, 0); assert.equal(state.writes.length, 0);
+  assert.equal(e.cloudPayload().dictionary[0].replace, 'Fire target');
+  assert.equal(e.settingsSavePayload().dictionary[0].alts.length, 0);
+  const incoming = e._cloud.snapshot(); incoming.dictionary[0].replace = 'Remote correction';
+  await e.cloudApply(incoming);
+  assert.equal(e.dictionary[0].replace, 'Temporary correction');
+  assert.equal(e.cloudPayload().dictionary[0].replace, 'Remote correction');
+  e.ctEndTestDictionary(); e.ctOfflineTest = false;
+  e.scheduleSettingsSave(); assert.equal(state.writes.length, 0, 'restoring identical normal rows does not queue a write');
+  e.dictionary[0].replace = 'Real correction'; e.scheduleSettingsSave(); await e.flushScheduledSettingsSave();
+  assert.equal(state.state.profiles.guest.dictionaries.Thai.entries[0].replace, 'Real correction');
+  assert.equal(state.state.profiles.guest.dictionaries.Thai.entries[0].alts.length, 0);
+});
+
+test('an account/access snapshot closes the temporary Dictionary before applying the new normal scope', async () => {
+  const state = startupStore(), h = startupHarness(state, startupLegacy(state.state)), { e } = h;
+  await h.start(); state.writes.length = 0;
+  const methods = require('../public/clientTextUi.js').mixin.methods;
+  for (const name of ['ctPersistentDictionary', 'ctBeginTestDictionary', 'ctEndTestDictionary']) e[name] = methods[name];
+  e.ctCloseCompletion = e.ctDictionaryEndEdit = () => {};
+  e.ctFence = () => { e.ctEndTestDictionary(); e.ctOfflineTest = false; };
+  e.ctBeginTestDictionary({ accountId: 'guest', language: 'Thai' }); e.ctOfflineTest = true;
+  e.dictionary[0].replace = 'Private guest correction';
+  const next = e._cloud.snapshot(); next.profileId = 'other'; next.dictionary[0].replace = 'Other account';
+  await e.cloudApply(next);
+  assert.equal(e._ctTestDictionary, null); assert.equal(e.dictionary[0].replace, 'Other account');
+  assert.equal(state.writes.length, 0);
+});

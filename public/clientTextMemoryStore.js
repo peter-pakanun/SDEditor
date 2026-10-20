@@ -2,10 +2,11 @@
 (function (root, factory) {
     const state = root.ClientTextState || (typeof require === 'function' ? require('./clientTextState.js') : null);
     const store = root.ClientTextStore || (typeof require === 'function' ? require('./clientTextStore.js') : null);
-    const api = factory(state, store);
+    const adapters = root.ContentAdapters || (typeof require === 'function' ? require('./contentAdapters.js') : null);
+    const api = factory(state, store, adapters);
     if (typeof module === 'object' && module.exports) module.exports = api;
     else root.ClientTextMemoryStore = api;
-})(typeof globalThis === 'object' ? globalThis : self, function (S, C) {
+})(typeof globalThis === 'object' ? globalThis : self, function (S, C, A) {
     'use strict';
     const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
     function normalizeScope(input) {
@@ -88,7 +89,7 @@
             // Vue.markRaw adds its marker to this array during activation.
             // Records remain owned originals; edit/save overlays never mutate them.
             workspaces.set(captured.id, { metadata, units, byId, assets: assetMap,
-                saved: new Map(), drafts: new Map(), history: new Map(), receipts: new Map() });
+                saved: new Map(), drafts: new Map(), history: new Map(), receipts: new Map(), memory: new Map(), memorySeeded: false });
             return S.copy(metadata);
         }
         async function getMetadata(rawScope, options) {
@@ -202,24 +203,46 @@
                 ...(acceptedMtl.length ? {mtlAcceptances:S.copy(input.mtlAcceptances)} : {}) };
             const entry = { id: input.jobId, unitId, before: before || null, after, origin: after.origin, createdAt: after.savedAt };
             const committed = { jobId: input.jobId, signature, unitId, saved: after, committedAt: Date.now() };
+            // Use the same eligibility rules as durable ClientText saves. Drafts,
+            // unreviewed source changes and comparison imports never teach TM.
+            const learned = A.clienttext.memoryUnits(unit, after.values, captured.scope.language,
+                { game: captured.scope.game, branchId: captured.scope.branchId, jobId: input.jobId, origin: after.origin, saved: after });
             guard(options);
             if(acceptedMtl.length)mtl.resolveAcceptances(captured.scope,acceptedMtl,{jobId:input.jobId,now:after.savedAt});
             workspace.saved.set(unitId, after);
             const history = workspace.history.get(unitId) || []; history.push(entry); workspace.history.set(unitId, history);
             if (own(input, 'expectedDraftRevision')) workspace.drafts.delete(unitId);
             workspace.receipts.set(input.jobId, committed);
+            for (const entry of learned) {
+                const before = workspace.memory.get(entry.id);
+                if (before && before.source === entry.source && before.target === entry.target && S.stableStringify(before.context) === S.stableStringify(entry.context)) continue;
+                workspace.memory.set(entry.id, { ...entry, updatedAt: after.savedAt, localRevision: (before?.localRevision || 0) + 1 });
+            }
             return { saved: S.copy(after), receipt: S.copy(committed), replayed: false };
         }
         async function listHistory(rawScope, unitId, options = {}) {
             const workspace = workspaces.get(capture(rawScope, options).id), records = workspace?.history.get(unitId) || [];
             return records.slice().reverse().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, options.limit || 100).map(S.copy);
         }
+        async function seedMemory(rawScope, entries, options) {
+            const captured = capture(rawScope, options), workspace = ready(captured);
+            if (workspace.memorySeeded) return;
+            const units = (entries || []).filter(entry => entry.context?.contentMode === 'clienttext'
+                && (!entry.language || entry.language === captured.scope.language)
+                && [captured.scope.game, 'all'].includes(entry.gameScope));
+            guard(options);
+            for (const entry of units) if (!workspace.memory.has(entry.id)) workspace.memory.set(entry.id, S.copy(entry));
+            workspace.memorySeeded = true;
+        }
         async function getMemory(rawScope, options) {
-            capture(rawScope, options); return { units: [], counts: { total: 0, text: 0, form: 0 } };
+            const workspace = workspaces.get(capture(rawScope, options).id);
+            const units = [...(workspace?.memory.values() || [])].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).map(S.copy);
+            return { units, counts: { total: units.length, text: units.filter(unit => unit.context.fieldKind === 'text').length,
+                form: units.filter(unit => unit.context.fieldKind === 'form').length } };
         }
         function dispose() { disposed = true; workspaces.clear(); mtl?.dispose(); }
         return { import: importContent, importContent, getMetadata, listWorkspaces, seedPreviousVersion, getUnits, getUnitsByIds, getUnit, getSaved, getAsset,
-            putDraft, getDraft, getDraftSummaries, discardDraft, save, listHistory, getMemory, normalizeScope, scopeKey, mtl, dispose };
+            putDraft, getDraft, getDraftSummaries, discardDraft, save, listHistory, seedMemory, getMemory, normalizeScope, scopeKey, mtl, dispose };
     }
     return { normalizeScope, scopeKey, create };
 });

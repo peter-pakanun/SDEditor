@@ -80,7 +80,7 @@
       },
       cancelSettingsImport() { this.settingsImportDraft = null; this.settingsImportConfirm = ''; this.$refs.importSettingsFileForm.reset(); },
       cloudPayload() {
-        return this.toPlainForStorage({ ...window.CloudSync.preferences(this), dictionary: this.dictionary, editorClipboard: this.editorClipboard });
+        return this.toPlainForStorage({ ...window.CloudSync.preferences(this), dictionary: this.ctPersistentDictionary?.() || this.dictionary, editorClipboard: this.editorClipboard });
       },
       async cloudApply(snapshot) {
         if (!snapshot) return;
@@ -91,6 +91,11 @@
         const scopeChanged = this.cloudSignedIn !== snapshot.signedIn || this.lang !== settings.lang
           || (this.cloudProfileId || oldUser.id || 'guest') !== nextProfile
           || ['id', 'language', 'assignmentVersion', 'role', 'isAdmin'].some(key => oldUser[key] !== nextUser[key]);
+        if (scopeChanged && this._ctTestDictionary) this.ctFence();
+        // Same-account background refreshes may update the real Dictionary,
+        // but must never replace or publish the temporary editor copy.
+        const temporaryDictionary = this._ctTestDictionary;
+        if (temporaryDictionary && Object.hasOwn(snapshot, 'dictionary')) temporaryDictionary.base = clone(snapshot.dictionary);
         if (scopeChanged && (this.editorSessionActive ?? this.editorVisible)) {
           // Capture the outgoing draft before applying new account/access state.
           // Session detachment captures its immutable scope synchronously; an
@@ -113,7 +118,7 @@
           this.cloudDefinitionsChoice = ''; this.cloudNoteChoice = '';
         }
         const rawDictionary = typeof Vue !== 'undefined' && Vue.toRaw ? Vue.toRaw(this.dictionary) : this.dictionary;
-        const dictionaryChanged = Object.hasOwn(snapshot, 'dictionary') && !sameDictionary(rawDictionary, snapshot.dictionary);
+        const dictionaryChanged = !temporaryDictionary && Object.hasOwn(snapshot, 'dictionary') && !sameDictionary(rawDictionary, snapshot.dictionary);
         if (!dictionaryChanged && same(window.CloudSync.preferences(this), settings) && this.editorClipboard === snapshot.editorClipboard) {
           if (scopeChanged) await this.loadEditorDrafts?.();
           return;

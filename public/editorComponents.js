@@ -324,7 +324,7 @@
               </div>
               <details class="dictTlnote">
                 <summary>TL note</summary>
-                <textarea rows="3" v-model="word.tlnote" @input="controller.dictionaryEntryInput(word)" placeholder="Translator note (shared)" :lang="controller.translationEditorBcp47"></textarea>
+                <textarea rows="3" v-model="word.tlnote" @input="controller.dictionaryEntryInput(word)" :placeholder="controller.dictionaryTemporary ? 'Translator note (temporary)' : 'Translator note (shared)'" :lang="controller.translationEditorBcp47"></textarea>
               </details>
             </div>
             <button type="button" class="dictDeleteBtn" @click="controller.removeVocab(word)" title="Delete this Dictionary entry" :aria-label="'Delete Dictionary entry ' + (word.find || 'without a Find value')">🗑️</button>

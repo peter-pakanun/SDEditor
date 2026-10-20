@@ -503,7 +503,7 @@
                 return (this.dictionary || []).filter(entry=>this.ctDictionaryMatchedDefinitions.has(String(entry?._id || '')));
             },
             ctDictionaryReady() {
-                return !!(!this.ctOfflineTest && this.ctActive && this.ctWorkspace && !this.ctBusy && !this.ctHistoryViewer
+                return !!(this.ctActive && this.ctWorkspace && !this.ctBusy && !this.ctHistoryViewer
                     && !this.versionChooserVisible && !this.settingsDialogVisible && !this.showSetting
                     && (!this.lang || this.lang===this.ctWorkspace.scope.language)
                     && this.gameVersion===this.ctWorkspace.scope.game && (this.branchId || 'default')===(this.ctWorkspace.scope.branchId || 'default'));
@@ -568,6 +568,7 @@
                 };
                 return {
                     get editorReady(){return current() && host.ctDictionaryReady;},get visibleDictionary(){return current() ? host.ctDictionaryVisible : [];},
+                    get dictionaryTemporary(){return host.ctOfflineTest;},
                     get dictionaryFlashId(){return host.dictionaryFlashId;},get translationEditorBcp47(){return host.translationEditorBcp47;},
                     get dictionaryCanUse(){return current() && host.ctDictionaryReady && host.ctCurrentUnit?.fields.some(field=>field.id===host.ctFocusedField && field.kind!=='gender');},
                     get cloudEntryHistoryAvailable(){return current() && host.cloudEntryHistoryAvailable;},get cloudEntryHistoryHint(){return host.cloudEntryHistoryHint;},
@@ -641,7 +642,7 @@
                 controller.focus=event=>{this.ctFocusSource(group,source);focus(event);};return controller;
             },
             async scheduleClientTextDictionaryMatches() {
-                if(this.ctOfflineTest || !this.ctActive || !this.ctWorkspace || !this.ensureDictionaryWorker)return;
+                if(!this.ctActive || !this.ctWorkspace || !this.ensureDictionaryWorker)return;
                 const ctx=this.ctContext(),unit=this.ctCurrentUnit,run=this._ctDictionaryRun={},fields=this.ctFieldsFor().filter(field=>field.kind!=='gender');
                 this._ctDictionaryRequest?.cancel?.();
                 const current=()=>this._ctDictionaryRun===run && this.ctCurrent(ctx) && this.ctCurrentUnit===unit;
@@ -1293,6 +1294,24 @@
                 if(!store)throw new Error('This in-memory test session has ended. Open Test Sheet Offline again.');
                 return store;
             },
+            ctPersistentDictionary() { return this._ctTestDictionary?.base || this.dictionary; },
+            ctBeginTestDictionary(scope) {
+                // The editor/worker integrations all consume dictionary. Give
+                // them detached rows; CloudSync continues to own the real store.
+                this._ctTestDictionary = { accountId: scope.accountId, language: scope.language, base: this.dictionary || [] };
+                this.dictionary = copy(this.dictionary || []);
+                this.tmManagerVisible = false; this.tmEditing = null; this.tmSeedVisible = false; this.tmHistoryVisible = false;
+            },
+            ctEndTestDictionary() {
+                const session = this._ctTestDictionary;
+                if (!session) return;
+                const snapshot = this._cloud?.snapshot?.();
+                this.dictionary = snapshot?.profileId === session.accountId && snapshot.settings?.lang === session.language
+                    ? snapshot.dictionary : session.base;
+                this._ctTestRestoredDictionary = this.dictionary;
+                this._ctTestDictionary = null;
+                this.ctDictionaryFilter = ''; this.ctDictionaryEndEdit(); this.ctCloseCompletion();
+            },
             ctContext() { return { key: this.managedCatalogScope, scope: copy(this.ctWorkspace?.scope || {}), epoch: this._ctEpoch || 0 }; },
             ctCurrent(ctx) { return ctx.key === this.managedCatalogScope && ctx.epoch === (this._ctEpoch || 0) && JSON.stringify(ctx.scope) === JSON.stringify(this.ctWorkspace?.scope || {}); },
             ctFence(keepTestGroupId = null) {
@@ -1303,6 +1322,7 @@
                 this.ctFlushCommentDraft().catch(()=>{});
                 this.ctFlushReplyCommentDrafts().catch(()=>{});
                 this.ctMtlReset?.();
+                this.ctEndTestDictionary();
                 this._ctEpoch = (this._ctEpoch || 0) + 1; this._ctAbort?.abort(); clearInterval(this._ctSyncTimer); clearTimeout(this._ctDraftTimer);clearTimeout(this._ctSearchTimer);
                 this._ctDictionaryRequest?.cancel?.();this._ctDictionaryRun=null;this.ctDictionaryPack=null;this._ctPendingDictionaryPack=null;this.ctDraftSummaries=[];
                 this._ctSync?.stop?.(); this._ctSync = null;
@@ -1635,10 +1655,19 @@
                         const convoIndex=await root.ClientTextConvoIndex.buildConvoIndex(units,npcIndex,{guard:current,signal});check();
                         this._ctNpcIndex=raw(npcIndex);this._ctConvoIndex=raw(convoIndex);this.ctRevision++;
                     },initialization);
-                    await this.ctInitializationStep('Preparing Dictionary matches',async()=>{await this.$nextTick?.();check();if(!test){await this._cloudLanguageSwitch;check();await this.ensureDictionarySnapshot?.();check();}},initialization);
+                    await this.ctInitializationStep('Preparing Dictionary matches',async()=>{
+                        await this.$nextTick?.();check();await this._cloudLanguageSwitch;check();
+                        if(test){
+                            if(await this.flushScheduledSettingsSave?.()===false)throw new Error('Save pending settings before opening a test sheet.');
+                            check();this.ctBeginTestDictionary(scope);
+                            const memory=this.testMode ? {units:[]} : await this._ctStore.getMemory(scope,{guard:current});check();
+                            await store.seedMemory(scope,memory.units,{guard:current});check();
+                        }
+                        await this.ensureDictionarySnapshot?.();check();
+                    },initialization);
                     await this.ctInitializationStep('Opening ClientText workspace',async()=>{
                     check();this.ctActive = true; this.versionChooserVisible = false; this.editorVisible = false;
-                    if(test){this._ctTestTool=this.ctTool;this._ctTestFilters=this.ctSelectedFilters.slice();this.ctTool='lookup';this.ctSelectedFilters=[...statusFilters.map(item=>item.key),'mtl'];}
+                    if(test){this._ctTestTool=this.ctTool;this._ctTestFilters=this.ctSelectedFilters.slice();this.ctSelectedFilters=[...statusFilters.map(item=>item.key),'mtl'];}
                     const memory=()=>{if(this.ctCurrent(ctx) && this.ctActive)return this.ctLoadMemory(ctx);};
                     if(this.queueWorkspaceBackground)this.queueWorkspaceBackground('clienttext-memory',memory);else setTimeout(memory,0);
                     this.activeContentGroup = metadata?.group || { id: scope.groupId, contentMode: 'clienttext' };
@@ -1659,7 +1688,13 @@
                     // exact originals after a failed language selection.
                     return false;
                 }
-                finally { if (openingOwns?.() && (!ctx || this.ctCurrent(ctx))) this.ctBusy = false;this.ctFinishInitialization(initialization); }
+                finally {
+                    if (openingOwns?.() && (!ctx || this.ctCurrent(ctx))) {
+                        this.ctBusy = false;
+                        if(test && !this.ctActive)this.ctEndTestDictionary();
+                    }
+                    this.ctFinishInitialization(initialization);
+                }
             },
             async ctOpenCached(row) { const scope = this._ctStore.normalizeScope(row.scope || row); return this.ctActivate(scope, row.metadata || row); },
             async ctSync(ctx = this.ctContext()) {
