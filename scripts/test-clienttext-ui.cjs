@@ -4549,6 +4549,44 @@ test('local checkpoint indication waits for transaction completion and preserves
     assert.equal(app.ctValues[fieldId],'new text that failed');assert.match(app.ctError,/Draft was not stored/);clearTimeout(app._ctDraftTimer);
 });
 
+test('successful durable retry clears its own checkpoint warning and keeps the unsaved draft/history boundary',async()=>{
+    const testScope={...scope,versionId:'local:test:warning-v',groupId:'local:test:warning-g'},
+        {app,original}=harness({ctWorkspace:{scope:testScope},ctDraftDirty:true,ctValues:{[fieldId]:'Exact failed draft\r\n'}}),pending=deferred(),started=deferred();
+    app.ctRefreshDraftSummaries=async()=>{};app._ctLocalStore={async putDraft(){throw Error('Transient quota');}};
+    assert.equal(await app.ctFlushDraft(),false);const warning=app.ctError;assert.match(warning,/Draft was not stored/);
+    app._ctLocalStore.putDraft=async()=>{started.resolve();await pending.promise;return{revision:1};};
+    const retry=app.ctFlushDraft();await started.promise;assert.equal(app.ctError,warning,'pending retry is not confirmation');
+    pending.resolve();assert.equal(await retry,true);assert.equal(app.ctError,'');assert.equal(app.ctCheckpointWarning,null);
+    assert.equal(app.ctLocalDraftState,'checkpointed');assert.equal(app.ctDraftDirty,true);assert.equal(app.ctSaved[original.id],undefined);
+});
+
+test('a checkpoint retry cannot clear an unrelated error or another scope/unit warning',async()=>{
+    for(const change of ['error','unit','scope']){
+        const testScope={...scope,versionId:'local:test:warning-v',groupId:'local:test:warning-g'},
+            {app}=harness({ctWorkspace:{scope:testScope},ctDraftDirty:true}),pending=deferred(),started=deferred();
+        app.ctRefreshDraftSummaries=async()=>{};app._ctLocalStore={async putDraft(){throw Error('Transient quota');}};
+        assert.equal(await app.ctFlushDraft(),false);
+        app._ctLocalStore.putDraft=async()=>{started.resolve();await pending.promise;return{revision:1};};
+        const retry=app.ctFlushDraft();await started.promise;
+        if(change==='error')app.ctError='Unrelated export failure';
+        if(change==='unit')app.ctCheckpointWarning.unitId='another-ID';
+        if(change==='scope')app.ctCheckpointWarning.context.scope.groupId='local:test:another';
+        const before=app.ctError;pending.resolve();assert.equal(await retry,true);assert.equal(app.ctError,before,change);
+    }
+});
+
+test('a successful newer checkpoint resolves a superseded same-unit warning but an older completion cannot clear a newer failure',async()=>{
+    const testScope={...scope,versionId:'local:test:warning-v',groupId:'local:test:warning-g'},
+        {app}=harness({ctWorkspace:{scope:testScope},ctDraftDirty:true}),pending=deferred(),started=deferred();
+    app.ctRefreshDraftSummaries=async()=>{};app._ctLocalStore={async putDraft(){throw Error('Transient quota');}};
+    assert.equal(await app.ctFlushDraft(),false);app.ctValues[fieldId]='Newer complete draft';
+    app._ctLocalStore.putDraft=async()=>({revision:1});assert.equal(await app.ctFlushDraft(),true);assert.equal(app.ctError,'');
+    app.ctValues[fieldId]='In-flight draft';app._ctLocalStore.putDraft=async()=>{started.resolve();await pending.promise;return{revision:2};};
+    const retry=app.ctFlushDraft();await started.promise;
+    const head=[...app._ctDraftHeads.values()][0];app.ctError='Newer checkpoint failure';app.ctCheckpointWarning={head,attempt:head.attempts+1,unitId:app.ctSelection,context:app.ctContext(),message:app.ctError};
+    pending.resolve();assert.equal(await retry,true);assert.equal(app.ctError,'Newer checkpoint failure');assert.ok(app.ctCheckpointWarning);
+});
+
 test('local draft discard requires explicit confirmation scoped to the selected ID',async()=>{
     const testScope={...scope,versionId:'local:test:discard-v',groupId:'local:test:discard-g'},
         {app}=harness({ctWorkspace:{scope:testScope},ctDraftDirty:true,ctValues:{[fieldId]:'keep local draft'}});

@@ -119,6 +119,7 @@
                 const old=normalizeScope(record.scope), scope={...old,...owner,versionId:'local:test:'+root.crypto.randomUUID(),groupId:'local:test:'+root.crypto.randomUUID()};
                 if(old.game!==owner.game)throw fail('Select the backup’s game before restoring.');
                 const oldId=identity(old);if(mapped.has(oldId))throw fail('Duplicate workbook identity in backup.');mapped.set(oldId,scope);
+                core().validateLocalMetadata(old,record.metadata);
                 if(record.metadata?.localProtocol!==protocol || !Array.isArray(record.assets) || !record.assets.length || record.assets.length>2)throw fail('Malformed backup metadata.');
                 const assets=[],units=[],roles=new Set();
                 for(const item of record.assets) {
@@ -174,6 +175,9 @@
             const done=new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onabort=tx.onerror=()=>reject(tx.error || fail('Restore transaction failed.'));});
             try {
                 const id=identity(scope);
+                const metadataRow=await new Promise((resolve,reject)=>{const req=tx.objectStore(names.meta).get(JSON.stringify([id,'meta']));req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});
+                if(!metadataRow)throw fail('Restore workspace metadata is missing. Stored data has been retained.');
+                core().validateLocalMetadata(scope,metadataRow.value);
                 for(const label of labels)for(const raw of rows[label]){
                     const value=clone(raw),unitId=label==='history'?value.id:label==='receipts'?value.jobId:value.unitId;
                     if(label==='drafts' && value.mtlAcceptances){value.restoredMtlAcceptances=value.mtlAcceptances;delete value.mtlAcceptances;}
@@ -183,7 +187,7 @@
                     if(label!=='receipts'){rebind(value);rebind(value.before);rebind(value.after);}
                     tx.objectStore(names[label]).put({key:JSON.stringify([id,unitId]),scope:id,value,...(['drafts','history'].includes(label)?{unitKey:JSON.stringify([id,value.unitId])}:{})});
                 }
-                const req=tx.objectStore(names.meta).get(JSON.stringify([id,'meta']));req.onsuccess=()=>{const row=req.result;row.value.localRestorePending=false;tx.objectStore(names.meta).put(row);};
+                metadataRow.value.localRestorePending=false;tx.objectStore(names.meta).put(metadataRow);
                 if(options.guard && !options.guard())tx.abort();
                 await done;
             }catch(error){try{tx.abort();}catch(_){}await done.catch(()=>{});throw error;}

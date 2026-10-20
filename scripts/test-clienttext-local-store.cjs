@@ -137,3 +137,57 @@ test('a delayed same-original importer cannot overwrite a ready workspace or its
     assert.equal((await f.store.getSaved(scope))[original.id].values[fieldId],'Authored before delayed import');
     assert.equal((await f.store.listHistory(scope,original.id)).length,1);
 });
+
+test('current private protocols are explicit on new imports; stored missing, malformed, older and future protocols fail without writes',async t=>{
+    const f=await prepared(),metaKey=rowKey(scope,'meta'),current=structuredClone(f.tables.get(C.stores.meta).get(metaKey));
+    assert.equal(current.value.localProtocol,C.LOCAL_PROTOCOL);assert.equal(current.value.storageProtocol,S.STORAGE_PROTOCOL);
+    const draft=await f.store.putDraft(scope,f.original.id,{values:values('Keep original draft')},{expectedRevision:null});
+    const command={jobId:'protocol-receipt',values:values('Keep original save')};await f.store.save(scope,f.original.id,command);
+    const snapshot=()=>structuredClone([...f.tables].map(([name,rows])=>[name,[...rows]]));
+    for(const name of ['localProtocol','storageProtocol'])for(const [label,value]of [['missing',undefined],['null',null],['object',{}],['array',[]],['number',1],['blank',''],['older',name==='localProtocol'?'clienttext-local-v0':'clienttext-trusted-v0'],['future',name==='localProtocol'?'clienttext-local-v999':'clienttext-trusted-v999']])await t.test(name+' '+label,async()=>{
+        const changed=structuredClone(current);if(value===undefined)delete changed.value[name];else changed.value[name]=value;f.tables.get(C.stores.meta).set(metaKey,changed);
+        const before=snapshot(),commits=f.commits.length;
+        for(const action of [
+            ()=>f.store.getMetadata(scope),()=>f.store.getUnits(scope),()=>f.store.save(scope,f.original.id,command),
+            ()=>f.store.save(scope,f.original.id,{jobId:'new-protocol-save',values:values('Do not save')}),
+            ()=>f.store.putDraft(scope,f.original.id,{values:values('Do not checkpoint')},{expectedRevision:draft.revision}),
+            ()=>f.store.discardDraft(scope,f.original.id,{expectedRevision:draft.revision}),()=>f.store.seedMemory(scope,[]),
+            ()=>f.store.seedPreviousVersion(scope,scope),()=>f.store.migrateWorkspace(scope),
+            ()=>f.store.import(scope,{units:[f.original],assets:[f.originalAsset]}),
+        ]){await assert.rejects(action(),{code:'CLIENTTEXT_LOCAL_PROTOCOL_UNSUPPORTED'});assert.deepEqual(snapshot(),before);}
+        assert.equal(f.commits.length,commits,'unsupported metadata cannot commit any transaction');
+        f.tables.get(C.stores.meta).set(metaKey,structuredClone(current));
+    });
+    assert.equal((await f.store.getSaved(scope))[f.original.id].values[fieldId],'Keep original save');
+    assert.equal((await f.store.getDraft(scope,f.original.id)).values[fieldId],'Keep original draft');
+});
+
+test('explicit unsupported protocols on new imports are rejected before preparation rather than normalized to current',async()=>{
+    const f=fixture(),original=unit(),originalAsset=await ownedAsset();
+    for(const metadata of [{localProtocol:'clienttext-local-v999'},{localProtocol:null},{storageProtocol:'clienttext-trusted-v999'},{storageProtocol:''}]){
+        const before=f.operations.length;
+        await assert.rejects(f.store.import(scope,{units:[original],assets:[originalAsset],metadata}),{code:'CLIENTTEXT_LOCAL_PROTOCOL_UNSUPPORTED'});
+        assert.equal(f.operations.length,before);assert.equal(f.commits.length,0);
+    }
+    await f.store.import(scope,{units:[original],assets:[originalAsset],metadata:{localProtocol:C.LOCAL_PROTOCOL,storageProtocol:S.STORAGE_PROTOCOL}});
+    assert.equal((await f.store.getMetadata(scope)).storageProtocol,S.STORAGE_PROTOCOL);
+});
+
+test('a protocol change between preparation and write transaction fences drafts and Save receipt replay atomically',async()=>{
+    for(const operation of ['draft','save','receipt']){
+        const f=await prepared(),metaKey=rowKey(scope,'meta'),metadata=structuredClone(f.tables.get(C.stores.meta).get(metaKey)),draft=await f.store.putDraft(scope,f.original.id,{values:values('Prior draft')});
+        const command={jobId:'prior-receipt',values:values('Prior save')};await f.store.save(scope,f.original.id,command);
+        const dbTransaction=f.db.transaction;let injected=false;
+        f.db.transaction=(names,mode,options)=>{
+            if(!injected && mode==='readwrite' && names.includes(operation==='draft'?C.stores.drafts:C.stores.receipts)){
+                const changed=structuredClone(metadata);changed.value.storageProtocol='clienttext-trusted-v999';f.tables.get(C.stores.meta).set(metaKey,changed);injected=true;
+            }
+            return dbTransaction(names,mode,options);
+        };
+        const commits=f.commits.length;
+        const action=operation==='draft'?()=>f.store.putDraft(scope,f.original.id,{values:values('Do not checkpoint')},{expectedRevision:draft.revision}):()=>f.store.save(scope,f.original.id,operation==='receipt'?command:{jobId:'race',values:values('Do not save')});
+        await assert.rejects(action(),{code:'CLIENTTEXT_LOCAL_PROTOCOL_UNSUPPORTED'});assert.equal(injected,true);assert.equal(f.commits.length,commits);
+        f.tables.get(C.stores.meta).set(metaKey,metadata);
+        assert.equal((await f.store.getDraft(scope,f.original.id)).values[fieldId],'Prior draft');assert.equal((await f.store.listHistory(scope,f.original.id)).length,1);
+    }
+});

@@ -25,10 +25,18 @@
     }
     const scopeKey = input => { const scope = normalizeScope(input); return key(scope.accountId, scope.game, scope.branchId, scope.versionId, scope.groupId, scope.language); };
     const isLocal = scope => String(scope?.groupId || '').startsWith('local:test:');
+    const LOCAL_PROTOCOL = 'clienttext-local-v1';
     const scopeFromKey = id => Object.fromEntries(['accountId','game','branchId','versionId','groupId','language'].map((name,index)=>[name,JSON.parse(id)[index]]));
     const corrupt = message => Object.assign(new Error('Local workbook recovery data is invalid: ' + message + '. The stored data has been retained.'), {code:'CLIENTTEXT_LOCAL_INVALID'});
+    function validateLocalProtocols(value) {
+        // v1 is the first durable private format. Missing tags are not evidence
+        // of an older compatible format; never infer or downgrade stored data.
+        if(value?.localProtocol!==LOCAL_PROTOCOL || value?.storageProtocol!==S.STORAGE_PROTOCOL)
+            throw Object.assign(new Error('Unsupported or missing local workbook protocol. This editor supports '+LOCAL_PROTOCOL+' and '+S.STORAGE_PROTOCOL+'. Stored data has been retained. Open it with a compatible editor; do not clear browser data.'),{code:'CLIENTTEXT_LOCAL_PROTOCOL_UNSUPPORTED'});
+    }
     function validateLocalMetadata(scope, value) {
         if (!value || !isLocal(scope)) return value;
+        validateLocalProtocols(value);
         if (scopeKey(value) !== scopeKey(scope) || value.state !== 'ready' || !Number.isSafeInteger(value.unitCount) || value.unitCount < 1
             || !Array.isArray(value.descriptors) || !value.descriptors.length || value.descriptors.length > 2) throw corrupt('workspace identity or readiness');
         const roles=new Set();let count=0;
@@ -96,6 +104,15 @@
         const get = async (tx, name, id) => (await request(tx.objectStore(name).get(id)))?.value;
         const put = (tx, name, scope, id, value, extras = {}) => tx.objectStore(name).put({ key: key(scope,id), scope, value, ...extras });
         const del = (tx, name, scope, id) => tx.objectStore(name).delete(key(scope,id));
+        const localWriteStores=(scope,selected)=>isLocal(scope)?[stores.meta,...selected]:selected;
+        async function validateLocalWrite(tx,rawScope) {
+            if(!isLocal(rawScope))return;
+            const scope=normalizeScope(rawScope),metadata=await get(tx,stores.meta,key(scopeKey(scope),'meta'));
+            if(!metadata)throw corrupt('workspace metadata is missing');
+            validateLocalMetadata(scope,metadata);
+            if(metadata.localRestorePending)throw Object.assign(new Error('Local workbook restoration is incomplete. Stored data has been retained.'),{code:'CLIENTTEXT_NOT_READY'});
+            return metadata;
+        }
         async function transaction(selected, mode, action, options) {
             guard(options);
             const db = await getDb(); guard(options);
@@ -427,6 +444,8 @@
             return result;
         }
         async function cleanupLegacy(scope,options={}) {
+            // Private v1 has never used these per-workspace legacy caches.
+            if(isLocal(scopeFromKey(scope)))return;
             // Delete only redundant originals/proofs after complete caches and
             // exact pending legacy request bodies have committed durably.
             const range=dependencies.keyRange || root.IDBKeyRange,prefix=JSON.stringify([scope]).slice(0,-1)+',',upper=prefix+'\uffff';
@@ -437,6 +456,7 @@
             },options);
         }
         async function freezeLegacyOutbox(rawScope,units,options={}) {
+            if(isLocal(rawScope))return;
             const scope=capture(rawScope).id,byId=new Map(units.map(unit=>[unit.id,unit]));
             const pending=await rows(scope,stores.outbox,options);
             for(const operation of pending){
@@ -461,11 +481,12 @@
         async function migrateWorkspace(rawScope,options={}) {
             const captured=capture(rawScope),scope=captured.id;
             let metadata=await one(scope,stores.meta,'meta',options);
+            validateLocalMetadata(captured.scope,metadata);
             if(!metadata || metadata.state!=='ready')return metadata;
             if(metadata.originalCaches){
                 if(metadata.cacheMigration!=='complete'){
                     await cleanupLegacy(scope,options);
-                    metadata=await transaction([stores.meta],'readwrite',async tx=>{const current=await get(tx,stores.meta,key(scope,'meta'));current.cacheMigration='complete';put(tx,stores.meta,scope,'meta',current,{accountId:captured.scope.accountId});return current;},options);
+                    metadata=await transaction([stores.meta],'readwrite',async tx=>{const current=await get(tx,stores.meta,key(scope,'meta'));validateLocalMetadata(captured.scope,current);current.cacheMigration='complete';put(tx,stores.meta,scope,'meta',current,{accountId:captured.scope.accountId});return current;},options);
                 }
                 return metadata;
             }
@@ -532,6 +553,7 @@
                 prepared=await preparePreviousVersion(rawScope,units,rawPreviousScope,options);
             return transaction([stores.meta,stores.saved,stores.history,stores.drafts],'readwrite',async tx=>{
                 const current=await get(tx,stores.meta,key(captured.id,'meta'));
+                validateLocalMetadata(captured.scope,current);
                 if(current?.signature!==metadata.signature)throw new Error('Local workbook changed while comparing previous sources.');
                 await writePreviousVersion(tx,captured,current,prepared);
                 put(tx,stores.meta,captured.id,'meta',current,{accountId:captured.scope.accountId});return current;
@@ -539,12 +561,15 @@
         }
         async function importContent(rawScope,input,options={}) {
             const captured=capture(rawScope),scope=captured.id;guard(options);
+            const localProtocols=isLocal(captured.scope)?{localProtocol:LOCAL_PROTOCOL,storageProtocol:S.STORAGE_PROTOCOL,...Object.fromEntries(['localProtocol','storageProtocol'].filter(name=>own(input?.metadata,name)).map(name=>[name,input.metadata[name]]))}:{};
+            if(isLocal(captured.scope))validateLocalProtocols(localProtocols);
             if(!Array.isArray(input?.units)||!input.units.length)throw new TypeError('ClientText import contains no units.');
             const assets=(Array.isArray(input.assets)?input.assets:Object.entries(input.assets||{}).map(([role,asset])=>({role,...asset}))).map(asset=>({...asset}));
             if(isLocal(captured.scope))for(const unit of input.units)validateLocalUnit(unit,unit.id);
             const built=input.descriptors?{descriptors:input.descriptors,summaries:input.summaries}:input.manifest?{descriptors:input.manifest.descriptors}:await S.buildDescriptors(input.units,assets,options);
             const descriptors=built.descriptors,signature=S.hash({descriptors,unitCount:input.units.length});
             const existing=await one(scope,stores.meta,'meta',options);
+            validateLocalMetadata(captured.scope,existing);
             if(existing && existing.signature!==signature)throw new Error('ClientText originals are immutable. Import a changed workbook as a new source group.');
             if(existing?.state==='ready'){
                 if(isLocal(captured.scope) && input.previousScope && (!existing.previousScope || scopeKey(existing.previousScope)!==scopeKey(input.previousScope)))throw new Error('Existing local workbook work is retained. Open a new version to choose another previous workbook.');
@@ -561,20 +586,21 @@
             const previous=input.previousScope ? await preparePreviousVersion(rawScope,input.units,input.previousScope,options) : null;
             await transaction([stores.meta,...(previous?[stores.saved,stores.history,stores.drafts]:[])],'readwrite',async tx=>{
                 const current=await get(tx,stores.meta,key(scope,'meta'));if(current && current.signature!==signature)throw new Error('ClientText import changed in another tab.');
+                validateLocalMetadata(captured.scope,current);
                 // Another importer may have published and started editing while
                 // this one prepared immutable caches. Its metadata and work win.
                 if(current?.state==='ready'){
                     if(isLocal(captured.scope) && previous && (!current.previousScope || scopeKey(current.previousScope)!==previous.previous.id))throw new Error('Existing local workbook work is retained. Open a new version to choose another previous workbook.');
                     return;
                 }
-                const metadata={...copy(input.metadata||{}),...captured.scope,state:'ready',storageProtocol:S.STORAGE_PROTOCOL,signature,
+                const metadata={...copy(input.metadata||{}),...captured.scope,...localProtocols,state:'ready',storageProtocol:S.STORAGE_PROTOCOL,signature,
                     originalCaches:bindings,summaries,descriptors:copy(descriptors),assetNames:Object.fromEntries(assets.map(asset=>[asset.role,asset.name || asset.parsed?.filename])),imported:input.units.length,unitCount:input.units.length,createdAt:current?.createdAt||Date.now(),sequence:current?.sequence||0};
                 if(previous)await writePreviousVersion(tx,captured,metadata,previous);
                 validateLocalMetadata(captured.scope,metadata);
                 put(tx,stores.meta,scope,'meta',metadata,{accountId:captured.scope.accountId});
             },options);
             await cleanupLegacy(scope,options);
-            return transaction([stores.meta],'readwrite',async tx=>{const current=await get(tx,stores.meta,key(scope,'meta'));current.cacheMigration='complete';put(tx,stores.meta,scope,'meta',current,{accountId:captured.scope.accountId});return current;},options);
+            return transaction([stores.meta],'readwrite',async tx=>{const current=await get(tx,stores.meta,key(scope,'meta'));validateLocalMetadata(captured.scope,current);current.cacheMigration='complete';put(tx,stores.meta,scope,'meta',current,{accountId:captured.scope.accountId});return current;},options);
         }
         async function getUnits(rawScope, options = {}) {
             const metadata=await requireReady(capture(rawScope).id,options),units=[];
@@ -703,7 +729,8 @@
             const scope = capture(rawScope).id, unit = await getUnit(rawScope,unitId,options);
             if(!unit)throw new Error('ClientText draft source is unavailable.');
             const values=S.normalizeValues(unit,input.values),reviewed=S.normalizeReviewed(unit,input.reviewed||{});
-            return transaction([stores.drafts],'readwrite',async tx=>{
+            return transaction(localWriteStores(rawScope,[stores.drafts]),'readwrite',async tx=>{
+                await validateLocalWrite(tx,rawScope);
                 const previous=await get(tx,stores.drafts,key(scope,unitId));
                 if(isLocal(rawScope) && previous)validateLocalRecord(unit,previous,{draft:true});
                 if(own(options,'expectedRevision')&&(previous?.revision||null)!==options.expectedRevision)throw Object.assign(new Error('Another tab changed this ClientText draft.'),{code:'DRAFT_CHANGED'});
@@ -723,7 +750,8 @@
         },options);
         async function discardDraft(rawScope,unitId,options={}){
             const scope=capture(rawScope).id;
-            return transaction([stores.drafts],'readwrite',async tx=>{
+            return transaction(localWriteStores(rawScope,[stores.drafts]),'readwrite',async tx=>{
+                await validateLocalWrite(tx,rawScope);
                 const draft=await get(tx,stores.drafts,key(scope,unitId));
                 if(own(options,'expectedRevision')&&(draft?.revision||null)!==options.expectedRevision)throw Object.assign(new Error('Another tab changed this ClientText draft.'),{code:'DRAFT_CHANGED'});
                 del(tx,stores.drafts,scope,unitId);return true;
@@ -745,6 +773,7 @@
             const signature=S.hash(command);
             const mtl=input.mtlAcceptances?.length ? mtlStorage() : null;
             return transaction([stores.meta,stores.cacheUnits,stores.saved,stores.drafts,stores.history,stores.outbox,stores.receipts,stores.memory,stores.memoryHistory,...(mtl?.names || [])],'readwrite',async tx=>{
+                await validateLocalWrite(tx,rawScope);
                 const receipt=await get(tx,stores.receipts,key(scope,input.jobId));
                 if(receipt){if(receipt.signature!==signature)throw Object.assign(new Error('ClientText job ID was reused for different content.'),{code:'SAVE_RECEIPT_MISMATCH'});if(isLocal(rawScope))validateLocalRecord(unit,receipt.saved);return {saved:receipt.saved,receipt,replayed:true};}
                 const currentMetadata=await get(tx,stores.meta,key(scope,'meta'));
@@ -883,5 +912,5 @@
         return { import:importContent,importContent,save,getMetadata,getUnits,getUnitsByIds,getCompactUnits,getUnit,getSaved,getAsset,getProof,getCachedOriginal,migrateWorkspace,putDraft,getDraft,getDraftSummaries,discardDraft,
             listHistory,listWorkspaces,getOutbox,markSending,applyRemote,acknowledge,putRequest,getRequest,listRequests,deleteRequest,seedMemory,seedPreviousVersion,getMemory,getMemoryHistory,normalizeScope,scopeKey };
     }
-    return { stores,names,upgrade,normalizeScope,scopeKey,validateLocalRecord,create };
+    return { stores,names,upgrade,normalizeScope,scopeKey,LOCAL_PROTOCOL,validateLocalMetadata,validateLocalRecord,create };
 });

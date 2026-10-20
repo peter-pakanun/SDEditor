@@ -80,11 +80,113 @@ async function reopenAndAssert(scope,edits){
     const status=await page.evaluate(async({scope,edits})=>{const vm=window.__localApp,meta=await vm._ctStore.getMetadata(scope);if(!await vm.ctOpenCached(meta))throw new Error(vm.ctError);await vm.ctSelect(vm.ctUnits.find(unit=>unit.id===edits.draftUnit),true);return{saved:vm.ctSaved[edits.savedUnit]?.values[edits.savedField],draft:vm.ctValues[edits.draftField],history:(await vm.ctStorage(scope).listHistory(scope,edits.savedUnit)).length,draftDirty:vm.ctDraftDirty,checkpoint:vm.ctLocalDraftState,asset:await vm.ctStorage(scope).getAsset(scope,'normal').then(async asset=>({hash:await ClientTextState.sha256(await asset.blob.arrayBuffer()),bytes:asset.blob.size})),outbox:await vm._ctStore.getOutbox(scope)};},{scope,edits});
     assert.equal(status.saved,'Synthetic durable committed edit');assert.equal(status.draft,'Synthetic active draft \r\n [DNT] exact');assert.equal(status.draftDirty,true);assert.ok(status.history>=1);assert.deepEqual(status.outbox,[]);return status;
 }
+async function reviewFixes(){
+    const result=await page.evaluate(async()=>{
+        const vm=window.__localApp,base=vm._ctStore,local=vm._ctLocalStore,S=ClientTextState,C=ClientTextStore;
+        const zip=new JSZip(),ns='http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+        zip.file('[Content_Types].xml','<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>');
+        zip.file('xl/workbook.xml',`<workbook xmlns="${ns}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="ClientStrings" sheetId="1" r:id="rId1"/></sheets></workbook>`);
+        zip.file('xl/_rels/workbook.xml.rels','<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>');
+        zip.file('xl/worksheets/sheet1.xml',`<worksheet xmlns="${ns}"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>ID</t></is></c><c r="B1" t="inlineStr"><is><t>Text</t></is></c><c r="C1" t="inlineStr"><is><t>Translation</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>review-first</t></is></c><c r="B2" t="inlineStr"><is><t>First source</t></is></c><c r="C2" t="inlineStr"><is><t>Initial target</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>review-second</t></is></c><c r="B3" t="inlineStr"><is><t>Second source</t></is></c><c r="C3" t="inlineStr"><is><t>Other target</t></is></c></row></sheetData></worksheet>`);
+        const bytes=await zip.generateAsync({type:'arraybuffer'}),parsed=await vm._ctWorker.parseWorkbook(bytes,{filename:'Thai.xlsx',role:'normal',language:'Thai',game:'poe2'}),units=parsed.units;
+        const scope={...vm.ctRequestScope(),language:'Thai',versionId:'local:test:'+crypto.randomUUID(),groupId:'local:test:'+crypto.randomUUID()};
+        const asset={role:'normal',name:'Thai.xlsx',blob:new Blob([bytes]),hash:parsed.artifactHash,parserVersion:parsed.parserVersion,parsed:{...parsed,units:undefined}},built=await S.buildDescriptors(units,[asset]);
+        const input={units,assets:[asset],descriptors:built.descriptors,metadata:{version:{id:scope.versionId,name:'Protocol review fixture',game:'poe2',branchId:'default'},group:{id:scope.groupId,versionId:scope.versionId,contentMode:'clienttext',language:'Thai'}}};
+        const stamped=await base.import(scope,input),db=await OfflineStore.openClientTextDb(),metaKey=JSON.stringify([C.scopeKey(scope),'meta']);
+        const rawMeta=()=>new Promise((resolve,reject)=>{const tx=db.transaction(C.stores.meta,'readonly'),req=tx.objectStore(C.stores.meta).get(metaKey);tx.oncomplete=()=>resolve(req.result);tx.onabort=()=>reject(tx.error);});
+        const writeMeta=row=>new Promise((resolve,reject)=>{const tx=db.transaction(C.stores.meta,'readwrite');tx.objectStore(C.stores.meta).put(row);tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error);});
+        const canonical=async value=>{
+            if(value instanceof Blob)return{blobBytes:value.size,type:value.type,sha256:await S.sha256(await value.arrayBuffer())};
+            if(value instanceof ArrayBuffer)return{arrayBytes:value.byteLength,sha256:await S.sha256(value)};
+            if(ArrayBuffer.isView(value))return{view:value.constructor.name,sha256:await S.sha256(value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength))};
+            if(Array.isArray(value))return Promise.all(value.map(canonical));
+            if(value && typeof value==='object'){const out={};for(const key of Object.keys(value).sort())out[key]=await canonical(value[key]);return out;}
+            return value;
+        };
+        const snapshot=async()=>{
+            const names=Array.from(db.objectStoreNames).sort(),tx=db.transaction(names,'readonly');
+            const done=new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error);});
+            const rows=await Promise.all(names.map(name=>new Promise((resolve,reject)=>{const req=tx.objectStore(name).getAll();req.onsuccess=()=>resolve([name,req.result]);req.onerror=()=>reject(req.error);})));await done;
+            return JSON.stringify(await canonical(Object.fromEntries(rows)));
+        };
+        const rejected=async action=>{try{const value=await action();return{rejected:value===false,error:value===false?vm.ctError:'',value:value===false?null:value};}catch(error){return{rejected:true,error:error.message,code:error.code};}};
+        if(!await vm.ctOpenCached(stamped))throw new Error('Current protocol Reopen failed: '+vm.ctError);
+        await vm.ctSelect(vm.ctUnits[0],true);const unit=vm.ctCurrentUnit,fieldId=unit.fields.find(field=>field.kind!=='gender').id;
+        const saveCommand={jobId:crypto.randomUUID(),values:S.valuesFor(unit),reviewed:{},expectedRevision:0,expectedDraftRevision:null},save=await base.save(scope,unit.id,saveCommand);
+        const draft=await base.putDraft(scope,unit.id,{values:{...save.saved.values,[fieldId]:'Retained protocol draft'},reviewed:{}},{expectedRevision:null});
+        await base.seedMemory(scope,[]);const good=await rawMeta(),backup=await local.backup(scope),protocolCases=[];
+        for(const field of ['localProtocol','storageProtocol']){
+            const value=field==='localProtocol'?'clienttext-local-v1':'clienttext-trusted-v1';
+            const metadata=await base.getMetadata(scope);protocolCases.push({field,variant:'current',value:metadata[field],expected:value,reopen:await vm.ctOpenCached(metadata)});
+        }
+        for(const field of ['localProtocol','storageProtocol'])for(const variant of ['missing','malformed','future']){
+            await writeMeta(good);await local.acquire(scope);vm.ctDraftDirty=false;
+            const changed=structuredClone(good);if(variant==='missing')delete changed.value[field];else changed.value[field]=variant==='malformed'?{unexpected:1}:field==='localProtocol'?'clienttext-local-v99':'clienttext-trusted-v99';
+            await writeMeta(changed);const probes=[];
+            const actions={
+                read:()=>base.getMetadata(scope),
+                save:()=>base.save(scope,unit.id,{jobId:crypto.randomUUID(),values:save.saved.values,reviewed:{},expectedRevision:save.saved.revision,expectedDraftRevision:draft.revision}),
+                'receipt-replay':()=>base.save(scope,unit.id,saveCommand),
+                draft:()=>base.putDraft(scope,unit.id,{values:save.saved.values,reviewed:{}},{expectedRevision:draft.revision}),
+                discard:()=>base.discardDraft(scope,unit.id,{expectedRevision:draft.revision}),
+                seed:()=>base.seedMemory(scope,[]),
+                reimport:()=>base.import(scope,input),
+                reopen:()=>vm.ctOpenCached(changed.value),
+            };
+            for(const [action,operation]of Object.entries(actions)){const before=await snapshot(),outcome=await rejected(operation),after=await snapshot();probes.push({action,rejected:outcome.rejected,error:outcome.error,unchanged:before===after});}
+            const badZip=await JSZip.loadAsync(backup),manifest=JSON.parse(await badZip.file('local-workbook.json').async('string'));
+            if(variant==='missing')delete manifest.workspaces[0].metadata[field];else manifest.workspaces[0].metadata[field]=changed.value[field];
+            badZip.file('local-workbook.json',JSON.stringify(manifest));const badBackup=await badZip.generateAsync({type:'blob'}),beforeRestore=await snapshot(),restore=await rejected(()=>local.restore(badBackup,vm.ctRequestScope(),vm._ctWorker)),afterRestore=await snapshot();
+            probes.push({action:'backup-restore',rejected:restore.rejected,error:restore.error,unchanged:beforeRestore===afterRestore});protocolCases.push({field,variant,probes});
+        }
+        const atomicRaces=[];
+        for(const field of ['localProtocol','storageProtocol'])for(const action of ['save','draft','discard','seed']){
+            await writeMeta(good);const before=await snapshot(),nativeTx=IDBDatabase.prototype.transaction;let injected=false;
+            IDBDatabase.prototype.transaction=function(names,mode,...rest){
+                const selected=Array.from(typeof names==='string'?[names]:names),target=action==='save'?C.stores.saved:action==='seed'?C.stores.memory:C.stores.drafts;
+                if(this===db && mode==='readwrite' && selected.includes(target) && !injected){
+                    injected=true;const row=structuredClone(good);row.value[field]=field==='localProtocol'?'clienttext-local-v99':'clienttext-trusted-v99';
+                    // Queue a separate native writer ahead of the target write
+                    // transaction, after its ordinary readonly preparation.
+                    const conflict=nativeTx.call(this,C.stores.meta,'readwrite');conflict.objectStore(C.stores.meta).put(row);
+                }
+                return nativeTx.call(this,names,mode,...rest);
+            };
+            let outcome;try{outcome=await rejected(()=>action==='save'?base.save(scope,unit.id,{jobId:crypto.randomUUID(),values:save.saved.values,reviewed:{},expectedRevision:save.saved.revision,expectedDraftRevision:draft.revision}):action==='draft'?base.putDraft(scope,unit.id,{values:save.saved.values,reviewed:{}},{expectedRevision:draft.revision}):action==='discard'?base.discardDraft(scope,unit.id,{expectedRevision:draft.revision}):base.seedMemory(scope,[]));}finally{IDBDatabase.prototype.transaction=nativeTx;}
+            await writeMeta(good);atomicRaces.push({field,action,injected,rejected:outcome.rejected,error:outcome.error,unchanged:before===await snapshot()});
+        }
+        await writeMeta(good);vm.ctDraftDirty=false;if(!await vm.ctOpenCached(good.value))throw new Error('Current workspace did not recover after restoring test metadata: '+vm.ctError);await vm.ctSelect(vm.ctUnits[0],true);vm.ctError='';
+        async function quotaFailure(text){
+            const native=IDBObjectStore.prototype.put;let injected=false;IDBObjectStore.prototype.put=function(value,...rest){if(this.name===C.stores.drafts&&!injected){injected=true;throw new DOMException('Injected transient quota','QuotaExceededError');}return native.call(this,value,...rest);};
+            vm.ctValues[fieldId]=text;vm.ctDraftDirty=true;vm.ctQueueDraft();let result;try{result=await vm.ctFlushDraft();}finally{IDBObjectStore.prototype.put=native;}
+            return{result,injected,error:vm.ctError,state:vm.ctLocalDraftState};
+        }
+        const failed=await quotaFailure('Exact retry draft'),retried=await vm.ctFlushDraft(),retry={failed,retried,error:vm.ctError,state:vm.ctLocalDraftState,stored:(await local.getDraft(scope,unit.id)).values[fieldId]};
+        const failedUnrelated=await quotaFailure('Retry with unrelated error'),nativePut=local.putDraft;let unrelatedRetry;
+        local.putDraft=async(...args)=>{const saved=await nativePut(...args);vm.ctError='Unrelated export error must remain visible';return saved;};
+        try{const result=await vm.ctFlushDraft();unrelatedRetry={failed:failedUnrelated,result,error:vm.ctError,state:vm.ctLocalDraftState,stored:(await local.getDraft(scope,unit.id)).values[fieldId]};}finally{local.putDraft=nativePut;}
+        vm.ctError='';const failedOtherUnit=await quotaFailure('Retry after selection changed'),beforeUnit=vm.ctSelection,otherUnit=vm.ctUnits.find(value=>value.id!==beforeUnit);
+        local.putDraft=async(...args)=>{const saved=await nativePut(...args);vm.ctSelection=otherUnit.id;return saved;};let otherUnitRetry;
+        try{const result=await vm.ctFlushDraft();otherUnitRetry={failed:failedOtherUnit,result,error:vm.ctError,selection:vm.ctSelection,otherUnitId:otherUnit.id};}finally{local.putDraft=nativePut;vm.ctDraftDirty=false;vm.ctSelection=beforeUnit;}
+        return{stamped:{localProtocol:stamped.localProtocol,storageProtocol:stamped.storageProtocol},protocolCases,atomicRaces,retry,unrelatedRetry,otherUnitRetry};
+    });
+    assert.deepEqual(result.stamped,{localProtocol:'clienttext-local-v1',storageProtocol:'clienttext-trusted-v1'});
+    for(const item of result.protocolCases){if(item.variant==='current'){assert.equal(item.value,item.expected);assert.equal(item.reopen,true);}else for(const probe of item.probes){assert.equal(probe.rejected,true,JSON.stringify({field:item.field,variant:item.variant,...probe}));assert.equal(probe.unchanged,true,JSON.stringify({field:item.field,variant:item.variant,...probe}));}}
+    for(const probe of result.atomicRaces){assert.equal(probe.injected,true,JSON.stringify(probe));assert.equal(probe.rejected,true,JSON.stringify(probe));assert.equal(probe.unchanged,true,JSON.stringify(probe));}
+    assert.equal(result.retry.failed.result,false);assert.equal(result.retry.failed.injected,true);assert.match(result.retry.failed.error,/not stored/);assert.equal(result.retry.retried,true);assert.equal(result.retry.error,'');assert.equal(result.retry.state,'checkpointed');assert.equal(result.retry.stored,'Exact retry draft');
+    assert.equal(result.unrelatedRetry.failed.result,false);assert.equal(result.unrelatedRetry.result,true);assert.equal(result.unrelatedRetry.error,'Unrelated export error must remain visible');assert.equal(result.unrelatedRetry.stored,'Retry with unrelated error');
+    assert.equal(result.otherUnitRetry.failed.result,false);assert.equal(result.otherUnitRetry.result,true);assert.equal(result.otherUnitRetry.selection,result.otherUnitRetry.otherUnitId);assert.equal(result.otherUnitRetry.error,result.otherUnitRetry.failed.error);
+    reports.push({case:'native protocol gates current/missing/malformed/future metadata, refused operations leave every IDB record unchanged',ok:true,negativeCases:result.protocolCases.filter(item=>item.variant!=='current').length,operationsPerCase:9});
+    reports.push({case:'native metadata writer races after readonly preparation abort Save/draft/discard/seed atomically',ok:true,negativeCases:result.atomicRaces.length});
+    reports.push({case:'native transient checkpoint retry clears its owned warning; unrelated and different-unit errors remain',ok:true});
+    const report={ok:true,origin,profile,reports,result,errors,networkWrites};assert.deepEqual(errors,[]);assert.deepEqual(networkWrites,[]);fs.writeFileSync(path.join(temp,'clienttext-local-review-fixes-results.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
+}
 async function run(){
     await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));origin='http://127.0.0.1:'+server.address().port;await launch();
     try{
         await page.goto(origin+'/fixture/blank');await page.evaluate(()=>new Promise((resolve,reject)=>{const req=indexedDB.open('sdeditor',23);req.onupgradeneeded=()=>{const db=req.result;db.createObjectStore('kv',{keyPath:'key'});const revisions=db.createObjectStore('revisions_poe1',{keyPath:'id',autoIncrement:true});revisions.createIndex('by_file_lang_time',['filepath','lang','savedAt']);revisions.createIndex('by_file_time',['filepath','savedAt']);};req.onerror=()=>reject(req.error);req.onsuccess=()=>{const db=req.result,tx=db.transaction(['kv','revisions_poe1'],'readwrite');tx.objectStore('kv').put({key:'local-browser-legacy-sentinel',value:{preserve:'legacy SD evidence'}});tx.objectStore('revisions_poe1').put({id:7777,filepath:'fixture/sentinel.txt',lang:'Thai',savedAt:1,translations:['Preserve prior SD history']});tx.oncomplete=()=>{db.close();resolve();};tx.onabort=()=>reject(tx.error);};}));
         await bootstrap();const legacy=await page.evaluate(async()=>{const db=await OfflineStore.openClientTextDb();return new Promise((resolve,reject)=>{const tx=db.transaction(['kv','revisions_poe1'],'readonly'),a=tx.objectStore('kv').get('local-browser-legacy-sentinel'),b=tx.objectStore('revisions_poe1').get(7777);tx.oncomplete=()=>resolve({version:db.version,kv:a.result,history:b.result});tx.onabort=()=>reject(tx.error);});});assert.equal(legacy.version,24);assert.equal(legacy.kv.value.preserve,'legacy SD evidence');assert.deepEqual(legacy.history.translations,['Preserve prior SD history']);reports.push({case:'native v23 to v24 migration preserves legacy SD KV and history',ok:true});
+        if(process.argv.includes('--review-fixes-only')){await reviewFixes();return;}
         if(process.argv.includes('--lease-probe-only')){
             const lease=await page.evaluate(async()=>{
                 const vm=window.__localApp,store=vm._ctLocalStore,scope={...vm.ctRequestScope(),language:'Thai',versionId:'local:test:'+crypto.randomUUID(),groupId:'local:test:'+crypto.randomUUID()},fieldId=JSON.stringify(['Text',null]);
