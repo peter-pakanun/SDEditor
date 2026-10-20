@@ -8274,44 +8274,88 @@ app.component('app-dialog', window.AppDialogs?.component || {});
 app.directive('tooltip', {
   mounted(el, binding) {
     el.__sdTooltipValue = binding.value;
+    const describe = value => {
+      // Preserve authored descriptions and other existing ARIA associations.
+      const current = el.getAttribute?.('aria-description');
+      if (current != null && current !== el.__sdTooltipDescription) return;
+      const owner = binding.instance?.$root || binding.instance;
+      const text = owner?.normalizeTooltipText?.(value) ?? String(value ?? '');
+      if (text.trim()) { el.setAttribute?.('aria-description', text); el.__sdTooltipDescription = text; }
+      else if (el.__sdTooltipDescription !== undefined) { el.removeAttribute('aria-description'); delete el.__sdTooltipDescription; }
+    };
     const show = (e) => {
+      if (el.__sdTooltipDismissed) return;
       // A nested control owns its own hint; row/container pointer listeners
       // must not replace it while the same mousemove bubbles upward.
       for (let target = e?.target; target && target !== el; target = target.parentElement) {
         if (target.__sdTooltipValue) { el.__sdTooltipShown = false; return; }
       }
-      el.__sdTooltipShown = true;
+      el.__sdTooltipShown = !!String(el.__sdTooltipValue ?? '').trim();
       el.__sdTooltipAnchor = e;
+      const doc = el.ownerDocument, previous = doc?.__sdTooltipTrigger;
+      if (previous && previous !== el) {
+        previous.__sdTooltipShown = false;
+        doc.removeEventListener('keydown', previous.__sdTooltipHandlers.escape, true);
+      }
+      if (doc) {
+        if (el.__sdTooltipShown) { doc.__sdTooltipTrigger = el; doc.addEventListener('keydown', escape, true); }
+        else { delete doc.__sdTooltipTrigger; doc.removeEventListener('keydown', escape, true); }
+      }
       binding.instance?.showTooltip?.(e, el.__sdTooltipValue);
     };
+    const enter = e => { el.__sdTooltipDismissed = false; show(e); };
     const focus = () => {
+      el.__sdTooltipDismissed = false;
       const rect = el.getBoundingClientRect();
       show({ clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 });
     };
-    const hide = () => { el.__sdTooltipShown = false; binding.instance?.hideTooltip?.(); };
-    el.__sdTooltipHandlers = { show, focus, hide };
-    el.addEventListener('mouseenter', show);
+    const hide = () => {
+      el.__sdTooltipShown = false;
+      const doc = el.ownerDocument, owns = doc?.__sdTooltipTrigger === el;
+      doc?.removeEventListener('keydown', escape, true);
+      if (owns) delete doc.__sdTooltipTrigger;
+      if (!doc || owns) binding.instance?.hideTooltip?.();
+    };
+    const reset = () => { el.__sdTooltipDismissed = false; hide(); };
+    const escape = event => {
+      if (event.isComposing || event.keyCode === 229 || event.key !== 'Escape' || !el.__sdTooltipShown || el.ownerDocument?.__sdTooltipTrigger !== el) return;
+      const owner = binding.instance?.$root || binding.instance;
+      if (owner?.tooltip && !owner.tooltip.visible) { hide(); return; }
+      // Capture before toolbar/menu/editor Escape actions, without moving focus.
+      event.preventDefault(); event.stopImmediatePropagation();
+      el.__sdTooltipDismissed = true;
+      hide();
+    };
+    el.__sdTooltipHandlers = { show, enter, focus, hide, reset, escape, describe };
+    el.addEventListener('mouseenter', enter);
     el.addEventListener('mousemove', show);
-    el.addEventListener('mouseleave', hide);
+    el.addEventListener('mouseleave', reset);
     el.addEventListener('focus', focus);
-    el.addEventListener('blur', hide);
+    el.addEventListener('blur', reset);
     el.removeAttribute('title');
+    describe(binding.value);
   },
   updated(el, binding) {
     el.__sdTooltipValue = binding.value;
     el.removeAttribute('title');
+    el.__sdTooltipHandlers.describe(binding.value);
     // Keep focused/hovered action hints current when their state changes.
     if (el.__sdTooltipShown && binding.value !== binding.oldValue) el.__sdTooltipHandlers.show(el.__sdTooltipAnchor);
   },
   unmounted(el) {
     const handlers = el.__sdTooltipHandlers;
     if (!handlers) return;
-    el.removeEventListener('mouseenter', handlers.show);
+    el.removeEventListener('mouseenter', handlers.enter);
     el.removeEventListener('mousemove', handlers.show);
-    el.removeEventListener('mouseleave', handlers.hide);
+    el.removeEventListener('mouseleave', handlers.reset);
     el.removeEventListener('focus', handlers.focus);
-    el.removeEventListener('blur', handlers.hide);
+    el.removeEventListener('blur', handlers.reset);
+    el.ownerDocument?.removeEventListener('keydown', handlers.escape, true);
     if (el.__sdTooltipShown) handlers.hide();
+    if (el.ownerDocument?.__sdTooltipTrigger === el) delete el.ownerDocument.__sdTooltipTrigger;
+    if (el.__sdTooltipDescription !== undefined && el.getAttribute?.('aria-description') === el.__sdTooltipDescription) el.removeAttribute('aria-description');
+    delete el.__sdTooltipDescription;
+    delete el.__sdTooltipDismissed;
     delete el.__sdTooltipHandlers;
     delete el.__sdTooltipValue;
     delete el.__sdTooltipAnchor;

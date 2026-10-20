@@ -437,3 +437,48 @@ test('nested toolbar hints keep ownership while pointer events bubble through a 
   assert.equal(calls.at(-1), 'Toolbar action');
   row.handlers.mousemove({ target: row }); assert.equal(calls.at(-1), 'Updated row');
 });
+
+
+function tooltipDirectiveFixture() {
+  const source=fs.readFileSync(path.join(__dirname,'../public/index.js'),'utf8');
+  let directive;const first=source.indexOf("app.directive('tooltip', {");
+  vm.runInNewContext(source.slice(first,source.indexOf("app.mount('#app');",first)),{app:{directive:(_name,value)=>{directive=value;}}});
+  const keys=new Set(),doc={addEventListener(name,fn,capture){assert.equal(capture,true);keys.add(fn);},removeEventListener(name,fn){keys.delete(fn);}},calls=[];
+  const make=(initial={})=>{const attrs={...initial},listeners={};return{ownerDocument:doc,listeners,attrs,getAttribute:name=>attrs[name]??null,
+    setAttribute:(name,value)=>{attrs[name]=value;},removeAttribute:name=>{delete attrs[name];},addEventListener:(name,fn)=>{listeners[name]=fn;},removeEventListener:name=>{delete listeners[name];},
+    getBoundingClientRect:()=>({left:1,top:2,width:28,height:28})};};
+  const instance={showTooltip:(anchor,text)=>calls.push(['show',text]),hideTooltip:()=>calls.push(['hide'])};
+  return{directive,doc,keys,calls,make,instance};
+}
+
+test('Tooltip Escape captures before toolbar actions, retains the trigger and stays dismissed until a new interaction',()=>{
+  const f=tooltipDirectiveFixture(),el=f.make();f.directive.mounted(el,{instance:f.instance,value:'Bold shortcut'});el.listeners.focus();
+  let prevented=0,stopped=0;const event={key:'Escape',preventDefault(){prevented++;},stopImmediatePropagation(){stopped++;}};
+  [...f.keys][0]({...event,isComposing:true});[...f.keys][0]({...event,keyCode:229});assert.equal(prevented,0,'IME cancellation stays with composition');
+  [...f.keys][0](event);assert.equal(prevented,1);assert.equal(stopped,1);assert.equal(el.__sdTooltipShown,false);assert.equal(f.keys.size,0);
+  const after=f.calls.length;el.listeners.mousemove({target:el});f.directive.updated(el,{instance:f.instance,value:'Changed hint',oldValue:'Bold shortcut'});
+  assert.equal(f.calls.length,after,'pointer movement and state updates do not reopen a dismissed hint');
+  el.listeners.blur();el.listeners.focus();assert.equal(f.calls.at(-1)[1],'Changed hint');
+  f.directive.updated(el,{instance:f.instance,value:'',oldValue:'Changed hint'});assert.equal(f.keys.size,0);assert.equal(el.attrs['aria-description'],undefined);
+  f.directive.unmounted(el);assert.equal(f.keys.size,0);assert.equal(f.doc.__sdTooltipTrigger,undefined);
+  assert.doesNotThrow(()=>window.EditorComponents.FieldToolbar.methods.toolbarKeydown.call({}, {defaultPrevented:true,key:'Escape'}));
+});
+
+test('Tooltip preserves explicit descriptions and associations, updates generated descriptions and removes only its own attribute',()=>{
+  const f=tooltipDirectiveFixture(),el=f.make({'aria-describedby':'existing-help'});
+  f.directive.mounted(el,{instance:f.instance,value:'View and download this file as text'});
+  assert.equal(el.attrs['aria-description'],'View and download this file as text');assert.equal(el.attrs['aria-describedby'],'existing-help');
+  f.directive.updated(el,{instance:f.instance,value:'Updated explanation',oldValue:'View and download this file as text'});
+  assert.equal(el.attrs['aria-description'],'Updated explanation');f.directive.unmounted(el);assert.equal(el.attrs['aria-description'],undefined);assert.equal(el.attrs['aria-describedby'],'existing-help');
+  const explicit=f.make({'aria-description':'Authored description'});f.directive.mounted(explicit,{instance:f.instance,value:'Hint'});
+  f.directive.updated(explicit,{instance:f.instance,value:'Other hint',oldValue:'Hint'});f.directive.unmounted(explicit);assert.equal(explicit.attrs['aria-description'],'Authored description');
+  const changed=f.make();f.directive.mounted(changed,{instance:f.instance,value:'Hint'});changed.attrs['aria-description']='Later authored text';f.directive.updated(changed,{instance:f.instance,value:'New hint',oldValue:'Hint'});f.directive.unmounted(changed);assert.equal(changed.attrs['aria-description'],'Later authored text');
+});
+
+test('only the visible Tooltip owner handles Escape when pointer and focus are on different controls',()=>{
+  const f=tooltipDirectiveFixture(),focused=f.make(),hovered=f.make();f.directive.mounted(focused,{instance:f.instance,value:'Focused'});f.directive.mounted(hovered,{instance:f.instance,value:'Hovered'});
+  focused.listeners.focus();hovered.listeners.mouseenter({target:hovered});assert.equal(focused.__sdTooltipShown,false);assert.equal(f.keys.size,1);
+  let stopped=0;[...f.keys][0]({key:'Escape',preventDefault(){},stopImmediatePropagation(){stopped++;}});assert.equal(stopped,1);assert.equal(hovered.__sdTooltipDismissed,true);assert.equal(focused.__sdTooltipDismissed,false);
+  const count=f.calls.length;hovered.listeners.mousemove({target:hovered});assert.equal(f.calls.length,count);
+  f.directive.unmounted(focused);f.directive.unmounted(hovered);assert.equal(f.keys.size,0);
+});

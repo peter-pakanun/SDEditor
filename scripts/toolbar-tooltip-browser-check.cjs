@@ -6,7 +6,8 @@ const { join } = require('node:path');
 
 module.exports = async function ({ page, context, failures, directory }) {
     mkdirSync(directory, { recursive: true });
-    const results = [], requests = [];
+    const results = [], requests = [], accessibility = [], escapeChecks = [];
+    const axSession = await context.newCDPSession(page);
     page.on('request', request => { if (request.method() === 'POST' && /\/mtl\//.test(request.url())) requests.push(request.url()); });
     const tooltip = page.getByRole('tooltip');
     const settle = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -14,10 +15,25 @@ module.exports = async function ({ page, context, failures, directory }) {
         await page.mouse.move(1, 1);
         await page.evaluate(() => { document.activeElement?.blur(); window.__sharedFixtureApp.hideTooltip(); });
     };
+    async function readAccessibility(control, name) {
+        const id = 'toolbar-ax-' + accessibility.length;
+        await control.evaluate((element, id) => element.dataset.toolbarAx = id, id);
+        const { result } = await axSession.send('Runtime.evaluate', { expression: `document.querySelector('[data-toolbar-ax="${id}"]')` });
+        const { node } = await axSession.send('DOM.describeNode', { objectId: result.objectId });
+        const { nodes } = await axSession.send('Accessibility.getPartialAXTree', { backendNodeId: node.backendNodeId, fetchRelatives: false });
+        await axSession.send('Runtime.releaseObject', { objectId: result.objectId });
+        const entry = nodes.find(value => value.backendDOMNodeId === node.backendNodeId);
+        const authored = await control.getAttribute('aria-description');
+        assert.ok(authored, name + ': descriptive hint available before hover/focus');
+        assert.equal(entry?.description?.value?.replace(/\s+/g, ' ').trim(), authored.replace(/\s+/g, ' ').trim(), name + ': Chromium accessibility tree retains the complete description');
+        const snapshot = { case: name, name: entry.name?.value, role: entry.role?.value, description: entry.description.value, ignored: entry.ignored };
+        accessibility.push(snapshot); return snapshot;
+    }
     async function checkHint(control, name, keyboard = true) {
         await clear(); await control.scrollIntoViewIfNeeded();
         const expected = await control.evaluate(element => String(element.__sdTooltipValue || ''));
         assert.ok(expected, name + ': shared directive has a nonempty hint');
+        await readAccessibility(control, name);
         await control.hover({ force: true }); await tooltip.waitFor(); await settle();
         async function check(phase) {
             assert.equal(await tooltip.innerText(), expected, name + '/' + phase + ': complete shared hint');
@@ -34,6 +50,12 @@ module.exports = async function ({ page, context, failures, directory }) {
         if (keyboard) {
             await control.focus(); await tooltip.waitFor(); await settle(); await check('focus');
             assert.equal(await control.evaluate(element => document.activeElement === element), true, name + ': native focus retained');
+            await control.hover({ force: true });
+            await page.keyboard.press('Escape'); await tooltip.waitFor({ state: 'detached' });
+            assert.equal(await control.evaluate(element => document.activeElement === element), true, name + ': Escape dismisses only the hint and retains trigger focus');
+            const box = await control.boundingBox(); await page.mouse.move(box.x + box.width / 2 + 1, box.y + box.height / 2);
+            await settle(); assert.equal(await tooltip.count(), 0, name + ': pointer movement does not reopen a dismissed hint');
+            escapeChecks.push(name);
             await control.evaluate(element => element.blur()); await tooltip.waitFor({ state: 'detached' });
         }
         results.push(name);
@@ -48,6 +70,8 @@ module.exports = async function ({ page, context, failures, directory }) {
         }
     }
     await checkVisibleHints('.editor .editorFieldToolbar button, .editor .editorActions button, .editor .gamePreviewFrameBtn, .editor .sideSearchRow button, .editor .dictionaryEntries button', 'SD full');
+    const rawFile = accessibility.find(entry => entry.name === 'Show raw file');
+    assert.equal(rawFile?.description, 'View and download this file as text', 'released raw-file description is preserved before hover');
     await page.evaluate(async () => { const h = window.__sharedFixtureApp; await h.editorExit(); h.inlineRowFocusOut = () => {}; h.gameVersionSelected = true; h.inlineEditor = true; await h.$nextTick(); if (!await h.activateInlineRow(h.descs[0].filepath)) throw Error('SD inline fixture activation failed'); await h.$nextTick(); });
     await page.waitForSelector('.workspace [data-editor-ref^="translation_"]');
     await checkVisibleHints('.workspace .editorFieldToolbar button, .workspace .workspaceActions button, .workspace .workspacePagination button, .workspace .inlineFileActions button', 'SD inline/workspace');
@@ -80,6 +104,7 @@ module.exports = async function ({ page, context, failures, directory }) {
     await english.focus(); await page.keyboard.press('Space');
     assert.equal(await english.getAttribute('aria-pressed'), 'true');
     assert.match(await tooltip.innerText(), /Use English is active/, 'focused Eng hint follows the active state');
+    assert.match((await readAccessibility(english, 'Eng active state')).description, /Use English is active/);
     await page.keyboard.press('Enter'); assert.equal(await english.getAttribute('aria-pressed'), 'false');
     assert.equal(await page.evaluate(() => window.__englishActions), 2, 'Eng preserves native Space/Enter activation');
     const target = page.locator('.ctFullEditor [data-ct-target="toolbar-text"]');
@@ -98,7 +123,7 @@ module.exports = async function ({ page, context, failures, directory }) {
         const original = window.__sharedFixtureApp, mount = document.createElement('div'); mount.id = 'toolbarMtlFixture'; Object.assign(mount.style, { position: 'fixed', left: '20px', top: '20px', zIndex: '3000' }); document.body.append(mount);
         const controller = Vue.reactive({ side: 'translation', mtl: true, mtlDisabled: true, mtlHint: 'Sign in with language access to translate', mtlSettings: true, mtlDebug: true,
             formatting: false, disabled: false, open: false, menuOpen: false, choices: [], entries: [], groups: [], mtlBusy: false,
-            toggle() {}, menu() {}, generate() { window.__mtlActions = 'generate'; }, cancelMtl() { window.__mtlActions = 'cancel'; }, toggleMtlSettings() {}, debugMtl() {} });
+            toggle() {}, menu() { this.menuOpen = !this.menuOpen; }, closeMenu() { this.menuOpen = false; }, options() {}, generate() { window.__mtlActions = 'generate'; }, cancelMtl() { window.__mtlActions = 'cancel'; }, toggleMtlSettings() {}, debugMtl() {} });
         const root = Vue.createApp({ data: () => ({ controller }), methods: { showTooltip: (...args) => original.showTooltip(...args), hideTooltip: () => original.hideTooltip() },
             template: '<editor-field-toolbar :controller="controller"><input aria-label="MTL fixture input"></editor-field-toolbar>' });
         root.component('editor-field-toolbar', EditorComponents.FieldToolbar);
@@ -115,6 +140,15 @@ module.exports = async function ({ page, context, failures, directory }) {
     await checkHint(mtl, 'MTL stop'); await mtl.focus(); await page.keyboard.press('Space'); assert.equal(await page.evaluate(() => window.__mtlActions), 'cancel');
     await page.evaluate(async () => { window.__toolbarMtl.controller.mtlProgress = { phase: 'cancelling', canCancel: false }; await window.__toolbarMtl.$nextTick(); });
     await checkHint(mtlTarget, 'MTL stopping explanation');
+    await page.evaluate(async () => { window.__toolbarMtl.controller.menuOpen = true; await window.__toolbarMtl.$nextTick(); });
+    const menuTrigger = page.locator('#toolbarMtlFixture .fieldHistoryMenuButton');
+    await clear(); await menuTrigger.focus(); await tooltip.waitFor(); await page.keyboard.press('Escape'); await tooltip.waitFor({ state: 'detached' });
+    assert.equal(await page.evaluate(() => window.__toolbarMtl.controller.menuOpen), true, 'first Escape dismisses the hint before the menu');
+    assert.equal(await menuTrigger.evaluate(element => document.activeElement === element), true);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.evaluate(() => window.__toolbarMtl.controller.menuOpen), false, 'second Escape still closes the actual revision menu');
+    assert.equal(await menuTrigger.evaluate(element => document.activeElement === element), true);
+    escapeChecks.push('revision menu: hint first, then close');
     await page.evaluate(() => document.getElementById('toolbarMtlFixture').remove());
 
     console.log('PASS SD/ClientText hover, keyboard focus, native activation and MTL disabled/admin states.');
@@ -147,7 +181,8 @@ module.exports = async function ({ page, context, failures, directory }) {
     await page.getByRole('button', { name: 'Use English', exact: true }).first().hover(); await tooltip.waitFor();
     await page.screenshot({ path: join(directory, 'toolbar-tooltip-inline.png') });
     assert.deepEqual(failures, []); assert.deepEqual(requests, []);
-    writeFileSync(join(directory, 'results.json'), JSON.stringify({ ok: true, hints: results, layout, browserErrors: failures, inferenceRequests: requests,
+    writeFileSync(join(directory, 'results.json'), JSON.stringify({ ok: true, hints: results, accessibility, escapeChecks, layout, browserErrors: failures, inferenceRequests: requests,
         limits: 'Synthetic test-mode SPA and stubbed MTL/English action handlers; persistence and hosted deployment are outside this presentation change. Zoom uses effective CSS viewport/device density emulation.' }, null, 2));
+    console.log('PASS Chromium AX descriptions: ' + accessibility.length + '; Escape focus/dismissal cases: ' + escapeChecks.length);
     console.log('PASS toolbar hover/focus/disabled placement: ' + results.length + ' hints; square unclipped Eng: ' + layout.length + ' theme/density/width/zoom cases. Evidence: ' + directory);
 };

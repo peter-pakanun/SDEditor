@@ -893,7 +893,7 @@
     name: 'EditorFieldToolbar', props: { controller: { type: Object, required: true } },
     components: { 'app-notice': Notice },
     watch:{'controller.mtlBusy'(value,previous){if(!value && previous && global.document?.activeElement===this.$refs.mtlTarget)this.$nextTick(()=>this.$refs.mtlButton?.focus({preventScroll:true}));}},
-    methods:{showTooltip(event,text){this.$root.showTooltip(event,text);},hideTooltip(){this.$root.hideTooltip();},closeMenu(){this.controller.closeMenu();this.$nextTick(()=>this.$refs.menuButton?.focus({preventScroll:true}));},toolbarKeydown(event){if(event.key==='Escape' && event.target.closest('.editorFieldToolbar,.editorFieldComparisonControls,.fieldHistoryMenu')){event.preventDefault();event.stopPropagation();this.closeMenu();}},generateMtl(event){
+    methods:{showTooltip(event,text){this.$root.showTooltip(event,text);},hideTooltip(){this.$root.hideTooltip();},closeMenu(){this.controller.closeMenu();this.$nextTick(()=>this.$refs.menuButton?.focus({preventScroll:true}));},toolbarKeydown(event){if(event.defaultPrevented)return;if(event.key==='Escape' && event.target.closest('.editorFieldToolbar,.editorFieldComparisonControls,.fieldHistoryMenu')){event.preventDefault();event.stopPropagation();this.closeMenu();}},generateMtl(event){
       if(this.controller.mtlBusy){
         // Cancellation may disable the spinner. Keep keyboard focus in its
         // stable toolbar wrapper until it becomes Translate again.

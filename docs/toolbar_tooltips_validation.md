@@ -1,5 +1,7 @@
 # Shared toolbar tooltips and square Eng: local review
 
+The release candidate includes the subsequent [Escape and accessibility P2 follow-up](toolbar_tooltips_p2_validation.md). The counts below describe the original reviewed toolbar commit.
+
 This change starts from the released frontend `91b7f1a18e39f52f28b37b4588c8566a05dc2da3`, independently confirmed on the existing remote master before creating the clean task-owned branch `feat/shared-toolbar-tooltips`. API remains `3e535402da908ba9a1506710ee38f642fa506127` with no source or schema change. No push or deployment is authorized or performed.
 
 ## Inventory and behavior
