@@ -218,7 +218,7 @@ async function run() {
     const failures = [], results = [], isolationScopes = []; let browser, primaryPage;
     try {
         browser = await playwright.chromium.launch({ executablePath, headless: true, args: ['--disable-gpu'] });
-        const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, acceptDownloads: true, ignoreHTTPSErrors: true });
+        const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, hasTouch: process.argv.includes('--english-touch-only'), acceptDownloads: true, ignoreHTTPSErrors: true });
         const page = primaryPage = await context.newPage(); page.on('pageerror', error => failures.push(error.message));
         const bootstrap = async (target=page, account='admin') => {
             await target.goto(origin + '/?cloudApi=' + encodeURIComponent(apiOrigin));
@@ -235,6 +235,10 @@ async function run() {
             await target.getByRole('region', { name: 'Source versions' }).waitFor();
         };
         await bootstrap(page, managerAccessOnly ? 'manager' : 'admin');
+        if(process.argv.includes('--english-eligibility-only') || process.argv.includes('--english-touch-only')){
+            await require('./clienttext-eng-eligibility-browser-check.cjs')({page,api,files,Codec,ClientState,failures,directory,touch:process.argv.includes('--english-touch-only')});
+            return;
+        }
         if(process.argv.includes('--english-consistency-only')){
             await require('./clienttext-english-consistency-browser-check.cjs')({page,api,files,Codec,ClientState,JSZip,failures,directory});
             return;

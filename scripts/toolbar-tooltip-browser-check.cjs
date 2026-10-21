@@ -118,6 +118,7 @@ module.exports = async function ({ page, context, failures, directory }) {
     assert.match(await englishDisabled.evaluate(element => element.__sdTooltipValue), /compatible shared-service update/);
     await page.evaluate(async () => { window.__sharedFixtureApp.ctPolicy = { clientTextEnglishIntent: ClientTextState.ENGLISH_INTENT_PROTOCOL, clientTextEnglishEligibility: ClientTextState.ENGLISH_ELIGIBILITY_PROTOCOL }; await window.__sharedFixtureApp.$nextTick(); });
 
+    await target.fill(''); // An inactive Eng action requires blank or exact English.
     // Exercise MTL/admin/cancellation branches without requesting any generation.
     await page.evaluate(() => {
         const original = window.__sharedFixtureApp, mount = document.createElement('div'); mount.id = 'toolbarMtlFixture'; Object.assign(mount.style, { position: 'fixed', left: '20px', top: '20px', zIndex: '3000' }); document.body.append(mount);

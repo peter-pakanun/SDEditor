@@ -535,3 +535,46 @@ test('only the visible Tooltip owner handles Escape when pointer and focus are o
   const count=f.calls.length;hovered.listeners.mousemove({target:hovered});assert.equal(f.calls.length,count);
   f.directive.unmounted(focused);f.directive.unmounted(hovered);assert.equal(f.keys.size,0);
 });
+
+
+function disabledTouchTooltipFixture(){
+  const f=tooltipDirectiveFixture(),el=f.make({tabindex:'0'}),button=f.make(),icon={parentElement:button};button.parentElement=el;button.disabled=true;
+  button.contains=target=>target===button || target===icon;el.contains=target=>target===el || button.contains(target);
+  el.querySelector=selector=>selector==='button:disabled' && button.disabled?button:null;
+  el.focus=()=>{if(f.doc.activeElement!==el){f.doc.activeElement=el;el.listeners.focus();}};
+  f.directive.mounted(el,{instance:f.instance,value:'Disabled action explanation'});f.directive.mounted(button,{instance:f.instance,value:'Disabled action explanation'});
+  const event=extra=>({type:'pointerdown',pointerType:'touch',pointerId:7,isPrimary:true,clientX:4,clientY:5,target:button,...extra});
+  const tap=()=>{el.listeners.pointerdown(event());el.listeners.pointerup(event({type:'pointerup'}));};
+  return{...f,el,button,event,tap};
+}
+test('disabled wrapper touch opens the shared hint through compatibility mouse events, outside dismissal and Escape/reopen',()=>{
+  const f=disabledTouchTooltipFixture();f.tap();assert.equal(f.el.__sdTooltipTouch,true);assert.equal(f.doc.__sdTooltipTrigger,f.el);assert.equal(f.doc.activeElement,f.el);
+  const calls=f.calls.length;
+  f.button.listeners.mouseenter({type:'mouseenter',target:f.button});f.el.listeners.mousemove({type:'mousemove',target:f.button});
+  f.button.listeners.mouseleave({type:'mouseleave'});f.el.listeners.mouseleave({type:'mouseleave'});
+  assert.equal(f.calls.length,calls,'compatibility mouse events cannot steal or hide the touch hint');assert.equal(f.keys.size,2);
+  f.el.__sdTooltipHandlers.outside({target:{}});assert.equal(f.el.__sdTooltipShown,false);assert.equal(f.keys.size,0);assert.deepEqual(f.calls.at(-1),['hide']);
+  f.tap();assert.equal(f.el.__sdTooltipShown,true);let stopped=0;
+  f.el.__sdTooltipHandlers.escape({key:'Escape',preventDefault(){},stopImmediatePropagation(){stopped++;}});assert.equal(stopped,1);assert.equal(f.keys.size,0);assert.equal(f.doc.activeElement,f.el);
+  f.tap();assert.equal(f.el.__sdTooltipShown,true,'a new tap reopens an already-focused dismissed wrapper');
+  f.el.listeners.blur({type:'blur'});assert.equal(f.keys.size,0);f.directive.unmounted(f.button);f.directive.unmounted(f.el);assert.equal(Object.keys(f.el.listeners).length,0);
+});
+test('disabled touch explanation ignores mouse, drag and canceled gestures and never captures a newly enabled action',()=>{
+  const f=disabledTouchTooltipFixture();
+  f.el.listeners.pointerdown(f.event({pointerType:'mouse'}));f.el.listeners.pointerup(f.event({type:'pointerup',pointerType:'mouse'}));assert.equal(f.calls.length,0);
+  f.el.listeners.pointerdown(f.event());f.el.listeners.pointermove(f.event({type:'pointermove',clientX:30}));f.el.listeners.pointerup(f.event({type:'pointerup',clientX:30}));assert.equal(f.calls.length,0);
+  f.el.listeners.pointerdown(f.event());f.el.listeners.pointercancel(f.event({type:'pointercancel'}));f.el.listeners.pointerup(f.event({type:'pointerup'}));assert.equal(f.calls.length,0);
+  f.el.listeners.pointerdown(f.event());f.button.disabled=false;f.el.listeners.pointerup(f.event({type:'pointerup'}));assert.equal(f.calls.length,0);
+  let blocked=0;const click={pointerType:'touch',preventDefault(){blocked++;},stopImmediatePropagation(){}};
+  f.el.listeners.click(click);assert.equal(blocked,1,'a tap started disabled cannot activate after an asynchronous enable');
+  f.el.listeners.pointerdown(f.event());f.el.listeners.pointerup(f.event({type:'pointerup'}));f.el.listeners.click(click);assert.equal(blocked,1,'a new enabled-control gesture is not suppressed');
+  f.directive.unmounted(f.button);f.directive.unmounted(f.el);
+});
+test('touch hint ownership transfer and unmount remove active document listeners without suppressing keyboard clicks',()=>{
+  const f=disabledTouchTooltipFixture();f.tap();let blocked=0;
+  f.el.listeners.click({detail:0,preventDefault(){blocked++;},stopImmediatePropagation(){}});assert.equal(blocked,0);
+  const other=f.make();f.directive.mounted(other,{instance:f.instance,value:'Other control'});other.listeners.focus();
+  assert.equal(f.el.__sdTooltipTouch,false);assert.equal(f.keys.size,1,'only the new owner keyboard listener remains');
+  f.directive.unmounted(other);f.tap();assert.equal(f.keys.size,2);f.directive.unmounted(f.el);f.directive.unmounted(f.button);
+  assert.equal(f.keys.size,0);assert.equal(f.doc.__sdTooltipTrigger,undefined);assert.equal(f.el.__sdTooltipTouch,undefined);
+});

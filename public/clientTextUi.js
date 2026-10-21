@@ -42,7 +42,7 @@
         {key:'controls',label:'ClientText controls',description:'Control identities and counts compared with English.'}
     ];
     const defaultScanChecks = () => Object.fromEntries(scanTypes.map(type=>[type.key,type.key!=='terminology']));
-    const rowControl = event => !!event?.target?.closest?.('textarea,input,select,button,label,a,audio,[contenteditable="true"],.HLter,.ctReferenceContext,.ctDialogueAudio');
+    const rowControl = event => !!event?.target?.closest?.('textarea,input,select,button,label,a,audio,[contenteditable="true"],.HLter,.ctReferenceContext,.ctDialogueAudio,.fieldEnglishTarget');
     const genderSuggestions = ['M', 'F', 'N', 'MP', 'FP', 'NP'];
     const russianGenderSuggestions = ['MS', 'FS', 'NS', 'MP', 'FP', 'NP', 'M'];
     const pairedLanguages = ['French', 'German', 'Polish', 'Portuguese', 'Russian', 'Spanish'];
@@ -2115,8 +2115,29 @@
             ctEnglishWitness(actions) {return {protocol:root.ClientTextState.ENGLISH_ELIGIBILITY_PROTOCOL,fields:Object.fromEntries(Object.keys(actions).map(id=>{const field=this.ctCurrentUnit.fields.find(field=>field.id===id);return [id,{sourceHash:this.ctReviewHash(field),eligible:root.ClientTextState.englishEligible(field) && !isDNTSource(field.source)}];}))};},
             ctEnglishDecision(field) { return this.ctSaved[this.ctSelection]?.englishIntent?.[field.id] || this.ctSaved[this.ctSelection]?.provenance?.englishIntent?.[field.id]; },
             ctUsesEnglish(field,unit=this.ctCurrentUnit) { return root.ClientTextState.englishIntentFor(field,this.ctSaved[unit?.id],{game:this.gameVersion}); },
-            ctEnglishHint(field) {
+            ctEnglishDraftEligible(field) {
+                const value=String(this.ctValues[field.id] ?? '');
+                return !value.trim() || value===field.source;
+            },
+            ctEnglishRemovesDecision(field) {
+                const decision=this.ctEnglishDecision(field);
+                return this.ctUsesEnglish(field) || !this.ctEnglishEligible(field) && !!decision && decision.state!=='revoked';
+            },
+            ctEnglishActionReason(field,revoke=this.ctEnglishRemovesDecision(field)) {
+                if(!this.ctActive || !this.ctCurrentUnit?.fields.includes(field))return 'This field is no longer active. Return to the current record before changing Use English.';
                 if(this.ctPendingSharedRecovery())return 'Resolve the shared conflict or rejected save before changing Use English.';
+                if(this.ctChoices?.length)return 'Resolve the translation alternatives before changing Use English.';
+                if(this._ctSaveJob)return 'Finish or resolve the pending save before changing Use English.';
+                if(this.ctBusy || this.ctBrowseBusy)return 'Wait for the current ClientText operation to finish before changing Use English.';
+                if(this.ctRecoveryBusy)return 'Wait for recovery to finish before changing Use English.';
+                if(this.ctHistoryViewer)return 'Close the history viewer before changing Use English.';
+                if(this.ctMtlBusy?.(field))return 'Wait for machine translation to finish or stop it before changing Use English.';
+                if(this.ctMtlCandidate?.(field))return 'Accept or dismiss the machine-translation candidate before changing Use English.';
+                if(revoke)return this.ctEnglishDecision(field) && this.ctEnglishDecision(field).state!=='revoked' ? '' : 'There is no Use English decision to remove.';
+                return this.ctEnglishUnavailableReason(field) || (this.ctEnglishDraftEligible(field) ? '' : 'Use English is available only when the current translation is blank or exactly matches English. A different translation cannot be replaced by Eng.');
+            },
+            ctEnglishHint(field) {
+                const blocked=this.ctEnglishActionReason(field);if(blocked)return blocked;
                 if(this.ctUsesEnglish(field))return 'Use English is active. This field is resolved and exports blank. Activate to require translation and save this ID. Previous text remains in history.';
                 const unavailable=this.ctEnglishUnavailableReason(field);
                 if(unavailable)return unavailable+(this.ctEnglishDecision(field) && this.ctEnglishDecision(field).state!=='revoked'?' Activate to remove the previous decision and save this ID.':'');
@@ -2124,7 +2145,7 @@
             },
             ctEnglishOffer(field) { return this.ctEnglishEligible(field) && !this.ctUsesEnglish(field) && this.ctValues[field.id]===field.source; },
             async ctChooseEnglish(field,revoke=false) {
-                if((!this.ctEnglishEligible(field) && !(revoke && this.ctEnglishDecision(field))) || this.ctBusy || this.ctRecoveryBusy || this.ctHistoryViewer || this.ctMtlBusy?.(field) || this.ctMtlCandidate?.(field) || this._ctSaveJob)return false;
+                if(this.ctEnglishActionReason(field,revoke))return false;
                 const action={action:revoke?'revoke':'set',sourceHash:this.ctReviewHash(field),previousValue:String(this.ctValues[field.id] ?? '')};
                 return this.ctSave(false,{englishActions:{[field.id]:action},englishValues:{...this.ctValues,...(!revoke?{[field.id]:''}:{})},englishReviewed:{...this.ctReviewed,...(!revoke?{[field.id]:this.ctReviewHash(field)}:{})}});
             },
@@ -2379,11 +2400,13 @@
                 const existing=this._ctSaveJob, retry=existing?.unitId===unitId && existing.scopeKey===scopeKey && existing.command;
                 // An uncertain commit must find its receipt with the exact old
                 // command before checkpointing any newer editor text.
+                const englishEditorSignature=!retry && options.englishActions ? JSON.stringify([this.ctValues,this.ctReviewed]) : null;
                 if(!retry && !await this.ctFlushDraft()){
                     if(this.ctCurrent(ctx) && this.ctSelection===unitId && this.ctError)postNotice(this,'ctError',this.ctError);
                     return false;
                 }
                 if(!this.ctCurrent(ctx)||this.ctSelection!==unitId)return false;
+                if(englishEditorSignature && englishEditorSignature!==JSON.stringify([this.ctValues,this.ctReviewed])){postNotice(this,'ctError','The draft changed before Use English could be saved. Review the current translation and activate Eng again if appropriate.');return false;}
                 const job=existing?.unitId===unitId && existing.scopeKey===scopeKey ? existing : {unitId,scopeKey,id:uuid()};
                 this._ctSaveJob=job;this.ctBusy = true;let submittedSignature;
                 try {

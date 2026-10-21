@@ -55,6 +55,82 @@ test('Use English offer is optional, exact, text-only and carries an explicit co
     assert.equal(app.ctEnglishEligible({...field,kind:'form',form:'MS'}),false);
     app.gameVersion='poe1';assert.equal(app.ctEnglishOffer(field),false);
 });
+function englishDraftHarness(){
+    const h=harness();h.app.ctPolicy.clientTextEnglishIntent=S.ENGLISH_INTENT_PROTOCOL;return h;
+}
+test('Eng activation reads the live draft: blank or raw English equality, without broadening matching',async()=>{
+    for(const [source,draft,allowed]of [
+        ['English','',true],['English',' \t\r\n',true],['English','English',true],['English','Translation',false],
+        ['English','English ',false],['English','english',false],['English',' English',false],
+        ['English\r\nnext','English\nnext',false],['English\r\nnext','English\r\nnext',true],
+        ['\u00e9','e\u0301',false],['[NOAUDIO] English','English',false],['[NOAUDIO] English','[NOAUDIO] English',true]
+    ]){
+        const {app,original}=englishDraftHarness(),field=original.fields[0];field.source=source;field.target='Immutable original translation';app.ctValues[field.id]=draft;
+        const before=clone(app.ctSaved),toolbar=app.ctFieldToolbar(field,'translation');let submitted,calls=0;
+        app.ctSave=async(close,input)=>{calls++;submitted=input;return true;};
+        assert.equal(toolbar.englishDisabled,!allowed,JSON.stringify({source,draft}));
+        assert.equal(await app.ctChooseEnglish(field),allowed);assert.equal(calls,allowed?1:0);assert.deepEqual(app.ctSaved,before);
+        assert.equal(app.ctValues[field.id],draft,'enablement/failed conversion never changes the live draft');assert.equal(field.target,'Immutable original translation');
+        if(allowed){assert.equal(submitted.englishValues[field.id],'');assert.equal(submitted.englishActions[field.id].previousValue,draft);}
+        else{assert.match(toolbar.englishHint,/current translation is blank or exactly matches English/);assert.equal(toolbar.englishToggle(),false);assert.equal(calls,0);}
+    }
+});
+test('the same Eng controller updates immediately with typing and rejects retained callbacks after scope or source replacement',async()=>{
+    const {app,original}=englishDraftHarness(),field=original.fields[0],toolbar=app.ctFieldToolbar(field,'translation');let calls=0;app.ctSave=async()=>{calls++;return true;};
+    for(const value of ['',field.source,'Translation','',field.source+' ']){app.ctValues[field.id]=value;assert.equal(toolbar.englishDisabled,!!value.trim() && value!==field.source);}
+    assert.equal(calls,0);app.ctValues[field.id]='';app.managedCatalogScope='another-account:poe2';
+    assert.equal(toolbar.englishDisabled,true);assert.match(toolbar.englishHint,/no longer active/);assert.equal(toolbar.englishToggle(),false);assert.equal(calls,0);
+    app.managedCatalogScope='alice:poe2';const next={...original,fields:original.fields.map(f=>({...f,source:'New source'}))};app._ctUnitIndex.set(original.id,next);app.ctUnits=[next];
+    assert.equal(toolbar.englishDisabled,true);assert.equal(toolbar.englishToggle(),false);assert.equal(await app.ctChooseEnglish(field),false);assert.equal(calls,0);
+});
+test('active Eng revocation and unsupported retained-decision removal keep the current different draft',async()=>{
+    for(const unsupported of [false,true]){
+        const {app,original}=englishDraftHarness(),field=original.fields[0];if(unsupported)field.kind='form';
+        app.ctSaved[original.id]={values:{[field.id]:''},reviewed:{[field.id]:S.sourceHash(field.source)},englishIntent:{[field.id]:{state:'active',sourceHash:S.sourceHash(field.source),decisionId:'existing'}}};
+        app.ctValues[field.id]='Current different draft';let submitted;app.ctSave=async(close,input)=>{submitted=input;return true;};
+        const toolbar=app.ctFieldToolbar(field,'translation');assert.equal(toolbar.englishDisabled,false);assert.equal(await toolbar.englishToggle(),true);
+        assert.equal(submitted.englishActions[field.id].action,'revoke');assert.equal(submitted.englishValues[field.id],'Current different draft');assert.equal(app.ctValues[field.id],'Current different draft');
+    }
+});
+test('source-stale Eng decisions require an eligible draft and explicit approval of the current source',async()=>{
+    const {app,original}=englishDraftHarness(),field=original.fields[0],oldHash=S.sourceHash('Old English');field.source='New English';
+    app.ctSaved[original.id]={values:{[field.id]:''},englishIntent:{[field.id]:{state:'needs_review',sourceHash:oldHash,decisionId:'previous'}}};
+    app.ctValues[field.id]='Old English';const toolbar=app.ctFieldToolbar(field,'translation');let submitted;app.ctSave=async(close,input)=>{submitted=input;return true;};
+    assert.equal(toolbar.englishActive,false);assert.equal(toolbar.englishDisabled,true);assert.equal(await app.ctChooseEnglish(field),false);assert.equal(submitted,undefined);
+    app.ctValues[field.id]='New English';assert.equal(toolbar.englishDisabled,false);assert.match(toolbar.englishHint,/previous decision needs review/);
+    assert.equal(await toolbar.englishToggle(),true);assert.equal(submitted.englishActions[field.id].action,'set');assert.equal(submitted.englishActions[field.id].sourceHash,S.sourceHash('New English'));
+    assert.equal(app.ctSaved[original.id].englishIntent[field.id].sourceHash,oldHash,'availability does not rewrite the stored approval');
+});
+test('Eng draft eligibility cannot bypass unsupported fields, source scope or operational save restrictions',async()=>{
+    for(const [change,reason]of [
+        [(app,f)=>{f.kind='form';},/grammatical/],[(app,f)=>{f.kind='gender';},/Gender/],[(app,f)=>{f.source='';},/active English/],
+        [(app,f)=>{f.source='[NOAUDIO]';},/active English/],[(app,f)=>{f.source='[DNT] Internal';},/DNT/],
+        [(app)=>{app.gameVersion='poe1';},/PoE1/],[(app)=>{app.ctPolicy=null;},/compatible/],
+        [(app)=>{app.ctBusy=true;},/operation/],[(app)=>{app.ctBrowseBusy=true;},/operation/],[(app)=>{app._ctSaveJob={};},/pending save/],
+        [(app)=>{app.ctRecoveryBusy=true;},/recovery/],[(app)=>{app.ctHistoryViewer=true;},/history viewer/],
+        [(app)=>{app.ctMtlBusy=()=>true;},/machine translation/],[(app)=>{app.ctMtlCandidate=()=>({});},/candidate/],
+        [(app)=>{app.ctChoices=[{}];},/alternatives/],[(app)=>{app.ctPendingSharedRecovery=()=>({});},/shared conflict/]
+    ]){
+        const {app,original}=englishDraftHarness(),field=original.fields[0];app.ctValues[field.id]='';change(app,field);let calls=0;app.ctSave=async()=>{calls++;};
+        const toolbar=app.ctFieldToolbar(field,'translation');assert.equal(toolbar.englishDisabled,true);assert.match(toolbar.englishHint,reason);
+        assert.equal(toolbar.englishToggle(),false);assert.equal(await app.ctChooseEnglish(field),false);assert.equal(calls,0);
+    }
+});
+for(const revoke of [false,true])test('Eng '+(revoke?'revocation':'activation')+' aborts a draft change during its checkpoint without creating a save command',async()=>{
+    const {app,original}=englishDraftHarness(),field=original.fields[0],entered=deferred(),gate=deferred();let saves=0;app.ctValues[field.id]='';
+    if(revoke)app.ctSaved[original.id]={values:{[field.id]:''},englishIntent:{[field.id]:{state:'active',sourceHash:S.sourceHash(field.source),decisionId:'existing'}}};
+    const before=clone(app.ctSaved);app._ctStore={async save(){saves++;throw Error('Must not submit stale draft');}};
+    app.ctFlushDraft=async()=>{entered.resolve();await gate.promise;return true;};
+    const saving=app.ctChooseEnglish(field,revoke);await entered.promise;app.ctValues[field.id]='Newer different translation';gate.resolve();
+    assert.equal(await saving,false);assert.equal(saves,0);assert.equal(app.ctValues[field.id],'Newer different translation');assert.deepEqual(app.ctSaved,before);assert.ok(!app._ctSaveJob);assert.equal(app.ctBusy,false);assert.match(app.ctError,/draft changed/);
+});
+
+test('disabled Eng explanation is a row control: Enter, Space and navigation cannot open or change the record',async()=>{
+    const {app,original}=englishDraftHarness();let selects=0;app.ctSelect=async()=>{selects++;return true;};
+    const target={closest:selector=>selector.includes('.fieldEnglishTarget')?{}:null};
+    for(const key of ['Enter',' ','ArrowDown','Home'])assert.equal(await app.ctRowKeydown(original,{key,target,preventDefault(){throw Error('Explanation must not navigate');}}),false);
+    assert.equal(app.ctRowClick(original,{target}),false);assert.equal(app.ctRowDoubleClick(original,{target}),false);assert.equal(selects,0);assert.equal(app.ctEditor,false);
+});
 function assignmentHarness(changes={}){
     const managed=require('../public/managedVersions.js').mixin.methods,
         h=harness({managedCatalogAccess:true,cloudCanAccessAllLanguages:true,managedTeamSort:'language',managedTeamSortDir:'asc',
