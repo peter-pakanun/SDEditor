@@ -254,7 +254,7 @@
                     const normal=fields.find(candidate=>candidate.form==='Normal Translation');
                     if(normal)return {normal,possessive:fields.find(candidate=>candidate.form==='Possessive Translation')};
                 }
-                if(/<if:possessive>/.test(this.ctValues[field.id] || ''))return {normal:field,possessive:null};
+                if(/<if:possessive>/.test(this.ctPreviewValue(field)))return {normal:field,possessive:null};
                 return null;
             },
             ctGamePreview() {
@@ -263,7 +263,7 @@
                 const field=this.ctPossessivePreviewForms?.normal || this.ctPreviewField;
                 if(!field)return {source:empty,target:empty};
                 return {source:this.buildGamePreviewSegments(field.source,{contentMode:'clienttext'}),
-                    target:this.buildGamePreviewSegments(this.ctValues[field.id] ?? '',{contentMode:'clienttext',
+                    target:this.buildGamePreviewSegments(this.ctPreviewValue(field),{contentMode:'clienttext',
                         ...(this.ctPossessivePreviewForms ? {possessive:false} : {})})};
             },
             ctGamePreviewVariants() {
@@ -272,8 +272,8 @@
                 const normal=this.ctGamePreview.target;
                 const prefix=this.buildGamePreviewSegments(this.ctPreviewAffixes.prefix.trim(),{contentMode:'clienttext',possessive:false});
                 const suffix=this.buildGamePreviewSegments(this.ctPreviewAffixes.suffix.trim(),{contentMode:'clienttext',possessive:true});
-                const dedicated=forms.possessive ? String(this.ctValues[forms.possessive.id] ?? '') : '';
-                const possessive=suffix.segments.length ? this.buildGamePreviewSegments(dedicated.trim() ? dedicated : this.ctValues[forms.normal.id] ?? '',
+                const dedicated=forms.possessive ? this.ctPreviewValue(forms.possessive) : '';
+                const possessive=suffix.segments.length ? this.buildGamePreviewSegments(dedicated.trim() ? dedicated : this.ctPreviewValue(forms.normal),
                     {contentMode:'clienttext',possessive:true}) : normal;
                 const compose=(...parts)=>{
                     const active=parts.filter(part=>part.segments.length),segments=[];
@@ -1502,6 +1502,18 @@
                 if(side==='source')return [...new Set(fields.map(field=>field.source))].join('\n');
                 const values=this.ctValuesFor(unit);
                 return fields.map(field=>values[field.id]).filter(text=>String(text ?? '').trim().length>0).join('\n');
+            },
+            // Display only: search, saved targets and exports keep ctListText/valuesFor.
+            ctListTargetParts(unit) {
+                const values=this.ctValuesFor(unit);
+                return this.ctFieldsFor(unit).filter(field=>field.kind!=='gender').flatMap(field=>{
+                    const english=this.ctUsesEnglish(field,unit),text=english?'-- Use English --':String(values[field.id] ?? '');
+                    return text.trim() ? [{id:field.id,text,english}] : [];
+                });
+            },
+            ctPreviewValue(field) {
+                const value=String(this.ctValues[field.id] ?? '');
+                return !value.trim() && this.ctUsesEnglish(field) ? field.source : value;
             },
             ctDiagnose(unit) { const values = this.ctValuesFor(unit); return unit.fields.flatMap(field => this.ctUsesEnglish(field,unit)?[]:root.ClientTextState.diagnose(field, values[field.id]).map(issue => ({ ...issue, severity: issue.level || issue.severity, fieldId: field.id }))); },
             ctTone(unit) { const s = this.ctStatus(unit); return s.missing ? 'missing' : s.outdated ? 'outdated' : s.revised ? 'revised' : s.saved ? 'saved' : ''; },

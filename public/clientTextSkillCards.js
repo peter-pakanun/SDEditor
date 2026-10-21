@@ -174,6 +174,8 @@
                     if (storedDraft?.unitId === match.unit.id && scopeKey(storedDraft.scope) === capturedScope && own(storedDraft.values, match.field.id))
                         target = String(storedDraft.values[match.field.id] ?? '');
                     if (draft?.unitId === match.unit.id && own(draft.values, match.field.id)) target = String(draft.values[match.field.id] ?? '');
+                    // Preview projection only; blank authored targets stay blank in storage/export.
+                    if (!target.trim() && State.englishIntentFor(match.field, options.saved?.[match.unit.id], { game })) target = match.field.source;
                 }
                 const value = { source: valid ? match.field.source : missing ? ref.source : '', target,
                     status: match.status, translated: valid && !!target.trim(), origin: valid ? 'workbook' : missing ? 'client-catalog' : 'unavailable',

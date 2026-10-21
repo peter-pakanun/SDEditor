@@ -4,6 +4,22 @@ const State=require('../public/clientTextState.js');
 const browser={ClientTextState:State};vm.runInNewContext(fs.readFileSync(require.resolve('../public/keywordPopups.js'),'utf8'),{window:browser});
 const Popup=browser.KeywordPopups;
 
+test('keyword preview projects active English decisions without changing targets or frozen popup contexts',()=>{
+ const {host,units}=fixture(),unit=units[0];for(const field of unit.fields)field.required=true;
+ const record={values:Object.fromEntries(unit.fields.map(field=>[field.id,''])),englishIntent:Object.fromEntries(unit.fields.map(field=>[field.id,{state:'active',sourceHash:State.sourceHash(field.source),decisionId:'approval-'+field.id}]))};
+ host.ctSaved={[unit.id]:record};host.ctValues={...record.values};const before=JSON.stringify([units,host.ctSaved,host.ctValues]),opened=context(host,true);
+ assert.equal(opened.entries.get('Example').title,unit.fields[0].source);assert.equal(opened.entries.get('Example').content,unit.fields[1].source);
+ assert.equal(Popup.cardContent(host,'Example',opened).notice,'');assert.equal(JSON.stringify([units,host.ctSaved,host.ctValues]),before);
+ host.ctValues['Info Title']='A real draft';assert.equal(context(host,true).entries.get('Example').title,'A real draft');
+ host.ctValues['Info Title']='';record.englishIntent['Info Title'].state='revoked';
+ assert.equal(context(host,true).entries.get('Example').title,'');assert.match(Popup.cardContent(host,'Example',context(host,true)).notice,/Missing/);
+ assert.equal(opened.entries.get('Example').title,unit.fields[0].source,'Existing pinned contexts keep their original immutable view');
+ for(const changed of [{...record,conflicts:[{fieldId:'Info Content'}]},{...record,syncRecovery:{state:'rejected'}},
+  {...record,englishIntent:{...record.englishIntent,'Info Content':{...record.englishIntent['Info Content'],sourceHash:State.sourceHash('Old English')}}}]){
+  host.ctSaved={[unit.id]:changed};assert.equal(context(host,true).entries.get('Example').content,'');
+ }
+});
+
 test('identical KeywordPopups IDs remain isolated by game, account, branch, language and release',()=>{
  const {host}=fixture(),scope={...host.ctWorkspace.scope,branchId:'default',versionId:'release'};
  host.ctWorkspace.scope=scope;

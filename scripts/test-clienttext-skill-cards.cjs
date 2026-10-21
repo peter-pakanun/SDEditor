@@ -87,6 +87,21 @@ test('short descriptions keep live scoped drafts, Saved values, blanks and indep
     }
 });
 
+test('skill preview renders English only for valid active decisions, preserving blank targets and preferring real drafts',()=>{
+    const f=fixture(),field=f.unit.fields.find(field=>field.name==='Short Description');field.required=true;
+    const record={values:{[field.id]:''},englishIntent:{[field.id]:{state:'active',sourceHash:State.sourceHash(field.source),decisionId:'approval'}}},saved={[f.unit.id]:record};
+    const before=JSON.stringify([f,saved]);
+    assert.equal(compose(f,{saved}).target.shortDescription.text,field.source);assert.equal(compose(f,{saved}).target.shortDescription.available,true);
+    assert.equal(JSON.stringify([f,saved]),before);
+    assert.equal(compose(f,{saved,draft:{scope:f.scope,unitId:f.unit.id,values:{[field.id]:'Live draft'}}}).target.shortDescription.text,'Live draft');
+    assert.equal(compose(f,{saved,drafts:{[f.unit.id]:{scope:f.scope,unitId:f.unit.id,values:{[field.id]:'Other field draft'}}}}).target.shortDescription.text,'Other field draft');
+    for(const changed of [{...record,englishIntent:{}},{...record,conflicts:[{fieldId:field.id}]},{...record,syncRecovery:{state:'rejected'}},
+        {...record,englishIntent:{[field.id]:{...record.englishIntent[field.id],state:'revoked'}}},
+        {...record,englishIntent:{[field.id]:{...record.englishIntent[field.id],sourceHash:State.sourceHash('Old English')}}}]){
+        assert.equal(compose(f,{saved:{[f.unit.id]:changed}}).target.shortDescription.available,false);
+    }
+});
+
 test('compact card always names the active skill, while gem preview keeps its item name', () => {
     const f = fixture(), item = f.units.find(unit => unit.sheet === 'BaseItemTypes'), result = compose(f, { unit: item });
     assert.equal(result.source.title.text, f.card.itemTitle.source);

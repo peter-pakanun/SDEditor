@@ -180,15 +180,17 @@
   function fieldController(host, field, sourceText) {
     const source=sourceText!==undefined,unit=host.ctCurrentUnit,captured=key(host,false),fieldId=field.id;
     const valid=()=>host.ctActive && key(host,false)===captured && host.ctCurrentUnit===unit && unit?.fields.includes(field);
+    const usesEnglish=()=>valid() && host.ctUsesEnglish?.(field,unit);
     const value=()=>source ? String(sourceText) : String((host.ctInputValues || host.ctValues)[fieldId] ?? '');
     const list=()=>ranges(host,field,value(),source),descriptor={id:fieldId,isMultiline:true,
       get english(){return source ? value() : String(field.source ?? '');},get translation(){return value();},
       set translation(text){if(valid() && !host.ctBusy && !host.ctHistoryViewer && !host.ctMtlBusy?.(field))(host.ctInputValues || host.ctValues)[fieldId]=applyRawInput(host,field,text);},get readonly(){return source || !valid() || host.ctBusy || host.ctHistoryViewer || !!host.ctMtlBusy?.(field);},
-      get placeholder(){return source?'English':field.kind==='form' && !field.required?'Optional translation':'Translation';},
+      get placeholder(){return source?'English':usesEnglish()?'-- Use English --':field.kind==='form' && !field.required?'Optional translation':'Translation';},
       get lang(){return source?'en':host.translationEditorBcp47;},
       get dataAttrs(){const issues=diagnostics();
         return source ? {'data-ct-source':fieldId,'aria-label':field.name+' English'}
         : {'data-ct-target':fieldId,id:'ctfield-'+field.targetCell,'aria-label':field.name+(field.form?' '+(host.ctClassVariantLabel?.(field) ?? field.form):''),
+          'data-ct-use-english':usesEnglish() || undefined,
           'aria-busy':host.ctMtlBusy?.(field)||undefined,'aria-description':host.ctMtlBusy?.(field)?'MTL is generating a provisional translation. This field is read-only. Use Stop translation to cancel.':undefined,
           title:issues.map(issue=>issue.message).join('\n') || undefined,'aria-invalid':issues.some(issue=>(issue.level || issue.severity)==='error') || undefined,
           'aria-autocomplete':'list','aria-controls':'sharedEditorAutocompleteList','aria-expanded':host.ctCompletion?.fieldId===fieldId,
@@ -202,7 +204,11 @@
         ...(manualCurrent ? host.ctDiagnostics?.[unit?.id] || [] : []).filter(issue=>issue.fieldId===fieldId && ['clienttext-consistency','inconsistent-translation','dictionary-terminology'].includes(issue.code))];
     };
     const controller={field:descriptor,get ready(){return valid();},get mtlProgress(){return !source && valid()?host.ctMtlProgressFor?.(field)||null:null;},get diagnostics(){return diagnosticPresentation(diagnostics()).diagnostics;},
-      get diagnosticPresentation(){return diagnosticPresentation(diagnostics());},get highlight(){return source ? renderRanges(value(),list()) : renderAnnotatedRanges(value(),[
+      get diagnosticPresentation(){return diagnosticPresentation(diagnostics());},get highlight(){
+      // Native placeholders do not paint over whitespace. The existing display
+      // overlay supplies the same cue without changing raw value/selection.
+      if(!source && value().length && !value().trim() && usesEnglish())return '<span class="ctEnglishPlaceholder" aria-hidden="true">-- Use English --</span>';
+      return source ? renderRanges(value(),list()) : renderAnnotatedRanges(value(),[
       ...list().map(range=>({...range,classes:['tagRange',...(range.kind==='keyword'?['vocab']:[])]})),
       ...diagnostics().map(issue=>({...issue,classes:['diagnosticRange',(issue.level || issue.severity)==='error'?'diagError':'diagWarning']})),
     ]);},highlightAttrs:{},

@@ -235,6 +235,10 @@ async function run() {
             await target.getByRole('region', { name: 'Source versions' }).waitFor();
         };
         await bootstrap(page, managerAccessOnly ? 'manager' : 'admin');
+        if(process.argv.includes('--english-presentation-only')){
+            await require('./clienttext-english-presentation-browser-check.cjs')({page,api,files,Codec,ClientState,failures,directory,JSZip,bootstrap});
+            return;
+        }
         if(process.argv.includes('--english-eligibility-only') || process.argv.includes('--english-touch-only')){
             await require('./clienttext-eng-eligibility-browser-check.cjs')({page,api,files,Codec,ClientState,failures,directory,touch:process.argv.includes('--english-touch-only')});
             return;

@@ -38,7 +38,8 @@
         const values = unit.id === host.ctCurrentUnit?.id && host.ctActive && source.scope?.groupId === selected.groupId ? { ...originalValues, ...host.ctValues } : originalValues;
         const read = name => {
           const field = unit.fields.find(field => field.name === name);
-          return String((translated ? values?.[field?.id] : field?.source) ?? '');
+          const value = String((translated ? values?.[field?.id] : field?.source) ?? '');
+          return translated && field && !value.trim() && root.ClientTextState.englishIntentFor(field, source.saved?.[unit.id], { game: source.scope?.game }) ? field.source : value;
         };
         entries.set(unit.recordId, { title: read('Info Title'), content: read('Info Content'), scope: copy(source.scope || {}) });
       }

@@ -58,6 +58,49 @@ test('Use English offer is optional, exact, text-only and carries an explicit co
 function englishDraftHarness(){
     const h=harness();h.app.ctPolicy.clientTextEnglishIntent=S.ENGLISH_INTENT_PROTOCOL;return h;
 }
+
+test('active Eng has display-only native/list placeholders and English preview while raw values and formatting stay blank',()=>{
+    const {app,mixin,window,original}=englishDraftHarness(),field=original.fields[0];
+    field.source='[Keyword|English] {0} <b>source</b>';field.target='';app.ctValues[field.id]='';
+    app.buildGamePreviewSegments=(text,options)=>({segments:[{text}],keysOrder:[],options});
+    const controller=app.ctFieldController(field);
+    assert.equal(controller.field.placeholder,'Translation');assert.equal(app.ctPreviewValue(field),'');
+    assert.deepEqual(Array.from(app.ctListTargetParts(original)),[]);
+    app.ctSaved={[original.id]:{values:{[field.id]:''},reviewed:{[field.id]:S.sourceHash(field.source)},englishIntent:{[field.id]:{state:'active',sourceHash:S.sourceHash(field.source),decisionId:'approval'}}}};
+    const before=JSON.stringify([original,app.ctValues,app.ctSaved]);
+    assert.equal(controller.field.placeholder,'-- Use English --');assert.equal(controller.field.dataAttrs['data-ct-use-english'],true);
+    assert.equal(controller.field.translation,'');assert.equal(controller.highlight,'');
+    assert.equal(app.ctListTargetParts(original)[0].text,'-- Use English --');assert.equal(app.ctListTargetParts(original)[0].english,true);
+    assert.equal(app.ctListText(original,'target'),'','Search/target access does not gain presentation text');
+    const preview=mixin.computed.ctGamePreview.call(app);assert.equal(preview.target.segments[0].text,field.source);assert.equal(preview.target.options.contentMode,'clienttext');
+    assert.equal(window.EditorSession.formatAdapter(app,'clienttext').fields[0].target,'');
+    assert.equal(JSON.stringify([original,app.ctValues,app.ctSaved]),before,'Rendering does not mutate any source or durable/draft target');
+    app.ctValues[field.id]=' \t\r\n';assert.match(controller.highlight,/<span class="ctEnglishPlaceholder" aria-hidden="true">-- Use English --<\/span>/);
+    assert.equal(controller.field.translation,' \t\r\n');assert.equal(app.ctPreviewValue(field),field.source,'Approved whitespace still previews English without trimming stored text');
+    app.ctValues[field.id]='New draft';assert.equal(controller.field.translation,'New draft');assert.equal(app.ctPreviewValue(field),'New draft','A real draft takes precedence while approval awaits ordinary-save revocation');
+    assert.equal(controller.highlight.includes('-- Use English --'),false);
+    app.ctValues[field.id]=field.source;assert.equal(app.ctPreviewValue(field),field.source);
+    app.ctValues[field.id]='';app.ctSaved[original.id].englishIntent[field.id].state='revoked';
+    assert.equal(controller.field.placeholder,'Translation');assert.equal(controller.field.dataAttrs['data-ct-use-english'],undefined);assert.equal(app.ctPreviewValue(field),'');assert.equal(app.ctListTargetParts(original).length,0);
+});
+
+test('Eng presentation never resolves stale, suspended, conflicted or ineligible approvals',()=>{
+    for(const change of [
+        (app,field,saved)=>{saved.englishIntent[field.id].state='needs_review';},
+        (app,field,saved)=>{saved.englishIntent[field.id].sourceHash=S.sourceHash('Old English');},
+        (app,field,saved)=>{saved.syncRecovery={state:'rejected'};},
+        (app,field,saved)=>{saved.conflicts=[{fieldId:field.id}];},
+        (app,field,saved)=>{field.outdated=true;saved.reviewed={};},
+        (app,field)=>{field.kind='form';},(app,field)=>{field.kind='gender';},
+        (app,field)=>{field.source='[DNT] Internal';},(app)=>{app.gameVersion='poe1';}
+    ]){
+        const {app,original}=englishDraftHarness(),field=original.fields[0];field.target='';app.ctValues[field.id]='';
+        const saved={values:{[field.id]:''},reviewed:{[field.id]:S.sourceHash(field.source)},englishIntent:{[field.id]:{state:'active',sourceHash:S.sourceHash(field.source),decisionId:'approval'}}};
+        app.ctSaved={[original.id]:saved};change(app,field,saved);
+        assert.notEqual(app.ctFieldController(field).field.placeholder,'-- Use English --');
+        assert.equal(app.ctPreviewValue(field),'');assert.equal(app.ctListTargetParts(original).length,0);
+    }
+});
 test('Eng activation reads the live draft: blank or raw English equality, without broadening matching',async()=>{
     for(const [source,draft,allowed]of [
         ['English','',true],['English',' \t\r\n',true],['English','English',true],['English','Translation',false],
@@ -154,6 +197,9 @@ test('Use English decrements the normal Missing counter/filter and resolves fiel
     assert.equal(app.ctFieldStatus(original.fields[0]).missing,false);assert.equal(app.ctSheetSeverities.get(sheet),'filled');
     assert.deepEqual(progress(),{total:1,resolved:1,percent:100});assert.equal(app.ctNeedsAttention(original),false);
     assert.equal(app.ctFieldController(original.fields[0]).diagnosticPresentation.errorCount,0);assert.deepEqual(clone(app.ctAnalyzeScanUnit(original,{tagSyntax:true,variables:true,keywords:true,terminology:true},null)),[]);
+    assert.equal(app.ctFieldController(original.fields[0]).field.placeholder,'-- Use English --');assert.equal(app.ctPreviewValue(original.fields[0]),original.fields[0].source);
+    assert.equal((await f.store.getSaved(scope))[original.id].values[fieldId],'');
+    assert.equal((await f.store.listHistory(scope,original.id)).at(-1).after.values[fieldId],'','Placeholder and English preview never enter actual save history');
     const approved=clone(app.ctSaved[original.id]);
     for(const changed of [
         {...approved,englishIntent:{[fieldId]:{...approved.englishIntent[fieldId],state:'needs_review'}}},
@@ -163,6 +209,7 @@ test('Use English decrements the normal Missing counter/filter and resolves fiel
     ]){app.ctSaved={[original.id]:changed};assert.equal(app.ctCounts.missing,1);assert.equal(app.ctRows.length,1);assert.equal(app.ctSheetSeverities.get(sheet),'error');assert.equal(progress().resolved,0);}
     app.ctSaved={[original.id]:approved};assert.equal(await app.ctChooseEnglish(original.fields[0],true),true);
     assert.equal(app.ctCounts.missing,1);assert.equal(app.ctRows.length,1);assert.equal(progress().resolved,0);assert.equal(app.ctSheetSeverities.get(sheet),'error');
+    assert.equal(app.ctFieldController(original.fields[0]).field.placeholder,'Translation');assert.equal(app.ctPreviewValue(original.fields[0]),'');
     const reopened=listHarness({ctUnits:[original,neutral],ctSaved:await f.store.getSaved(scope)}).app;assert.equal(reopened.ctCounts.missing,1);
     app.gameVersion='poe1';app.ctSaved={[original.id]:approved};assert.equal(app.ctCounts.missing,1,'ineligible game cannot inherit resolution');
 });

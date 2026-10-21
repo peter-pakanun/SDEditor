@@ -87,6 +87,7 @@ async function jump(page,locator,sheet,field,alt=false){
     },units);
     try{await page.waitForSelector('.ctSkillCard');}catch(error){console.log('Fixture state',JSON.stringify(await page.evaluate(()=>({active:fixtureApp.ctActive,workspace:fixtureApp.ctWorkspace,signedIn:fixtureApp.cloudSignedIn,allowed:fixtureApp.privateMediaAllowed,catalog:!!fixtureApp.ctSkillCatalog,scope:fixtureApp.ctSkillContextKey,model:fixtureApp.ctSkillBaseModel,selection:fixtureApp.ctSelection,fields:fixtureApp.ctPreviewField?.name}))),errors,requests);throw error;}await page.waitForFunction(()=>fixtureApp.ctSkillImages.icon?.startsWith('blob:'));
     assert.equal(await page.locator('.ctSkillCard').count(),4);
+    if(process.argv.includes('--english-presentation-only')){await require('./clienttext-english-special-preview-browser-check.cjs')({page,folder,errors});return;}
     const source=page.locator('.gamePreviewSourcePane .ctSkillFullCard'),target=page.locator('.gamePreviewTargetPane .ctSkillFullCard');
     const shortSource=page.locator('.gamePreviewSourcePane .ctSkillShortCard'),shortTarget=page.locator('.gamePreviewTargetPane .ctSkillShortCard');
     assert.equal(await page.locator('.skillCardEdit').count(),0,'no trailing edit controls');
