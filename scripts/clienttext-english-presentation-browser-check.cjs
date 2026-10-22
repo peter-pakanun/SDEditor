@@ -48,10 +48,11 @@ module.exports=async function({page,api,files,Codec,ClientState:S,failures,direc
     assert.equal(await english('Name').isEnabled(),true);await toggle('Name');
     const marked=await check('blank approved');assert.equal(marked.missing,initial.missing-1);assert.equal(marked.progress.resolved,initial.progress.resolved+1);
     assert.equal(await input('Name').evaluate(el=>el.matches(':placeholder-shown')),true);
+    if(process.argv.includes('--english-placeholder-style'))await require('./clienttext-eng-placeholder-style-browser-check.cjs')({page,directory});
     for(const theme of ['light','grey','dark','modern-dark']){
         await page.evaluate(theme=>{document.documentElement.dataset.theme=theme;},theme);
         const style=await input('Name').evaluate(el=>({placeholder:getComputedStyle(el,'::placeholder').color,muted:getComputedStyle(el).getPropertyValue('--ui-muted').trim(),color:getComputedStyle(el).color,opacity:getComputedStyle(el,'::placeholder').opacity}));
-        assert.notEqual(style.placeholder,style.color);assert.equal(style.opacity,'1');themes.push({theme,...style});
+        assert.notEqual(style.placeholder,style.color);assert.ok(Number(style.opacity)<1);themes.push({theme,...style});
     }
     await page.screenshot({path:join(directory,'eng-placeholder-full.png')});
     await page.evaluate(()=>{document.documentElement.dataset.theme='light';});
