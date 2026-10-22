@@ -1,5 +1,5 @@
 /* Display colours only; workbook fills and status priority live in ClientTextState. */
-:root { --ct-revised-surface:#ceb2e4; --ct-revised-ink:#481b70; --ct-filled-surface:#b5bbc5; --ct-filled-border:#626b7a; }
+:root { --ct-revised-surface:#ceb2e4; --ct-revised-ink:#481b70; --ct-filled-surface:#b5bbc5; --ct-filled-border:#626b7a; --ct-english-placeholder-ink:var(--ui-muted); }
 [data-theme="dark"],[data-theme="modern-dark"] { --ct-revised-surface:#301d42; --ct-revised-ink:#ddc2f4; --ct-filled-surface:#171b22; --ct-filled-border:#818b9c; }
 .ctWorkspaceBody { display:grid; grid-template-columns:190px minmax(0,1fr); align-items:start; gap:18px; min-width:0; }
 .ctWorkspaceBody.ctToolsOpen { grid-template-columns:190px minmax(0,1fr) clamp(360px,29vw,460px); }
@@ -30,7 +30,7 @@
 .editorFieldTools {min-width:0;max-width:100%;font-size:calc(12px * var(--density));}
 .editorFieldFrame {overflow:hidden;border:1px solid var(--ui-border);border-radius:5px;background:var(--color-element-alt);}
 .editorFieldFrame.outdated {border-color:var(--ui-dropped);}.editorFieldFrame.missing {border-color:var(--ui-missing);}.editorFieldFrame:focus-within {box-shadow:0 0 0 1px var(--ui-accent);}
-.ctEnglishPlaceholder,.ctTarget [data-ct-use-english]::placeholder {color:var(--ui-muted);opacity:var(--ct-english-placeholder-opacity,.85);}
+.ctEnglishPlaceholder,.ctTarget [data-ct-use-english]::placeholder {color:var(--ct-english-placeholder-ink);font-weight:400;opacity:var(--ct-english-placeholder-opacity,.85);}
 :is([data-theme="dark"],[data-theme="modern-dark"]) {--ct-english-placeholder-opacity:.65;}
 .editorFieldFrame .editorTextField,.editorFieldFrame :is(textarea,input[data-ct-target]),.editorFieldFrame .ctSourceDiff {border:0!important;border-radius:0;box-shadow:none;margin:0;width:100%;box-sizing:border-box;}
 .editorFieldToolbar {display:flex;align-items:center;flex-wrap:wrap;gap:4px;min-height:29px;padding:2px 5px;border-top:1px solid var(--ui-border);background:var(--color-element-alt);color:var(--ui-muted);}
