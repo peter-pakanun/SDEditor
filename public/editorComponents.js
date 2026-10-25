@@ -497,6 +497,7 @@
               <label class="srOnly" for="editorLookupSearch">Search reference files</label>
               <input id="editorLookupSearch" type="search" ref="lookupSearchInput" v-model="lookupQuery" @input="lookupSearchChanged" placeholder="Filename, stat, English, or translation…" autocomplete="off">
               <button type="button" class="clearSearch" @click="lookupClearSearch" :disabled="!lookupQuery">Clear</button>
+              <button type="button" class="filterToggle caseSensitiveToggle" :class="{ active: lookupCaseSensitive }" @click="lookupToggleCaseSensitive" :aria-pressed="lookupCaseSensitive" aria-label="Case sensitive search" v-tooltip="'Case sensitive (Alt + C)'"><span aria-hidden="true">Aa</span></button>
               <button type="button" ref="lookupFiltersButton" class="filterToggle" :class="{ active: lookupFiltersVisible }" @click="lookupFiltersVisible = !lookupFiltersVisible" :aria-expanded="lookupFiltersVisible" aria-controls="editorLookupFilters" aria-label="Lookup filters" v-tooltip="'Lookup filters'"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h2m6 0h8M4 17h8m6 0h2"></path><circle cx="9" cy="7" r="3"></circle><circle cx="15" cy="17" r="3"></circle></svg></button>
             </div>
           </div>

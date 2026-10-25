@@ -162,6 +162,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .filterToggle:hover:not(:disabled), .filterToggle.active { background: transparent; border: 0; color: var(--ui-accent); }
 .filterToggle:focus:not(:focus-visible) { outline: none; }
 .filterToggle:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: -3px; }
+.caseSensitiveToggle { min-width: 32px; padding: 6px 7px; font-size: 13px; font-weight: 700; letter-spacing: -.08em; }
 .searchField {
   display: flex;
   align-items: center;

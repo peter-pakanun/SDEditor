@@ -231,6 +231,7 @@ function formatPageRange(total, page, pageSize) {
       pageSize: 20,
       currentPage: 1,
       searchText: "",
+      searchCaseSensitive: false,
       selectedFileFilters: ['missing', 'saved', 'revised', 'dropped', 'diagnosticError', 'diagnosticWarning'],
       fileFiltersVisible: false,
       selectedFilepath: '',
@@ -5136,6 +5137,9 @@ function formatPageRange(total, page, pageSize) {
     isFilterFocusShortcut(e) {
       return !!e?.ctrlKey && e.code === (this.filterShortcutCtrlD ? "KeyD" : "KeyF");
     },
+    isCaseSensitiveShortcut(e) {
+      return !!e?.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.code === "KeyC";
+    },
     openEditorLookup() {
       const scope=window.EditorSession.key(this,false);
       if(this.ctActive)this.ctTool='lookup';else this.sideTab='lookup';
@@ -5143,6 +5147,11 @@ function formatPageRange(total, page, pageSize) {
     },
     lookupPanelKeydown(e) {
       if (this.isImeComposingEvent(e)) return;
+      if (this.isCaseSensitiveShortcut(e) && e.target === (this.getEditorComponentRef?.('lookupSearchInput') || this.$refs.lookupSearchInput)) {
+        e.preventDefault();
+        this.lookupToggleCaseSensitive?.();
+        return;
+      }
       if (this.isFilterFocusShortcut(e)) {
         e.preventDefault();
         this.lookupFocusSearch?.();
@@ -5170,6 +5179,11 @@ function formatPageRange(total, page, pageSize) {
       if (this.isImeComposingEvent(e)) return;
       if (e.defaultPrevented) return;
       if (window.AppDialogs?.isOpen) return;
+      if (this.isCaseSensitiveShortcut(e) && e.target === this.$refs.searchInput) {
+        e.preventDefault();
+        this.toggleSearchCaseSensitive();
+        return;
+      }
       if(this.ctActive){this.ctKey(e);return;}
       if (this.$refs.rawFileDialog?.open) {
         if ((e.ctrlKey || e.metaKey) && e.code === 'KeyS') e.preventDefault();
@@ -6409,6 +6423,10 @@ function formatPageRange(total, page, pageSize) {
       this.fileSearchChanged();
       this.$refs.searchInput?.focus();
     },
+    toggleSearchCaseSensitive() {
+      this.searchCaseSensitive = !this.searchCaseSensitive;
+      this.applyFileSearch();
+    },
     renderFileListLines(lines) {
       const source = Vue.toRaw ? Vue.toRaw(lines) : lines;
       const cache = this._fileListLineCache ||= Vue.markRaw ? Vue.markRaw(new WeakMap()) : new WeakMap();
@@ -6427,7 +6445,7 @@ function formatPageRange(total, page, pageSize) {
       if (this.selectedFileFilters.some(key => key === 'review' || key === 'edited')) this.selectedFileFilters = [...new Set(selectedFilters)];
       // Data refreshes keep the settled query while the user is still typing.
       const query = this._fileSearchTimer != null || this._fileSearchComposing ? (this._fileSearchAppliedText || '') : this.searchText;
-      const search = query.toLocaleLowerCase();
+      const search = this.searchCaseSensitive ? query : query.toLocaleLowerCase();
       const hasSearch = !!search.trim();
       const diagnosticResults = this.diagnosticScanResults;
       const descs = Vue.toRaw ? Vue.toRaw(this.descs) : this.descs;
@@ -6487,11 +6505,16 @@ function formatPageRange(total, page, pageSize) {
 
           const english = desc.translations.English || [];
           const translation = desc.translations[lang] || [];
+          const englishText = english.join('\n');
+          const translationText = [...translation, ...(this.inlineDraftRows?.[desc.filepath]?.translations || [])].join('\n');
           record.entry = {
             order,
             path: desc.filepath.toLocaleLowerCase(),
-            english: english.join('\n').toLocaleLowerCase(),
-            translation: [...translation, ...(this.inlineDraftRows?.[desc.filepath]?.translations || [])].join('\n').toLocaleLowerCase(),
+            pathExact: desc.filepath,
+            english: englishText.toLocaleLowerCase(),
+            englishExact: englishText,
+            translation: translationText.toLocaleLowerCase(),
+            translationExact: translationText,
             row: {
               filepath: desc.filepath,
               filedir: desc.filedir,
@@ -6550,7 +6573,9 @@ function formatPageRange(total, page, pageSize) {
       }
       const filtered = [];
       for (const entry of snapshot.entries) {
-        if (!hasSearch || entry.path.includes(search) || entry.english.includes(search) || entry.translation.includes(search)) filtered.push(entry.row);
+        if (!hasSearch || (this.searchCaseSensitive
+          ? entry.pathExact.includes(search) || entry.englishExact.includes(search) || entry.translationExact.includes(search)
+          : entry.path.includes(search) || entry.english.includes(search) || entry.translation.includes(search))) filtered.push(entry.row);
       }
       this._fileSearchAppliedText = query;
       // Rows are a replaced display snapshot. Tracking every field of 20,000

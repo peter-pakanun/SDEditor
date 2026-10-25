@@ -706,6 +706,27 @@ test('search matches filename, English, and Thai while respecting selected statu
   assert.deepEqual(names(editor.filteredDescs), ['source-match', 'translation-match']);
 });
 
+test('case-sensitive main search toggles from the focused input with Alt+C', () => {
+  const { editor } = loadEditor();
+  editor.descs = [
+    description('Fire-file', { isMissing: true }, 'FIRE source', 'cold'),
+    description('cold-file', { isMissing: true }, 'cold source', 'fire translation'),
+  ];
+  editor.searchText = 'fire'; editor.applyFileSearch();
+  assert.deepEqual(names(editor.filteredDescs), ['Fire-file', 'cold-file']);
+
+  const focused = keyboardEvent('c', editor.$refs.searchInput, { code: 'KeyC', altKey: true });
+  editor.handleKeydown(focused);
+  assert.equal(focused.defaultPrevented, true);
+  assert.equal(editor.searchCaseSensitive, true);
+  assert.deepEqual(names(editor.filteredDescs), ['cold-file']);
+
+  const elsewhere = keyboardEvent('c', { tagName: 'TEXTAREA' }, { code: 'KeyC', altKey: true });
+  editor.handleKeydown(elsewhere);
+  assert.equal(elsewhere.defaultPrevented, false);
+  assert.equal(editor.searchCaseSensitive, true);
+});
+
 test('typing batches file searches after 250 ms and preserves results, page, and selection meanwhile', () => {
   const { editor, timers } = loadEditor();
   paginatedFixtures(editor);
@@ -799,6 +820,10 @@ test('IME composition cannot publish unfinished file search text or flush it wit
 test('Enter and search arrow navigation flush the latest query before using file results', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
   assert.match(html, /<input\b[^>]*\bid="searchInp"[^>]*@keydown\.enter\.stop\.prevent="applyFileSearch"/);
+  const caseToggle = html.indexOf('class="filterToggle caseSensitiveToggle"');
+  const filtersToggle = html.indexOf('ref="fileFiltersButton" class="filterToggle"');
+  assert.ok(caseToggle >= 0 && caseToggle < filtersToggle, 'Case sensitivity appears before the filters button.');
+  assert.match(html, /:aria-pressed="searchCaseSensitive" aria-label="Case sensitive search"/);
   for (const key of ['Enter', 'ArrowDown', 'ArrowUp']) {
     const harness = loadEditor();
     const { editor, timers } = harness;

@@ -110,6 +110,23 @@ test('plain case-insensitive lookup supports paths, stat codes, English and tran
   assert.deepEqual(search(model, '[.*]'), []);
 });
 
+test('case-sensitive Lookup filters results and highlights only exact-case matches', () => {
+  const mixed = description('FireBlade', 'FIRE damage and fire resistance', 'FIRE translation');
+  const upper = description('FIRE-WARD', 'FIRE resistance', 'FIRE translation');
+  const { model } = loadLookup({ descs: [mixed, upper] });
+  assert.deepEqual(search(model, 'fire'), [mixed.filepath, upper.filepath]);
+  model.lookupPage = 2;
+  model.lookupToggleCaseSensitive();
+  assert.equal(model.lookupCaseSensitive, true);
+  assert.equal(model.lookupPage, 1);
+  assert.deepEqual(search(model, 'fire'), [mixed.filepath]);
+  const result = model.lookupVisibleResults[0];
+  const marked = parts => Array.from(parts).filter(part => part.matched).map(part => part.text);
+  assert.deepEqual(marked(result.filepathParts), []);
+  assert.deepEqual(marked(result.englishParts), ['fire']);
+  assert.deepEqual(marked(result.translationParts), []);
+});
+
 test('encoded and actual newlines are searchable across lines and entries', () => {
   const one = description('multiline', ['Stores poison\\nDeals damage', 'Next entry'], ['กักเก็บ\\nสร้างความเสียหาย', 'บรรทัดถัดไป']);
   const { model } = loadLookup({ descs: [one] });
@@ -617,6 +634,7 @@ test('query highlighting marks every literal case-insensitive occurrence and pre
   assert.deepEqual(plain(api.highlightParts(text, '<img')).filter(part => part.matched), [{ text: '<img', matched: true }]);
   assert.deepEqual(plain(api.highlightParts(text, ' \n ')), [{ text, matched: false }]);
   assert.deepEqual(plain(api.highlightParts('', 'fire')), []);
+  assert.deepEqual(plain(api.highlightParts(text, 'fire', true)).filter(part => part.matched), [{ text: 'fire', matched: true }]);
 });
 
 test('highlight offsets follow whitespace and Unicode normalization without changing literal text', () => {

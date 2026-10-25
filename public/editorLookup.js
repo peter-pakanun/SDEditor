@@ -16,7 +16,10 @@
   const asLines = value => Array.isArray(value) ? value.map(line => String(line ?? '')) : [];
   const readableText = value => String(value ?? '').replace(/\\n/g, '\n').replace(/\r\n?/g, '\n');
   const compactText = (value, literal = false) => (literal ? String(value ?? '') : readableText(value)).replace(/\s+/gu, ' ').trim();
-  const foldText = (value, literal = false) => compactText(value, literal).normalize('NFC').toLocaleLowerCase();
+  const foldText = (value, literal = false, caseSensitive = false) => {
+    const text = compactText(value, literal).normalize('NFC');
+    return caseSensitive ? text : text.toLocaleLowerCase();
+  };
   const hasQuery = (model, value) => !!foldText(value, sessionFor(model).mode === 'clienttext' || !!model.lookupCatalogSources?.some(source => source.mode === 'clienttext'));
   // Use the editor's immutable-English detector for CT references too. Saved
   // targets never control visibility; SD Lookup keeps its existing behavior.
@@ -24,8 +27,8 @@
     || !!window.ClientTextUI?.isDNTSource && !window.ClientTextUI.isDNTSource(field?.source);
   const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
-  function queryRanges(text, query, literal = false) {
-    const needle = foldText(query, literal);
+  function queryRanges(text, query, literal = false, caseSensitive = false) {
+    const needle = foldText(query, literal, caseSensitive);
     if (!needle) return [];
     // Keep original offsets when normalization, case folding or whitespace
     // changes the length of the searchable text. Reference text stays literal.
@@ -44,10 +47,11 @@
     }
     if (chunks[0]?.text === ' ') chunks.shift();
     if (chunks.at(-1)?.text === ' ') chunks.pop();
-    const folded = chunks.map(chunk => chunk.text).join('').toLocaleLowerCase();
+    const folded = chunks.map(chunk => caseSensitive ? chunk.text : chunk.text.toLocaleLowerCase()).join('');
     const starts = [], ends = [];
     for (const chunk of chunks) {
-      for (let i = 0; i < chunk.text.toLocaleLowerCase().length; i++) {
+      const foldedChunk = caseSensitive ? chunk.text : chunk.text.toLocaleLowerCase();
+      for (let i = 0; i < foldedChunk.length; i++) {
         starts.push(chunk.start); ends.push(chunk.end);
       }
     }
@@ -77,14 +81,14 @@
     return parts;
   }
 
-  function highlightParts(value, query) {
+  function highlightParts(value, query, caseSensitive = false) {
     const text = String(value ?? '');
-    return textParts(text, queryRanges(text, query));
+    return textParts(text, queryRanges(text, query, false, caseSensitive));
   }
 
-  function excerptParts(value, query, limit = 150, matches = null, literal = false) {
+  function excerptParts(value, query, limit = 150, matches = null, literal = false, caseSensitive = false) {
     const text = compactText(value, literal);
-    const ranges = matches || queryRanges(text, query, literal);
+    const ranges = matches || queryRanges(text, query, literal, caseSensitive);
     const wantedStart = Math.max(0, (ranges[0]?.start || 0) - 35);
     const wantedEnd = Math.min(text.length, wantedStart + limit);
     let start = wantedStart, end = wantedEnd;
@@ -116,26 +120,30 @@
         desc, local, filepath: desc.filepath,
         filename: String(desc.filename || desc.filepath.split('/').pop()),
         pathText: foldText([desc.filepath, ...stats].join('\n')),
-        englishText: foldText(english), translationText: foldText(translation),
+        pathExactText: foldText([desc.filepath, ...stats].join('\n'), false, true),
+        englishText: foldText(english), englishExactText: foldText(english, false, true),
+        translationText: foldText(translation), translationExactText: foldText(translation, false, true),
         english, translation,
       });
     }
     return entries;
   }
 
-  function searchIndex(index, query, scope = 'all', translatedOnly = false, mixed = false) {
-    const needle = foldText(query);
-    const literalNeedle = foldText(query, true);
+  function searchIndex(index, query, scope = 'all', translatedOnly = false, mixed = false, caseSensitive = false) {
+    const needle = foldText(query, false, caseSensitive);
+    const literalNeedle = foldText(query, true, caseSensitive);
     if (!needle && (!mixed || !literalNeedle)) return [];
     return index.filter(entry => {
       const wanted = entry.literal ? literalNeedle : needle;
       if (!wanted) return false;
       if (translatedOnly && !entry.translationText) return false;
-      if (scope === 'path' || scope === 'metadata') return entry.pathText.includes(wanted);
-      if (scope === 'english') return entry.englishText.includes(wanted);
-      if (scope === 'translation') return entry.translationText.includes(wanted);
-      return entry.pathText.includes(wanted) || entry.englishText.includes(wanted)
-        || entry.translationText.includes(wanted);
+      const pathText = caseSensitive ? entry.pathExactText : entry.pathText;
+      const englishText = caseSensitive ? entry.englishExactText : entry.englishText;
+      const translationText = caseSensitive ? entry.translationExactText : entry.translationText;
+      if (scope === 'path' || scope === 'metadata') return pathText.includes(wanted);
+      if (scope === 'english') return englishText.includes(wanted);
+      if (scope === 'translation') return translationText.includes(wanted);
+      return pathText.includes(wanted) || englishText.includes(wanted) || translationText.includes(wanted);
     });
   }
 
@@ -193,7 +201,9 @@
           output.push({ ...common, key: JSON.stringify(['clienttext', scope, unit.id, field.id]),
             filepath, filename: String(unit.recordId), unit, field, metadata, reference,
             literal: true, english, translation, pathText: foldText(filepath + ' ' + metadata, true),
-            englishText: foldText(english, true), translationText: foldText(translation, true) });
+            pathExactText: foldText(filepath + ' ' + metadata, true, true),
+            englishText: foldText(english, true), englishExactText: foldText(english, true, true),
+            translationText: foldText(translation, true), translationExactText: foldText(translation, true, true) });
         }
       }
     }
@@ -204,6 +214,7 @@
     data() {
       return {
         lookupQuery: '', lookupAppliedQuery: '', lookupLanguage: '', lookupScope: 'all', lookupTranslatedOnly: false,
+        lookupCaseSensitive: false,
         lookupPage: 1, lookupPageSize: PAGE_SIZE, lookupSelectedFilepath: '', lookupRevision: 0,
         lookupModeFilter: 'all', lookupGroupFilter: '', lookupCatalogSources: [], lookupCatalogGroups: [],
         lookupMissingReferences: [], lookupPreparing: false, lookupPreparationError: '', lookupCatalogKey: '',
@@ -282,7 +293,7 @@
           cache.byPath = new Map(cache.entries.map(entry => [entry.key || entry.filepath, entry]));
           caches.set(this, cache);
         }
-        return searchIndex(cache.entries, this.lookupAppliedQuery, this.lookupScope, this.lookupTranslatedOnly, true)
+        return searchIndex(cache.entries, this.lookupAppliedQuery, this.lookupScope, this.lookupTranslatedOnly, true, this.lookupCaseSensitive)
           .filter(entry => (!this.lookupModeFilter || this.lookupModeFilter === 'all' || (entry.mode || 'statdescription') === this.lookupModeFilter)
             && (!this.lookupGroupFilter || entry.groupId === this.lookupGroupFilter));
       },
@@ -299,15 +310,15 @@
         const start = (this.lookupCurrentPage - 1) * this.lookupPageSize;
         const queryFor = scope => this.lookupScope === 'all' || this.lookupScope === scope ? this.lookupAppliedQuery : '';
         return this.lookupResults.slice(start, start + this.lookupPageSize).map(entry => {
-          const englishParts = excerptParts(entry.english, queryFor('english'), 150, null, entry.literal);
-          const translationParts = excerptParts(entry.translation, queryFor('translation'), 150, null, entry.literal);
+          const englishParts = excerptParts(entry.english, queryFor('english'), 150, null, entry.literal, this.lookupCaseSensitive);
+          const translationParts = excerptParts(entry.translation, queryFor('translation'), 150, null, entry.literal, this.lookupCaseSensitive);
           const statsText = compactText(entry.metadata || asLines(entry.desc?.stats).join(' '), entry.literal);
           const pathText = entry.filepath + ' ' + statsText;
-          const pathRanges = queryRanges(pathText, queryFor('path') || queryFor('metadata'), entry.literal);
+          const pathRanges = queryRanges(pathText, queryFor('path') || queryFor('metadata'), entry.literal, this.lookupCaseSensitive);
           const statsOffset = entry.filepath.length + 1;
           const statRanges = pathRanges.filter(range => range.end > statsOffset)
             .map(range => ({ start: Math.max(0, range.start - statsOffset), end: range.end - statsOffset }));
-          const statsParts = excerptParts(statsText, '', 150, statRanges, entry.literal);
+          const statsParts = excerptParts(statsText, '', 150, statRanges, entry.literal, this.lookupCaseSensitive);
           return {
             key: entry.key || entry.filepath, mode: entry.mode || 'statdescription', groupId: entry.groupId || '', groupLabel: entry.groupLabel || '',
             filepath: entry.filepath, filename: entry.filename, isDNT: !!entry.desc?.isDNT,
@@ -444,6 +455,10 @@
         }
         const key = sessionKey(this);
         this._editorLookupSearchTimer = setTimeout(() => { if (sessionKey(this) === key) this.lookupApplySearch(); }, SEARCH_DELAY);
+      },
+      lookupToggleCaseSensitive() {
+        this.lookupCaseSensitive = !this.lookupCaseSensitive;
+        this.lookupApplySearch();
       },
       lookupApplySearch() {
         clearTimeout(this._editorLookupSearchTimer);

@@ -139,6 +139,21 @@ test('Lookup search is recognized as a search box and panel shortcut retains foc
   assert.equal(calls.focus, 1);
 });
 
+test('Lookup Alt+C toggles case sensitivity only while the search input has focus', () => {
+  const { editor } = loadEditor();
+  editor.sideTab = 'lookup';
+  const input = editor.$refs.lookupSearchInput;
+  const focused = event('c', { code: 'KeyC', altKey: true, target: input });
+  dispatchLookupKey(editor, focused);
+  assert.equal(focused.defaultPrevented, true);
+  assert.equal(editor.lookupCaseSensitive, true);
+
+  const elsewhere = event('c', { code: 'KeyC', altKey: true, target: { tagName: 'TEXTAREA' } });
+  dispatchLookupKey(editor, elsewhere);
+  assert.equal(elsewhere.defaultPrevented, false);
+  assert.equal(editor.lookupCaseSensitive, true);
+});
+
 test('Lookup keyboard controls cannot save, discard, or navigate the translation draft', () => {
   const { editor, calls } = loadEditor();
   editor.sideTab = 'lookup';
@@ -220,6 +235,10 @@ test('inactive Lookup and scope changes close filters without restoring focus to
 test('Lookup uses the main-search filter pattern and removes expansion without duplicating panel ownership', () => {
   assert.doesNotMatch(lookupPanel, /Expand Lookup|lookupDialog|lookupExpanded|<teleport/);
   assert.match(lookupPanel, /ref="lookupFiltersButton" class="filterToggle"/);
+  const caseToggle = lookupPanel.indexOf('class="filterToggle caseSensitiveToggle"');
+  const filtersToggle = lookupPanel.indexOf('ref="lookupFiltersButton" class="filterToggle"');
+  assert.ok(caseToggle >= 0 && caseToggle < filtersToggle, 'Case sensitivity appears before Lookup filters.');
+  assert.match(lookupPanel, /:aria-pressed="lookupCaseSensitive" aria-label="Case sensitive search"/);
   assert.match(lookupPanel, /:aria-expanded="lookupFiltersVisible" aria-controls="editorLookupFilters"/);
   assert.match(lookupPanel, /v-tooltip="'Lookup filters'"/);
   assert.match(lookupPanel, /<fieldset v-show="lookupFiltersVisible" id="editorLookupFilters"/);
