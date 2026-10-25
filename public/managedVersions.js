@@ -532,9 +532,16 @@
       },
       managedCached(version) { return this.localVersions.some(v => v.hasSource && v.sourceHash === version.sourceHash && v.branchId === version.branchId); },
       managedRowActionTarget(event) { return !!event?.target?.closest?.('a, button, input, select, textarea, summary, details, [role="button"]'); },
+      async managedSelectVersionDetails(versionId) {
+        const result = await this.managedReadDetails(versionId);
+        await this.$nextTick();
+        if (this.selectedManagedVersionId !== versionId) return result;
+        this.$el?.querySelector?.('.versionDetails .teamVersionTable')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+        return result;
+      },
       managedSelectVersionRow(version, event) {
         if (this.managedVersionBusy || this.managedRowActionTarget(event)) return;
-        return this.managedReadDetails(version.id);
+        return this.managedSelectVersionDetails(version.id);
       },
       managedOpenVersionRow(version, event) {
         if (this.managedRowActionTarget(event)) return false;
