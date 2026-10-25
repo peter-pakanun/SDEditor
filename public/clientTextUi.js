@@ -138,7 +138,7 @@
         data() { return {
             ...exportProgress?.mixin.data(),
             ctActive: false, ctWorkspace: null, ctUnits: raw([]), ctSaved: raw({}), ctRevision: 0,
-            ctSheet: '', ctSheetFilter: '', ctSearch: '', ctAppliedSearch: '', ctFilter: '', ctPage: 1, ctPageSize: 20,
+            ctSheet: '', ctSheetFilter: '', ctSearch: '', ctAppliedSearch: '', ctSearchCaseSensitive: false, ctFilter: '', ctPage: 1, ctPageSize: 20,
             ctBrowseMode: 'sheets', ctNpcSelection: 'all', ctNpcKind: '', ctNpcFilter: '', ctBrowseBusy: false,
             ctConvoSelection: 'all', ctConvoFilter: '', ctConvoExpanded: [], ctConvoFocusKey: '',
             ctSort: 'row', ctSortDir: 'asc', ctSelectedFilters: defaultFilters(), ctFiltersVisible: false,
@@ -470,7 +470,8 @@
             ctEffectivePageSize() { return Math.max(1,Math.floor(Number(this.pageSize || this.ctPageSize) || 20)); },
             ctRows() {
                 this.ctRevision;
-                const query = this.ctAppliedSearch.toLocaleLowerCase();
+                const caseSensitive = this.ctSearchCaseSensitive;
+                const query = caseSensitive ? this.ctAppliedSearch : this.ctAppliedSearch.toLocaleLowerCase();
                 return this.ctBrowseOrderedUnits().filter(unit => {
                     const fields=this.ctFieldsFor(unit);if(!fields.length)return false;
                     if (this.ctBrowseMode==='sheets' && this.ctSheet && JSON.stringify([unit.role, unit.sheet]) !== this.ctSheet) return false;
@@ -483,7 +484,10 @@
                             ? this.ctDraftUnitIds.has(unit.id) : key==='mtl' ? this.ctMtlUnitIds?.has(unit.id) : status[key]))return false;
                     if (!query) return true;
                     const values = root.ClientTextState.valuesFor(unit, this.ctSaved[unit.id]);
-                    return [unit.recordId, unit.sheet, ...fields.flatMap(field => [field.source, values[field.id]]), ...this.ctNotes(unit)].some(text => String(text).toLocaleLowerCase().includes(query));
+                    return [unit.recordId, unit.sheet, ...fields.flatMap(field => [field.source, values[field.id]]), ...this.ctNotes(unit)].some(text => {
+                        const value = String(text);
+                        return (caseSensitive ? value : value.toLocaleLowerCase()).includes(query);
+                    });
                 });
             },
             ctPageRows() { return this.ctRows.slice((this.ctPage - 1) * this.ctEffectivePageSize, this.ctPage * this.ctEffectivePageSize); },
@@ -1141,6 +1145,12 @@
                 this.ctSortDir=this.ctSort===key && this.ctSortDir==='asc'?'desc':'asc';this.ctSort=key;this.ctPage=1;
             },
             ctApplySearch() {clearTimeout(this._ctSearchTimer);this.ctAppliedSearch=this.ctSearch;this.ctPage=1;},
+            ctToggleSearchCaseSensitive() {this.ctSearchCaseSensitive=!this.ctSearchCaseSensitive;this.ctPage=1;},
+            ctSearchKeydown(event) {
+                if(event?.currentTarget!==this.$refs?.ctSearchInput || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey
+                    || event.code!=='KeyC' || event.isComposing || event.keyCode===229)return false;
+                event.preventDefault();event.stopPropagation?.();this.ctToggleSearchCaseSensitive();return true;
+            },
             ctClearSearch() {this.ctSearch='';this.ctApplySearch();this.$refs?.ctSearchInput?.focus();},
             ctResetFilters() {this.ctFilter='';this.ctSelectedFilters=this.ctBrowseMode!=='sheets'?statusFilters.map(item=>item.key):defaultFilters();this.ctSearch='';this.ctApplySearch();},
             ctFilterByStatus(status,event) {

@@ -524,8 +524,9 @@
             <div class="searchToolbar"><div class="searchField">
               <label class="srOnly" for="ctSearchInput">Search ClientText</label>
               <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m16 16 4.5 4.5"></path></svg>
-              <input id="ctSearchInput" ref="ctSearchInput" type="search" v-model="ctSearch" @keydown.enter.stop.prevent="ctApplySearch" @keydown.esc.stop.prevent="ctClearSearch" placeholder="Search filenames, English, or translations…">
+              <input id="ctSearchInput" ref="ctSearchInput" type="search" v-model="ctSearch" @keydown="ctSearchKeydown" @keydown.enter.stop.prevent="ctApplySearch" @keydown.esc.stop.prevent="ctClearSearch" placeholder="Search filenames, English, or translations…">
               <button v-if="ctSearch" class="clearSearch" @click="ctClearSearch">Clear</button><kbd v-else>{{ filterShortcutCtrlD ? 'Ctrl D' : 'Ctrl F' }}</kbd>
+              <button type="button" class="filterToggle caseSensitiveToggle" :class="{ active: ctSearchCaseSensitive }" @click="ctToggleSearchCaseSensitive" :aria-pressed="ctSearchCaseSensitive" aria-label="Case sensitive search" v-tooltip="'Case sensitive (Alt + C)'"><span aria-hidden="true">Aa</span></button>
               <button class="filterToggle" :class="{active:ctFiltersVisible}" @click="ctFiltersVisible=!ctFiltersVisible" :aria-expanded="ctFiltersVisible" aria-controls="ctFilterPanel" aria-label="Filters" v-tooltip="'Filters'"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h2m6 0h8M4 17h8m6 0h2"></path><circle cx="9" cy="7" r="3"></circle><circle cx="15" cy="17" r="3"></circle></svg></button>
             </div></div>
           </section>
