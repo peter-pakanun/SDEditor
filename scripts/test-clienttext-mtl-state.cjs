@@ -63,3 +63,13 @@ test('lower Luna settings survive candidate snapshots and cannot be changed by a
     }
 });
 module.exports={candidate,descriptor};
+test('Cloudflare candidate settings preserve exact immutable provenance and reject unsupported effort aliases',()=>{
+    const model='@cf/deepseek-ai/deepseek-v4.1-flash-1017';
+    for(const effort of ['none','low','high','max']){
+        const inferenceSettings={version:'mtl-inference-settings-v1',model,effort},c=candidate(unit(),{provider:'cloudflare-workers-ai',model,effort,inferenceSettings});
+        const normalized=M.normalizeCandidate(c);assert.deepEqual(normalized.inferenceSettings,inferenceSettings);
+        assert.equal(normalized.provider,'cloudflare-workers-ai');assert.equal(normalized.model,model);
+        assert.throws(()=>M.mergeCandidate(normalized,{...c,effort:effort==='max'?'none':'max',inferenceSettings:{...inferenceSettings,effort:effort==='max'?'none':'max'}}),{code:'MTL_CANDIDATE_CHANGED'});
+    }
+    for(const effort of ['medium','xhigh','minimal'])assert.throws(()=>M.normalizeCandidate(candidate(unit(),{model,effort,inferenceSettings:{version:'mtl-inference-settings-v1',model,effort}})));
+});

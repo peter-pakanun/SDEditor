@@ -57,7 +57,10 @@
             scope: server?.scope || snapshot.scope, unit: snapshot.unit || (server?.unitId ? { id: server.unitId } : undefined),
             field: snapshot.field || server?.field, source: server?.source ?? snapshot.source, language: server?.language || snapshot.language,
             context: server?.context || snapshot.context, inferenceSettings: server?.inferenceSettings || snapshot.inferenceSettings,
-            ...(request ? { prompt: { instructions: request.instructions, messages: request.input } } : {}),
+            ...(request ? { prompt: Array.isArray(request.messages)
+                ? {instructions:request.messages.filter(item=>item?.role==='system'&&typeof item.content==='string').map(item=>item.content).join('\n'),
+                    messages:request.messages.filter(item=>item?.role!=='system'&&['user','assistant'].includes(item?.role)&&typeof item.content==='string').map(item=>({role:item.role,content:item.content}))}
+                : {instructions:request.instructions,messages:request.input} } : {}),
             ...(server && Object.hasOwn(server, 'response') ? { response: server.response ? { translation: server.response.translation } : null } : {}), lookup: server?.lookup,
             validation: server?.validation, failureReason: server?.failureReason, failureStage: server?.failureStage,
             validationReason: server?.validationReason, protocolCheck: server?.protocolCheck, protocolExplanation: server?.protocolExplanation,

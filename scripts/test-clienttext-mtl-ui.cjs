@@ -415,6 +415,16 @@ test('selected debug presentation includes only bounded structural stream summar
         for(const field of counts)assert.equal(bounded.streamSummary[field],null);
     }
 });
+test('Admin debug projects an executed chat prompt without connection, reasoning or arbitrary message fields',()=>{
+    const record={requestId:'chat-prompt',status:'completed',server:{providerRequest:{model:'private-model-id',reasoning_effort:'high',response_format:{type:'json_object'},
+        messages:[{role:'system',content:'Translate only the requested field.',reasoning_content:'private-reasoning'},
+            {role:'user',content:'Quoted source and context.',authorization:'private-auth'},
+            {role:'tool',content:'private-tool-text'},{role:'assistant',content:'Prior quoted context.',reasoning_content:'private-chain'}]},response:{translation:'Translated text'}}};
+    const shown=Debug.present(record);
+    assert.deepEqual(shown.prompt,{instructions:'Translate only the requested field.',messages:[{role:'user',content:'Quoted source and context.'},{role:'assistant',content:'Prior quoted context.'}]});
+    assert.equal(shown.response.translation,'Translated text');assert.doesNotMatch(JSON.stringify(shown),/private-model|private-reasoning|private-auth|private-tool|private-chain|reasoning_effort|response_format/);
+    assert.deepEqual(JSON.parse(Debug.sectionText(record,'prompt')),shown.prompt);
+});
 
 test('a proxy-masked generation failure reads the original job once and presents its validation failure without another POST',async()=>{
     const h=harness(),calls=[];let requestId;
@@ -998,7 +1008,8 @@ function modelSettingsHarness(){
     for(const[name,method]of Object.entries(ModelSettings.mixin.methods))app[name]=method.bind(app);
     for(const[name,getter]of Object.entries(ModelSettings.mixin.computed))Object.defineProperty(app,name,{configurable:true,get:()=>getter.call(app)});
     const generate=app._cloud.request;app._cloud.request=async(path,options)=>path==='/v1/admin/mtl/model-settings'?{settings:{version:'mtl-inference-settings-v1',models:[
-        {model:'gpt-6-luna',efforts:['none','low','medium','high','xhigh','max']},{model:'gpt-6.1-sol',efforts:['low','medium','high','xhigh','max']}]}}:generate(path,options);
+        {model:'gpt-6-luna',efforts:['none','low','medium','high','xhigh','max']},{model:'gpt-6.1-sol',efforts:['low','medium','high','xhigh','max']},
+        {model:'@cf/deepseek-ai/deepseek-v4.1-flash-1017',provider:'cloudflare',available:true,efforts:['none','low','high','max']}]}}:generate(path,options);
     return h;
 }
 test('model settings are pinned-Admin-only, session-local and preserve the Sol/medium default and explicit choices',async()=>{
@@ -1022,6 +1033,20 @@ test('model metadata and selections cannot cross account, client, role or assign
     }
     const {app,field}=modelSettingsHarness();await app.ctMtlSettingsToggle(field);app.ctMtlSettingsChoose('effort','max');app._cloud={...app._cloud};assert.equal(app.ctMtlSettingsCapture(),undefined);
 });
+test('Cloudflare Admin choices use the supported effort contract and remain unavailable without server credentials',async()=>{
+    const model='@cf/deepseek-ai/deepseek-v4.1-flash-1017',{app,field}=modelSettingsHarness();
+    await app.ctMtlSettingsToggle(field);
+    assert.equal(app.ctMtlSettingsChoose('model',model),true);assert.equal(app.ctMtlSettingsCapture().effort,'high','medium falls back to Cloudflare high');
+    const listed=app.ctMtlSettingsCatalog.models.find(item=>item.model===model);
+    assert.equal(listed.label,'DeepSeek V4.1 Flash (1017) · Cloudflare');assert.equal(listed.provider,'cloudflare');
+    for(const effort of ['none','low','high','max']){assert.equal(app.ctMtlSettingsChoose('effort',effort),true);assert.deepEqual(app.ctMtlSettingsCapture(),{version:'mtl-inference-settings-v1',model,effort});}
+    for(const effort of ['medium','xhigh','minimal','fast'])assert.equal(app.ctMtlSettingsChoose('effort',effort),false);
+    listed.available=false;assert.throws(()=>app.ctMtlSettingsCapture(),/unavailable/);assert.equal(app.ctMtlSettingsChoose('model',model),false);
+    assert.equal(app.ctMtlSettingsDefault(),true);assert.equal(app.ctMtlSettingsCapture(),undefined);
+    const legacy=ModelSettings.catalog({version:'mtl-inference-settings-v1',models:[{model:'gpt-6.1-sol',efforts:['medium']}]});assert.equal(legacy.models[0].available,true);
+    assert.throws(()=>ModelSettings.catalog({version:'mtl-inference-settings-v1',models:[{model,efforts:['medium'],available:true}]}));
+    assert.throws(()=>ModelSettings.catalog({version:'mtl-inference-settings-v1',models:[{model,efforts:['high'],available:'true'}]}));
+});
 test('each panel opening rechecks account availability; failed and unavailable choices never alter defaults',async()=>{
     const {app,field}=modelSettingsHarness();let calls=0;const request=app._cloud.request;app._cloud.request=(...args)=>{calls++;return request(...args);};
     await app.ctMtlSettingsToggle(field);await app.ctMtlSettingsToggle(field);await app.ctMtlSettingsToggle(field);assert.equal(calls,2);
@@ -1042,7 +1067,7 @@ test('a limited or older API catalog keeps unavailable lower efforts out of capt
     assert.deepEqual(ModelSettings.DEFAULT,{version:'mtl-inference-settings-v1',model:'gpt-6.1-sol',effort:'medium'});
 });
 test('Translate freezes the Admin selection before tone/context awaits and debug retains the captured request',async()=>{
-  for(const [model,effort]of [['gpt-6.1-sol','low'],['gpt-6-luna','none'],['gpt-6-luna','low'],['gpt-6-luna','medium']]){
+  for(const [model,effort]of [['gpt-6.1-sol','low'],['gpt-6-luna','none'],['gpt-6-luna','low'],['gpt-6-luna','medium'],['@cf/deepseek-ai/deepseek-v4.1-flash-1017','low']]){
     const h=modelSettingsHarness(),{app,field}=h;await app.ctMtlSettingsToggle(field);app.ctMtlSettingsChoose('model',model);app.ctMtlSettingsChoose('effort',effort);
     const notes=deferred();app.ctToneNotesPrepare=()=>notes.promise;let submitted;const request=app._cloud.request;
     app._cloud.request=async(path,options)=>{if(options?.method==='POST')submitted=structuredClone(options.body);return request(path,options);};

@@ -28,6 +28,7 @@ test('remaining API literals are internal wire/configuration identifiers, not re
     assert.ok(found.length>0,'Actual service identities remain intact');
     const modelConfig=hit=>hit.file==='mtl-inference-settings.js'&&!/new ApiError/.test(hit.text)
         ||hit.file==='mtl-provider.js'&&hit.text.includes("transport('https://api.openai.com/v1/models'")
+        ||hit.file==='mtl-cloudflare-provider.js'&&(hit.text.startsWith('export const CLOUDFLARE_MTL_MODEL =')||hit.text.startsWith('const endpoint = configured ? `https://api.cloudflare.com/'))
         ||hit.file==='mtl-service.js'&&hit.text==="{ ...MTL_DEFAULT_SETTINGS, model: 'gpt-6-luna', effort: 'xhigh' }) === previous.requestHash) return previous.requestHash;";
     assert.deepEqual(found.filter(hit=>(!internal.test(hit.text)&&!modelConfig(hit))||/new ApiError/.test(hit.text)),[],
         'Every remaining branded API literal must be a technical identity, never an error message');

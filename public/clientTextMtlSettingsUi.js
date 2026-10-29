@@ -5,7 +5,9 @@
 })(typeof window!=='undefined'?window:globalThis,function(root){
     'use strict';
     const VERSION='mtl-inference-settings-v1',DEFAULT={version:VERSION,model:'gpt-6.1-sol',effort:'medium'};
-    const POLICY={'gpt-6-luna':['none','low','medium','high','xhigh','max'],'gpt-6.1-sol':['low','medium','high','xhigh','max']};
+    const CLOUDFLARE='@cf/deepseek-ai/deepseek-v4.1-flash-1017';
+    const POLICY={'gpt-6-luna':['none','low','medium','high','xhigh','max'],'gpt-6.1-sol':['low','medium','high','xhigh','max'],[CLOUDFLARE]:['none','low','high','max']};
+    const LABELS={'gpt-6-luna':'GPT-6 Luna','gpt-6.1-sol':'GPT-6.1 Sol',[CLOUDFLARE]:'DeepSeek V4.1 Flash (1017) · Cloudflare'};
     const raw=value=>root.Vue?.markRaw?root.Vue.markRaw(value):value;
     const allowed=host=>host.cloudSignedIn===true&&host.cloudUser?.isAdmin===true&&host.cloudUser.role==='admin'
         &&!!host.cloudUser.id&&host.cloudUser.id===host.cloudProfileId&&host.cloudUser.id===host.ctWorkspace?.scope?.accountId
@@ -18,12 +20,14 @@
         return {version:VERSION,model:value.model,effort:value.effort};
     }
     function catalog(value){
-        if(value?.version!==VERSION||!Array.isArray(value.models)||value.models.length>2)throw new Error('The server needs an upgrade before model settings can be used.');
+        if(value?.version!==VERSION||!Array.isArray(value.models)||value.models.length>3)throw new Error('The server needs an upgrade before model settings can be used.');
         const used=new Set();
         return {models:value.models.map(item=>{
             if(typeof item?.model!=='string'||!Object.hasOwn(POLICY,item.model)||used.has(item.model)||!Array.isArray(item.efforts)
-                ||!item.efforts.length||item.efforts.some(effort=>!POLICY[item.model].includes(effort)))throw new Error('The translation model list could not be verified.');
-            used.add(item.model);return {model:item.model,label:item.model==='gpt-6-luna'?'GPT-6 Luna':'GPT-6.1 Sol',efforts:[...new Set(item.efforts)]};
+                ||!item.efforts.length||item.efforts.some(effort=>!POLICY[item.model].includes(effort))
+                ||item.available!==undefined&&typeof item.available!=='boolean')throw new Error('The translation model list could not be verified.');
+            used.add(item.model);return {model:item.model,label:LABELS[item.model],efforts:[...new Set(item.efforts)],available:item.available!==false,
+                provider:item.model===CLOUDFLARE?'cloudflare':'siwc'};
         })};
     }
     const mixin={
@@ -38,7 +42,7 @@
             ctMtlSettingsCapture(){
                 if(!allowed(this)||!this.ctMtlSettingsChoice||this.ctMtlSettingsOwner?.client!==this._cloud||this.ctMtlSettingsOwner?.fence!==fence(this))return undefined;
                 const value=settings(this.ctMtlSettingsChoice),available=this.ctMtlSettingsCatalog?.models.find(item=>item.model===value.model);
-                if(!available?.efforts.includes(value.effort))throw new Error('The selected model is unavailable. Open Model settings or use the default.');
+                if(!available?.available||!available.efforts.includes(value.effort))throw new Error('The selected model is unavailable. Open Model settings or use the default.');
                 return value;
             },
             async ctMtlSettingsToggle(field){
@@ -52,7 +56,7 @@
                     const response=await client.request('/v1/admin/mtl/model-settings');
                     if(!current())return false;
                     this.ctMtlSettingsCatalog=catalog(response.settings);this.ctMtlSettingsOwner=raw({client,fence:origin});
-                    if(!this.ctMtlSettingsCatalog.models.length)this.ctMtlSettingsError='Neither permitted model is listed for the connected translation account. Default generation remains unchanged.';
+                    if(!this.ctMtlSettingsCatalog.models.some(item=>item.available))this.ctMtlSettingsError='No configured translation models are available. Default generation remains unchanged.';
                     return true;
                 }catch(error){if(current())this.ctMtlSettingsError=error?.status===404?'The server needs an upgrade before model settings can be used.':'The translation account model list is unavailable. Close and reopen Model settings to try again. Default generation remains unchanged.';return false;}
                 finally{if(current()){this.ctMtlSettingsLoading=false;this._ctMtlSettingsLoad=null;}}
@@ -60,8 +64,8 @@
             ctMtlSettingsChoose(name,value){
                 if(!allowed(this)||this.ctMtlSettingsOwner?.client!==this._cloud||this.ctMtlSettingsOwner?.fence!==fence(this))return false;
                 const previous=this.ctMtlSettingsSelected(),model=name==='model'?value:previous.model,available=this.ctMtlSettingsCatalog?.models.find(item=>item.model===model);
-                if(!available)return false;
-                const effort=name==='effort'?value:available.efforts.includes(previous.effort)?previous.effort:available.efforts[0];
+                if(!available?.available)return false;
+                const effort=name==='effort'?value:available.efforts.includes(previous.effort)?previous.effort:model===CLOUDFLARE&&available.efforts.includes('high')?'high':available.efforts[0];
                 if(!available.efforts.includes(effort))return false;
                 this.ctMtlSettingsChoice=settings({version:VERSION,model,effort});return true;
             },
@@ -69,8 +73,10 @@
         }
     };
     const Bar={name:'ClientTextMtlSettingsBar',props:{host:{type:Object,required:true}},
-        computed:{choice(){return this.host.ctMtlSettingsSelected();},models(){return this.host.ctMtlSettingsCatalog?.models||[];},efforts(){return this.models.find(item=>item.model===this.choice.model)?.efforts||[];}},
+        computed:{choice(){return this.host.ctMtlSettingsSelected();},models(){return this.host.ctMtlSettingsCatalog?.models||[];},efforts(){return this.models.find(item=>item.model===this.choice.model&&item.available)?.efforts||[];},
+            cloudflareUnavailable(){return this.models.some(item=>item.provider==='cloudflare'&&!item.available);},cloudflareSelected(){return this.choice.model===CLOUDFLARE;},
+            fastGuidance(){return this.cloudflareSelected?'Fast is unavailable for Cloudflare testing. Choose a reasoning effort instead.':'Fast support and account entitlement have not been verified for this ChatGPT connection.';}},
         methods:{close(){const button=this.$el.parentElement?.querySelector('.ctMtlSettingsButton');this.host.ctMtlSettingsPanel='';this.$nextTick(()=>button?.focus({preventScroll:true}));}},
-        template:'<section role="region" class="ctMtlSettingsBar" aria-label="Translation model settings" data-inline-focus-surface @keydown.esc.stop.prevent="close()"><div class="ctMtlSettingsFields"><label>Model<select aria-label="Model" :value="choice.model" :disabled="host.ctMtlSettingsLoading || !models.length" @change="host.ctMtlSettingsChoose(\'model\',$event.target.value)"><option v-if="!models.some(item=>item.model===choice.model)" :value="choice.model">{{ choice.model===\'gpt-6.1-sol\'?\'GPT-6.1 Sol · default\':choice.model }}</option><option v-for="item in models" :key="item.model" :value="item.model">{{ item.label }}</option></select></label><label>Reasoning<select aria-label="Reasoning" :value="choice.effort" :disabled="host.ctMtlSettingsLoading || !efforts.length" @change="host.ctMtlSettingsChoose(\'effort\',$event.target.value)"><option v-if="!efforts.includes(choice.effort)" :value="choice.effort">{{ choice.effort }}</option><option v-for="effort in efforts" :key="effort" :value="effort">{{ effort }}</option></select></label><label class="ctMtlSettingsFast" title="Fast support and account entitlement have not been verified for this ChatGPT connection."><input type="checkbox" aria-label="Fast · unavailable" disabled> Fast · unavailable</label><button type="button" @click="host.ctMtlSettingsDefault()">Use default</button><button type="button" @click="close()" aria-label="Close model settings">Close</button></div><p>For your next requests in this sign-in only. In-flight requests keep their settings. Default: Sol / medium. Fast availability is unverified; sampling and output limits are unavailable on this connection.</p><p v-if="host.ctMtlSettingsLoading" role="status">Checking available models…</p><p v-if="host.ctMtlSettingsError" class="ctMtlSettingsError" role="alert">{{ host.ctMtlSettingsError }}</p></section>'};
+        template:'<section role="region" class="ctMtlSettingsBar" aria-label="Translation model settings" data-inline-focus-surface @keydown.esc.stop.prevent="close()"><div class="ctMtlSettingsFields"><label>Model<select aria-label="Model" :value="choice.model" :disabled="host.ctMtlSettingsLoading || !models.length" @change="host.ctMtlSettingsChoose(\'model\',$event.target.value)"><option v-if="!models.some(item=>item.model===choice.model)" :value="choice.model">{{ choice.model===\'gpt-6.1-sol\'?\'GPT-6.1 Sol · default\':choice.model }}</option><option v-for="item in models" :key="item.model" :value="item.model" :disabled="!item.available">{{ item.label }}{{ item.available ? \'\' : \' · unavailable\' }}</option></select></label><label>Reasoning<select aria-label="Reasoning" :value="choice.effort" :disabled="host.ctMtlSettingsLoading || !efforts.length" @change="host.ctMtlSettingsChoose(\'effort\',$event.target.value)"><option v-if="!efforts.includes(choice.effort)" :value="choice.effort">{{ choice.effort }}</option><option v-for="effort in efforts" :key="effort" :value="effort">{{ effort }}</option></select></label><label class="ctMtlSettingsFast" :title="fastGuidance"><input type="checkbox" aria-label="Fast · unavailable" disabled> Fast · unavailable</label><button type="button" @click="host.ctMtlSettingsDefault()">Use default</button><button type="button" @click="close()" aria-label="Close model settings">Close</button></div><p>For your next requests in this sign-in only. In-flight requests keep their settings. Default: Sol / medium. Sampling and output limits are fixed by the service.</p><p v-if="cloudflareSelected">Cloudflare testing uses separate server credentials and billing. Reasoning: none, low, high or max.</p><p v-if="cloudflareUnavailable">Cloudflare testing is unavailable until its server credentials are configured.</p><p v-if="host.ctMtlSettingsLoading" role="status">Checking available models…</p><p v-if="host.ctMtlSettingsError" class="ctMtlSettingsError" role="alert">{{ host.ctMtlSettingsError }}</p></section>'};
     return {mixin,Bar,settings,catalog,DEFAULT};
 });
