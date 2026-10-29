@@ -92,6 +92,38 @@ test('bounded lookup evidence enters the sanitized ZIP request section with call
     });
 });
 
+test('Cloudflare debug ZIP retains a bounded sanitized terminal chunk trail even with a null final response',async()=>{
+    const value=record('failed'),content='Visible rejected output ไทย Bearer synthetic-hidden-token '+'x'.repeat(2000);
+    value.server.response=null;value.server.streamSummary={events:304,completedEventSeen:false,cloudflare:{version:'cloudflare-stream-v1',
+        stopSeen:true,doneSeen:false,acceptedTrailingChunks:2,omittedChunks:1,rawBody:'synthetic-raw-stream',
+        chunks:Array.from({length:8},(_,index)=>({event:index+1,phase:'after-stop',disposition:index===7?'rejected':'trailing',object:'chat.completion.chunk',
+            idMatches:true,id:'synthetic-private-id',choicesCount:3,malformedJson:index===7,error:{message:'synthetic-provider-error'},
+            choices:Array.from({length:3},()=>({index:0,finishReason:'stop',role:'assistant',content,contentCharacters:content.length,
+                reasoningPresent:true,refusalPresent:true,toolsPresent:true,deltaKind:'object',contentKind:'string',
+                unknownDeltaFieldsPresent:true,unknownChoiceFieldsPresent:false,audioPresent:true,reasoning_content:'synthetic-hidden-thought',
+                refusal:'synthetic-private-refusal',tool_calls:'synthetic-private-tool',arbitrary:'synthetic-arbitrary'}))}))}};
+    const before=JSON.stringify(value),downloads=[],h=harness(value);
+    await globals({JSZip,saveAs:blob=>downloads.push(blob)},async()=>{
+        assert.equal(await h.dialog.downloadAll(),true);const files=await unzip(downloads[0]),trail=files['stream-chunks.json'];
+        assert.equal(files['response.json'],null);assert.equal(files['manifest.json'].sections.streamChunks.status,'available');
+        assert.equal(trail.stopSeen,true);assert.equal(trail.doneSeen,false);assert.equal(trail.acceptedTrailingChunks,2);assert.equal(trail.omittedChunks,3);
+        assert.equal(trail.chunks.length,6);assert.equal(trail.chunks[0].event,3);assert.equal(trail.chunks[5].disposition,'rejected');
+        assert.equal(trail.chunks[5].choices.length,2);assert.equal(trail.chunks[5].choices[0].content.length,1024);assert.equal(trail.chunks[5].choices[0].contentTruncated,true);
+        assert.equal(trail.chunks[5].choices[0].contentCharacters,content.length);assert.equal(trail.chunks[5].choices[0].reasoningPresent,true);
+        assert.equal(trail.chunks[5].choices[0].deltaKind,'object');assert.equal(trail.chunks[5].choices[0].contentKind,'string');
+        assert.equal(trail.chunks[5].choices[0].unknownDeltaFieldsPresent,true);assert.equal(trail.chunks[5].choices[0].unknownChoiceFieldsPresent,false);
+        assert.equal(trail.chunks[5].choices[0].audioPresent,true);
+        assert.match(trail.chunks[5].choices[0].content,/Visible rejected output ไทย Bearer \[redacted\]/);
+        assert.deepEqual(files['request.json'].streamSummary.cloudflare,trail);
+        assert.doesNotMatch(JSON.stringify(files),/synthetic-(?:hidden-token|raw-stream|private-id|provider-error|hidden-thought|private-refusal|private-tool|arbitrary)/);
+    });assert.equal(JSON.stringify(value),before,'Chunk export does not change retained diagnostics');
+    value.server.streamSummary.cloudflare.chunks[7].choices[0]={deltaKind:'synthetic-private-kind',contentKind:'synthetic-private-kind',
+        unknownDeltaFieldsPresent:'synthetic-private-flag',unknownChoiceFieldsPresent:true,audioPresent:{secret:'synthetic-private-audio'}};
+    const invalid=JSON.parse(Debug.downloadBundle(value).files['stream-chunks.json']).chunks[5].choices[0];
+    assert.equal(invalid.deltaKind,'other');assert.equal(invalid.contentKind,'other');assert.equal(invalid.unknownDeltaFieldsPresent,false);
+    assert.equal(invalid.unknownChoiceFieldsPresent,true);assert.equal(invalid.audioPresent,false);assert.doesNotMatch(JSON.stringify(invalid),/synthetic-private/);
+});
+
 test('archive and entry filenames never incorporate unsafe IDs, paths or credential-like values',()=>{
     for(const id of ['../private','..\\private','C:\\private','a/b','a\u0000b','日本語','x'.repeat(81),'Bearer synthetic-token','sk-syntheticsecret123']){
         const bundle=Debug.downloadBundle({...record(),requestId:id});assert.equal(bundle.filename,'sdeditor-mtl-debug-request.zip');

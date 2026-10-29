@@ -39,7 +39,37 @@
         for (const [field, allowed] of Object.entries({ outputItemTypes: ['message', 'reasoning', 'function_call', 'custom_tool_call'],
             contentTypes: ['output_text', 'refusal', 'not-array'], textValueTypes: kinds }))
             result[field] = Array.isArray(summary[field]) ? summary[field].slice(0, 16).map(value => known(value, allowed)) : [];
+        const cloudflare = cloudflareChunks(summary.cloudflare);
+        if (cloudflare) result.cloudflare = cloudflare;
         return result;
+    }
+    // Independently verify the API's bounded chunk projection before displaying
+    // or exporting it. Hidden reasoning and arbitrary provider data stay absent.
+    function cloudflareChunks(value) {
+        if (!value || value.version !== 'cloudflare-stream-v1' || !Array.isArray(value.chunks)) return undefined;
+        const number = input => Number.isSafeInteger(input) && input >= 0 && input <= 2 * 1024 * 1024 ? input : null;
+        const label = (input, allowed) => allowed.includes(input) ? input : 'other';
+        const choices = input => Array.isArray(input) ? input.slice(0, 2).map(choice => ({
+            index: number(choice?.index), finishReason: choice?.finishReason == null ? null
+                : label(choice.finishReason, ['stop','length','tool_calls','function_call','content_filter']),
+            role: choice?.role == null ? null : label(choice.role, ['assistant']),
+            content: typeof choice?.content === 'string' ? redact(choice.content).slice(0, 1024) : null,
+            contentCharacters: number(choice?.contentCharacters), contentTruncated: choice?.contentTruncated === true || typeof choice?.content === 'string' && choice.content.length > 1024,
+            reasoningPresent: choice?.reasoningPresent === true, refusalPresent: choice?.refusalPresent === true, toolsPresent: choice?.toolsPresent === true,
+            ...Object.fromEntries(['deltaKind','contentKind'].filter(key => Object.hasOwn(choice || {}, key))
+                .map(key => [key, label(choice[key], ['missing','null','array','object','string','number','boolean','other'])])),
+            ...Object.fromEntries(['unknownDeltaFieldsPresent','unknownChoiceFieldsPresent','audioPresent'].filter(key => Object.hasOwn(choice || {}, key))
+                .map(key => [key, choice[key] === true])),
+        })) : [];
+        return { version: 'cloudflare-stream-v1', stopSeen: value.stopSeen === true, doneSeen: value.doneSeen === true,
+            acceptedTrailingChunks: number(value.acceptedTrailingChunks),
+            omittedChunks: Math.min(2 * 1024 * 1024, (number(value.omittedChunks) || 0) + Math.max(0, value.chunks.length - 6)),
+            chunks: value.chunks.slice(-6).map(chunk => ({ event: number(chunk?.event),
+                phase: label(chunk?.phase, ['before-stop','after-stop','after-done']),
+                disposition: label(chunk?.disposition, ['stop','trailing','usage','done','rejected']),
+                object: label(chunk?.object, ['chat.completion.chunk']), idMatches: typeof chunk?.idMatches === 'boolean' ? chunk.idMatches : null,
+                choicesCount: number(chunk?.choicesCount), choices: choices(chunk?.choices), malformedJson: chunk?.malformedJson === true,
+            })) };
     }
     // A labeled selection of actual fields, not a raw transport dump. Preserve
     // quoted prompt/workbook/response text; omit connection configuration.
@@ -99,6 +129,7 @@
             ['validationError','validation-error.json',error ? { ...validation, diagnosticsError: redact(error) } : validation],
             ['requestIdentity','request-identity.json',pick(['requestId','status','scope','unit','field','language','startedAt','sentAt','finishedAt','elapsedMs'])],
         ];
+        if (shown.streamSummary?.cloudflare) sections.push(['streamChunks','stream-chunks.json',shown.streamSummary.cloudflare]);
         const files = {}, manifest = { format: 'sdeditor-mtl-debug-v1', capturedAt: new Date().toISOString(), requestId: shown.requestId ?? null,
             status: shown.status ?? null, diagnosticsLoading: loading === true,
             note: 'Sanitized snapshot captured on Download all. Browser and API clocks are independent. Missing sections were not recorded in this snapshot; empty sections contain JSON null.',
