@@ -441,7 +441,6 @@
               </div>
             </details>
           </div>
-          <div v-for="request in ctRequests.filter(request=>['publication','metadata'].includes(request.payload.kind))" :key="request.requestId"><button @click="ctResumePublication(request)">Resume {{ request.payload.name }} · {{ request.payload.kind === 'metadata' ? 'version draft' : 'content upload' }}</button></div>
         </section>
       </div>
       <section v-if="managedCatalogAccess && managedSelectedVersion" class="versionPanel versionDetails" aria-label="Selected version">
