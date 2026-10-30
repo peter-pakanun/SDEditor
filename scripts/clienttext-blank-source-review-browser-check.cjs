@@ -25,8 +25,9 @@ module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}
                 host.ctChoices=[];host.ctDraftDirty=false;host._ctSaveJob=null;host._ctEditRevision=0;host._ctDraftRevision=null;
                 host.ctSheet='';host.ctSearch='';host.ctAppliedSearch='';host.ctSelectedFilters=['missing','outdated','saved','revised','unchanged'];
                 host.ctEditor=full;host.ctInlineClosed=false;host.ctRevision++;
-                let revision=0;
+                let revision=0;host._blankReviewSaveCount=0;
                 host.ctStorage=()=>({getDraft:async()=>null,async save(scope,unitId,command){
+                    host._blankReviewSaveCount++;
                     return {saved:{unitId,revision:++revision,values:structuredClone(command.values),reviewed:structuredClone(command.reviewed),saved:true}};
                 }});
                 host.ctSync=()=>{};host.ctLoadMemory=()=>{};host.ctRefreshDiagnostics=()=>{};
@@ -38,6 +39,7 @@ module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}
             assert.equal(await target.count(),2,label+': the ordinary blank field stays hidden');
             const input=target.nth(1);
             assert.equal(await input.inputValue(),field.target,label);
+            assert.match(await page.locator('.ctBlankSourceReview').innerText(),/English is blank.*blank translation is allowed/);
             const review=page.getByRole('button',{name:'Mark reviewed',exact:true});await review.waitFor({state:'visible'});
             if(original===rows[0]){
                 const path=join(fixtureArtifacts,'blank-source-review-'+theme+'-'+(full?'full':'inline')+'.png');
@@ -45,6 +47,7 @@ module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}
             }
             if(full)await review.click();else {await review.focus();await page.keyboard.press('Enter');}
             await settle();assert.equal(await review.count(),0,label+': review action is reachable');
+            assert.equal(await page.evaluate(()=>window.__ctLayoutFixture._blankReviewSaveCount),0,label+': review remains a draft');
             const outcome=await page.evaluate(async()=>{
                 const host=window.__ctLayoutFixture,unit=host.ctCurrentUnit,values=JSON.stringify(host.ctValues);
                 if(!await host.ctSave())throw new Error(host.ctError || 'Save failed');
@@ -52,6 +55,10 @@ module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}
             });
             assert.deepEqual(outcome,{after:false,sameValues:true,saved:true},label);
             results.push({case:label,ok:true});
+            // Direct fixture replacement must finish outgoing focus before
+            // installing another ID; production selection owns this lifecycle.
+            await page.evaluate(()=>{window.__ctLayoutFixture.ctInlineClosed=true;document.activeElement?.blur();});
+            await settle();
         }
     }
 };

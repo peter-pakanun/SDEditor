@@ -1473,6 +1473,12 @@
                     hasChanges:status.saved && !status.missing && !status.outdated};
             },
             ctReviewHash(field) { return root.ClientTextState.sourceHash(field.source); },
+            ctBlankSourceReview(field,unit=this.ctCurrentUnit) {
+                const saved=this.ctSaved[unit?.id];
+                return field?.kind!=='gender' && !String(field?.source ?? '').trim() && (!!field?.outdated
+                    || (saved?.outdated || []).includes(field?.id)
+                    || Object.prototype.hasOwnProperty.call(saved?.provenance?.requiredReview || {},field?.id));
+            },
             ctValuesFor(unit) { return root.ClientTextState.valuesFor(unit, this.ctSaved[unit.id]); },
             ctRebuildSheets(units=this.ctUnits) {
                 const keys=new Set();
@@ -1481,26 +1487,35 @@
             },
             ctFieldsFor(unit=this.ctCurrentUnit) {
                 if(!unit)return [];
-                // Blank English can still have an explicit source-review
-                // assignment (for example a removed Hard Mode Display Name).
-                // Keep that field accessible through review and Save without
-                // removing any field from the original, history or export.
+                // Only unused fields are hidden. Retained translations remain
+                // accessible even after upstream removes English or its orange
+                // fill. Original, staged and draft values keep their identity.
                 const saved=this.ctSaved[unit.id],cache=this._ctVisibleFields ||= new WeakMap();let item=cache.get(unit);
                 if(!item || item.fields!==unit.fields || item.saved!==saved){
                     const hasEnglish=field=>field.kind!=='gender' && String(field.source ?? '').trim().length>0;
-                    const assigned=field=>!!field.outdated || (saved?.outdated || []).includes(field.id)
-                        || Object.prototype.hasOwnProperty.call(saved?.provenance?.requiredReview || {},field.id);
-                    const content=field=>hasEnglish(field) || field.kind!=='gender' && assigned(field);
+                    const content=field=>hasEnglish(field) || field.kind!=='gender' && (String(field.target ?? '').trim()
+                        || String(saved?.values?.[field.id] ?? '').trim() || this.ctBlankSourceReview(field,unit));
                     const fields=unit.fields || [],text=fields.filter(content);
                     const visible=text.length ? fields.filter(field=>field.kind==='gender' || content(field)) : [];
                     item={fields:unit.fields,saved,visible};cache.set(unit,item);
                 }
-                if(!this.hideDNT)return item.visible;
-                if(!item.withoutDNT){
-                    const ordinary=item.visible.filter(field=>field.kind!=='gender' && !isDNTSource(field.source));
+                let visible=item.visible;
+                if(unit.id===this.ctSelection && this.ctDraftDirty){
+                    const draft=field=>field.kind!=='gender' && (String(this.ctValues[field.id] ?? '').trim() || field.id===this.ctFocusedField);
+                    if(unit.fields.some(field=>draft(field) && !visible.includes(field)))
+                        visible=unit.fields.filter(field=>field.kind==='gender' || visible.includes(field) || draft(field));
+                }
+                // A retained draft must be discoverable before its values are
+                // hydrated, including an otherwise entirely empty record.
+                if(!visible.length && this.ctDraftUnitIds?.has(unit.id))visible=unit.fields;
+                if(!this.hideDNT)return visible;
+                if(visible!==item.visible || !item.withoutDNT){
+                    const ordinary=visible.filter(field=>field.kind!=='gender' && !isDNTSource(field.source));
                     // Gender has no English source of its own. Retain it as
-                    // metadata only while the record has visible prose.
-                    item.withoutDNT=ordinary.length ? item.visible.filter(field=>field.kind==='gender' || ordinary.includes(field)) : [];
+                    // metadata only while the record has visible text/work.
+                    const filtered=ordinary.length ? visible.filter(field=>field.kind==='gender' || ordinary.includes(field)) : [];
+                    if(visible!==item.visible)return filtered;
+                    item.withoutDNT=filtered;
                 }
                 return item.withoutDNT;
             },
@@ -2272,7 +2287,14 @@
                 }catch(error){if(this.ctCurrent(ctx)){this.ctError=error.message;if(error.code==='CLIENTTEXT_PENDING_RESOLUTION_REQUIRED')this._ctRecoveryJob=null;}return false;}
                 finally{if(this.ctCurrent(ctx))this.ctBusy=false;}
             },
-            ctMarkReviewed(field) { if(this.ctBusy || this.ctHistoryViewer || this.ctMtlBusy?.(field) || this.ctMtlCandidate?.(field))return false;this.ctReviewed[field.id] = this.ctReviewHash(field); this.ctDraftStageFailure=null;this.ctDraftDirty = true; this.ctQueueDraft(); },
+            ctMarkReviewed(field,event) {
+                if(this.ctBusy || this.ctHistoryViewer || this.ctMtlBusy?.(field) || this.ctMtlCandidate?.(field))return false;
+                // The action disappears after review. Retain focus in the
+                // editor so its removal cannot trigger a leave-row save.
+                if(event?.currentTarget && event.currentTarget===root.document?.activeElement)
+                    this.ctTargetInputs().find(input=>input.dataset?.ctTarget===field.id)?.focus?.({preventScroll:true});
+                this.ctReviewed[field.id] = this.ctReviewHash(field); this.ctDraftStageFailure=null;this.ctDraftDirty = true; this.ctQueueDraft();
+            },
             ctChoiceDisabled(choice) {
                 const field=this.ctCurrentUnit?.fields.find(field=>field.id===choice?.fieldId);
                 return !this.ctActive || this.ctBusy || this.ctHistoryViewer || !field || !!this.ctMtlBusy?.(field);
@@ -3787,6 +3809,7 @@
         }, template: `
         <div class="ctTarget" :class="{missing:host.ctFieldStatus(field).missing,outdated:host.ctFieldStatus(field).outdated,mtl:!!host.ctMtlCandidate?.(field)}">
             <label :for="'ctfield-'+field.targetCell" :class="{srOnly:field.kind === 'form' || (field.kind === 'gender' ? !compact : compact)}">{{ field.kind === 'gender' ? 'Gender' : field.kind === 'form' ? field.name+' '+host.ctClassVariantLabel(field) : (host.ctWorkspace?.scope.language || host.lang)+' translation' }} <small>{{ field.required ? '' : 'Optional' }}</small></label>
+            <p v-if="field.kind !== 'gender' && !String(field.source || '').trim()" class="ctBlankSourceReview" role="note"><strong v-if="compact">{{ field.name }} · </strong>English is blank. Review or clear the translation, then Save. A blank translation is allowed.</p>
             <component :is="host.ctFieldToolbar ? 'editor-field-toolbar' : 'div'" :controller="host.ctFieldToolbar ? host.ctFieldToolbar(field,'translation') : undefined">
             <template v-if="field.kind === 'gender'">
                 <div v-if="genderMultiline" class="textHL editorTextField multiline"><textarea :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" :value="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @input="host.ctGenderEdited(field,$event)" @compositionend="host.ctGenderEdited(field,$event)" @paste="host.ctGenderPaste(field,$event)" @keydown="host.ctGenderKeydown(field,$event)" aria-label="Gender" spellcheck="false" rows="1"></textarea></div>
@@ -3796,7 +3819,7 @@
             </component>
             <div v-if="host.ctMtlVisible && host.ctMtlPendingDismissal?.(field)" class="ctMtlReview ctMtlDismissal" data-inline-focus-surface role="status" @click.capture="host.ctMtlReviewFocus(field,$event)"><span>{{ host.ctMtlDismissalText(host.ctMtlPendingDismissal(field)) }}</span><small v-if="String(host.ctWorkspace?.scope?.groupId || '').startsWith('local:')">Keep this tab and workbook session open; closing or reloading loses unsent dismissal requests.</small><button type="button" @click="host.ctMtlRetryDismissals(host.ctMtlPendingDismissal(field))" :disabled="host.ctBusy">Retry dismissal upload</button></div>
             <div v-if="host.ctMtlVisible && (host.ctMtlPendingCandidate?.(field) || host.ctMtlAccepted?.(field))" class="ctMtlReview" data-inline-focus-surface @click.capture="host.ctMtlReviewFocus(field,$event)"><span class="ctMtlDot" aria-hidden="true"></span><span>MTL · {{ host.ctMtlAccepted?.(field) ? 'Accepted draft · Save to apply' : 'Needs review' }}</span><template v-if="host.ctMtlCandidate?.(field)"><button type="button" @click="host.ctMtlAccept(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)" title="Use as a reviewed draft. Save applies this text.">Accept</button><button type="button" @click="host.ctMtlDismiss(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Dismiss</button><small>Save and export use the underlying translation until you accept this text.</small></template><template v-else-if="host.ctMtlAccepted?.(field)"><button type="button" @click="host.ctMtlUndoAccept(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field)">Undo accept</button></template><template v-else><button type="button" @click="host.ctMtlShow(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Review MTL</button><button type="button" @click="host.ctMtlDismiss(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Dismiss</button></template><button v-if="host.ctMtlRecoveryReviews?.(field)?.length" type="button" @click="host.ctMtlRecoverReview(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Recover my review</button></div>
-            <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated || diagnosticPresentation.warningCount || diagnosticPresentation.errorCount" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field) && (field.required || host.ctClassFallback(field)?.kind !== 'generic')" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || !!host.ctMtlCandidate?.(field)" @click="host.ctMarkReviewed(field)">Mark reviewed</button><editor-diagnostic-meta :presentation="diagnosticPresentation"></editor-diagnostic-meta></div>
+            <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated || diagnosticPresentation.warningCount || diagnosticPresentation.errorCount" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field) && (field.required || host.ctClassFallback(field)?.kind !== 'generic')" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || !!host.ctMtlCandidate?.(field)" @click="host.ctMarkReviewed(field,$event)">Mark reviewed</button><editor-diagnostic-meta :presentation="diagnosticPresentation"></editor-diagnostic-meta></div>
             <div v-for="(issue,index) in diagnosticPresentation.notes" :key="index" :class="issue.kind === 'consistency' ? 'consistencyWarning' : 'terminologyWarning'" role="note">{{ issue.message }}</div>
         </div>` };
     const comparisonMixin=root.ClientTextComparisons?.mixin;

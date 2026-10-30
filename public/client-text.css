@@ -137,6 +137,7 @@
 .ctTarget label { display:block; font-size:12px; color:var(--ui-muted); margin-bottom:4px; }.ctTarget textarea { white-space:pre-wrap; tab-size:4; }.ctTarget > input { box-sizing:border-box; max-width:100%; min-width:110px; }
 .ctTarget.missing textarea,.ctTarget.missing input { border-color:var(--ui-missing); }.ctTarget.outdated textarea,.ctTarget.outdated input { border-color:var(--ui-dropped); }
 .ctFieldFacts { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:5px; }.ctFieldFacts small,.ctTarget label small { color:var(--ui-muted); font-weight:400; }.ctFieldFacts button { padding:3px 7px; font-size:12px; }
+.ctBlankSourceReview { margin:0 0 6px; font-size:12px; line-height:1.4; color:var(--ui-muted); font-weight:400; }
 .ctFormGrid { width:100%; table-layout:fixed; border-collapse:collapse; cursor:default; font:inherit; }.ctFormGrid th:first-child { width:3em; white-space:nowrap; }.ctFormGrid th,.ctFormGrid td { padding:5px; vertical-align:top; border:1px solid var(--ui-border); }.ctFormGrid th { text-align:center; }.ctFormGrid > tbody > tr > th { vertical-align:middle; }
 .ctNamedFormGrid th:first-child { width:7em; }
 .ctClassVariants { margin-top:8px; min-width:0; }.ctClassVariantsHeader { display:flex; flex-wrap:wrap; gap:6px 12px; align-items:baseline; }.ctClassVariantsHeader strong { font-size:12px; }.ctClassVariantsHeader small,.ctVariantSummary { color:var(--ui-muted); font-size:11px; }.ctVariantSummary { display:block; margin-top:4px; }

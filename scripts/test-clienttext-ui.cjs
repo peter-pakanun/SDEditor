@@ -823,8 +823,8 @@ test('context shares one component under identity and leaves fields and inline k
 function blankEnglishUnit(id='BlankThenEnglish',source='Visible English'){
     const original=namedUnit(id),base=original.fields[0];
     original.fields=[
-        {...base,id:JSON.stringify(['Blank',null]),name:'Blank',source:'',target:'RECOVERABLE_HIDDEN_TRANSLATION',required:false,sourceCell:'D2',targetCell:'E2'},
-        {...base,source,target:'Visible translation'},
+        {...base,id:JSON.stringify(['Blank',null]),name:'Blank',source:'',target:'',required:false,sourceCell:'D2',targetCell:'E2'},
+        {...base,source,target:source.trim()?'Visible translation':''},
         {...base,id:JSON.stringify(['Gender',null]),name:'Gender',kind:'gender',source:'',target:'F',required:false,sourceCell:'',targetCell:'F2'},
     ];return original;
 }
@@ -836,12 +836,12 @@ function visibleFieldsHarness(original,changes={}){
 }
 test('blank English fields hide without trimming nonempty English or removing its Gender metadata',()=>{
     const raw=' \tEnglish@literal\\n\nline \t',original=blankEnglishUnit('Whitespace',raw),before=clone(original),{app}=visibleFieldsHarness(original);
-    original.fields.splice(1,0,{...original.fields[0],id:JSON.stringify(['Whitespace',null]),name:'Whitespace',source:' \t\r\n\u00a0\uFEFF',target:'Hidden whitespace target'});
+    original.fields.splice(1,0,{...original.fields[0],id:JSON.stringify(['Whitespace',null]),name:'Whitespace',source:' \t\r\n\u00a0\uFEFF',target:' \t'});
     const snapshot=clone(original),visible=app.ctFieldsFor(original);
     assert.deepEqual(Array.from(visible,field=>field.name),['Text','Gender']);assert.equal(visible[0],original.fields[2]);assert.equal(visible[0].source,raw);
     assert.deepEqual(Array.from(app.ctFieldGroups.flatMap(group=>group.fields),field=>field.name),['Text','Gender']);
     assert.deepEqual(original,snapshot,'view construction keeps every baseline field and raw whitespace');assert.equal(before.fields.length,3);
-    assert.equal(original.fields[0].target,'RECOVERABLE_HIDDEN_TRANSLATION');
+    assert.equal(original.fields[0].target,'');
 });
 test('blank-source review assignments remain accessible in the field groups and keyboard order through durable Save',async()=>{
     const original=blankEnglishUnit('atlas_domination_2_4'),hidden=original.fields[0],visible=original.fields[1];
@@ -886,13 +886,50 @@ test('blank-source inherited review visibility follows saved assignments without
     blank.hideDNT=true;assert.equal(blank.ctFieldsFor().includes(hidden),true);
 });
 
-test('ClientText list omits all-blank units and ignores hidden targets in search and sort summaries',()=>{
+test('blank-English translations stay visible and searchable without an orange flag, including original and staged text',()=>{
+    const original=blankEnglishUnit('TargetOnly',''),field=original.fields[0];field.target='Retained translation';
+    const snapshot=clone(original),{app}=visibleFieldsHarness(original);
+    assert.equal(app.ctRows.length,1);assert.equal(app.ctFieldsFor().includes(field),true);
+    assert.equal(app.ctBlankSourceReview(field),false);
+    app.ctSearch='Retained translation';app.ctApplySearch();assert.equal(app.ctRows.length,1);
+    app.ctSaved={[original.id]:{values:{...S.valuesFor(original),[field.id]:''},reviewed:{},saved:true}};
+    assert.equal(app.ctFieldsFor().includes(field),true,'clearing text does not hide the retained original');
+    const staged=blankEnglishUnit('StagedOnly',''),{app:other}=visibleFieldsHarness(staged),id=staged.fields[0].id;
+    assert.equal(other.ctFieldsFor().length,0);
+    other.ctSaved={[staged.id]:{values:{...S.valuesFor(staged),[id]:'Saved target'},reviewed:{},saved:true}};
+    assert.equal(other.ctRows.length,1);assert.equal(other.ctFieldsFor().includes(staged.fields[0]),true);
+    other.hideDNT=true;assert.equal(other.ctFieldsFor().includes(staged.fields[0]),true);
+    assert.deepEqual(original,snapshot);
+});
+
+test('retained blank-English translations can be cleared and saved empty with original text and history preserved',async()=>{
+    const original=blankEnglishUnit('RemovedSource'),field=original.fields[0];field.target='Old translation';
+    const f=fixture();await f.store.import(scope,{units:[original],assets:[asset]});
+    const {app}=visibleFieldsHarness(original);app._ctStore=f.store;app.ctSync=()=>{};app.ctLoadMemory=()=>{};
+    assert.equal(await app.ctSave(),true);
+    app.ctValues[field.id]='';app.ctEdited(field);
+    assert.equal(app.ctFieldsFor().includes(field),true);assert.equal(await app.ctSave(),true);
+    const saved=(await f.store.getSaved(scope))[original.id],history=await f.store.listHistory(scope,original.id);
+    assert.equal(saved.values[field.id],'');assert.equal(saved.reviewed[field.id],S.sourceHash(''));
+    assert.equal(history.find(entry=>entry.after.revision===saved.revision).before.values[field.id],'Old translation');
+    assert.equal((await f.store.getUnit(scope,original.id)).fields[0].target,'Old translation');
+    assert.equal(app.ctFieldsFor().includes(field),true,'non-orange text remains accessible after empty Save');
+});
+
+test('blank-English draft-only records remain discoverable before hydration and while clearing the active field',()=>{
+    const original=blankEnglishUnit('DraftOnly',''),field=original.fields[0],{app}=visibleFieldsHarness(original);
+    assert.equal(app.ctRows.length,0);app.ctDraftSummaries=[{unitId:original.id,revision:1}];
+    assert.equal(app.ctRows.length,1);assert.equal(app.ctFieldsFor().includes(field),true);
+    app.ctDraftSummaries=[];app.ctDraftDirty=true;app.ctValues[field.id]='Draft text';app.ctFocusedField=field.id;
+    assert.equal(app.ctFieldsFor().includes(field),true);app.ctValues[field.id]='';
+    assert.equal(app.ctFieldsFor().includes(field),true,'clearing cannot remove the focused cell before Save');
+});
+
+test('ClientText list omits entirely empty unused units and fields',()=>{
     const mixed=blankEnglishUnit(),blank=blankEnglishUnit('AllBlank',' \t\r\n'),snapshot=clone([mixed,blank]),
         {app}=visibleFieldsHarness(mixed,{ctUnits:[mixed,blank],_ctUnitIndex:new Map([[mixed.id,mixed],[blank.id,blank]])});
     assert.deepEqual(Array.from(app.ctRows,unit=>unit.id),[mixed.id]);assert.equal(app.ctFieldsFor(blank).length,0,'Gender alone cannot create a visible prose record');
     assert.equal(app.ctSortValue(mixed,'english').includes('Visible English'),true);assert.equal(app.ctSortValue(mixed,'translation').includes('Visible translation'),true);
-    assert.equal(app.ctSortValue(mixed,'translation').includes('RECOVERABLE_HIDDEN_TRANSLATION'),false);
-    app.ctSearch='RECOVERABLE_HIDDEN_TRANSLATION';app.ctApplySearch();assert.equal(app.ctRows.length,0);
     app.ctSearch='Visible translation';app.ctApplySearch();assert.deepEqual(Array.from(app.ctRows,unit=>unit.id),[mixed.id]);
     assert.deepEqual([mixed,blank],snapshot);assert.equal(app.ctCounts.total,2,'status totals continue to describe the retained originals');
 });
@@ -1009,7 +1046,7 @@ test('DNT toggle while TM replacement confirmation is pending cannot write a hid
     assert.equal(await pending,false);assert.deepEqual(clone(app.ctValues),before);assert.equal(app.ctDraftDirty,false);
 });
 
-test('blank-first-field preview, Lookup and TM fall back to real English while hidden authored text stays intact',async()=>{
+test('blank-first-field preview, Lookup and TM fall back to real English while unused cells stay intact',async()=>{
     const original=blankEnglishUnit(),reference=blankEnglishUnit('Reference'),{app,window}=visibleFieldsHarness(original,{ctUnits:[original,reference],
         _ctUnitIndex:new Map([[original.id,original],[reference.id,reference]]),ctFocusedField:original.fields[0].id});
     reference.fields[1].target='Reference translation';const seen=[];
@@ -1017,14 +1054,15 @@ test('blank-first-field preview, Lookup and TM fall back to real English while h
     assert.equal(app.ctPreviewField,original.fields[1]);assert.equal(app.ctMemoryResults.length,1);assert.equal(seen[0],original.fields[1]);
     assert.deepEqual(Array.from(app.ctLookupResults,match=>match.name),['Text']);assert.equal(app.ctLookupResults[0].target,'Reference translation');
     app.ctEdited=field=>{assert.equal(field,original.fields[1]);app.ctDraftDirty=true;};await app.ctApplyMemory({target:'TM@literal\\n\ntranslation'});
-    assert.equal(app.ctValues[original.fields[1].id],'TM@literal\\n\ntranslation');assert.equal(app.ctValues[original.fields[0].id],'RECOVERABLE_HIDDEN_TRANSLATION');
+    assert.equal(app.ctValues[original.fields[1].id],'TM@literal\\n\ntranslation');assert.equal(app.ctValues[original.fields[0].id],'');
     app.ctFocusedField=original.fields[2].id;assert.equal(app.ctPreviewField,original.fields[1],'Gender focus retains a prose preview');
 });
-test('initial ClientText selection focuses later real English and hydrates hidden durable values unchanged',async()=>{
+test('initial ClientText selection exposes and focuses retained draft text even without English',async()=>{
     const original=blankEnglishUnit(),hidden=original.fields[0],visible=original.fields[1],before=clone(original),{app}=visibleFieldsHarness(original,{ctSelection:'',ctValues:{}}),focus=[];
     app._ctStore={async getDraft(){return{revision:3,values:{[hidden.id]:'Hidden durable draft',[visible.id]:'Visible durable draft'},reviewed:{}};}};
     app.ctFlushDraft=async()=>true;app.ctFlushCommentDraft=async()=>{};app.ctLoadComments=()=>{};app.ctLoadCommentDraft=()=>{};app.ctFocusTarget=()=>focus.push(app.ctFocusedField);
     assert.equal(await app.ctSelect(original,true),true);assert.equal(app.ctFocusedField,visible.id);assert.deepEqual(focus,[visible.id]);
+    assert.equal(app.ctFieldsFor().includes(hidden),true);
     assert.equal(app.ctValues[hidden.id],'Hidden durable draft');assert.equal(app.ctValues[visible.id],'Visible durable draft');assert.equal(app.ctValues[original.fields[2].id],'F');
     assert.deepEqual(original,before);
 });
@@ -1072,12 +1110,12 @@ test('TM refuses stale match IDs and modal or busy editor before requesting repl
         assert.equal(await app.ctApplyMemory(match),false);assert.equal(app.ctValues[fieldId],original.fields[0].target);
     }
 });
-test('hidden English fields remain in real durable saves, immutable originals and recoverable history',async()=>{
+test('blank-source authored text is visible and remains in real durable saves and recoverable history',async()=>{
     const original=blankEnglishUnit(),snapshot=clone(original),hidden=original.fields[0],visible=original.fields[1],f=fixture();
     await f.store.import(scope,{units:[original],assets:[asset]});const {app}=visibleFieldsHarness(original);
     app._ctStore=f.store;app.ctSync=()=>{};app.ctLoadMemory=()=>{};app.ctDraftDirty=true;
     app.ctValues[hidden.id]='Authored hidden@value\\n\nkept';app.ctValues[visible.id]='Authored visible';
-    assert.deepEqual(Array.from(app.ctFieldsFor(original),field=>field.name),['Text','Gender']);assert.equal(await app.ctSave(),true);
+    assert.deepEqual(Array.from(app.ctFieldsFor(original),field=>field.name),['Blank','Text','Gender']);assert.equal(await app.ctSave(),true);
     const saved=(await f.store.getSaved(scope))[original.id],retained=await f.store.getUnit(scope,original.id),history=await f.store.listHistory(scope,original.id);
     assert.equal(saved.values[hidden.id],'Authored hidden@value\\n\nkept');assert.equal(saved.values[visible.id],'Authored visible');assert.equal(saved.values[original.fields[2].id],'F');
     assert.deepEqual(S.normalizeUnit(retained),S.normalizeUnit(snapshot));assert.equal(history.at(-1).after.values[hidden.id],saved.values[hidden.id]);
@@ -1093,7 +1131,7 @@ test('late same-ID hydration cannot publish old blank-field drafts or focus into
     app.ctSelection=replacement.id;app.ctValues=values;app.ctFocusedField=replacement.fields[1].id;
     pending.resolve({values:{[original.fields[0].id]:'Old hidden draft'},revision:4});assert.equal(await selecting,false);
     assert.equal(app.ctValues,values);assert.equal(app.ctWorkspace.scope.groupId,'replacement-group');assert.equal(app.ctPreviewField,replacement.fields[1]);
-    assert.equal(app.ctValues[replacement.fields[0].id],'RECOVERABLE_HIDDEN_TRANSLATION');
+    assert.equal(app.ctValues[replacement.fields[0].id],'');
 });
 
 test('sheet filtering matches names without changing workbook identities, selection or record filters',()=>{
@@ -1422,7 +1460,7 @@ for(const full of [false,true])test(`worksheet-order Tab and Shift+Tab ${full?'f
         await app.ctTargetKeydown(field,key);assert.equal(key.defaultPrevented,true,from+' to '+to);assert.equal(key.propagationStopped,true);
         assert.equal(focuses.at(-1).fieldId,byCell(to).id);assert.equal(app.ctFocusedField,byCell(to).id);
     }
-    assert.equal(app.ctValues[byCell('K2').id],'Hidden authored translation');assert.equal(app.ctValues[byCell('I2').id],'');
+    assert.equal(app.ctValues[byCell('K2').id],'');assert.equal(app.ctValues[byCell('I2').id],'');
 });
 
 test('inline worksheet boundaries save and navigate inline while full boundaries retain native surrounding controls',async()=>{
@@ -1687,7 +1725,7 @@ test('dirty inline drafts at a worksheet boundary or before only occupied IDs ar
 
 test('inline cross-ID navigation saves exact raw work, skips all-blank and occupied IDs and focuses the worksheet edge',async()=>{
     const rows=[worksheetUnit('ID1'),worksheetUnit('ID2',3),worksheetUnit('ID3',4),worksheetUnit('ID4',5)];
-    for(const field of rows[1].fields)if(field.kind!=='gender')field.source=' \t\n';
+    for(const field of rows[1].fields)if(field.kind!=='gender'){field.source=' \t\n';field.target='';}
     const f=fixture();await f.store.import(scope,{units:rows,assets:[asset]});
     const {app,focuses}=keyboardHarness(rows[0],{ctUnits:rows,_ctUnitIndex:new Map(rows.map(unit=>[unit.id,unit])),ctDraftDirty:true,
         instanceTabId:'our-session',ctPeers:[{unitId:rows[2].id,sessionId:'other-session',away:false}]});
@@ -2197,7 +2235,7 @@ function worksheetUnit(id='WorksheetOrder',row=2){
     original.fields=[field('Text','text','Main English','Main translation','F'),
         field('Word','form','Shared form English','Form MS','H',{form:'MS',group:'Word',required:false}),
         field('Word','form','Shared form English','','I',{form:'FS',group:'Word',required:false}),
-        field('Blank','text',' \t\r\n','Hidden authored translation','K',{required:false}),
+        field('Blank','text',' \t\r\n','','K',{required:false}),
         field('Later','text','Later English','Later translation','Z'),
         field('Wide','text','Wide English','Wide translation','AB'),
         field('Gender','gender','','F','D',{required:false})];
@@ -4281,7 +4319,7 @@ function initializationHarness(changes={}){
 for(const initialHideDNT of [true,false])test('all-DNT sheet navigation follows repeated toggles after activation; drafts and selection stay intact: '+initialHideDNT,async()=>{
     const visible=unit(),hidden={...unit(),sheet:'OnlyDntSheet'},gender={...unit(),role:'gender',sheet:'OnlyDntGender'},blank={...unit(),sheet:'OnlyBlank'};
     for(const original of [hidden,gender,blank])original.id=JSON.stringify([original.role,original.sheet,original.recordId]);
-    hidden.fields[0].source='<augurypopuptext>{[DNT] hidden sheet}';gender.fields[0].source='DNT hidden Gender sheet';blank.fields[0].source='';
+    hidden.fields[0].source='<augurypopuptext>{[DNT] hidden sheet}';gender.fields[0].source='DNT hidden Gender sheet';blank.fields[0].source='';blank.fields[0].target='';
     const units=[visible,hidden,gender,blank],before=clone(units),store={getUnits:async()=>units,getSaved:async()=>({}),getDraftSummaries:async()=>[],
         getDraft:async()=>null,listHistory:async()=>[],listWorkspaces:async()=>[],listRequests:async()=>[]},
         {app,mixin}=initializationHarness({hideDNT:initialHideDNT,_ctStore:store});
