@@ -325,6 +325,10 @@ async function run() {
     });
     await page.waitForSelector('.editor [data-editor-ref="translation_1"]:not([readonly])');
     console.log('SD full editor and native fields mounted.');
+    if(process.env.SDEDITOR_SD_TOOLBAR_ONLY==='1'){
+      await require('./sd-toolbar-browser-check.cjs')({page,directory:join(__dirname,'../temp/sd-toolbar')});
+      assert.deepEqual(failures,[]);return;
+    }
     if (process.env.SDEDITOR_LOOKUP_FOCUS_ONLY === '1') {
       await require('./lookup-focus-browser-check.cjs')({ page, directory: join(__dirname, '../temp/lookup-focus') });
       assert.deepEqual(failures, []); return;
@@ -428,6 +432,7 @@ async function run() {
       const unit = Vue.markRaw({ id: 'normal|Sheet|record', role: 'normal', sheet: 'Sheet', recordId: 'record', fields: [field], developerNotes: 'Developer note', notes: [] });
       host.ctWorkspace = { scope: { accountId: 'guest', game: 'poe2', branchId: 'default', versionId: 'fixture', groupId: 'local:fixture', language: 'Thai' },
         metadata: { version: { name: 'Fixture' }, descriptors: [{ role: 'normal', baselineId: 'a'.repeat(64) }] } };
+      const fixtureMtl=Vue.markRaw(ClientTextMtlMemoryStore.create());host.ctMtlStorage=()=>fixtureMtl;
       host.ctUnits = Vue.markRaw([unit]); host._ctUnitIndex = Vue.markRaw(new Map([[unit.id, unit]])); host._ctWorkUnits = Vue.markRaw(new Map());
       host.ctSelection = unit.id; host.ctFocusedField = field.id; host.ctValues = { [field.id]: field.target };
       host.ctSaved = {}; host.ctReviewed = {}; host.ctEditor = true; host.ctActive = true;
@@ -581,8 +586,9 @@ async function run() {
     assert.equal(await ct.inputValue(), 'kept raw @ literal\\n\ntranslation');
     await page.locator('.sharedEditorSidebar').getByRole('button', { name: 'TM', exact: true }).click();
     assert.equal(await page.locator('.sharedEditorSidebar').getByRole('button', { name: 'Manage TM', exact: true }).count(), 0);
-    await page.locator('.sharedEditorSidebar').getByRole('button', { name: /History/ }).click();
-    assert.equal(await page.locator('.ctHistoryPanel').count(), 1);
+    await page.locator('.ctFullEditor .editorFieldTools[data-comparison-side="translation"] .fieldHistoryMenuButton').first().click();
+    assert.equal(await page.locator('.ctFullEditor .fieldHistoryMenu').count(), 1);
+    await page.locator('.ctFullEditor .fieldHistoryMenu').getByRole('button',{name:'Close revision menu',exact:true}).click();
     await page.locator('.sharedEditorSidebar').getByRole('button', { name: 'Comments', exact: true }).click();
     assert.equal(await page.locator('.fileCommentsPanel').count(), 1);
     assert.match(await page.locator('.fileCommentsPanel').innerText(), /Shared comments are unavailable in test mode/);

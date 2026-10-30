@@ -2358,9 +2358,9 @@ function classVariantUnit(id='ClassVariants',row=2){
         targetCell:String.fromCharCode(68+index)+row}));return original;
 }
 
-function dialogueVariantUnit(generic=''){
+function dialogueVariantUnit(generic='',sheet='NPCTalkDialogueTextAudio'){
     const original=classVariantUnit('DialogueVariants'),base=original.fields[0];
-    original.role='normal';original.sheet='NPCTalkDialogueTextAudio';original.id=JSON.stringify([original.role,original.sheet,original.recordId]);
+    original.role='normal';original.sheet=sheet;original.id=JSON.stringify([original.role,original.sheet,original.recordId]);
     original.fields=[{...base,id:JSON.stringify(['Text',null]),kind:'text',form:undefined,group:undefined,target:generic,originalMissing:!generic.trim()},
         ...original.fields.filter(field=>CLASS_VARIANT_FORMS.includes(field.form)).map(field=>({...field,required:!!field.target.trim(),originalMissing:false}))];
     for(const field of original.fields)field.outdated=true;
@@ -2387,7 +2387,7 @@ test('dialogue class blanks show English fallback in fields, picker, grouped lis
     assert.equal(controller.field.placeholder,'Optional translation');assert.equal(app.ctClassVariantCounts(group),'3 translated · 9 use English');
     const gender=dialogueVariantUnit();gender.role='gender';gender.sheet+='_Gender';const genderHost=keyboardHarness(gender).app;
     assert.equal(genderHost.ctBlankEnglishVariants(genderHost.ctFieldGroups[0]).length,10,'the matching Gender worksheet retains the same class fallback');
-    for(const change of [unit=>unit.sheet='NPCTextAudio',unit=>unit.sheet='NPCTextAudio_Gender',
+    for(const change of [unit=>unit.sheet='NPCs',unit=>unit.sheet='NPCTalk',
         unit=>unit.fields.forEach(field=>field.form='MS'),unit=>unit.fields.forEach(field=>field.source=''),
         unit=>unit.fields.forEach(field=>field.source='[NOAUDIO]'),unit=>unit.fields.forEach(field=>field.source='[DNT] internal')]){
         const other=dialogueVariantUnit();change(other);const host=keyboardHarness(other).app;
@@ -2440,8 +2440,8 @@ test('bulk dialogue review fences stale groups and blocks conflicts, pending sav
     assert.equal(S.statusFor(app.ctCurrentUnit,{values:app.ctValues,reviewed:app.ctReviewed}).fields[blank.id].missing,true,'reviewing a blank does not erase separately required translation workload');
 });
 
-test('saved generic dialogue covers blank overrides without approving populated variants; draft generic edits only change presentation',async()=>{
-    const original=dialogueVariantUnit('Generic [Keyword] {0}'),f=fixture();await f.store.import(scope,{units:[original],assets:[asset]});
+for(const sheet of ['NPCTextAudio','NPCTalkDialogueTextAudio'])test(sheet+' saved generic dialogue covers blank overrides without approving populated variants; draft generic edits only change presentation',async()=>{
+    const original=dialogueVariantUnit('Generic [Keyword] {0}',sheet),f=fixture();await f.store.import(scope,{units:[original],assets:[asset]});
     const {app}=keyboardHarness(original);app._ctStore=f.store;app.ctSync=()=>{};app.ctLoadMemory=()=>{};
     const group=app.ctFieldGroups[0],blank=original.fields.find(field=>field.kind==='form'&&!field.target),generic=original.fields[0],
         populated=app.ctPopulatedVariants(group),before=clone(original);
@@ -2462,8 +2462,8 @@ test('saved generic dialogue covers blank overrides without approving populated 
     assert.equal(app.ctStatus().fields[blank.id].outdated,true,'typing a generic draft cannot clear review');assert.deepEqual(original,before);
 });
 
-test('Gender dialogue fallbacks require every generic form and preview each form separately without choosing a gender',()=>{
-    const original=dialogueVariantUnit();original.role='gender';original.sheet+='_Gender';original.id=JSON.stringify([original.role,original.sheet,original.recordId]);
+for(const sheet of ['NPCTextAudio','NPCTalkDialogueTextAudio'])test(sheet+' Gender dialogue fallbacks require every generic form and preview each form separately without choosing a gender',()=>{
+    const original=dialogueVariantUnit('',sheet);original.role='gender';original.sheet+='_Gender';original.id=JSON.stringify([original.role,original.sheet,original.recordId]);
     const base=original.fields[0];original.fields=[...['MS','FS','NS','MP','FP','NP'].map((form,index)=>({...base,id:JSON.stringify(['Text',form]),kind:'form',group:'Text',form,
         target:form==='NS'?'NONEXISTENT':'Generic '+form,required:true,originalMissing:false,targetCell:'GEN'+index})),...original.fields.slice(1)];
     const {app,mixin}=keyboardHarness(original),blank=original.fields.find(field=>field.form==='StrFour');app.ctFocusedField=blank.id;
@@ -2526,7 +2526,7 @@ test('class variant names default to English Characters Name source and preserve
     const group=app.ctFieldGroups[0],dex=group.fields.find(field=>field.form==='DexFour'),dexb=group.fields.find(field=>field.form==='DexFourb');
     assert.notEqual(app.mapClientTextClassNames,false,'an absent legacy setting keeps class name mapping enabled');
     assert.equal(app.ctClassVariantName(dex),'Ranger');assert.equal(app.ctClassVariantName(dexb),'Huntress');
-    assert.equal(app.ctClassVariantLabel(dex),'Ranger (DexFour)');assert.equal(app.ctVariantLabel(dex),'Ranger (DexFour) (blank)');
+    assert.equal(app.ctClassVariantLabel(dex),'Ranger (DexFour)');assert.equal(app.ctVariantLabel(dex),'Ranger (DexFour) (Use generic)');
     assert.equal(app.ctVariantLabel(dexb),'Huntress (DexFourb)');
     assert.equal(app.ctHistoryFieldLabel(dex),'Text · Ranger (DexFour)');
     assert.equal(app.ctHistoryFieldLabel(dexb),'Text · Huntress (DexFourb)');
@@ -2680,8 +2680,8 @@ test('hidden blank variants expose committed workload, missing/outdated facts an
         missing=group.fields.find(field=>field.form==='IntFourb'),optional=group.fields.find(field=>field.form==='IntFour'),
         outdated=group.fields.find(field=>field.form==='StrFourb');
     app.ctDiagnostics={[app.ctSelection]:[{fieldId:optional.id,severity:'warning',message:'Preserved manual finding'}]};
-    assert.equal(app.ctVariantLabel(missing),'Sorceress (IntFourb) (blank) · Missing');
-    assert.equal(app.ctVariantLabel(optional),'Witch (IntFour) (blank) · Warning');assert.equal(app.ctVariantFacts(optional).missing,false);
+    assert.equal(app.ctVariantLabel(missing),'Sorceress (IntFourb) (Use generic) · Missing');
+    assert.equal(app.ctVariantLabel(optional),'Witch (IntFour) (Use generic) · Warning');assert.equal(app.ctVariantFacts(optional).missing,false);
     assert.equal(app.ctVariantLabel(outdated),'Warrior (StrFourb) · Outdated');
     assert.equal(app.ctVariantSummary(app.ctClassFields(group)),'2 Workload · 1 Missing · 1 Outdated · 1 Warning');
     const diagnostics=app.ctDiagnostics;app.ctSelectVariant(group,optional.id,{focus:false});

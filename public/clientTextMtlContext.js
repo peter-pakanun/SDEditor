@@ -937,5 +937,5 @@
             replies.set(challenge.id, { signature, body: copy(body) }); return body;
         } };
     }
-    return { LIMITS, create, roleHints, exampleScore, createLookupSession, build: options => create(options).initial };
+    return { approvedTranslation(unit,field,saved){const translation=translationFor(unit,field,saved);return validExample(field,translation)?translation.translation:null;}, LIMITS, create, roleHints, exampleScore, createLookupSession, build: options => create(options).initial };
 });

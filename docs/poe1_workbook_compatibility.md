@@ -1,5 +1,9 @@
 # PoE1 workbook compatibility audit
 
+The [29 October full export follow-up](poe1_full_export_validation.md), audited on
+30 October 2026, extends this historical Thai-only evidence to all 14 supplied
+workbooks across nine languages, including the five actual PoE1 Gender exports.
+
 Local audit, 20 October 2026, based on frontend `d173f8c754c7b42b08f3f53193ba698ed9f3a8fe`.
 The supplied files were read directly and never modified or sent to an external service.
 No workbook content or generated export is committed. This is local validation, not deployment evidence.

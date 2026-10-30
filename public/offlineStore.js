@@ -21,7 +21,8 @@
   // v24 excludes pages/workers unaware of durable private workbook identities,
   // their local-only memory scope, restore readiness and original bindings.
   // No stores are removed and no authored records or retry bodies are rewritten.
-  const DB_VERSION = 25;
+  // v26 fences older writers before private SD MTL review acceptance joins atomic saves.
+  const DB_VERSION = 26;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
   const tmListeners = new Set();
@@ -209,6 +210,7 @@
           notifyMigration({ id: 'schema:' + DB_VERSION, kind: 'schema', scope: { storageVersion: DB_VERSION }, state: 'started', durationMs: 0 });
         }
         const db = req.result;
+        if(!db.objectStoreNames.contains('sd_mtl')){const store=db.createObjectStore('sd_mtl',{keyPath:'key'});store.createIndex('by_scope','scopeKey');}
 
         if (!db.objectStoreNames.contains(STORE_KV)) {
           db.createObjectStore(STORE_KV, { keyPath: 'key' });
@@ -1294,7 +1296,7 @@
       collaboration: batch.collaboration || null, promoteDropped: batch.promoteDropped || null, promoteDroppedByPath: batch.promoteDroppedByPath || null,
       ...(resetStaging ? { resetStaging: true, origin: batch.origin, bases: batch.bases } : {}),
       ...(!resetStaging && batch.bases ? { bases: batch.bases } : {}), ...(batch.checkpoint ? { checkpoint: batch.checkpoint } : {}),
-      ...(draft ? { draft } : {}), ...(Object.hasOwn(batch, 'tmCapture') ? { tmCapture: batch.tmCapture, origin: batch.origin } : {}) });
+      ...(draft ? { draft } : {}), ...(batch.sdMtl?.length?{sdMtl:batch.sdMtl}:{}), ...(Object.hasOwn(batch, 'tmCapture') ? { tmCapture: batch.tmCapture, origin: batch.origin } : {}) });
     const receiptKey = captured ? receiptScopeKey(captured) : 'translation_save_receipts_' + batch.game;
     const batchWorkspaceKey = workspaceKey(captured || batch.game), batchSourceKey = sourceKey(captured || batch.game);
     const db = await openDb();
@@ -1302,7 +1304,7 @@
     const recordMode = await usesRecords(captured);
     const recordBatch = recordMode ? await normalized.beginBatch(batch, captured,
       { workspace: batchWorkspaceKey, source: batchSourceKey, receipts: receiptKey }, normalizedRooms) : null;
-    const tx = recordBatch?.tx || db.transaction([STORE_KV, revisionsStore, ...(batch.tmCapture?.length && normalized ? normalized.tmStores : [])], 'readwrite');
+    const tx = recordBatch?.tx || db.transaction([STORE_KV, revisionsStore, ...(batch.sdMtl?.length?['sd_mtl']:[]), ...(batch.tmCapture?.length && normalized ? normalized.tmStores : [])], 'readwrite');
     const done = txDone(tx);
     const kv = recordBatch?.kv || tx.objectStore(STORE_KV);
     let failure, result;
@@ -1370,6 +1372,20 @@
               JSON.parse(JSON.stringify(values[batchWorkspaceKey].status?.[file.filepath] || {}))]));
           }
           return;
+        }
+        for(const claim of batch.sdMtl||[]){
+          const store=tx.objectStore('sd_mtl'),request=store.get(claim.key);
+          request.onsuccess=()=>{
+            const row=request.result,file=files.find(file=>file.filepath===row?.filepath);
+            const decoded=String(file?.translations?.[row?.index]??'').replace(/\\n/g,'\n');
+            const text=row?.column==null?decoded:decoded.split('@')[row.column];
+            if(!row||row.requestId!==claim.requestId||row.revision!==claim.revision||row.status!=='acceptedDraft'
+              ||row.scope.accountId!==String(batch.accountId||'guest')||row.scope.game!==batch.game||row.scope.language!==batch.language
+              ||row.scope.baselineId!==batch.sourceHash||row.scope.branchId!==(batch.branchId||'default')
+              ||(row.scope.groupId||'')!==(batch.groupId||'')||(row.scope.versionId||'')!==(batch.versionId||'')
+              ||text!==claim.text||row.sourceHash!==claim.sourceHash){fail(Object.assign(new Error('The MTL review changed before Save. Reopen this file to compare it.'),{code:'MTL_REVIEW_CHANGED'}));return;}
+            store.put({...row,status:'accepted',reviewText:text,revision:row.revision+1,saveJobId:batch.jobId});
+          };
         }
         const workspace = values[batchWorkspaceKey];
         if (!workspace || !Array.isArray(workspace.descs)) {

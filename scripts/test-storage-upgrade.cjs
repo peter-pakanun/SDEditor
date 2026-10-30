@@ -179,7 +179,7 @@ function versionedStorage(version = 4) {
   } };
   return { indexedDB, tables, connections, requests, events, createdStores, operations, commits, features,
     get version() { return storedVersion; },
-    snapshot: () => [...tables].filter(([name]) => !name.startsWith('clienttext_') && name !== 'statdescription_zips').map(([name, rows]) => [name, copy([...rows])]),
+    snapshot: () => [...tables].filter(([name]) => !name.startsWith('clienttext_') && name !== 'statdescription_zips' && name !== 'sd_mtl').map(([name, rows]) => [name, copy([...rows])]),
   };
 }
 function loadStore(fixture, worker = false) {
@@ -250,7 +250,7 @@ test('v4 to current storage upgrade preserves every KV record and revision store
   const { store } = loadStore(fixture);
   assert.deepEqual(await store.getSettings(), before[0][1].find(([key]) => key === 'settings')[1].value);
   assert.equal(fixture.version, CURRENT_STORAGE_VERSION); assert.equal(fixture.requests[0].version, CURRENT_STORAGE_VERSION);
-  assert.deepEqual(fixture.createdStores, ['statdescription_zips', ...require('../public/clientTextStore.js').names, ...require('../public/clientTextMtlStore.js').names]); assert.deepEqual(fixture.snapshot(), before);
+  assert.deepEqual(fixture.createdStores, ['sd_mtl', 'statdescription_zips', ...require('../public/clientTextStore.js').names, ...require('../public/clientTextMtlStore.js').names]); assert.deepEqual(fixture.snapshot(), before);
 });
 
 test('v11 ClientText writers are fenced while original assets, work, history and retry evidence are retained', async () => {
@@ -271,7 +271,7 @@ test('v11 ClientText writers are fenced while original assets, work, history and
   assert.equal(fixture.version, CURRENT_STORAGE_VERSION); assert.equal(older.closed, true);
   assert.throws(() => older.transaction(['clienttext_requests'], 'readwrite'), error => error.name === 'InvalidStateError');
   await assert.rejects(openVersion(fixture, 11), error => error.name === 'VersionError');
-  assert.deepEqual(fixture.createdStores, ['statdescription_zips', ...require('../public/clientTextMtlStore.js').names]);
+  assert.deepEqual(fixture.createdStores, ['sd_mtl', 'statdescription_zips', ...require('../public/clientTextMtlStore.js').names]);
   assert.deepEqual(fixture.snapshot(), before);
   for (const [name, row] of Object.entries(retained)) assert.deepEqual(fixture.tables.get(name).get(row.key), row);
   assert.equal(await fixture.tables.get('clienttext_assets').get('original').blob.text(), 'exact original workbook bytes');
@@ -324,7 +324,7 @@ test('v12 editors are fenced without changing accepted parsing authority or frag
   await loadStore(fixture).store.getSettings();
   assert.equal(fixture.version, CURRENT_STORAGE_VERSION);assert.equal(older.closed,true);
   await assert.rejects(openVersion(fixture,12),error=>error.name==='VersionError');
-  assert.deepEqual(fixture.createdStores,['statdescription_zips',...require('../public/clientTextMtlStore.js').names]);assert.deepEqual(fixture.snapshot(),before);
+  assert.deepEqual(fixture.createdStores,['sd_mtl','statdescription_zips',...require('../public/clientTextMtlStore.js').names]);assert.deepEqual(fixture.snapshot(),before);
   assert.deepEqual(await snapshotStores(fixture, names), clientTextBefore,
     'Every ClientText row, fragmented request, receipt and original workbook byte survives the upgrade.');
 });

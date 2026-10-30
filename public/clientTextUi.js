@@ -1563,7 +1563,7 @@
             ctForm(group, form) { return group.fields.find(field => field.form === form); },
             ctClassFields(group) { return group.fields.filter(isClassField); },
             ctClassEnglishField(field,unit=this.ctCurrentUnit) {
-                return this.gameVersion==='poe2' && String(unit?.sheet || '').replace(/_Gender$/,'')==='NPCTalkDialogueTextAudio' && unit.fields.includes(field)
+                return this.gameVersion==='poe2' && ['NPCTextAudio','NPCTalkDialogueTextAudio'].includes(String(unit?.sheet || '').replace(/_Gender$/,'')) && unit.fields.includes(field)
                     && isClassField(field) && !!String(field.source ?? '').trim() && !root.ClientTextState.audioOnly(field.source) && !isDNTSource(field.source);
             },
             ctClassUsesEnglish(field,unit=this.ctCurrentUnit,value=this.ctValues[field.id]) {

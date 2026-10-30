@@ -1,5 +1,9 @@
 # ClientText MTL
 
+StatDescription uses the same toolbar and visibility policy with its own syntax,
+private review storage and transient server source handling. See [SD toolbar and
+MTL](sd_mtl.md). SD has no Use English action.
+
 MTL generates a suggestion for one ClientText text or grammatical-form field. Gender metadata and empty English fields are excluded. The field toolbar uses a compact square translation icon, immediately before the history separator. **Settings → MTL** contains the personal data-sharing choice and optional F8 or Ctrl+Alt+F8 shortcut; shortcuts are disabled initially. Admins also see the existing connection controls and limits panel in this section. Switching sections or closing and reopening Settings preserves unsaved quota edits; only **Save limits** applies them. Editor behavior and other keyboard shortcuts remain under **Editor & shortcuts**.
 
 Translate, MTL review controls and **Settings → MTL** are visible to signed-in Translators and Managers with an assigned account language, and always to Admins. The selected editor language does not count as an assignment. Assigned Managers and Admins retain their existing all-language access; a Translator selecting another language still sees the disabled Translate control. Losing an assignment hides MTL without discarding ordinary drafts or separate review buffers. Shared character tone notes and other private assets keep their existing access policy.

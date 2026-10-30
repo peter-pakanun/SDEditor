@@ -1600,7 +1600,7 @@
       }
       const db = await openDb(), tx = db.transaction([stores.meta, stores.baseline, stores.files, stores.records, stores.drafts,
         stores.rooms, stores.shared, stores.operations, stores.roomRecords, stores.submissions, stores.receipts, revisionStoreName(scope.game),
-        ...(batch.tmCapture?.length ? tmStores : [])], 'readwrite');
+        ...(batch.sdMtl?.length?['sd_mtl']:[]), ...(batch.tmCapture?.length ? tmStores : [])], 'readwrite');
       let roomSelection;
       const fail = error => { tx._normalizedError = error; try { tx.abort(); } catch (_) {} };
       const synthetic = work => {

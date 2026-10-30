@@ -500,14 +500,14 @@ test('class workload fills distinguish optional blank, missing and reviewed outd
     assert.equal(field(unresolved, 'Text', 'DexFour').originalFill, 'FF9966');
 });
 
-test('generic dialogue export preserves blank overrides and all Gender defaults while removing inherited orange fill',async()=>{
+for(const sheetName of ['NPCTextAudio_Gender','NPCTalkDialogueTextAudio_Gender'])test(sheetName+' generic dialogue export preserves blank overrides and all Gender defaults while removing inherited orange fill',async()=>{
     const bytes=await workbook({normal:classDialogue()});
     // The workbook helper uses Normal as its ordinary sheet name.
     const zip=await JSZip.loadAsync(bytes),book=await zip.file('xl/workbook.xml').async('string');
-    zip.file('xl/workbook.xml',book.replace('name="Normal"','name="NPCTalkDialogueTextAudio_Gender"'));
-    const original=await zip.generateAsync({type:'uint8array'}),parsed=await Codec.parseWorkbook(original,{filename:'German_Gender.xlsx',role:'gender'}),current=get(parsed,'dialogue','NPCTalkDialogueTextAudio_Gender'),
+    zip.file('xl/workbook.xml',book.replace('name="Normal"','name="'+sheetName+'"'));
+    const original=await zip.generateAsync({type:'uint8array'}),parsed=await Codec.parseWorkbook(original,{filename:'German_Gender.xlsx',role:'gender'}),current=get(parsed,'dialogue',sheetName),
         values=State.valuesFor(current),blank=field(current,'Text','DexFour'),saved={[current.id]:{values,reviewed:{}}};
-    const exported=await Codec.exportWorkbook(original,parsed,saved),result=get(await Codec.parseWorkbook(exported,{filename:'German_Gender.xlsx',role:'gender'}),'dialogue','NPCTalkDialogueTextAudio_Gender');
+    const exported=await Codec.exportWorkbook(original,parsed,saved),result=get(await Codec.parseWorkbook(exported,{filename:'German_Gender.xlsx',role:'gender'}),'dialogue',sheetName);
     assert.equal(field(result,'Text','DexFour').target,'');assert.equal(field(result,'Text','DexFour').outdated,false);
     for(const form of ['MS','FS'])assert.equal(field(result,'Text',form).target,field(current,'Text',form).target);
     assert.equal(field(result,'Text','IntFour').originalMissing,true,'an explicitly Missing class variant remains red');

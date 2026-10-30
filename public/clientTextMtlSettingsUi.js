@@ -9,11 +9,12 @@
     const POLICY={'gpt-6-luna':['none','low','medium','high','xhigh','max'],'gpt-6.1-sol':['low','medium','high','xhigh','max'],[CLOUDFLARE]:['none','low','high','max']};
     const LABELS={'gpt-6-luna':'GPT-6 Luna','gpt-6.1-sol':'GPT-6.1 Sol',[CLOUDFLARE]:'DeepSeek V4.1 Flash (1017) · Cloudflare'};
     const raw=value=>root.Vue?.markRaw?root.Vue.markRaw(value):value;
+    const owner=host=>host.ctActive===false?host.cloudProfileId:host.ctWorkspace?.scope?.accountId;
     const allowed=host=>host.cloudSignedIn===true&&host.cloudUser?.isAdmin===true&&host.cloudUser.role==='admin'
-        &&!!host.cloudUser.id&&host.cloudUser.id===host.cloudProfileId&&host.cloudUser.id===host.ctWorkspace?.scope?.accountId
+        &&!!host.cloudUser.id&&host.cloudUser.id===host.cloudProfileId&&host.cloudUser.id===owner(host)
         &&!!host._cloud&&!host._cloud.destroyed;
     const fence=host=>JSON.stringify([host.cloudSignedIn,host.cloudProfileId,host.cloudUser?.id,host.cloudUser?.role,
-        host.cloudUser?.isAdmin,host.cloudUser?.assignmentVersion,host._cloud?.epoch,host.ctWorkspace?.scope?.accountId]);
+        host.cloudUser?.isAdmin,host.cloudUser?.assignmentVersion,host._cloud?.epoch,owner(host)]);
     function settings(value){
         if(!value||value.version!==VERSION||typeof value.model!=='string'||!Object.hasOwn(POLICY,value.model)||!POLICY[value.model].includes(value.effort))
             throw new Error('Choose an available translation model and reasoning effort.');
@@ -46,7 +47,7 @@
                 return value;
             },
             async ctMtlSettingsToggle(field){
-                if(!allowed(this)||!this.ctCurrentUnit?.fields.includes(field))return false;
+                if(!allowed(this)||!(field.kind==='sd'?this.sdFieldCurrent?.(field):this.ctCurrentUnit?.fields.includes(field)))return false;
                 if(this.ctMtlSettingsPanel===field.id){this.ctMtlSettingsPanel='';return false;}
                 this.ctMtlSettingsPanel=field.id;
                 const client=this._cloud,origin=fence(this),load=raw({});this._ctMtlSettingsLoad=load;

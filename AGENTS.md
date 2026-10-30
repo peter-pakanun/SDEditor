@@ -88,6 +88,7 @@ Browser modules below are in `public/`; `server.js` and `scripts/` are at the re
 | Managed source versions | `managedVersions.js`, `managed-versions.css` |
 | Comments and lookup | `commentsUi.js`, `editorLookup.js`, `editorDictionaryIndex.js` |
 | Shared UI and fixtures | `appDialog.js`, `interface.css`, `index.css`, `dummyFiles.js`, `scripts/test-*.cjs`, `scripts/*-browser-fixture.cjs` |
+| SD field toolbar and MTL | `sdText.js`, `sdEditorTools.js`, `sdMtlStore.js`; see [SD MTL](docs/sd_mtl.md). IndexedDB v26 accepts candidates atomically with whole-file Save. Server source/prompt/context stay transient. Use English is ClientText-only; MTL visibility is shared. |
 
 Keep `workspaceState.js` loaded before its helper/storage/protocol consumers and before `offlineStore.js` in `saveWorker.js`. It supports browser, worker and Node consumers. `FileSaver.js` is a vendored client download helper; JSZip handles ZIP archives.
 

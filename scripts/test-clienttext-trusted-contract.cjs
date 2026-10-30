@@ -13,9 +13,9 @@ const unit = (fields, role = 'normal', recordId = 'Exact/@ ID') => S.normalizeUn
 
 test('generic dialogue review inheritance agrees with sparse API counts and preserves all Gender defaults, original summaries and conflicts',async()=>{
     const A=await api;
-    for(const forms of [[null],['MS','FS','NS','MP','FP','NP']]){
+    for(const sheet of ['NPCTextAudio','NPCTalkDialogueTextAudio'])for(const forms of [[null],['MS','FS','NS','MP','FP','NP']]){
         const gender=forms[0]!==null,source='Exact shared English',original=S.normalizeUnit({role:gender?'gender':'normal',
-            sheet:'NPCTalkDialogueTextAudio'+(gender?'_Gender':''),recordId:'generic-review',fields:[
+            sheet:sheet+(gender?'_Gender':''),recordId:'generic-review',fields:[
                 ...forms.map(form=>field('Text','Generic '+(form || 'text'),{kind:form?'form':'text',form,source,outdated:true})),
                 field('Text','',{kind:'form',form:'StrFour',source,required:false,originalMissing:false,outdated:true,originalFill:S.FILLS.outdated}),
                 field('Text','Class override',{kind:'form',form:'DexFour',source,outdated:true})]});

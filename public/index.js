@@ -167,7 +167,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
   const config = Vue.defineComponent({
-  mixins: [window.PrivateMediaUI?.mixin || {}, window.PreviewFonts?.mixin || {}, window.ClientTextSkillCardUI?.mixin || {}, window.KeywordPopups?.mixin || {}, window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.ClientTextResourceSync?.mixin || {}, window.ClientTextMtlUI?.mixin || {}, window.ClientTextMtlSettingsUI?.mixin || {}, window.ClientTextToneNotesUI?.mixin || {}, window.ClientTextMtlDebug?.mixin || {}, window.MtlConnectionUI?.mixin || {}, window.MtlLimitsUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}],
+  mixins: [window.PrivateMediaUI?.mixin || {}, window.PreviewFonts?.mixin || {}, window.ClientTextSkillCardUI?.mixin || {}, window.KeywordPopups?.mixin || {}, window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.ClientTextResourceSync?.mixin || {}, window.ClientTextMtlUI?.mixin || {}, window.ClientTextMtlSettingsUI?.mixin || {}, window.ClientTextToneNotesUI?.mixin || {}, window.ClientTextMtlDebug?.mixin || {}, window.MtlConnectionUI?.mixin || {}, window.MtlLimitsUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}, window.SDEditorTools?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -1818,7 +1818,7 @@ function formatPageRange(total, page, pageSize) {
       if (this.ctActive || !this.editorSessionActive) return;
       let block = this.editorBlocks?.[this.editorFocusedIndex];
       let sourceRaw = block?.english ?? "";
-      let translationRaw = block?.translation ?? "";
+      let translationRaw = this.sdPreviewValue ? this.sdPreviewValue(this.editorFocusedIndex) : block?.translation ?? "";
       let sourceDecoded = this.decodeEscapedNewlines(sourceRaw);
       let translationDecoded = this.decodeEscapedNewlines(translationRaw);
       let sourcePreview = this.buildGamePreviewSegments(sourceDecoded);
@@ -4926,6 +4926,7 @@ function formatPageRange(total, page, pageSize) {
       }
     },
     insertTranslationText(editorIndex, text, options = {}) {
+      if(this.sdReviewInsert?.(editorIndex,text,options))return;
       if (this.editorTranslationReadOnly) return;
       let editorBlock = this.editorBlocks?.[editorIndex];
       let columnIndex = Number.isInteger(options.columnIndex) ? options.columnIndex : (editorBlock?.isTable ? (this.hlPopup.columnIndex || this.editorFocusedColumnIndex || 0) : null);
@@ -7213,6 +7214,7 @@ function formatPageRange(total, page, pageSize) {
           }
           // Bookkeeping uses the captured session even after a new file opens.
           // It must never clear or rebase the next file's typing.
+          this.sdSaved?.(sdMtl);
           await this.editorDraftCommitted?.(session, newTranslations, ack, accepted, alignmentRecoveryAtSave);
         };
         const rejectDeferredSave = error => {
@@ -7224,9 +7226,14 @@ function formatPageRange(total, page, pageSize) {
           if (this.inlineDraftFindings) this.inlineDraftFindings = { ...this.inlineDraftFindings,
             [desc.filepath]: [{ level: 'error', message, deferredSave: true }] };
         };
+        const sdMtl = await this.sdSaveClaims?.(newTranslations) || [];
+        if(this.editorBlocks!==blocksAtSave || !this.collaborationContextCurrent(context)
+          || this.editorTranslationReadOnly || this._editorCollabBase!==baseAtSave
+          || JSON.stringify(desc.translations.English)!==englishAtSave
+          || !arrayEquals(draftAtSave,this.editorBlocks.map(block=>block?.translation??'')))return false;
         const alignmentRevisions = this.entryAlignmentSaveRevisions?.(newTranslations);
         const result = await this.persistTranslationBatch([{ desc, lines: newTranslations, needsReview: false }], 'save', {
-          context, close, bases: { [desc.filepath]: this.toPlainForStorage(baseAtSave || session?.base || this.collaborationFile(desc)) },
+          context, close, ...(sdMtl.length?{sdMtl}:{}), bases: { [desc.filepath]: this.toPlainForStorage(baseAtSave || session?.base || this.collaborationFile(desc)) },
           ...(alignmentRevisions ? { revisions: alignmentRevisions } : {}),
           promoteDropped: this.editorDroppedCandidate ? this.capturedDroppedPromotion(desc.filepath) : null,
           inline: !!this.inlineActive,
@@ -7242,6 +7249,7 @@ function formatPageRange(total, page, pageSize) {
           ...(deferCommit ? { deferCommit: true, onCommitted: completeDeferredSave, onRejected: rejectDeferredSave } : {}),
         });
         if (result.stale || result.status === 'conflict') return false;
+        if(result.status!=='queued')this.sdSaved?.(sdMtl);
         if (this.editorBlocks !== blocksAtSave || !this.collaborationContextCurrent(context)) return false;
         if (deferCommit && result.status === 'queued') {
           if (session) session.submission = { jobId: result.jobId, translations: [...newTranslations] };
@@ -8285,6 +8293,7 @@ if (window.EditorComponents?.DictionaryEntries) app.component('editor-dictionary
 if (window.EditorComponents?.Tools) app.component('editor-tools', window.EditorComponents.Tools);
 if (window.EditorComponents?.Autocomplete) app.component('editor-autocomplete', window.EditorComponents.Autocomplete);
 if (window.EditorComponents?.NativeField) app.component('editor-native-field', window.EditorComponents.NativeField);
+if(window.SDEditorTools){app.component('sd-mtl-review',window.SDEditorTools.Review);app.component('sd-mtl-details',window.SDEditorTools.Details);}
 if (window.EditorComponents?.FieldToolbar) app.component('editor-field-toolbar', window.EditorComponents.FieldToolbar);
 if (window.EditorComponents?.WorkspaceShell) app.component('editor-workspace-shell', window.EditorComponents.WorkspaceShell);
 if (window.EditorComponents?.Notice) app.component('app-notice', window.EditorComponents.Notice);

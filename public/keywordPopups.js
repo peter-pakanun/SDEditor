@@ -21,7 +21,7 @@
     const y = side === 'top' ? anchor.top - h : side === 'bottom' ? anchor.bottom : (anchor.top + anchor.bottom - h) / 2;
     return { x: clamp(x, viewport.width - w - 8), y: clamp(y, viewport.height - h - 8), maxWidth, maxHeight, side };
   }
-  function snapshot(host, sources, translated) {
+  function snapshot(host, sources, translated, approvedOnly=false) {
     const entries = new Map();
     const selected = host.ctActive ? host.ctWorkspace?.scope || {} : root.EditorReferenceCatalog?.sessionFor(host)?.scope || {game:host.gameVersion};
     let scope = {};
@@ -38,6 +38,7 @@
         const values = unit.id === host.ctCurrentUnit?.id && host.ctActive && source.scope?.groupId === selected.groupId ? { ...originalValues, ...host.ctValues } : originalValues;
         const read = name => {
           const field = unit.fields.find(field => field.name === name);
+          if(translated&&approvedOnly)return field?root.ClientTextMtlContext?.approvedTranslation(unit,field,source.saved)||'':'';
           const value = String((translated ? values?.[field?.id] : field?.source) ?? '');
           return translated && field && !value.trim() && root.ClientTextState.englishIntentFor(field, source.saved?.[unit.id], { game: source.scope?.game }) ? field.source : value;
         };
@@ -176,7 +177,7 @@
         this._keywordPress = null; this._keywordClick = null; this._keywordRestoreAnchor = null;
         this.clearKeywordAutocomplete(); this.dismissKeywordWindows(null);
       },
-      async keywordContext(translated) {
+      async keywordContext(translated,options={}) {
         const generation = this._keywordContextGeneration || 0, key = this.keywordReferenceKey;
         let sources;
         if (this.ctActive) sources = [{ units: this.ctUnits, saved: this.ctSaved, scope: this.ctWorkspace?.scope }];
@@ -189,7 +190,7 @@
           }
         }
         if (generation !== (this._keywordContextGeneration || 0) || key !== this.keywordReferenceKey) return null;
-        return snapshot(this, sources || [], translated);
+        return snapshot(this, sources || [], translated,options.approvedOnly===true);
       },
       keywordCard(tag, context, extra = {}) {
         return cardContent(this, tag, context, { id: ++this.keywordWindowSequence, pinned: false, ...extra });

@@ -244,10 +244,10 @@
         return {
           field: {
             get english() { return component.field.english; },
-            get translation() { return component.field.translation; },
-            set translation(value) { if (!component.source && !host.editorTranslationReadOnly) component.field.translation = value; },
+            get translation() { return host.sdValue ? host.sdValue(host.sdField(component.blockIndex,component.columnIndex)) : component.field.translation; },
+            set translation(value) { if (!component.source && !host.editorTranslationReadOnly) {if(host.sdSetValue)host.sdSetValue(host.sdField(component.blockIndex,component.columnIndex),value);else component.field.translation = value;} },
             get isMultiline() { return component.field.isMultiline; },
-            get readonly() { return component.source || host.editorTranslationReadOnly; },
+            get readonly() { return component.source || host.editorTranslationReadOnly || !!host.sdBusy?.(host.sdField(component.blockIndex,component.columnIndex)); },
             get lang() { return component.source ? 'en' : host.translationEditorBcp47; },
             get dataAttrs() {
               if (component.source) return { 'data-editor-ref': component.refName };
@@ -260,11 +260,13 @@
             },
           },
           get ready() { return host.editorReady; },
-          get highlight() { return component.highlight; },
+          get mtlProgress() { return !component.source && host.sdToolbar ? host.sdToolbar(component.blockIndex,component.columnIndex,'translation').mtlProgress : null; },
+          get highlight() { return !component.source && host.sdReview?.(host.sdField(component.blockIndex,component.columnIndex)) ? host.buildTagHLter(String(host.sdValue(host.sdField(component.blockIndex,component.columnIndex))),[]) : component.highlight; },
           get highlightAttrs() { return { 'data-editor-ref': component.highlightRefName }; },
           input: event => component.input(event),
           focus: () => { if (!component.source) host.setEditorFocus(component.blockIndex, component.column); },
-          keydown: event => host.translationKeydown(event, component.blockIndex, component.column),
+          selection: () => {if(host.sdStyleRevision!==undefined)host.sdStyleRevision++;},
+          keydown: event => {if(!host.sdKeydown?.(event,host.sdField?.(component.blockIndex,component.columnIndex),component.source))host.translationKeydown(event, component.blockIndex, component.column);},
           compositionend: event => host.translationCompositionEnd(event, component.blockIndex, component.column),
           altKeyup: event => host.hotkeyPasteHL(event, component.block, component.blockIndex, component.column),
           scroll: () => host.syncHlScroll(component.kind, component.blockIndex, component.columnIndex),
@@ -277,6 +279,7 @@
     methods: {
       input(event) {
         if (this.source || this.controller.editorTranslationReadOnly) return;
+        if(this.controller.sdFieldInput?.(this.controller.sdField(this.blockIndex,this.columnIndex)))return;
         if (this.columnIndex != null) this.controller.tableColumnInput(this.block, this.blockIndex, this.columnIndex, event);
         else if (this.field.isMultiline) this.controller.normalizeMultilineEditorBlock(this.block, this.blockIndex, event);
         else this.controller.translationInput(this.block, this.blockIndex, event);
@@ -287,7 +290,7 @@
         else if (!event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey) this.controller.copySpanToTranslation(event, this.field, this.blockIndex, this.column);
       },
     },
-    template: '<editor-native-field :controller="nativeController" :kind="kind"></editor-native-field>',
+    template: `<component :is="controller.sdToolbar ? 'editor-field-toolbar' : 'div'" :controller="controller.sdToolbar ? controller.sdToolbar(blockIndex,columnIndex,source?'source':'translation') : undefined"><editor-native-field :controller="nativeController" :kind="kind"></editor-native-field></component><sd-mtl-review v-if="!source && controller.sdToolbar" :host="controller" :index="blockIndex" :column="columnIndex"></sd-mtl-review>`,
   };
 
   const DictionaryEntries = {
@@ -958,13 +961,13 @@
       <div v-if="controller.open" class="editorFieldComparisonControls"><select :value="controller.reference" @change="controller.select($event.target.value)" :disabled="controller.disabled" v-tooltip="controller.choices.find(choice=>choice.key===controller.reference)?.label" :aria-label="controller.side === 'source' ? 'English version to compare' : 'Translation revision to compare'"><option v-if="!controller.choices.length" value="">Earlier original unavailable</option><optgroup v-for="group in controller.groups" :key="group" :label="group"><option v-for="choice in controller.choices.filter(value=>value.group===group)" :key="choice.key" :value="choice.key">{{ choice.label }}</option></optgroup></select><span class="fieldDiffArrow" aria-hidden="true">→</span><span class="fieldDiffLatest">Latest</span></div>
       <app-notice v-if="controller.open && controller.error" class="ctHistoryError" tone="error">{{ controller.error }}</app-notice>
       <p v-if="controller.open && !controller.parts" class="fieldDiffUnavailable">{{ controller.busy ? 'Preparing earlier original…' : 'Earlier original unavailable. Open the menu to load previous versions.' }}</p>
-      <pre v-if="controller.open && controller.side === 'translation' && controller.parts" class="ctInlineDiff ctTranslationDiff" aria-label="Translation differences"><span v-for="(part,index) in controller.parts" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ controller.display(part.value) }}</span></pre>
+      <pre v-if="controller.open && (controller.side === 'translation' || controller.sourceDiffBelow) && controller.parts" class="ctInlineDiff ctTranslationDiff" :aria-label="controller.side === 'source' ? 'English differences' : 'Translation differences'"><span v-for="(part,index) in controller.parts" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ controller.display(part.value) }}</span></pre>
       <section v-if="controller.menuOpen" class="fieldHistoryMenu" aria-label="Revision history and comparison options">
         <div class="fieldHistoryOptions"><label><input type="checkbox" :checked="controller.whitespace" @change="controller.options('whitespace',$event.target.checked)"> Show whitespace</label><label><input type="checkbox" :checked="controller.characters" @change="controller.options('characters',$event.target.checked)"> Character differences</label><button type="button" @click="closeMenu()" aria-label="Close revision menu">Close</button></div>
         <app-notice v-if="controller.error" class="ctHistoryError" tone="error">{{ controller.error }}</app-notice>
         <button v-if="controller.moreVersions" type="button" @click="controller.olderVersions()" :disabled="controller.busy">{{ controller.busy ? 'Preparing earlier original…' : 'Load earlier version' }}</button>
         <button v-if="controller.moreHistory" type="button" @click="controller.olderHistory()" :disabled="controller.busy">Load older history</button>
-        <p>Restoring creates a saved revision of the whole record.</p>
+        <p>{{ controller.restoreLabel || 'Restoring creates a saved revision of the whole record.' }}</p>
         <div class="fieldHistoryEntries"><article v-for="entry in controller.entries" :key="entry.key" class="ctHistoryEvent"><p>{{ controller.label(entry) }}</p><small>{{ entry.action }}</small><details v-for="(change,fieldId) in entry.intentChanges" :key="fieldId" v-show="change.previousValue !== undefined"><summary>Previous editor translation · {{ change.label }}</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:16rem;overflow:auto">{{ change.previousValue }}</pre></details><details v-if="entry.syncRecoveryText"><summary>Shared command recovery · {{ entry.syncRecovery.resolution }}</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:16rem;overflow:auto">{{ entry.syncRecoveryText }}</pre></details><div class="ctHistoryActions"><template v-for="part in ['before','after']" :key="part"><span v-if="!entry[part].available" class="fieldDiffUnavailable">{{ part }} revision unavailable</span><button type="button" @click="controller.details(entry,part)" :disabled="!entry[part].available">Details {{ part }}</button><button type="button" @click="controller.restore(entry,part)" :disabled="controller.restoreDisabled || controller.disabled || !entry[part].available">Restore {{ part }}</button></template></div></article><p v-if="!controller.entries.length">No saved history for this record.</p></div>
         <div class="fieldHistoryDetails"><article v-for="row in controller.detailRows" :key="row.id"><strong>{{ row.name }}{{ row.removed ? ' · Removed field' : '' }}</strong><label>English changes</label><pre class="ctInlineDiff"><span v-for="(part,index) in row.source" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ controller.display(part.value) }}</span></pre><label>Translation changes</label><pre class="ctInlineDiff"><span v-for="(part,index) in row.target" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ controller.display(part.value) }}</span></pre></article><template v-if="controller.detailNotes"><strong>Developer notes</strong><pre class="ctInlineDiff"><span v-for="(part,index) in controller.detailNotes" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ controller.display(part.value) }}</span></pre></template></div>
       </section>

@@ -5,12 +5,13 @@ const {join}=require('node:path');
 // recording save adapter. Transactional draft/save coverage lives in the UI tests.
 module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}){
     await page.addScriptTag({url:new URL('/clientTextStore.js',page.url()).href});
+    for(const sheet of ['NPCTextAudio','NPCTalkDialogueTextAudio']){
     for(const theme of ['light','grey','dark','modern-dark'])for(const full of [false,true]){
         await page.setViewportSize({width:1100,height:900});
-        await page.evaluate(({theme,full})=>{
+        await page.evaluate(({theme,full,sheet})=>{
             document.documentElement.dataset.theme=theme;
             const host=window.__ctLayoutFixture;host.ctStartClassVariantFixture(true);
-            const original=host.ctCurrentUnit,unit=Vue.markRaw({...original,sheet:'NPCTalkDialogueTextAudio',id:JSON.stringify(['normal','NPCTalkDialogueTextAudio','DialogueReview']),
+            const original=host.ctCurrentUnit,unit=Vue.markRaw({...original,sheet,id:JSON.stringify(['normal',sheet,'DialogueReview']),
                 fields:original.fields.map((field,index)=>({...field,
                     target:index===0?'':index<3?'Translated '+field.form:index===3?' \t':'',
                     required:index<3,originalMissing:false,outdated:index>0}))});
@@ -25,8 +26,8 @@ module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}
                 return {saved:{unitId,revision:host._dialogueSaveCount,values:structuredClone(command.values),reviewed:structuredClone(command.reviewed),saved:true}};
             }};
             host.ctStorage=()=>store;host.ctSync=()=>{};host.ctLoadMemory=()=>{};host.ctRefreshDiagnostics=()=>{};
-        },{theme,full});await settle();
-        const name=theme+' '+(full?'full':'inline'),picker=()=>page.getByRole('combobox',{name:'All worksheet class variants'}),
+        },{theme,full,sheet});await settle();
+        const name=sheet+' '+theme+' '+(full?'full':'inline'),picker=()=>page.getByRole('combobox',{name:'All worksheet class variants'}),
             bulk=()=>page.getByRole('button',{name:'Review blank variants (10)',exact:true}),
             blank=()=>page.locator('[data-ct-target="regular-DexFour"]');
         assert.equal(await page.locator('.ctClassVariantsHeader small').innerText(),'2 translated · 10 use English',name);
@@ -39,7 +40,7 @@ module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}
         await bulk().hover();await page.getByRole('tooltip').waitFor();
         assert.match(await page.getByRole('tooltip').innerText(),/Save applies the review/);
         if(theme==='light' || theme==='modern-dark'){
-            const path=join(fixtureArtifacts,'dialogue-variants-'+theme+'-'+(full?'full':'inline')+'-before.png');
+            const path=join(fixtureArtifacts,sheet+'-dialogue-variants-'+theme+'-'+(full?'full':'inline')+'-before.png');
             await page.screenshot({path});screenshots.push(path);
         }
         const before=await page.evaluate(()=>JSON.stringify(window.__ctLayoutFixture.ctValues));
@@ -56,7 +57,7 @@ module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}
         assert.equal(await page.locator('.ctTarget .ctFieldFacts').getByText('Reviewed',{exact:true}).count(),1);
         const geometry=await page.locator('.ctClassVariants').evaluate(element=>({right:element.getBoundingClientRect().right,viewport:innerWidth}));
         assert.ok(geometry.right<=geometry.viewport+1,name+': controls fit a resized desktop');
-        const path=join(fixtureArtifacts,'dialogue-variants-'+theme+'-'+(full?'full':'inline')+'.png');
+        const path=join(fixtureArtifacts,sheet+'-dialogue-variants-'+theme+'-'+(full?'full':'inline')+'.png');
         await page.screenshot({path});screenshots.push(path);
         if(!full){await blank().press('Control+Enter');await page.locator('.ctFullEditor').waitFor();await settle();}
         await page.locator('.ctEditorActionButtons').getByRole('button',{name:'Save',exact:true}).click();await settle();
@@ -77,12 +78,12 @@ module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}
         results.push({name:name+' English fallback, exact blanks, bulk staging, Save, individual reviews and immutable source'});
     }
     for(const theme of ['light','grey','dark','modern-dark'])for(const full of [false,true])for(const forms of [[null],['MS','FS'],['MS','FS','NS','MP','FP','NP']]){
-        await page.evaluate(({theme,full,forms})=>{
+        await page.evaluate(({theme,full,forms,sheet})=>{
             document.documentElement.dataset.theme=theme;
             const host=window.__ctLayoutFixture;host.ctStartClassVariantFixture(true);
             const previous=host.ctCurrentUnit,base=previous.fields[0],gender=forms[0]!==null,
-                unit=Vue.markRaw({...previous,role:gender?'gender':'normal',sheet:'NPCTalkDialogueTextAudio'+(gender?'_Gender':''),
-                    id:JSON.stringify([gender?'gender':'normal','NPCTalkDialogueTextAudio'+(gender?'_Gender':''),'GenericReview']),
+                unit=Vue.markRaw({...previous,role:gender?'gender':'normal',sheet:sheet+(gender?'_Gender':''),
+                    id:JSON.stringify([gender?'gender':'normal',sheet+(gender?'_Gender':''),'GenericReview']),
                     fields:[...forms.map((form,index)=>({...base,id:JSON.stringify(['Text',form]),kind:form?'form':'text',group:'Text',form,
                         target:'Generic '+(form || 'text'),targetCell:String.fromCharCode(68+index)+'3',required:true,originalMissing:false,outdated:true})),
                         ...previous.fields.slice(1).map((field,index)=>({...field,target:index<2?'Class '+field.form:index===2?' \t':'',required:index<2,originalMissing:false,outdated:true}))]});
@@ -95,8 +96,8 @@ module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}
             const store={getDraft:async()=>null,async save(scope,unitId,command){host._dialogueSaveCount++;return {saved:{unitId,revision:host._dialogueSaveCount,
                 values:structuredClone(command.values),reviewed:structuredClone(command.reviewed),saved:true}};}};
             host.ctStorage=()=>store;host.ctSync=()=>{};host.ctLoadMemory=()=>{};host.ctRefreshDiagnostics=()=>{};
-        },{theme,full,forms});await settle();
-        const name=theme+' '+(full?'full':'inline')+' '+forms.length+' generic defaults',blank=page.locator('[data-ct-target="regular-DexFour"]');
+        },{theme,full,forms,sheet});await settle();
+        const name=sheet+' '+theme+' '+(full?'full':'inline')+' '+forms.length+' generic defaults',blank=page.locator('[data-ct-target="regular-DexFour"]');
         assert.equal(await blank.getAttribute('placeholder'),'-- Use generic --',name);
         assert.equal(await page.locator('.ctTarget .ctEnglishPlaceholder').innerText(),'-- Use generic --');
         assert.equal(await page.locator('.ctClassVariantsHeader small').innerText(),'2 translated · 10 use generic');
@@ -115,7 +116,7 @@ module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}
             target:host.ctSaved[host.ctSelection].values['regular-DexFour'],original:JSON.stringify(host.ctCurrentUnit)===host._dialogueOriginal};}),
             {generic:true,outdated:false,review:'',target:' \t',original:true});
         assert.equal(await page.locator('.ctVariantTabs button.outdated').count(),2,'populated overrides still require their own reviews');
-        if(theme==='modern-dark' && full){const path=join(fixtureArtifacts,'generic-defaults-'+forms.length+'.png');await page.locator('.ctClassVariants').screenshot({path});screenshots.push(path);}
+        if(theme==='modern-dark' && full){const path=join(fixtureArtifacts,sheet+'-generic-defaults-'+forms.length+'.png');await page.locator('.ctClassVariants').screenshot({path});screenshots.push(path);}
         const genericId=await page.evaluate(()=>window.__ctLayoutFixture.ctCurrentUnit.fields[0].id);
         await page.locator('[data-ct-target]').evaluateAll((elements,id)=>elements.find(element=>element.dataset.ctTarget===id).focus(),genericId);
         await page.keyboard.press('Control+A');await page.keyboard.press('Backspace');await settle();
@@ -125,5 +126,6 @@ module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}
         assert.equal(await page.evaluate(()=>window.__ctLayoutFixture.ctStatus().fields['regular-DexFour'].outdated),true,'saving one absent generic restores blank review');
         assert.equal(await page.getByRole('button',{name:'Review blank variants (10)',exact:true}).count(),1);
         results.push({name:name+' complete and partial defaults, separate previews, saved-only completion and independent populated reviews'});
+    }
     }
 };

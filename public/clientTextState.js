@@ -394,7 +394,7 @@
         return [field.group || field.name,field.kind==='form'?field.form:null];
     }
     function dialogueGenericFields(unit, field, options={}) {
-        if(options.game && options.game!=='poe2' || String(unit?.sheet || '').replace(/_Gender$/,'')!=='NPCTalkDialogueTextAudio'
+        if(options.game && options.game!=='poe2' || !['NPCTextAudio','NPCTalkDialogueTextAudio'].includes(String(unit?.sheet || '').replace(/_Gender$/,''))
             || !unit.fields.includes(field) || field.kind!=='form' || !CLASS_FORMS.includes(fieldForm(field)[1]) || field.audioOnly || audioOnly(field.source))return [];
         const [name]=fieldForm(field),source=field.sourceHash || sourceHash(field.source);
         return unit.fields.filter(candidate=>{

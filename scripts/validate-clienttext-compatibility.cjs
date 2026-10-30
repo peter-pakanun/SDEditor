@@ -15,9 +15,17 @@ const withoutTab=raw=>raw.replace(/<((?:[\w.-]+:)?tabColor)\b[^>]*?(?:\/>|>[\s\S
  .replace(/<((?:[\w.-]+:)?sheetPr)([^>]*?)>\s*<\/\1>/,'<$1$2/>').replace(/<(?:[\w.-]+:)?sheetPr\s*\/>/,'');
 async function check(game,filename){
  const bytes=await fs.readFile(filename),originalHash=hash(bytes),name=path.basename(filename),started=performance.now();
- const parsed=await Codec.parseWorkbook(bytes,{filename:name,game});
- assert.equal(Codec.assertGame(parsed,game),game,'Full sample has internal game evidence');
- assert.throws(()=>Codec.assertGame(parsed,game==='poe1'?'poe2':'poe1'),{code:'CLIENTTEXT_GAME_MISMATCH'});
+ const parsed=await Codec.parseWorkbook(bytes,{filename:name,game}),detectedGame=Codec.detectGame(parsed);
+ if(detectedGame){
+  assert.equal(Codec.assertGame(parsed,game),game,'Sample game evidence matches the selected game');
+  assert.throws(()=>Codec.assertGame(parsed,game==='poe1'?'poe2':'poe1'),{code:'CLIENTTEXT_GAME_MISMATCH'});
+ }else{
+  // Gender exports can omit independent game markers. Retain the explicitly
+  // selected release scope without manufacturing evidence from the filename.
+  assert.equal(parsed.role,'gender','Full normal samples must have internal game evidence');
+  assert.equal(parsed.game,null,'Marker-free Gender samples have no detected game');
+  for(const selectedGame of ['poe1','poe2'])assert.equal(Codec.assertGame(parsed,selectedGame),null,'Marker-free Gender samples accept an explicit game scope');
+ }
  assert.deepEqual(await Codec.exportWorkbook(bytes,parsed,{}),bytes,'No-op export is byte-exact');
  const before=await JSZip.loadAsync(bytes),records={},selected=new Map();let editedFields=0;
  for(const sheet of parsed.sheets){
@@ -64,8 +72,13 @@ async function check(game,filename){
  const dntFields=parsed.units.reduce((count,unit)=>count+unit.fields.filter(field=>/\bDNT\b/i.test(field.source)).length,0);
  const mixedDntRows=parsed.units.filter(unit=>unit.fields.some(field=>/\bDNT\b/i.test(field.source))&&unit.fields.some(field=>field.source.trim()&&!/\bDNT\b/i.test(field.source))).length;
  assert.equal(hash(await fs.readFile(filename)),originalHash,'Sample file stays unchanged');assert.equal(hash(bytes),originalHash);
- console.log(JSON.stringify({filename:name,game,status:'PASS',originalHash,sheets:parsed.sheets.length,units:parsed.units.length,
+ const fieldKinds={},fieldForms={};for(const unit of parsed.units)for(const field of unit.fields){
+  fieldKinds[field.kind]=(fieldKinds[field.kind]||0)+1;
+  if(field.form)fieldForms[field.form]=(fieldForms[field.form]||0)+1;
+ }
+ console.log(JSON.stringify({filename:name,game,role:parsed.role,detectedGame,status:'PASS',originalHash,sheets:parsed.sheets.length,units:parsed.units.length,
   fields:parsed.units.reduce((n,unit)=>n+unit.fields.length,0),warnings:parsed.warnings.length,editedSheets:selected.size,editedFields,untouchedParts,
+  fieldKinds,fieldForms,
   macroParts:Object.keys(before.files).filter(name=>/vbaProject\.bin$/i.test(name)).length,
   formulaCount:(await Promise.all(parsed.sheets.map(async sheet=>(await before.file(sheet.path).async('string')).match(/<(?:[\w.-]+:)?f(?:\s|>)/g)?.length||0))).reduce((a,b)=>a+b,0),
   npcGroups:npc.groups.length,conversationRows:convo.memberships.size,audioRows:parsed.units.filter(unit=>Audio.clipsFor(unit,game).length).length,
