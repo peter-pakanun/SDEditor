@@ -389,8 +389,8 @@
         <section class="versionPanel offlineVersion" aria-label="Offline workspace">
           <h2>Offline</h2>
           <div class="versionOfflineTabs" role="tablist" aria-label="Offline content mode" @keydown="managedOfflineModeKeydown">
-            <button id="offlineSdTab" type="button" role="tab" aria-controls="offlineSdPanel" :aria-selected="managedOfflineContentMode === 'statdescription'" :tabindex="managedOfflineContentMode === 'statdescription' ? 0 : -1" @click="managedOfflineContentMode = 'statdescription'">StatDescription <small>SD</small></button>
-            <button id="offlineCtTab" type="button" role="tab" aria-controls="offlineCtPanel" :aria-selected="managedOfflineContentMode === 'clienttext'" :tabindex="managedOfflineContentMode === 'clienttext' ? 0 : -1" @click="managedOfflineContentMode = 'clienttext'">ClientText <small>CT</small></button>
+            <button id="offlineSdTab" type="button" role="tab" aria-controls="offlineSdPanel" :aria-selected="managedOfflineContentMode === 'statdescription'" :tabindex="managedOfflineContentMode === 'statdescription' ? 0 : -1" @click="managedOfflineContentMode = 'statdescription'">StatDescription</button>
+            <button id="offlineCtTab" type="button" role="tab" aria-controls="offlineCtPanel" :aria-selected="managedOfflineContentMode === 'clienttext'" :tabindex="managedOfflineContentMode === 'clienttext' ? 0 : -1" @click="managedOfflineContentMode = 'clienttext'">ClientText</button>
           </div>
           <app-notice v-if="ctLocalIssue" tone="error" role="alert">{{ ctLocalIssue }}</app-notice>
           <app-notice v-if="ctError" tone="error" role="alert">{{ ctError }}</app-notice>

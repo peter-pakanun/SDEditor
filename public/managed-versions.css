@@ -63,7 +63,6 @@
 .offlineVersion { align-self: start; }
 .versionOfflineTabs { display: flex; gap: 4px; margin: 0 0 16px; border-bottom: 1px solid var(--ui-border); }
 .versionOfflineTabs > button { flex: 1; min-width: 0; padding: 10px 5px; margin-bottom: -1px; border: 0; border-bottom: 2px solid transparent; border-radius: 5px 5px 0 0; background: transparent; font-size: 13px; }
-.versionOfflineTabs > button small { display: block; margin-top: 3px; font-size: 11px; color: var(--ui-muted); }
 .versionOfflineTabs > button[aria-selected="true"] { border-bottom-color: var(--ui-accent); background: var(--ui-accent-soft); color: var(--ui-accent); font-weight: 600; }
 .versionOfflineTabs > button:hover { background: var(--ui-accent-soft); }
 .versionOfflineTabs > button:focus-visible, .versionOfflineDisclosure > summary:focus-visible, .versionLocalWorkbook button:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; }
