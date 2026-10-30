@@ -499,6 +499,20 @@ test('class workload fills distinguish optional blank, missing and reviewed outd
     const unresolved = get(await Codec.parseWorkbook(await Codec.exportWorkbook(bytes, parsed, { [unit.id]: { values: { [outdated.id]: 'Authored but unreviewed' } } }), { filename: 'German.xlsx' }), 'dialogue');
     assert.equal(field(unresolved, 'Text', 'DexFour').originalFill, 'FF9966');
 });
+
+test('generic dialogue export preserves blank overrides and all Gender defaults while removing inherited orange fill',async()=>{
+    const bytes=await workbook({normal:classDialogue()});
+    // The workbook helper uses Normal as its ordinary sheet name.
+    const zip=await JSZip.loadAsync(bytes),book=await zip.file('xl/workbook.xml').async('string');
+    zip.file('xl/workbook.xml',book.replace('name="Normal"','name="NPCTalkDialogueTextAudio_Gender"'));
+    const original=await zip.generateAsync({type:'uint8array'}),parsed=await Codec.parseWorkbook(original,{filename:'German_Gender.xlsx',role:'gender'}),current=get(parsed,'dialogue','NPCTalkDialogueTextAudio_Gender'),
+        values=State.valuesFor(current),blank=field(current,'Text','DexFour'),saved={[current.id]:{values,reviewed:{}}};
+    const exported=await Codec.exportWorkbook(original,parsed,saved),result=get(await Codec.parseWorkbook(exported,{filename:'German_Gender.xlsx',role:'gender'}),'dialogue','NPCTalkDialogueTextAudio_Gender');
+    assert.equal(field(result,'Text','DexFour').target,'');assert.equal(field(result,'Text','DexFour').outdated,false);
+    for(const form of ['MS','FS'])assert.equal(field(result,'Text',form).target,field(current,'Text',form).target);
+    assert.equal(field(result,'Text','IntFour').originalMissing,true,'an explicitly Missing class variant remains red');
+    assert.equal(saved[current.id].reviewed[blank.id],undefined);
+});
 test('v1 snapshots replay their metadata authority and cannot silently export as v2', async () => {
     const bytes = await workbook({ normal: classDialogue(), macro: true });
     const options = { filename: 'German.xlsm', role: 'gender', parserVersion: 'clienttext-v1' }, legacy = await Codec.parseWorkbook(bytes, options), unit = get(legacy, 'dialogue');

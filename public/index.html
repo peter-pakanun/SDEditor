@@ -388,6 +388,14 @@
         </section>
         <section class="versionPanel offlineVersion" aria-label="Offline workspace">
           <h2>Offline</h2>
+          <div class="versionOfflineTabs" role="tablist" aria-label="Offline content mode" @keydown="managedOfflineModeKeydown">
+            <button id="offlineSdTab" type="button" role="tab" aria-controls="offlineSdPanel" :aria-selected="managedOfflineContentMode === 'statdescription'" :tabindex="managedOfflineContentMode === 'statdescription' ? 0 : -1" @click="managedOfflineContentMode = 'statdescription'">StatDescription <small>SD</small></button>
+            <button id="offlineCtTab" type="button" role="tab" aria-controls="offlineCtPanel" :aria-selected="managedOfflineContentMode === 'clienttext'" :tabindex="managedOfflineContentMode === 'clienttext' ? 0 : -1" @click="managedOfflineContentMode = 'clienttext'">ClientText <small>CT</small></button>
+          </div>
+          <app-notice v-if="ctLocalIssue" tone="error" role="alert">{{ ctLocalIssue }}</app-notice>
+          <app-notice v-if="ctError" tone="error" role="alert">{{ ctError }}</app-notice>
+          <app-notice v-for="draft in ctLocalEmergencyDrafts.filter(draft=>draft.scope.accountId === ctRequestScope().accountId &amp;&amp; draft.scope.game === gameVersion &amp;&amp; draft.scope.branchId === (branchId || 'default'))" :key="draft.id" tone="error" role="alert">{{ draft.pending ? 'Checkpoint pending' : 'Draft was not stored' }} for {{ draft.scope.language }} · {{ draft.scope.groupId.slice(-8) }}. Keep this tab open. <button @click="ctDownloadEmergencyDraft(draft)">Download unstored draft</button></app-notice>
+          <div id="offlineSdPanel" v-show="managedOfflineContentMode === 'statdescription'" role="tabpanel" aria-labelledby="offlineSdTab" tabindex="0">
           <template v-if="managedOfflineVersion"><label for="offlineVersionName">Version name</label><div class="versionNameField"><input id="offlineVersionName" v-model="offlineVersionName" @keydown.enter.prevent="saveOfflineVersionName" placeholder="Name this local version"><button @click="saveOfflineVersionName">Save name</button></div><p class="versionHash" tabindex="0" v-tooltip="'Source hash: ' + managedOfflineVersion.sourceHash" :aria-label="'Source hash: ' + managedOfflineVersion.sourceHash">{{ managedOfflineVersion.sourceHash?.slice(0, 16) }}</p><button class="primaryAction" @click="continueOfflineVersion" :disabled="managedVersionBusy">Continue offline workspace</button></template>
           <p v-else-if="managedLocalVersionsLoading && !managedLocalVersionsLoaded" class="versionLoading versionMuted" role="status"><span class="browserWorkSpinner" aria-hidden="true"></span> Loading offline workspace…</p>
           <template v-else-if="managedOfflineAssociatedVersion">
@@ -400,17 +408,39 @@
             <button class="primaryAction" @click="managedImportOffline(false)" :disabled="managedVersionBusy">Import StatDescriptions.zip</button>
           </template>
           <div v-if="managedOfflineVersion" class="versionActions"><button @click="managedImportOffline(false)" :disabled="managedVersionBusy || !managedLocalVersionsLoaded">Import next/update</button><button @click="managedImportOffline(true)" :disabled="managedVersionBusy">Import translated</button></div>
-          <div class="versionActions"><button @click="ctOpenOfflineTest" :disabled="managedVersionBusy || ctBusy || ctUploading">Local workbooks</button></div>
-          <p class="versionMuted">Local workbooks are stored only in this browser/profile for the selected account and game. Reopen a workspace below to recover its drafts. Download backups regularly. Old memory-only tabs cannot be recovered after they were closed or refreshed.</p>
-          <label>Restore local recovery backup <input type="file" accept=".zip" @change="ctRestoreLocalBackup" :disabled="ctLocalBackupBusy || ctBusy"></label>
-          <app-notice v-if="ctLocalIssue" tone="error" role="alert">{{ ctLocalIssue }}</app-notice>
-          <app-notice v-if="ctError" tone="error" role="alert">{{ ctError }}</app-notice>
-          <app-notice v-for="draft in ctLocalEmergencyDrafts.filter(draft=>draft.scope.accountId === ctRequestScope().accountId &amp;&amp; draft.scope.game === gameVersion &amp;&amp; draft.scope.branchId === (branchId || 'default'))" :key="draft.id" tone="error" role="alert">{{ draft.pending ? 'Checkpoint pending' : 'Draft was not stored' }} for {{ draft.scope.language }} · {{ draft.scope.groupId.slice(-8) }}. Keep this tab open. <button @click="ctDownloadEmergencyDraft(draft)">Download unstored draft</button></app-notice>
-          <div v-for="workspace in ctLocalWorkspaces.filter(row=>row.groupId.startsWith('local:test:'))" :key="workspace.groupId" class="versionActions">
-            <span>{{ workspace.version?.name || 'Local workbook' }} · {{ workspace.language }} · {{ new Date(workspace.createdAt).toLocaleString() }} · {{ workspace.groupId.slice(-8) }}</span>
-            <button @click="ctOpenCached(workspace)" :disabled="ctBusy || ctLocalBackupBusy">Reopen local workbook</button>
           </div>
-          <p class="versionMuted versionWorkbookDropHint">Drop XLSX/XLSM workbooks here to open Local workbooks.</p>
+          <div id="offlineCtPanel" v-show="managedOfflineContentMode === 'clienttext'" role="tabpanel" aria-labelledby="offlineCtTab" tabindex="0">
+            <p class="versionMuted versionOfflineIntro">Edit XLSX/XLSM workbooks locally. Saved work and drafts stay in this browser for the selected account and game. Download recovery backups regularly.</p>
+            <button :class="{ primaryAction: !ctPrivateLocalWorkspaces.length }" @click="ctOpenOfflineTest" :disabled="managedVersionBusy || ctBusy || ctUploading || ctLocalBackupBusy">Open new workbook…</button>
+            <p class="versionMuted versionWorkbookDropHint">Or drop workbook files here.</p>
+            <template v-if="ctPrivateLocalWorkspaces.length">
+              <h3 class="versionOfflineSubheading">Latest workbook</h3>
+              <article v-for="workspace in ctPrivateLocalWorkspaces.slice(0, 1)" :key="workspace.groupId" class="versionLocalWorkbook versionLatestWorkbook">
+                <strong>{{ workspace.version?.name || 'Local workbook' }}</strong>
+                <p class="versionWorkbookMeta">{{ workspace.language }} · <time tabindex="0" :datetime="new Date(workspace.createdAt).toISOString()" v-tooltip="'Imported ' + new Date(workspace.createdAt).toLocaleString()">{{ new Date(workspace.createdAt).toLocaleDateString() }}</time> · <span class="versionWorkbookId">{{ workspace.groupId.slice(-8) }}</span></p>
+                <button class="primaryAction" @click="ctOpenCached(workspace)" :disabled="managedVersionBusy || ctBusy || ctLocalBackupBusy || ctUploading">Reopen local workbook</button>
+              </article>
+              <details v-if="ctPrivateLocalWorkspaces.length > 1" class="versionOfflineDisclosure versionOlderWorkbooks">
+                <summary>Older workbooks <span class="versionDisclosureCount">{{ ctPrivateLocalWorkspaces.length - 1 }}</span></summary>
+                <div class="versionOlderWorkbookList">
+                  <article v-for="workspace in ctPrivateLocalWorkspaces.slice(1)" :key="workspace.groupId" class="versionLocalWorkbook">
+                    <strong>{{ workspace.version?.name || 'Local workbook' }}</strong>
+                    <p class="versionWorkbookMeta">{{ workspace.language }} · <time tabindex="0" :datetime="new Date(workspace.createdAt).toISOString()" v-tooltip="'Imported ' + new Date(workspace.createdAt).toLocaleString()">{{ new Date(workspace.createdAt).toLocaleDateString() }}</time> · <span class="versionWorkbookId">{{ workspace.groupId.slice(-8) }}</span></p>
+                    <button @click="ctOpenCached(workspace)" :disabled="managedVersionBusy || ctBusy || ctLocalBackupBusy || ctUploading">Reopen local workbook</button>
+                  </article>
+                </div>
+              </details>
+            </template>
+            <p v-else class="versionMuted">No local ClientText workbooks stored yet. Open a workbook to start, or restore a recovery backup below.</p>
+            <details class="versionOfflineDisclosure versionWorkbookRestore">
+              <summary>Restore a recovery backup</summary>
+              <div class="versionOfflineDisclosureBody">
+                <p class="versionMuted">Restore a downloaded backup as a new local workbook. Existing workbooks are kept.</p>
+                <label for="ctLocalRecoveryFile">Recovery backup (.zip)</label>
+                <input id="ctLocalRecoveryFile" type="file" accept=".zip" @change="ctRestoreLocalBackup" :disabled="managedVersionBusy || ctLocalBackupBusy || ctBusy || ctUploading">
+              </div>
+            </details>
+          </div>
           <div v-for="request in ctRequests.filter(request=>['publication','metadata'].includes(request.payload.kind))" :key="request.requestId"><button @click="ctResumePublication(request)">Resume {{ request.payload.name }} · {{ request.payload.kind === 'metadata' ? 'version draft' : 'content upload' }}</button></div>
         </section>
       </div>
@@ -439,7 +469,7 @@
       <section class="box ctUploadDialog" aria-label="Content upload">
         <h2>{{ ctUploadTest ? 'Local workbooks' : ctUploadLocal ? 'Import ClientText locally' : ctUploadVersion ? 'Add content groups to '+ctUploadVersion.name : 'Publish a new version' }}</h2>
         <label v-if="!ctUploadLocal" class="ctUploadField">Predecessor version<input id="ctUploadPredecessor" type="text" :value="ctUploadPredecessor?.name || 'None — first version'" disabled></label>
-        <p v-if="ctUploadTest" class="versionMuted">Open local XLSM/XLSX files for one language. You can test a normal workbook, a Gender workbook, or both. Original files, committed edits, history and drafts stay in this browser. Every import creates a separate workspace; reopen it under Offline after restarting. Download a recovery backup for protection outside this browser.</p>
+        <p v-if="ctUploadTest" class="versionMuted">Open local XLSM/XLSX files for one language: a normal workbook, a Gender workbook, or both. Original files, committed edits, history and drafts stay in this browser. Every import creates a separate workspace; reopen it under Offline → ClientText after restarting. Download a recovery backup for protection outside this browser.</p>
         <label v-if="ctUploadTest" class="ctUploadField">Local workspace name<input v-model="ctUploadName" placeholder="Workbook name"></label>
         <template v-if="!ctUploadVersion && !ctUploadTest">
           <label class="ctUploadField">Version name<input type="text" v-model="ctUploadName"></label>

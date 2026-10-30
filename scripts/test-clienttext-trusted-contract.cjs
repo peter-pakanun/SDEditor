@@ -11,6 +11,38 @@ const field = (name, target = 'Original', extra = {}) => ({ id: fieldId(name, ex
 const unit = (fields, role = 'normal', recordId = 'Exact/@ ID') => S.normalizeUnit({ role,
     sheet: 'Exact sheet name', recordId, fields, developerNotes: 'Read-only notes', metadata: { Native: 'retained' } });
 
+test('generic dialogue review inheritance agrees with sparse API counts and preserves all Gender defaults, original summaries and conflicts',async()=>{
+    const A=await api;
+    for(const forms of [[null],['MS','FS','NS','MP','FP','NP']]){
+        const gender=forms[0]!==null,source='Exact shared English',original=S.normalizeUnit({role:gender?'gender':'normal',
+            sheet:'NPCTalkDialogueTextAudio'+(gender?'_Gender':''),recordId:'generic-review',fields:[
+                ...forms.map(form=>field('Text','Generic '+(form || 'text'),{kind:form?'form':'text',form,source,outdated:true})),
+                field('Text','',{kind:'form',form:'StrFour',source,required:false,originalMissing:false,outdated:true,originalFill:S.FILLS.outdated}),
+                field('Text','Class override',{kind:'form',form:'DexFour',source,outdated:true})]});
+        const facts=S.clientFacts(original),values=S.valuesFor(original),blank=original.fields.at(-2),snapshot=JSON.stringify(facts),base=A.unitCounts(facts);
+        const rows=[{saved:null},{saved:{values,reviewed:{}}},
+            {saved:{values,reviewed:{},saved:false},provenance:{sourceOnly:true}},
+            {saved:{values:{...values,[original.fields[0].id]:''},reviewed:{}}},
+            {saved:{values,reviewed:{},conflicts:[{fieldId:original.fields[0].id}]},provenance:{conflicts:[{fieldId:original.fields[0].id}]}},
+            {saved:{values,reviewed:{},conflicts:[{fieldId:blank.id}]},provenance:{conflicts:[{fieldId:blank.id}]}},
+            {saved:{values,reviewed:Object.fromEntries(forms.map((_,index)=>[original.fields[index].id,S.sourceHash(source)]))}}];
+        for(const {saved,provenance} of rows){
+            assert.deepEqual(A.unitCounts(facts,saved?.values || null,saved?.reviewed || {},provenance || {},{game:'poe2'}),browserCounts(original,saved));
+        }
+        const saved={values,reviewed:{}},status=S.statusFor(original,saved,{game:'poe2'});
+        assert.equal(status.fields[blank.id].generic,true);assert.equal(status.fields[blank.id].outdated,false);
+        assert.equal(S.fillFor(blank,'',saved,status.fields[blank.id]),'FFFFFF','export removes inherited orange instead of inventing a Reviewed fill');
+        assert.equal(S.colorCountsFor(original,saved).outdated,forms.length+1);
+        assert.equal(S.statusFor(original,saved,{game:'poe1'}).fields[blank.id].outdated,true);
+        const required={...original,fields:original.fields.map(value=>value===blank?{...value,required:true}:value)};
+        assert.equal(S.statusFor(required,saved).fields[blank.id].missing,true);assert.equal(S.statusFor(required,saved).fields[blank.id].outdated,true);
+        const unrelated={...original,fields:original.fields.map(value=>value===blank?{...value,source:'Different source'}:value)};
+        assert.equal(S.statusFor(unrelated,saved).fields[blank.id].outdated,true);
+        assert.equal(JSON.stringify(facts),snapshot);assert.deepEqual(A.unitCounts(facts),base,'accepted initial workload stays immutable');
+        assert.deepEqual(S.addOriginalSummary(S.emptySummary(),original),base);
+    }
+});
+
 function browserCounts(original, saved) {
     const result = S.emptySummary(); result.loaded = 1;
     const fields = original.fields.filter(value => !S.audioOnly(value.source));

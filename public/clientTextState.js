@@ -389,14 +389,39 @@
     }
     const isAbsent = (field, value) => !!field.required && !audioOnly(field.source) && !String(value ?? '').trim();
     const needsSourceReview = (field, value) => field.kind !== 'form' || !!field.required || !!field.outdated || !!String(value ?? '').trim();
+    function fieldForm(field) {
+        try {const id=JSON.parse(field.id);if(Array.isArray(id) && id.length===2)return id;}catch(_){}
+        return [field.group || field.name,field.kind==='form'?field.form:null];
+    }
+    function dialogueGenericFields(unit, field, options={}) {
+        if(options.game && options.game!=='poe2' || String(unit?.sheet || '').replace(/_Gender$/,'')!=='NPCTalkDialogueTextAudio'
+            || !unit.fields.includes(field) || field.kind!=='form' || !CLASS_FORMS.includes(fieldForm(field)[1]) || field.audioOnly || audioOnly(field.source))return [];
+        const [name]=fieldForm(field),source=field.sourceHash || sourceHash(field.source);
+        return unit.fields.filter(candidate=>{
+            const [other,form]=fieldForm(candidate);
+            return other===name && (candidate.sourceHash || sourceHash(candidate.source))===source
+                && (candidate.kind==='text' || candidate.kind==='form' && ['MS','FS','NS','MP','FP','NP'].includes(form));
+        });
+    }
+    function dialogueGenericFallback(unit,field,values,options={}) {
+        const fields=dialogueGenericFields(unit,field,options).filter(candidate=>!(allowsNonexistent(candidate) && String(values?.[candidate.id] ?? '').trim()==='NONEXISTENT'));
+        return fields.length>0 && fields.every(candidate=>String(values?.[candidate.id] ?? '').trim()) ? fields : [];
+    }
+    function inheritsGenericReview(unit,field,saved,options={}) {
+        if(!saved || saved.saved===false || saved.syncRecovery || field.required || String(saved.values?.[field.id] ?? '').trim())return false;
+        const generic=dialogueGenericFallback(unit,field,saved.values,options);
+        const ids=new Set([field.id,...generic.map(candidate=>candidate.id)]);
+        return generic.length>0 && ![...(saved.conflicts || []),...(saved.provenance?.conflicts || [])].some(conflict=>!conflict.fieldId || ids.has(conflict.fieldId));
+    }
     function statusFor(unit, saved = null, options = {}) {
         const values = valuesFor(unit, saved), reviewed = saved?.reviewed || {}, fields = {}, savedPresent = !!saved && saved.saved !== false;
         for (const field of unit.fields) {
             const originalMissing = isAbsent(field,field.target) || !!field.originalMissing;
             const assignedOutdated = (!!field.outdated || (saved?.outdated || []).includes(field.id)) && !audioOnly(field.source);
             const rawMissing = isAbsent(field,values[field.id]), english = englishIntentFor(field,saved,options);
-            const missing = rawMissing && !english, outdated = assignedOutdated && reviewed[field.id] !== sourceHash(field.source);
-            fields[field.id] = { missing,rawMissing,english,outdated,saved:savedPresent,
+            const generic=inheritsGenericReview(unit,field,saved,options);
+            const missing = rawMissing && !english, outdated = assignedOutdated && !generic && reviewed[field.id] !== sourceHash(field.source);
+            fields[field.id] = { missing,rawMissing,english,...(generic?{generic:true}:{}),outdated,saved:savedPresent,
                 revised:savedPresent && !originalMissing && !assignedOutdated && !audioOnly(field.source) && values[field.id] !== field.target,
                 unchanged:!missing && !outdated && !savedPresent };
         }
@@ -408,6 +433,7 @@
     // A fill override is separate from Saved: an unchanged complete save does
     // not acquire a completion colour. Null preserves the original cell fill.
     function fillFor(field, value, saved, status) {
+        if(status.generic)return field.originalFill===FILLS.outdated?'FFFFFF':null;
         const assignedOutdated = (field.outdated || (saved?.outdated || []).includes(field.id)) && !audioOnly(field.source);
         const reviewed = saved?.reviewed?.[field.id] === sourceHash(field.source);
         if (saved?.saved === false && value === field.target && !assignedOutdated && !reviewed && !status.english) return null;
@@ -420,6 +446,7 @@
         return null;
     }
     function fieldColorFor(field, saved, status) {
+        if(status.generic)return '';
         if (status.missing) return 'missing';
         if (status.outdated) return 'outdated';
         const value = own(saved?.values, field.id) ? saved.values[field.id] : field.target;
@@ -652,5 +679,5 @@
         clientFacts, originalValues, emptySummary, addOriginalSummary, originalCacheKey, buildDescriptors,
         normalizeUnit, compactUnit, normalizeCompact, leafHash, nodeHash, buildManifest, proofFor, verifyWitness,
         ENGLISH_INTENT_PROTOCOL, ENGLISH_ELIGIBILITY_PROTOCOL, englishEligible, englishIntentFor, normalizeEnglishIntent, applyEnglishActions, carryEnglishIntent,
-        normalizeValues, normalizeReviewed, valuesFor, needsSourceReview, statusFor, counts, carryForward, reviewAudioMarkerChanges, tokenize, maskAudioMarkers, tokenInsertion, extractVariables, variableIdentityKey, diagnose, suggestions, copy };
+        normalizeValues, normalizeReviewed, valuesFor, needsSourceReview, dialogueGenericFields, dialogueGenericFallback, inheritsGenericReview, statusFor, counts, carryForward, reviewAudioMarkerChanges, tokenize, maskAudioMarkers, tokenInsertion, extractVariables, variableIdentityKey, diagnose, suggestions, copy };
 });

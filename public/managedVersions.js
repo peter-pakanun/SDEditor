@@ -81,7 +81,7 @@
     data() { return { branchId: DEFAULT_BRANCH, versionChooserVisible: false, managedVersions: [], managedBranch: null,
       managedTeamSort: 'progress', managedTeamSortDir: 'desc',
       selectedManagedVersionId: '', managedVersionDetails: null, managedVersionError: '', managedOperationErrors: {}, managedVersionBusy: false,
-      managedVersionsUnavailable: false, managedShowWithdrawn: false, localVersions: [], offlineVersionName: '',
+      managedVersionsUnavailable: false, managedShowWithdrawn: false, localVersions: [], offlineVersionName: '', managedOfflineContentMode: 'statdescription',
       managedCatalogLoading: false, managedCatalogLoaded: false, managedLocalVersionsLoading: false, managedLocalVersionsLoaded: false,
       managedDetailsLoading: false, managedDetailsLoaded: false,
       activeManagedVersionId: '', managedActiveDetails: null, managedWorkspaceMode: 'offline', managedWorkspaceIdentity: null, managedNow: Date.now(), managedUploadVisible: false, managedUpload: null,
@@ -263,6 +263,15 @@
       managedDeadlineWeekday: deadlineWeekday,
       managedNextWeekDeadline: nextWeekDeadline,
       managedNextLocalWeekDeadline: nextLocalWeekDeadline,
+      managedOfflineModeKeydown(event) {
+        const tabs = [...event.currentTarget.querySelectorAll('[role="tab"]')];
+        const current = tabs.indexOf(event.target);
+        if (current < 0 || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+          : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+        tabs[index].click(); tabs[index].focus();
+      },
       managedCloseVersionMenus(except, returnFocus) {
         for (const menu of document.querySelectorAll('.versionActionMenu[open]')) {
           if (menu === except) continue;
@@ -528,6 +537,7 @@
         if (this.flushEditorDraft && !await this.flushEditorDraft()) return false;
         if (this._pendingSaves?.snapshot().jobs.length && !await this.waitForPendingSaves()) return false;
         if (this.editorSessionActive && this.editorExit) { await this.editorExit(); if (this.editorSessionActive) return false; }
+        this.managedOfflineContentMode = 'statdescription';
         this.versionChooserVisible = true; await this.managedLoadLocal(); await this.refreshManagedVersions(); return true;
       },
       managedCached(version) { return this.localVersions.some(v => v.hasSource && v.sourceHash === version.sourceHash && v.branchId === version.branchId); },

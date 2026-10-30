@@ -2277,10 +2277,10 @@ function classVariantUnit(id='ClassVariants',row=2){
         targetCell:String.fromCharCode(68+index)+row}));return original;
 }
 
-function dialogueVariantUnit(){
+function dialogueVariantUnit(generic=''){
     const original=classVariantUnit('DialogueVariants'),base=original.fields[0];
     original.role='normal';original.sheet='NPCTalkDialogueTextAudio';original.id=JSON.stringify([original.role,original.sheet,original.recordId]);
-    original.fields=[{...base,id:JSON.stringify(['Text',null]),kind:'text',form:undefined,group:undefined},
+    original.fields=[{...base,id:JSON.stringify(['Text',null]),kind:'text',form:undefined,group:undefined,target:generic,originalMissing:!generic.trim()},
         ...original.fields.filter(field=>CLASS_VARIANT_FORMS.includes(field.form)).map(field=>({...field,required:!!field.target.trim(),originalMissing:false}))];
     for(const field of original.fields)field.outdated=true;
     return original;
@@ -2357,6 +2357,47 @@ test('bulk dialogue review fences stale groups and blocks conflicts, pending sav
     const group=app.ctFieldGroups[0],blank=app.ctBlankEnglishVariants(group)[0];blank.required=true;
     assert.equal(app.ctReviewBlankVariants(group),true);
     assert.equal(S.statusFor(app.ctCurrentUnit,{values:app.ctValues,reviewed:app.ctReviewed}).fields[blank.id].missing,true,'reviewing a blank does not erase separately required translation workload');
+});
+
+test('saved generic dialogue covers blank overrides without approving populated variants; draft generic edits only change presentation',async()=>{
+    const original=dialogueVariantUnit('Generic [Keyword] {0}'),f=fixture();await f.store.import(scope,{units:[original],assets:[asset]});
+    const {app}=keyboardHarness(original);app._ctStore=f.store;app.ctSync=()=>{};app.ctLoadMemory=()=>{};
+    const group=app.ctFieldGroups[0],blank=original.fields.find(field=>field.kind==='form'&&!field.target),generic=original.fields[0],
+        populated=app.ctPopulatedVariants(group),before=clone(original);
+    assert.equal(app.ctClassFallback(blank).label,'Use generic');assert.equal(app.ctClassVariantCounts(group),'2 translated · 10 use generic');
+    assert.equal(app.ctFieldController(blank).field.placeholder,'-- Use generic --');assert.equal(app.ctPreviewValue(blank),generic.target);
+    assert.equal(app.ctBlankVariantsToReview(group).length,0);assert.equal(app.ctGenericVariantsToSave(group).length,10);
+    assert.equal(app.ctStatus().fields[blank.id].outdated,true,'an untouched generic still needs an explicit ID Save before accepted counters change');
+    app.ctMarkReviewed(generic);assert.equal(await app.ctSave(),true);
+    assert.equal(app.ctStatus().fields[blank.id].outdated,false);assert.equal(app.ctStatus().fields[blank.id].generic,true);
+    assert.equal(app.ctStatus().outdated,true);assert.equal(app.ctGenericVariantsToSave(group).length,0);
+    for(const field of populated)assert.equal(app.ctStatus().fields[field.id].outdated,true);
+    const saved=(await f.store.getSaved(scope))[original.id];assert.deepEqual(Object.keys(saved.reviewed),[generic.id]);
+    assert.equal(app.ctListTargetParts(original).find(part=>part.english).text,'-- Use generic -- (10 class variants)');
+    app.ctValues[generic.id]='';assert.equal(app.ctClassFallback(blank).label,'Use English');
+    assert.equal(app.ctStatus().fields[blank.id].outdated,false,'clearing a draft does not rewrite committed completion');
+    app.ctDraftDirty=true;assert.equal(await app.ctSave(),true);assert.equal(app.ctStatus().fields[blank.id].outdated,true);
+    app.ctValues[generic.id]='A new generic draft';assert.equal(app.ctPreviewValue(blank),'A new generic draft');
+    assert.equal(app.ctStatus().fields[blank.id].outdated,true,'typing a generic draft cannot clear review');assert.deepEqual(original,before);
+});
+
+test('Gender dialogue fallbacks require every generic form and preview each form separately without choosing a gender',()=>{
+    const original=dialogueVariantUnit();original.role='gender';original.sheet+='_Gender';original.id=JSON.stringify([original.role,original.sheet,original.recordId]);
+    const base=original.fields[0];original.fields=[...['MS','FS','NS','MP','FP','NP'].map((form,index)=>({...base,id:JSON.stringify(['Text',form]),kind:'form',group:'Text',form,
+        target:form==='NS'?'NONEXISTENT':'Generic '+form,required:true,originalMissing:false,targetCell:'GEN'+index})),...original.fields.slice(1)];
+    const {app,mixin}=keyboardHarness(original),blank=original.fields.find(field=>field.form==='StrFour');app.ctFocusedField=blank.id;
+    app.buildGamePreviewSegments=text=>({segments:[{text}],keysOrder:[]});
+    assert.equal(app.ctClassFallback(blank).kind,'generic');assert.equal(app.ctPreviewValue(blank),'','multiple defaults never collapse to an arbitrary generic');
+    let variants=mixin.computed.ctGamePreviewVariants.call(app);
+    assert.deepEqual(Array.from(variants,variant=>variant.label),['MS · Generic','FS · Generic','MP · Generic','FP · Generic','NP · Generic']);
+    assert.equal(variants[1].segments[0].text,'Generic FS');
+    const saved={values:clone(app.ctValues),reviewed:{}};app.ctSaved={[original.id]:saved};
+    assert.equal(app.ctStatus().fields[blank.id].outdated,false);
+    app.ctValues[original.fields[1].id]='';assert.equal(app.ctClassFallback(blank).kind,'mixed');
+    assert.equal(app.ctFieldController(blank).field.placeholder,'-- Use generic / English --');
+    variants=mixin.computed.ctGamePreviewVariants.call(app);assert.equal(variants[1].label,'FS · English');assert.equal(variants[1].segments[0].text,base.source);
+    assert.equal(app.ctStatus().fields[blank.id].outdated,false,'draft changes are display only');
+    app.ctSaved={[original.id]:{values:clone(app.ctValues),reviewed:{}}};assert.equal(app.ctStatus().fields[blank.id].outdated,true,'one saved missing generic restores blank review');
 });
 
 test('a regular translation and class variants share one English group without merging unrelated source fields',()=>{

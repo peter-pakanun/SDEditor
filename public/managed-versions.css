@@ -60,6 +60,33 @@
 .versionNameField { display: flex; gap: 8px; margin: 8px 0; }
 .versionNameField input { min-width: 0; flex: 1; }
 .offlineVersion .versionActions { margin-top: 15px; }
+.offlineVersion { align-self: start; }
+.versionOfflineTabs { display: flex; gap: 4px; margin: 0 0 16px; border-bottom: 1px solid var(--ui-border); }
+.versionOfflineTabs > button { flex: 1; min-width: 0; padding: 10px 5px; margin-bottom: -1px; border: 0; border-bottom: 2px solid transparent; border-radius: 5px 5px 0 0; background: transparent; font-size: 13px; }
+.versionOfflineTabs > button small { display: block; margin-top: 3px; font-size: 11px; color: var(--ui-muted); }
+.versionOfflineTabs > button[aria-selected="true"] { border-bottom-color: var(--ui-accent); background: var(--ui-accent-soft); color: var(--ui-accent); font-weight: 600; }
+.versionOfflineTabs > button:hover { background: var(--ui-accent-soft); }
+.versionOfflineTabs > button:focus-visible, .versionOfflineDisclosure > summary:focus-visible, .versionLocalWorkbook button:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; }
+.versionOfflineIntro { margin-top: 0; }
+.versionWorkbookDropHint { margin: 8px 0 20px; font-size: 12px; }
+.versionCatalog .versionOfflineSubheading { margin: 20px 0 10px; font-size: 13px; font-weight: 600; }
+.versionLocalWorkbook { padding: 14px; min-width: 0; }
+.versionLocalWorkbook > strong { display: block; overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; }
+.versionLatestWorkbook { border: 1px solid var(--ui-border); border-radius: 6px; background: var(--color-element-alt); }
+.versionWorkbookMeta { margin: 6px 0 12px; color: var(--ui-muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.versionWorkbookId { font-family: monospace; }
+.versionOfflineDisclosure { margin-top: 14px; border: 1px solid var(--ui-border); border-radius: 6px; }
+.versionOfflineDisclosure > summary { display: flex; align-items: center; gap: 8px; padding: 12px; border-radius: 5px; cursor: pointer; list-style: none; font-size: 13px; }
+.versionOfflineDisclosure > summary::-webkit-details-marker { display: none; }
+.versionOfflineDisclosure > summary::before { content: '▸'; color: var(--ui-muted); }
+.versionOfflineDisclosure[open] > summary::before { content: '▾'; }
+.versionOfflineDisclosure > summary:hover { background: var(--ui-accent-soft); }
+.versionDisclosureCount { margin-left: auto; padding: 1px 7px; border-radius: 10px; background: var(--color-element-alt); color: var(--ui-muted); font-size: 12px; }
+.versionOlderWorkbookList { max-height: 330px; overflow-y: auto; border-top: 1px solid var(--ui-border); }
+.versionOlderWorkbookList .versionLocalWorkbook + .versionLocalWorkbook { border-top: 1px solid var(--ui-border); }
+.versionOfflineDisclosureBody { padding: 0 12px 12px; border-top: 1px solid var(--ui-border); }
+.versionWorkbookRestore label { display: block; margin: 12px 0 6px; font-size: 12px; }
+.versionWorkbookRestore input { box-sizing: border-box; width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--ui-border); border-radius: 5px; background: var(--color-element-alt); color: var(--color-font); font-size: 12px; }
 .versionProgress { width: 210px; max-width: 100%; padding: 3px 0; border-radius: 3px; }
 .versionProgressSummary { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: var(--ui-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .versionProgressSummary strong { color: var(--color-font); font-weight: 600; }

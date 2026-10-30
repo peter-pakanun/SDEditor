@@ -181,11 +181,12 @@
     const source=sourceText!==undefined,unit=host.ctCurrentUnit,captured=key(host,false),fieldId=field.id;
     const valid=()=>host.ctActive && key(host,false)===captured && host.ctCurrentUnit===unit && unit?.fields.includes(field);
     const value=()=>source ? String(sourceText) : String((host.ctInputValues || host.ctValues)[fieldId] ?? '');
-    const usesEnglish=()=>valid() && (host.ctUsesEnglish?.(field,unit) || host.ctClassUsesEnglish?.(field,unit,value()));
+    const fallbackCue=()=>valid() && host.ctClassFallbackCue?.(field,value());
+    const usesEnglish=()=>valid() && (host.ctUsesEnglish?.(field,unit) || !!fallbackCue());
     const list=()=>ranges(host,field,value(),source),descriptor={id:fieldId,isMultiline:true,
       get english(){return source ? value() : String(field.source ?? '');},get translation(){return value();},
       set translation(text){if(valid() && !host.ctBusy && !host.ctHistoryViewer && !host.ctMtlBusy?.(field))(host.ctInputValues || host.ctValues)[fieldId]=applyRawInput(host,field,text);},get readonly(){return source || !valid() || host.ctBusy || host.ctHistoryViewer || !!host.ctMtlBusy?.(field);},
-      get placeholder(){return source?'English':usesEnglish()?'-- Use English --':field.kind==='form' && !field.required?'Optional translation':'Translation';},
+      get placeholder(){return source?'English':fallbackCue() || (usesEnglish()?'-- Use English --':field.kind==='form' && !field.required?'Optional translation':'Translation');},
       get lang(){return source?'en':host.translationEditorBcp47;},
       get dataAttrs(){const issues=diagnostics();
         return source ? {'data-ct-source':fieldId,'aria-label':field.name+' English'}
@@ -207,7 +208,7 @@
       get diagnosticPresentation(){return diagnosticPresentation(diagnostics());},get highlight(){
       // Native placeholders do not paint over whitespace. The existing display
       // overlay supplies the same cue without changing raw value/selection.
-      if(!source && value().length && !value().trim() && usesEnglish())return '<span class="ctEnglishPlaceholder" aria-hidden="true">-- Use English --</span>';
+      if(!source && value().length && !value().trim() && usesEnglish())return '<span class="ctEnglishPlaceholder" aria-hidden="true">'+(fallbackCue() || '-- Use English --')+'</span>';
       return source ? renderRanges(value(),list()) : renderAnnotatedRanges(value(),[
       ...list().map(range=>({...range,classes:['tagRange',...(range.kind==='keyword'?['vocab']:[])]})),
       ...diagnostics().map(issue=>({...issue,classes:['diagnosticRange',(issue.level || issue.severity)==='error'?'diagError':'diagWarning']})),
