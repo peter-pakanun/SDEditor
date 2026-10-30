@@ -76,6 +76,19 @@ function dispatchLookupKey(editor, keyEvent) {
   }
 }
 
+test('Enter in the Lookup search applies it again without saving or navigating', () => {
+  const { editor, calls } = loadEditor();
+  let searches = 0; editor.lookupApplySearch = () => { searches++; };
+  const input = editor.$refs.lookupSearchInput;
+  const enter = event('Enter', { target: input });
+  dispatchLookupKey(editor, enter);
+  assert.equal(searches, 1); assert.equal(enter.defaultPrevented, true);
+  dispatchLookupKey(editor, event('Enter', { target: input, isComposing: true }));
+  dispatchLookupKey(editor, event('Enter', { target: { tagName: 'BUTTON' } }));
+  assert.equal(searches, 1);
+  assert.equal(calls.save, 0); assert.equal(calls.navigate, 0);
+});
+
 test('Lookup opens and focuses search without saving or replacing the draft', () => {
   const { editor, calls } = loadEditor();
   const current = description('current');
@@ -344,7 +357,7 @@ test('workspace refresh invalidates saved lookup matches without consulting the 
   assert.equal(editor.editorBlocks[0].translation, 'Draft only phrase');
 });
 
-test('workspace refresh updates another reference language while retaining identical selected-language inputs', () => {
+test('workspace refresh defers another reference language until search while retaining selected-language inputs', () => {
   const { editor } = loadEditor();
   const current = description('current'); editor.descs = [current];
   editor.sideTab = 'lookup'; editor.lookupLanguage = 'French';
@@ -355,6 +368,8 @@ test('workspace refresh updates another reference language while retaining ident
     translations: { Thai: [...selectedText], French: ['New French reference'] } }];
   editor.applyWorkspaceOverlay();
   assert.equal(current.translations.Thai, selectedText);
+  assert.equal(editor.lookupResultCount, 0);
+  editor.lookupApplySearch();
   assert.equal(editor.lookupResultCount, 1);
   editor.lookupSelect(current.filepath);
   assert.equal(editor.lookupSelectedReference.blocks[0].translation, 'New French reference');

@@ -66,6 +66,44 @@ async function importReal(game){
     },game);
     assert.equal(result.opened,true,result.error);assert.equal(result.error,'');assert.ok(result.count>1000);fs.unlinkSync(inputCopies[game]);return result;
 }
+async function lookupSaveCheck(){
+    const imported=await importReal('poe2');
+    reports.push({case:'PoE2 native workbook import for Lookup save check',units:imported.count});
+    const chosen=await page.evaluate(async()=>{
+        const vm=window.__localApp,unit=vm.ctUnits.find(unit=>vm.ctFieldsFor(unit).length===1 && vm.ctFieldsFor(unit)[0].kind==='text' && vm.ctFieldsFor(unit)[0].source);
+        if(!unit)throw new Error('No ordinary visible text record');
+        await vm.ctSelect(unit,true);vm.ctEditor=true;
+        const field=vm.ctFieldsFor(unit)[0],activeSource=EditorReferenceCatalog.activeSource,load=vm.lookupLoadCatalog;
+        window.__lookupSaveMetrics={builds:0,loads:0};
+        EditorReferenceCatalog.activeSource=(...args)=>{window.__lookupSaveMetrics.builds++;return activeSource(...args);};
+        vm.lookupLoadCatalog=(...args)=>{window.__lookupSaveMetrics.loads++;return load(...args);};
+        vm.ctTool='lookup';return{unitId:unit.id,fieldId:field.id,query:unit.recordId};
+    });
+    await page.waitForFunction(()=>{const vm=window.__localApp;return vm.lookupCatalogKey===vm.lookupSessionKey;});
+    const search=page.getByRole('searchbox',{name:'Search reference files'}),input=page.locator('[data-ct-target]').first();
+    await search.fill(chosen.query);await page.waitForFunction(query=>window.__localApp.lookupAppliedQuery===query,chosen.query);
+    await page.evaluate(fieldId=>{const vm=window.__localApp;vm.lookupSelect(vm.lookupResults.find(entry=>entry.field.id===fieldId).key);},chosen.fieldId);
+    for(const theme of ['light','grey','dark','modern-dark']){
+        await page.evaluate(theme=>{document.documentElement.setAttribute('data-theme',theme);const vm=window.__localApp;
+            window.__lookupBefore={results:vm.lookupResults,reference:vm.lookupSelectedReference,selected:vm.lookupSelectedFilepath,page:vm.lookupPage,...window.__lookupSaveMetrics};},theme);
+        const value='Lookup committed '+theme;await input.fill(value);await input.focus();
+        const saved=await page.evaluate(async()=>{const vm=window.__localApp,start=performance.now();if(!await vm.ctSave(false))throw new Error(vm.ctError);await vm.$nextTick();
+            const b=window.__lookupBefore;return{ms:performance.now()-start,sameResults:vm.lookupResults===b.results,sameReference:vm.lookupSelectedReference===b.reference,
+                sameSelection:vm.lookupSelectedFilepath===b.selected,samePage:vm.lookupPage===b.page,builds:window.__lookupSaveMetrics.builds-b.builds,loads:window.__lookupSaveMetrics.loads-b.loads};});
+        assert.deepEqual({...saved,ms:0},{ms:0,sameResults:true,sameReference:true,sameSelection:true,samePage:true,builds:0,loads:0});
+        await search.focus();await search.press('Enter');
+        await page.waitForFunction(value=>window.__localApp.lookupSelectedReference?.blocks[0].translation===value,value);
+        const durable=await page.evaluate(async chosen=>{const vm=window.__localApp;return(await vm.ctStorage(vm.ctWorkspace.scope).getSaved(vm.ctWorkspace.scope))[chosen.unitId].values[chosen.fieldId];},chosen);
+        assert.equal(durable,value);
+        reports.push({case:'Lookup remains stable across native Save; Enter refreshes saved reference',theme,units:imported.count,saveMs:saved.ms});
+    }
+    await input.fill('Lookup reopened target');
+    assert.equal(await page.evaluate(()=>window.__localApp.ctSave(false)),true);
+    await page.evaluate(async()=>{const vm=window.__localApp;vm.ctTool='dictionary';await vm.$nextTick();vm.ctTool='lookup';});
+    await page.waitForFunction(()=>window.__localApp.lookupSelectedReference?.blocks[0].translation==='Lookup reopened target');
+    assert.deepEqual(errors,[]);assert.deepEqual(networkWrites,[]);
+    fs.writeFileSync(path.join(temp,'lookup-local-save-results.json'),JSON.stringify({ok:true,chosen,reports,errors,networkWrites},null,2));
+}
 async function chooseEditAndDraft(){return page.evaluate(async()=>{
     const vm=window.__localApp,units=vm.ctUnits.filter(unit=>vm.ctFieldsFor(unit).some(field=>field.kind!=='gender' && field.source && !ClientTextUI.isDNTSource(field.source)));
     const savedUnit=units[0],draftUnit=units.find(unit=>unit.id!==savedUnit.id);await vm.ctSelect(savedUnit,true);
@@ -282,6 +320,7 @@ async function run(){
         if(process.argv.includes('--review-fixes-only')){await reviewFixes();return;}
         if(process.argv.includes('--use-english-only')){await englishIntentCheck();return;}
         if(process.argv.includes('--intent-conflicts-only')){await intentConflictCheck();return;}
+        if(process.argv.includes('--lookup-saves-only')){await lookupSaveCheck();return;}
         if(process.argv.includes('--lease-probe-only')){
             const lease=await page.evaluate(async()=>{
                 const vm=window.__localApp,store=vm._ctLocalStore,scope={...vm.ctRequestScope(),language:'Thai',versionId:'local:test:'+crypto.randomUUID(),groupId:'local:test:'+crypto.randomUUID()},fieldId=JSON.stringify(['Text',null]);

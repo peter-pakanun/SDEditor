@@ -5155,6 +5155,9 @@ function formatPageRange(total, page, pageSize) {
       if (this.isFilterFocusShortcut(e)) {
         e.preventDefault();
         this.lookupFocusSearch?.();
+      } else if (e.key === 'Enter' && e.target === (this.getEditorComponentRef?.('lookupSearchInput') || this.$refs.lookupSearchInput)) {
+        e.preventDefault();
+        this.lookupApplySearch?.();
       } else if (e.key === 'Escape') {
         e.preventDefault();
         if (this.lookupFiltersVisible) this.lookupCloseFilters();

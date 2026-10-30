@@ -43,6 +43,46 @@ test('mixed references have composite identities and retain exact ClientText raw
   assert.equal(api.searchIndex(entries, 'Developer note', 'metadata', false, true).length, 2);
   assert.equal(api.searchIndex(entries, '\\n', 'english', false, true).length, 2);
 });
+
+test('Local Workbook saves retain the Lookup snapshot without catalog loads or corpus reads', () => {
+  let reads = 0, loads = 0;
+  const units = Array.from({ length: 2000 }, (_, index) => {
+    const original = unit(); original.id += index; original.recordId += index;
+    Object.defineProperty(original.fields[0], 'target', { get() { reads++; return 'Original target'; } });
+    return original;
+  });
+  const { host, session, api } = harness({
+    session: { mode: 'clienttext', version: { id: 'local:test:workbook' },
+      scope: { accountId: 'alice', game: 'poe2', versionId: 'local:test:workbook', groupId: 'local:test:group', language: 'Thai' },
+      group: { id: 'local:test:group', contentMode: 'clienttext' } },
+    host: { ctUnits: units, ctSaved: {}, lookupLoadCatalog() { loads++; } },
+  });
+  host.lookupQuery = 'Original target'; host.lookupApplySearch(); host.lookupPage = 2;
+  host.lookupSelect(host.lookupVisibleResults[0].key);
+  const selected = host.lookupSelectedFilepath, results = host.lookupResults, reference = host.lookupSelectedReference, initialReads = reads;
+  assert.equal(results.length, 2000); assert.ok(initialReads >= 2000);
+  for (let index = 0; index < 5; index++) {
+    host.ctSaved = { ...host.ctSaved, [units[20].id]: { values: { Text: 'Saved target ' + index } } };
+    host.ctValues.Text = 'Unsaved draft ' + index;
+    api.mixin.watch.ctRevision.call(host);
+    api.mixin.watch.lookupResults.call(host, host.lookupResults);
+    assert.equal(host.lookupResults, results);
+    assert.equal(host.lookupSelectedReference, reference);
+    assert.equal(host.lookupSelectedReference.blocks[0].translation, 'Original target');
+    assert.equal(host.lookupPage, 2); assert.equal(host.lookupSelectedFilepath, selected);
+  }
+  assert.equal(loads, 0); assert.equal(reads, initialReads, 'Saves must not traverse the workbook.');
+  host.lookupQuery = 'Saved target 4'; host.lookupApplySearch();
+  assert.equal(host.lookupResultCount, 1); assert.ok(reads > initialReads);
+  host.lookupSelect(host.lookupResults[0].key);
+  assert.equal(host.lookupSelectedReference.blocks[0].translation, 'Saved target 4');
+  host.ctSaved = { [units[20].id]: { values: { Text: 'Reopened target' } } };
+  api.mixin.watch.ctRevision.call(host);
+  session.tool = 'dictionary'; api.mixin.watch.lookupPanelActive.call(host, false);
+  session.tool = 'lookup'; api.mixin.watch.lookupPanelActive.call(host, true);
+  assert.equal(loads, 1);
+  assert.equal(host.lookupResultCount, 0, 'Reopening refreshes the existing query against the latest save.');
+});
 test('rendered Lookup filters raw and formatted DNT fields, retains ordinary siblings and target-only markers, and refreshes cached references',()=>{
   const original=unit(),base=original.fields[0];original.fields=[
     {...base,id:'Hidden',name:'Hidden',source:'[DNT] HIDDEN_NEEDLE',target:'Hidden target needle'},

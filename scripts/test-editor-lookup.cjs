@@ -221,6 +221,7 @@ test('Lookup language enumeration is cached, deferred while hidden, and refreshe
   assert.equal(translationReads, firstReads);
   assert.equal(model.lookupLanguage, 'French');
   model.sideTab = 'lookup';
+  api.mixin.watch.lookupPanelActive.call(model, true);
   const refreshed = model.lookupLanguages;
   assert.deepEqual(Array.from(refreshed), ['Thai', 'Japanese']);
   assert.ok(translationReads > firstReads);
@@ -228,7 +229,7 @@ test('Lookup language enumeration is cached, deferred while hidden, and refreshe
   assert.equal(model.lookupLanguage, '', 'A vanished choice is validated when Lookup becomes visible.');
 });
 
-test('active Lookup refreshes choices after committed changes and respects empty saved overrides', () => {
+test('active Lookup keeps language choices until the next search and respects empty saved overrides', () => {
   const one = description('one', 'English', [], { French: ['Français'], German: ['Deutsch'] });
   const local = { filepath: one.filepath, translations: { French: [], Japanese: ['日本語'] } };
   const { model, api } = loadLookup({ descs: [one], localDescs: { descs: [local] }, lookupLanguage: 'German' });
@@ -236,6 +237,8 @@ test('active Lookup refreshes choices after committed changes and respects empty
   local.translations.German = [];
   local.translations.Korean = ['한국어'];
   model.invalidateEditorLookupIndex();
+  assert.deepEqual(Array.from(model.lookupLanguages), ['Thai', 'German', 'Japanese']);
+  model.lookupApplySearch();
   const choices = model.lookupLanguages;
   assert.deepEqual(Array.from(choices), ['Thai', 'Japanese', 'Korean']);
   api.mixin.watch.lookupLanguages.call(model, choices);
@@ -582,16 +585,22 @@ test('replacing source, saved workspace, or reference language rebuilds the inde
   model.lookupSelect(two.filepath); assert.equal(model.lookupSelectedReference.lang, 'French');
 });
 
-test('refreshing saved reference text updates selected reference and expires vanished matches', () => {
+test('saved reference text and matches stay stable until another search', () => {
   const one = description('one'); const local = { filepath: one.filepath, translations: { Thai: ['Old text'] } };
   const { model, api } = loadLookup({ descs: [one], localDescs: { descs: [local] } });
   search(model, 'one', 'path');
   model.lookupSelect(one.filepath); assert.equal(model.lookupSelectedReference.blocks[0].translation, 'Old text');
+  const results = model.lookupResults;
   local.translations.Thai = ['Updated text']; model.invalidateEditorLookupIndex();
+  assert.equal(model.lookupResults, results);
+  assert.equal(model.lookupSelectedReference.blocks[0].translation, 'Old text');
+  model.lookupApplySearch();
   assert.equal(model.lookupSelectedReference.blocks[0].translation, 'Updated text');
   search(model, 'updated'); model.lookupSelect(one.filepath);
   local.translations.Thai = ['No longer matches']; model.invalidateEditorLookupIndex();
   api.mixin.watch.lookupResults.call(model, model.lookupResults);
+  assert.equal(model.lookupSelectedFilepath, one.filepath);
+  model.lookupApplySearch();
   assert.equal(model.lookupSelectedFilepath, ''); assert.equal(model.lookupSelectedReference, null);
 });
 

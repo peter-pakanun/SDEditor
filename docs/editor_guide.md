@@ -305,6 +305,8 @@ Choose **Prepare missing references** to make uncached groups available for refe
 
 The search and selected reference remain when you switch side tabs or move to another editor file. The configured search shortcut (**Ctrl+F**, or **Ctrl+D** in Settings) focuses the lookup search while Lookup is selected. **Esc** inside Lookup clears its search. Editor save and next/previous file shortcuts do not run while a Lookup control has focus.
 
+Saving translations keeps the current Lookup results and reference text stable. Run the search again (Enter in its search box), change the query or filters, or reopen Lookup to include the latest saved translations. Saves do not reload the reference catalog or search the workbook in the background.
+
 ### File Comments
 
 Open a file and select **Comments**, beside **History** in the right pane, to discuss that file. Translators' new comments are visible to their administrator-assigned language by default. Managers and admins can read every language's comments, and their new posts default to the selected language. Check **Post to all languages** to share a post across language teams; the checkbox starts unchecked and resets after posting. Existing comments remain global and show an **All languages** label, as do new global posts. Discussions follow the selected game (**PoE1** or **PoE2**) and file path across source hashes. Importing a new source version therefore keeps its file discussions available; PoE1 and PoE2 discussions remain separate.

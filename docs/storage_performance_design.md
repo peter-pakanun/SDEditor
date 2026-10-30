@@ -191,6 +191,8 @@ An uncached source download or missing required version facts still needs the ap
 
 Lookup rows are lazy: preparing a hidden lookup panel previously walked/reactively copied the whole corpus. [editorLookup.js](../public/editorLookup.js) builds the required visible scope on demand and uses scoped indexes rather than eagerly rendering hidden rows.
 
+Committed saves mark Lookup's index stale without changing its displayed snapshot. The next explicit search/filter action or panel activation refreshes that index; ClientText revisions do not reload the reference catalog. Index construction reads raw committed state, and unchanged queries reuse their results, so ordinary saves and record navigation do not subscribe to or rescan the workbook corpus. Context/access changes and DNT visibility still invalidate immediately.
+
 ## Measurements and remaining work
 
 The supplied Thai logs show selected-version opening decreasing from 53.3 s to 5.4 s after local readiness/read reuse changes, then 5.1 s after the activation/batching pass. Cached startup decreased from 37.7 s to 4.4 s. These are observed user runs, not controlled before/after measurements; the large early reduction includes moving remote synchronization beyond the local gate, not only faster disk access. Parent and child log rows overlap and must not be added together.
