@@ -843,6 +843,49 @@ test('blank English fields hide without trimming nonempty English or removing it
     assert.deepEqual(original,snapshot,'view construction keeps every baseline field and raw whitespace');assert.equal(before.fields.length,3);
     assert.equal(original.fields[0].target,'RECOVERABLE_HIDDEN_TRANSLATION');
 });
+test('blank-source review assignments remain accessible in the field groups and keyboard order through durable Save',async()=>{
+    const original=blankEnglishUnit('atlas_domination_2_4'),hidden=original.fields[0],visible=original.fields[1];
+    Object.assign(hidden,{id:JSON.stringify(['Hard Mode Display Name',null]),name:'Hard Mode Display Name',target:'',outdated:true,originalFill:S.FILLS.outdated});
+    const snapshot=clone(original),f=fixture(),captured={...scope,game:'poe1'};
+    await f.store.import(captured,{units:[original],assets:[asset]});
+    const {app}=visibleFieldsHarness(original,{gameVersion:'poe1',ctWorkspace:{scope:captured}});
+    app._ctStore=f.store;app.ctSync=()=>{};app.ctLoadMemory=()=>{};
+    assert.equal(app.ctStatus(original).outdated,true);
+    assert.equal(app.ctFieldsFor().includes(hidden),true);
+    assert.equal(app.ctFieldGroups.some(group=>group.fields.includes(hidden)),true);
+    assert.equal(app.ctTabFields().includes(hidden),true);
+    // Saving the visible name cannot silently approve the blank source.
+    app.ctValues[visible.id]='Changed name';app.ctEdited(visible);
+    assert.equal(await app.ctSave(),true);assert.equal(app.ctStatus(original).outdated,true);
+    app.ctMarkReviewed(hidden);
+    assert.equal(app.ctStatus(original).outdated,true,'the review is a draft until Save');
+    assert.equal(await app.ctSave(),true);
+    const saved=(await f.store.getSaved(captured))[original.id],history=await f.store.listHistory(captured,original.id);
+    assert.equal(saved.reviewed[hidden.id],S.sourceHash(''));assert.equal(saved.values[hidden.id],'');
+    assert.equal(saved.values[visible.id],'Changed name');assert.equal(S.statusFor(original,saved).outdated,false);
+    assert.equal(S.colorCountsFor(original,saved).reviewed,1);
+    assert.equal(app.ctFieldsFor().includes(hidden),true,'the reviewed field stays accessible');
+    assert.equal(history.find(entry=>entry.after.revision===saved.revision).after.reviewed[hidden.id],S.sourceHash(''));
+    assert.deepEqual(S.normalizeUnit(await f.store.getUnit(captured,original.id)),S.normalizeUnit(snapshot));
+    assert.deepEqual(original,snapshot);
+});
+
+test('blank-source inherited review visibility follows saved assignments without revealing unrelated blank fields',()=>{
+    const original=blankEnglishUnit(),hidden=original.fields[0],{app}=visibleFieldsHarness(original);
+    assert.equal(app.ctFieldsFor().includes(hidden),false);
+    const values=S.valuesFor(original),hash=S.sourceHash(hidden.source);
+    for(const assignment of [{outdated:[hidden.id]},{provenance:{requiredReview:{[hidden.id]:hash}}}]){
+        app.ctSaved={[original.id]:{values,reviewed:{},...assignment}};
+        assert.equal(app.ctFieldsFor().includes(hidden),true);
+    }
+    app.ctSaved={};assert.equal(app.ctFieldsFor().includes(hidden),false);
+    hidden.outdated=true;hidden.source=' \t\r\n';original.fields[1].source='';
+    // A reviewable row must remain discoverable even with no nonblank prose.
+    const {app:blank}=visibleFieldsHarness(original);
+    assert.equal(blank.ctFieldsFor().includes(hidden),true);assert.equal(blank.ctRows.length,1);
+    blank.hideDNT=true;assert.equal(blank.ctFieldsFor().includes(hidden),true);
+});
+
 test('ClientText list omits all-blank units and ignores hidden targets in search and sort summaries',()=>{
     const mixed=blankEnglishUnit(),blank=blankEnglishUnit('AllBlank',' \t\r\n'),snapshot=clone([mixed,blank]),
         {app}=visibleFieldsHarness(mixed,{ctUnits:[mixed,blank],_ctUnitIndex:new Map([[mixed.id,mixed],[blank.id,blank]])});

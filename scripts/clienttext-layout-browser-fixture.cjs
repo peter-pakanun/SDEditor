@@ -220,6 +220,11 @@ async function run() {
         await page.waitForFunction(() => !!window.__ctLayoutFixture || !!window.__ctLayoutFixtureError);
         assert.equal(await page.evaluate(()=>window.__ctLayoutFixtureError),undefined,'Fixture preparation succeeds');
         const settle = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        if(process.argv.includes('--blank-source-review-only')){
+            await require('./clienttext-blank-source-review-browser-check.cjs')({page,settle,fixtureArtifacts,results,screenshots});
+            assert.deepEqual(errors,[],'Blank-source review checks have no browser errors');
+            console.log(JSON.stringify({status:'PASS',results,screenshots},null,2));return;
+        }
         if(process.argv.includes('--dialogue-variants-only')){
             await require('./clienttext-dialogue-variants-browser-check.cjs')({page,settle,fixtureArtifacts,results,screenshots});
             assert.deepEqual(errors,[],'Dialogue variant checks have no browser errors');

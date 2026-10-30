@@ -1481,14 +1481,19 @@
             },
             ctFieldsFor(unit=this.ctCurrentUnit) {
                 if(!unit)return [];
-                // Originals are immutable. Cache visibility without removing
-                // any field from the unit, save payload, history or export.
-                const cache=this._ctVisibleFields ||= new WeakMap();let item=cache.get(unit);
-                if(!item || item.fields!==unit.fields){
+                // Blank English can still have an explicit source-review
+                // assignment (for example a removed Hard Mode Display Name).
+                // Keep that field accessible through review and Save without
+                // removing any field from the original, history or export.
+                const saved=this.ctSaved[unit.id],cache=this._ctVisibleFields ||= new WeakMap();let item=cache.get(unit);
+                if(!item || item.fields!==unit.fields || item.saved!==saved){
                     const hasEnglish=field=>field.kind!=='gender' && String(field.source ?? '').trim().length>0;
-                    const fields=unit.fields || [],text=fields.filter(hasEnglish);
-                    const visible=text.length ? fields.filter(field=>field.kind==='gender' || hasEnglish(field)) : [];
-                    item={fields:unit.fields,visible};cache.set(unit,item);
+                    const assigned=field=>!!field.outdated || (saved?.outdated || []).includes(field.id)
+                        || Object.prototype.hasOwnProperty.call(saved?.provenance?.requiredReview || {},field.id);
+                    const content=field=>hasEnglish(field) || field.kind!=='gender' && assigned(field);
+                    const fields=unit.fields || [],text=fields.filter(content);
+                    const visible=text.length ? fields.filter(field=>field.kind==='gender' || content(field)) : [];
+                    item={fields:unit.fields,saved,visible};cache.set(unit,item);
                 }
                 if(!this.hideDNT)return item.visible;
                 if(!item.withoutDNT){
