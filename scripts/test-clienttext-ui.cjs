@@ -2277,6 +2277,88 @@ function classVariantUnit(id='ClassVariants',row=2){
         targetCell:String.fromCharCode(68+index)+row}));return original;
 }
 
+function dialogueVariantUnit(){
+    const original=classVariantUnit('DialogueVariants'),base=original.fields[0];
+    original.role='normal';original.sheet='NPCTalkDialogueTextAudio';original.id=JSON.stringify([original.role,original.sheet,original.recordId]);
+    original.fields=[{...base,id:JSON.stringify(['Text',null]),kind:'text',form:undefined,group:undefined},
+        ...original.fields.filter(field=>CLASS_VARIANT_FORMS.includes(field.form)).map(field=>({...field,required:!!field.target.trim(),originalMissing:false}))];
+    for(const field of original.fields)field.outdated=true;
+    return original;
+}
+
+test('dialogue class blanks show English fallback in fields, picker, grouped list and preview without changing raw text or Eng eligibility',()=>{
+    const original=dialogueVariantUnit(),{app,window}=keyboardHarness(original),group=app.ctFieldGroups[0],
+        blank=app.ctBlankEnglishVariants(group)[0],translated=app.ctPopulatedVariants(group)[0];
+    app.ctValues[blank.id]=' \t\r\n';const before=JSON.stringify([original,app.ctValues,app.ctReviewed,app.ctSaved]);
+    const controller=app.ctFieldController(blank);
+    assert.equal(controller.field.placeholder,'-- Use English --');assert.equal(controller.field.dataAttrs['data-ct-use-english'],true);
+    assert.match(controller.highlight,/ctEnglishPlaceholder/);assert.equal(controller.field.translation,' \t\r\n');
+    assert.equal(app.ctPreviewValue(blank),blank.source);assert.equal(app.ctPreviewValue(translated),translated.target);
+    assert.equal(app.ctClassVariantCounts(group),'2 translated · 10 use English');
+    assert.match(app.ctVariantLabel(blank),/\(Use English\) · Outdated$/);
+    assert.equal(app.ctListTargetParts(original).filter(part=>part.english).length,1,'collapsed rows summarize blanks instead of adding twelve duplicate lines');
+    assert.equal(app.ctListTargetParts(original).find(part=>part.english).text,'-- Use English -- (10 class variants)');
+    assert.equal(app.ctListText(original,'target').includes('-- Use English --'),false);
+    assert.equal(app.ctEnglishEligible(blank),false,'inherent fallback does not broaden explicit Eng decisions to forms');
+    assert.equal(window.EditorSession.formatAdapter(app,'clienttext').fields.find(field=>field.id===blank.id).target,' \t\r\n');
+    assert.equal(JSON.stringify([original,app.ctValues,app.ctReviewed,app.ctSaved]),before);
+    app.ctValues[blank.id]='NONEXISTENT';assert.equal(app.ctClassUsesEnglish(blank),false);assert.equal(app.ctPreviewValue(blank),'NONEXISTENT');
+    assert.equal(controller.field.placeholder,'Optional translation');assert.equal(app.ctClassVariantCounts(group),'3 translated · 9 use English');
+    const gender=dialogueVariantUnit();gender.role='gender';gender.sheet+='_Gender';const genderHost=keyboardHarness(gender).app;
+    assert.equal(genderHost.ctBlankEnglishVariants(genderHost.ctFieldGroups[0]).length,10,'the matching Gender worksheet retains the same class fallback');
+    for(const change of [unit=>unit.sheet='NPCTextAudio',unit=>unit.sheet='NPCTextAudio_Gender',
+        unit=>unit.fields.forEach(field=>field.form='MS'),unit=>unit.fields.forEach(field=>field.source=''),
+        unit=>unit.fields.forEach(field=>field.source='[NOAUDIO]'),unit=>unit.fields.forEach(field=>field.source='[DNT] internal')]){
+        const other=dialogueVariantUnit();change(other);const host=keyboardHarness(other).app;
+        assert.equal(host.ctFieldGroups.flatMap(group=>host.ctBlankEnglishVariants(group)).length,0);
+    }
+    app.gameVersion='poe1';assert.equal(app.ctClassUsesEnglish(blank,original,''),false);
+});
+
+test('bulk dialogue review checkpoints only blank current-source reviews until Save, preserving individual translated review and exact blank targets',async()=>{
+    const original=dialogueVariantUnit(),f=fixture();await f.store.import(scope,{units:[original],assets:[asset]});
+    const {app,mixin}=keyboardHarness(original);app._ctStore=f.store;app.ctSync=()=>{};app.ctLoadMemory=()=>{};
+    app.ctFlushDraft=mixin.methods.ctFlushDraft.bind(app);
+    const group=app.ctFieldGroups[0],blanks=app.ctBlankEnglishVariants(group),translated=app.ctPopulatedVariants(group),values=clone(app.ctValues);
+    let checkpoints=0;app.ctQueueDraft=()=>{checkpoints++;};
+    assert.equal(app.ctReviewBlankVariants(group),true);assert.equal(checkpoints,1);assert.equal(app.ctDraftDirty,true);
+    assert.equal(Object.keys(app.ctReviewed).length,10);assert.deepEqual(app.ctValues,values);
+    assert.equal(app.ctBlankVariantsToReview(group).length,0);assert.equal(app.ctReviewBlankVariants(group),false);
+    for(const field of blanks)assert.equal(app.ctReviewed[field.id],S.sourceHash(field.source));
+    for(const field of translated)assert.equal(app.ctReviewed[field.id],undefined);
+    assert.equal(app.ctStatus().outdated,true);assert.equal(Object.keys(await f.store.getSaved(scope)).length,0);
+    assert.equal((await f.store.listHistory(scope,original.id)).length,0,'bulk review does not save or upload');
+    assert.equal(await app.ctFlushDraft(),true);const draft=await f.store.getDraft(scope,original.id);
+    assert.deepEqual(draft.values,values);assert.deepEqual(draft.reviewed,clone(app.ctReviewed));
+    assert.equal(await app.ctSave(),true);const saved=(await f.store.getSaved(scope))[original.id];
+    assert.deepEqual(saved.values,values);assert.equal(app.ctStatus().outdated,true);
+    for(const field of blanks)assert.equal(app.ctStatus().fields[field.id].outdated,false);
+    for(const field of translated)assert.equal(app.ctStatus().fields[field.id].outdated,true);
+    const fresh=keyboardHarness(original,{ctSaved:{[original.id]:saved}}).app;
+    assert.equal(fresh.ctBlankVariantsToReview(fresh.ctFieldGroups[0]).length,0,'saved reviews survive reopening');
+    for(const field of [original.fields[0],...translated])app.ctMarkReviewed(field);
+    assert.equal(await app.ctSave(),true);assert.equal(app.ctStatus().outdated,false);
+    const current=(await f.store.getSaved(scope))[original.id],history=await f.store.listHistory(scope,original.id);
+    assert.deepEqual(history[0].after.reviewed,current.reviewed);assert.deepEqual(current.values,values);
+    for(const field of blanks)assert.equal(current.values[field.id],'');
+    assert.equal(S.statusFor({...original,fields:original.fields.map(field=>({...field,source:'Changed English'}))},current).outdated,true,'review cannot approve a later source');
+});
+
+test('bulk dialogue review fences stale groups and blocks conflicts, pending saves, history and MTL without partial review',()=>{
+    for(const block of [app=>app.ctBusy=true,app=>app.ctBrowseBusy=true,app=>app.ctHistoryViewer={},app=>app._ctSaveJob={},
+        app=>app.ctRecoveryBusy=true,app=>app.ctChoices=[{fieldId:app.ctCurrentUnit.fields[1].id}],
+        app=>app.ctSaved={[app.ctSelection]:{syncRecovery:{state:'rejected'}}},
+        app=>app.ctMtlBusy=field=>field===app.ctCurrentUnit.fields[2],app=>app.ctMtlCandidate=field=>field===app.ctCurrentUnit.fields[2]]){
+        const {app}=keyboardHarness(dialogueVariantUnit()),group=app.ctFieldGroups[0];block(app);
+        assert.equal(app.ctReviewBlankVariants(group),false);assert.deepEqual(app.ctReviewed,{});assert.equal(app.ctDraftDirty,false);
+    }
+    const {app}=keyboardHarness(dialogueVariantUnit()),old=app.ctFieldGroups[0];
+    app._ctUnitIndex.set(app.ctSelection,clone(app.ctCurrentUnit));assert.equal(app.ctReviewBlankVariants(old),false);assert.deepEqual(app.ctReviewed,{});
+    const group=app.ctFieldGroups[0],blank=app.ctBlankEnglishVariants(group)[0];blank.required=true;
+    assert.equal(app.ctReviewBlankVariants(group),true);
+    assert.equal(S.statusFor(app.ctCurrentUnit,{values:app.ctValues,reviewed:app.ctReviewed}).fields[blank.id].missing,true,'reviewing a blank does not erase separately required translation workload');
+});
+
 test('a regular translation and class variants share one English group without merging unrelated source fields',()=>{
     const original=classVariantUnit(),base=original.fields[0];
     original.role='normal';original.id=JSON.stringify(['normal','NPCTextAudio',original.recordId]);original.sheet='NPCTextAudio';

@@ -1507,21 +1507,64 @@
             },
             // Display only: search, saved targets and exports keep ctListText/valuesFor.
             ctListTargetParts(unit) {
-                const values=this.ctValuesFor(unit);
-                return this.ctFieldsFor(unit).filter(field=>field.kind!=='gender').flatMap(field=>{
+                const values=this.ctValuesFor(unit),fallbackGroups=new Map(),parts=[];
+                for(const field of this.ctFieldsFor(unit).filter(field=>field.kind!=='gender')){
+                    if(this.ctClassUsesEnglish(field,unit,values[field.id])){
+                        const key=JSON.stringify([field.group || field.name,field.sourceCell]),existing=fallbackGroups.get(key);
+                        if(existing)existing.count++;else {const part={id:field.id,text:'',english:true,count:1};fallbackGroups.set(key,part);parts.push(part);}
+                        continue;
+                    }
                     const english=this.ctUsesEnglish(field,unit),text=english?'-- Use English --':String(values[field.id] ?? '');
-                    return text.trim() ? [{id:field.id,text,english}] : [];
-                });
+                    if(text.trim())parts.push({id:field.id,text,english});
+                }
+                for(const part of fallbackGroups.values())part.text='-- Use English -- ('+part.count+' class variant'+(part.count===1?'':'s')+')';
+                return parts;
             },
             ctPreviewValue(field) {
                 const value=String(this.ctValues[field.id] ?? '');
-                return !value.trim() && this.ctUsesEnglish(field) ? field.source : value;
+                return !value.trim() && (this.ctUsesEnglish(field) || this.ctClassUsesEnglish(field)) ? field.source : value;
             },
             ctDiagnose(unit) { const values = this.ctValuesFor(unit); return unit.fields.flatMap(field => this.ctUsesEnglish(field,unit)?[]:root.ClientTextState.diagnose(field, values[field.id]).map(issue => ({ ...issue, severity: issue.level || issue.severity, fieldId: field.id }))); },
             ctTone(unit) { const s = this.ctStatus(unit); return s.missing ? 'missing' : s.outdated ? 'outdated' : s.revised ? 'revised' : s.saved ? 'saved' : ''; },
             ctStatusLabel(unit) { const s = this.ctStatus(unit); return ['Missing', 'Outdated', 'Revised', 'Saved'].filter(label => s[label.toLowerCase()]).join(' · ') || 'Unchanged'; },
             ctForm(group, form) { return group.fields.find(field => field.form === form); },
             ctClassFields(group) { return group.fields.filter(isClassField); },
+            ctClassEnglishField(field,unit=this.ctCurrentUnit) {
+                return this.gameVersion==='poe2' && String(unit?.sheet || '').replace(/_Gender$/,'')==='NPCTalkDialogueTextAudio' && unit.fields.includes(field)
+                    && isClassField(field) && !!String(field.source ?? '').trim() && !root.ClientTextState.audioOnly(field.source) && !isDNTSource(field.source);
+            },
+            ctClassUsesEnglish(field,unit=this.ctCurrentUnit,value=this.ctValues[field.id]) {
+                return this.ctClassEnglishField(field,unit) && !String(value ?? '').trim();
+            },
+            ctBlankEnglishVariants(group) { return this.ctClassFields(group).filter(field=>this.ctClassUsesEnglish(field)); },
+            ctClassVariantCounts(group) {
+                const fields=this.ctClassFields(group),blank=this.ctBlankEnglishVariants(group).length;
+                return fields.some(field=>this.ctClassEnglishField(field))
+                    ? this.ctPopulatedVariants(group).length+' translated · '+blank+' use English'
+                    : this.ctPopulatedVariants(group).length+' populated / '+fields.length+' available';
+            },
+            ctBlankVariantsToReview(group) {
+                return this.ctBlankEnglishVariants(group).filter(field=>this.ctFieldStatus(field).outdated && this.ctReviewed[field.id]!==this.ctReviewHash(field));
+            },
+            ctStagedBlankVariantReviews(group) {
+                return this.ctBlankEnglishVariants(group).filter(field=>this.ctFieldStatus(field).outdated && this.ctReviewed[field.id]===this.ctReviewHash(field));
+            },
+            ctBlankVariantReviewBlocked(group) {
+                return !this.ctVariantGroupCurrent(group) || !!this._ctSaveJob || !!this.ctRecoveryBusy || !!this.ctPendingSharedRecovery()
+                    || !!this.ctChoices.length || this.ctBlankVariantsToReview(group).some(field=>this.ctMtlBusy?.(field) || this.ctMtlCandidate?.(field));
+            },
+            ctReviewBlankVariants(group,event) {
+                if(this.ctBlankVariantReviewBlocked(group))return false;
+                const fields=this.ctBlankVariantsToReview(group);if(!fields.length)return false;
+                // Removing the focused action must not blur the inline row and
+                // trigger its ordinary leave-row save before explicit Save.
+                if(event?.currentTarget && event.currentTarget===root.document?.activeElement){
+                    const selected=this.ctSelectedVariant(group);
+                    this.ctTargetInputs().find(input=>input.dataset?.ctTarget===selected?.id)?.focus?.({preventScroll:true});
+                }
+                for(const field of fields)this.ctReviewed[field.id]=this.ctReviewHash(field);
+                this.ctDraftStageFailure=null;this.ctDraftDirty=true;this.ctQueueDraft();return true;
+            },
             ctNamedForms(group) { return group.fields.filter(root.ClientTextState.isNamedForm); },
             ctNamedFormLabel(field) { return root.ClientTextState.isNamedForm(field) ? field.form.replace(/ Translation$/, '') : field.form; },
             ctSetPreviewAffixExample(key) {
@@ -1606,7 +1649,7 @@
             },
             ctVariantLabel(field) {
                 const facts=this.ctVariantFacts(field),labels=['Missing','Outdated','Error','Warning'].filter(name=>facts[name.toLowerCase()]);
-                return this.ctClassVariantLabel(field)+(String(this.ctValues[field.id] ?? '').trim()?'':' (blank)')+(labels.length?' · '+labels.join(' · '):'');
+                return this.ctClassVariantLabel(field)+(String(this.ctValues[field.id] ?? '').trim()?'':this.ctClassUsesEnglish(field)?' (Use English)':' (blank)')+(labels.length?' · '+labels.join(' · '):'');
             },
             ctVariantSummary(fields) {
                 const facts=fields.map(field=>this.ctVariantFacts(field)),labels=[];
@@ -2119,6 +2162,7 @@
             ctEnglishUnavailableReason(field) {
                 if(this.gameVersion!=='poe2')return 'Use English is unavailable for PoE1. Ordinary translations and blank saves remain allowed.';
                 if(field.kind==='gender')return 'Use English is unavailable for Gender metadata.';
+                if(this.ctClassEnglishField(field))return 'Blank dialogue class variants use English automatically. Use the class-variant review controls and Save to approve the current source.';
                 if(field.kind==='form')return 'Use English is unavailable for grammatical and class forms until their fallback behavior is verified.';
                 if(isDNTSource(field.source))return 'Use English is unavailable for DNT fields.';
                 if(!root.ClientTextState.englishEligible(field))return 'Use English requires an ordinary field with active English source text.';
@@ -3680,8 +3724,10 @@
                         <template v-if="host.ctForm(group,row+number)"><ct-target :host="host" :field="host.ctForm(group,row+number)" :compact="side !== 'both'"></ct-target></template><span v-else class="versionMuted">Unavailable</span>
                     </td></tr></tbody></table>
                 <section v-if="host.ctClassFields(group).length" class="ctClassVariants" :data-variant-group="group.key">
-                    <div class="ctClassVariantsHeader"><strong>Class variants</strong><small>{{ host.ctPopulatedVariants(group).length }} populated / {{ host.ctClassFields(group).length }} available</small></div>
+                    <div class="ctClassVariantsHeader"><strong>Class variants</strong><small>{{ host.ctClassVariantCounts(group) }}</small></div>
                     <small v-if="host.ctVariantSummary(host.ctClassFields(group))" class="ctVariantSummary">{{ host.ctVariantSummary(host.ctClassFields(group)) }}</small>
+                    <button v-if="host.ctBlankVariantsToReview(group).length" type="button" class="ctReviewBlankVariants" :disabled="host.ctBlankVariantReviewBlocked(group)" v-tooltip="'Blank class variants use English. Mark these variants reviewed for the current English source; Save applies the review.'" @click.stop="host.ctReviewBlankVariants(group,$event)">Review blank variants ({{ host.ctBlankVariantsToReview(group).length }})</button>
+                    <small v-if="host.ctStagedBlankVariantReviews(group).length" class="ctVariantSummary" role="status">{{ host.ctStagedBlankVariantReviews(group).length }} blank variant{{ host.ctStagedBlankVariantReviews(group).length === 1 ? '' : 's' }} reviewed · Save to apply</small>
                     <div class="ctVariantTabs" role="tablist" aria-label="Populated class variants"><button v-for="field in host.ctPopulatedVariants(group)" :key="field.id" type="button" role="tab" :aria-label="host.ctClassVariantLabel(field)" :aria-selected="host.ctSelectedVariant(group)?.id === field.id" :tabindex="host.ctSelectedVariant(group)?.id === field.id ? 0 : -1" :class="{active:host.ctSelectedVariant(group)?.id === field.id,missing:host.ctVariantFacts(field).missing,outdated:host.ctVariantFacts(field).outdated}" :title="host.ctVariantLabel(field)" @click="host.ctSelectVariant(group,field.id)" @keydown="host.ctVariantTabKeydown(group,field,$event)">{{ host.ctClassVariantName(field) }}<span v-if="host.ctVariantFacts(field).missing || host.ctVariantFacts(field).outdated || host.ctVariantFacts(field).error || host.ctVariantFacts(field).warning" class="ctVariantDot" aria-hidden="true">●</span></button></div>
                     <label class="ctVariantPicker">All variants<select :value="host.ctSelectedVariant(group)?.id" aria-label="All worksheet class variants" @change="host.ctSelectVariant(group,$event.target.value)"><option v-for="field in host.ctClassFields(group)" :key="field.id" :value="field.id">{{ host.ctVariantLabel(field) }}</option></select><small>{{ host.ctSelectedVariant(group)?.targetCell }}</small></label>
                     <ct-target v-if="host.ctSelectedVariant(group)" :key="host.ctSelectedVariant(group).id" :host="host" :field="host.ctSelectedVariant(group)" :compact="side !== 'both'"></ct-target>

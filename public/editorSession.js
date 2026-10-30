@@ -180,8 +180,8 @@
   function fieldController(host, field, sourceText) {
     const source=sourceText!==undefined,unit=host.ctCurrentUnit,captured=key(host,false),fieldId=field.id;
     const valid=()=>host.ctActive && key(host,false)===captured && host.ctCurrentUnit===unit && unit?.fields.includes(field);
-    const usesEnglish=()=>valid() && host.ctUsesEnglish?.(field,unit);
     const value=()=>source ? String(sourceText) : String((host.ctInputValues || host.ctValues)[fieldId] ?? '');
+    const usesEnglish=()=>valid() && (host.ctUsesEnglish?.(field,unit) || host.ctClassUsesEnglish?.(field,unit,value()));
     const list=()=>ranges(host,field,value(),source),descriptor={id:fieldId,isMultiline:true,
       get english(){return source ? value() : String(field.source ?? '');},get translation(){return value();},
       set translation(text){if(valid() && !host.ctBusy && !host.ctHistoryViewer && !host.ctMtlBusy?.(field))(host.ctInputValues || host.ctValues)[fieldId]=applyRawInput(host,field,text);},get readonly(){return source || !valid() || host.ctBusy || host.ctHistoryViewer || !!host.ctMtlBusy?.(field);},
