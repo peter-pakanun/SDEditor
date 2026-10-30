@@ -25,7 +25,7 @@ One TM unit contains a complete quoted entry, including all `@` table columns an
 
 ## Learning and managing entries
 
-Successful durable translation saves learn validated, nonblank pairs automatically. Draft typing, a queued submission, a failed save and suggestion insertion do not teach TM. Blank, DNT, malformed or structurally incompatible pairs are excluded. Unresolved Dropped copies are excluded; a reviewed replacement can teach its current English and final saved translation.
+Successful durable translation saves learn validated, nonblank pairs automatically. Draft typing, a queued submission, a failed save and suggestion insertion do not teach TM. Blank, DNT, malformed or structurally incompatible pairs are excluded. DNT detection uses `/\bDNT\b/i` anywhere in immutable English, including lowercase and malformed bracket markers; target-only markers do not determine DNT. Unresolved Dropped copies are excluded; a reviewed replacement can teach its current English and final saved translation.
 
 Open **Manage TM** to search, add, correct, delete, inspect history or restore entries. New entries use the selected game. **PoE1**, **PoE2** and **All** entries share a language store; a game-specific entry overrides All entries with the same raw English. Other-game entries remain available in the manager but do not supply suggestions. Source-version and branch metadata describe where a pair came from, so it can be reused in later versions.
 

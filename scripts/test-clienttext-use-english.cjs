@@ -163,3 +163,19 @@ test('forms, Gender, DNT and PoE1 cannot acquire new English decisions; raw text
     assert.throws(()=>S.applyEnglishActions(u,null,values(''),{[id]:{...action()[id],sourceHash:'a'.repeat(64)}},'bad','poe2'),/current/);
     assert.equal(S.sourceHash('[NOAUDIO] Source'),S.sourceHash('Source'),'accepted historical source hashing remains unchanged');
 });
+
+test('browser and API exclude case-insensitive whole-word DNT sources from Use English without rewriting fields',()=>{
+    const api=require('../../SDEditor-API/src/vendor/client-text-state.cjs');
+    for(const state of [S,api]){
+        for(const source of ['[DNT] Source','DNT] malformed','[dnt] Source','DnT source','DNT',
+            'Ordinary [DNT] source','<tag>{[dNt] source}','[DNT-UNUSED] Source']){
+            const u=unit(source,''),field=u.fields[0],snapshot=JSON.stringify(u);
+            assert.equal(state.englishEligible(field),false,source);
+            assert.throws(()=>state.applyEnglishActions(u,null,values(''),{[id]:{action:'set',sourceHash:state.sourceHash(source)}},'dnt-mark','poe2'),/ordinary PoE2 text field/);
+            assert.equal(JSON.stringify(u),snapshot,'DNT checks retain immutable source and target fields');
+        }
+        for(const source of ['Ordinary source','ADNT source','DNT2 source','[DNT_INTERNAL] source','D N T source']){
+            assert.equal(state.englishEligible(unit(source,'[DNT] target only').fields[0]),true,source);
+        }
+    }
+});

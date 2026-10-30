@@ -121,9 +121,7 @@
         if (field?.englishEligible===false) return false;
         if (field?.kind !== 'text' || !field.required || field.audioOnly || audioOnly(field.source)) return false;
         if (typeof field.source === 'string') {
-            if (!canonicalSource(field.source).trim() || /^(?:\[DNT|DNT )/.test(field.source)) return false;
-            if (tokenize(field.source).some(token => /^<[A-Za-z]/.test(token.full) && field.source[token.end] === '{'
-                && /^(?:\[DNT|DNT )/.test(field.source.slice(token.end + 1)))) return false;
+            if (!canonicalSource(field.source).trim() || /\bDNT\b/i.test(field.source)) return false;
         }
         return true;
     }

@@ -54,10 +54,7 @@
     return false;
   }
   function computeIsDNT(english) {
-    return Array.isArray(english) && english.some(line => {
-      const text = String(line || '');
-      return text.startsWith('[DNT') || text.startsWith('DNT ');
-    });
+    return Array.isArray(english) && english.some(line => /\bDNT\b/i.test(String(line || '')));
   }
   function parseText(filepath, text, lang, options = {}) {
     const count = (text.match(options.strict ? /^[ \t]*description\b/gim : /^description/gim) || []).length;

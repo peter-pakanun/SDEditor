@@ -133,7 +133,7 @@
       add('length', 'TM source and translation must contain at most 32768 characters.');
       return { valid: false, errors };
     }
-    if (/^(?:\[DNT|DNT )/.test(source)) add('dnt', 'Do not translate entries are excluded from Translation Memory.');
+    if (/\bDNT\b/i.test(source)) add('dnt', 'Do not translate entries are excluded from Translation Memory.');
     if (diagnostics?.analyze) for (const [kind, value] of [['source', source], ['target', target]]) {
       for (const finding of diagnostics.analyze(newlineText(value), { lang: language,
         checks: { tagSyntax: true, whitespace: false, dash: false } }).diagnostics) {
@@ -154,7 +154,7 @@
   function unitsFromDescription(desc, lines, language, options = {}) {
     const english = desc?.translations?.English;
     if (!Array.isArray(english) || !Array.isArray(lines) || english.length !== lines.length
-      || english.some(source => /^(?:\[DNT|DNT )/.test(text(source)))) return [];
+      || english.some(source => /\bDNT\b/i.test(text(source)))) return [];
     const units = [];
     for (let entryIndex = 0; entryIndex < english.length; entryIndex++) {
       const source = text(english[entryIndex]), target = text(lines[entryIndex]);

@@ -6,7 +6,6 @@
     'use strict';
     const exportProgress = root.ClientTextExportProgress || (typeof require === 'function' ? require('./clientTextExportProgress.js') : null);
     const statDescCodec = root.StatDescCodec || (typeof require === 'function' ? require('./statDescCodec.js') : null);
-    const clientTextState = root.ClientTextState || (typeof require === 'function' ? require('./clientTextState.js') : null);
     const teams = ['French', 'German', 'Spanish', 'Portuguese', 'Russian', 'Thai', 'Korean', 'Japanese', 'Simplified Chinese', 'Traditional Chinese', 'Turkish', 'Polish'];
     const copy = value => JSON.parse(JSON.stringify(value));
     const raw = value => root.Vue?.markRaw ? root.Vue.markRaw(value) : value;
@@ -102,14 +101,7 @@
         return groups;
     }
     function isDNTSource(source) {
-        const text=String(source ?? '');
-        if(statDescCodec.computeIsDNT([text]))return true;
-        if(!text.includes('[DNT') && !text.includes('DNT '))return false;
-        // Workbooks also put marked English inside style payloads (notably
-        // AuguryCardTiers). Apply the same SD prefix rule at each such boundary;
-        // ordinary inline mentions, target text and raw whitespace stay exact.
-        return clientTextState.tokenize(text).some(token=>/^<[A-Za-z]/.test(token.full) && text[token.end]==='{'
-            && statDescCodec.computeIsDNT([text.slice(token.end+1)]));
+        return statDescCodec.computeIsDNT([String(source ?? '')]);
     }
     function assetBytes(asset) { return asset?.blob || asset?.bytes || asset?.buffer; }
     function historySnapshot(unit, record) {

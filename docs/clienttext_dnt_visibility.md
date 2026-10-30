@@ -5,18 +5,20 @@ Implemented locally on 20 October 2026, based on reviewed frontend commit
 
 ## Detector and actual workbook evidence
 
-SD's `StatDescCodec.computeIsDNT` checks whether any selected English entry starts
-with `[DNT` or `DNT `. It is case-sensitive, does not trim whitespace, does not
-inspect targets and does not match bare `DNT`. SD's detector and whole-file policy
-are unchanged.
+As of 30 October 2026, SD's `StatDescCodec.computeIsDNT` checks whether any selected
+English entry matches `/\bDNT\b/i`. The same case-insensitive word rule applies in
+the frontend and API, ClientText visibility and Use English eligibility, and
+Translation Memory exclusions. It matches anywhere in immutable English, including
+bare `DNT`, lowercase or mixed-case spelling and malformed brackets such as `DNT]`
+or `[dnt`. ASCII letters, digits and underscores adjacent to the marker prevent a match.
+Targets never determine DNT classification. SD retains its whole-file policy.
 
-ClientText applies that same detector to each immutable English field. It also
-checks the beginning of text payloads immediately after `<tag>{`, using the existing
-ClientText tokenizer. This handles nested and custom formatting such as
+ClientText applies that same detector to each immutable English field, including
+markers inside nested and custom formatting such as
 `<size:+5>{<augurypopuptitle>{Butcher}}\n<augurypopuptext>{[DNT] Advanced Description}`.
 A mark in one payload hides that field, including its other payloads. Ordinary
-inline mentions, lowercase markers, leading whitespace, target-only markers,
-plain braces and closing tags do not create new DNT boundaries.
+siblings remain visible. No formatting-token boundary or leading prefix is required;
+inline mentions and markers after whitespace also match.
 
 This adaptation is necessary for the reported PoE1 `AuguryCardTiers` example:
 none of its marked fields starts with a raw SD prefix. **21 of its 81 records**
@@ -30,9 +32,11 @@ remain visible even when another field is marked.
 | PoE1 `Thai_PoE1.xlsm` | `67f90e1d2bae8063c7a351b56028548a46ccf82576d5b4223efb9cfea9889cb4` | 216 / 175 | 80 | 95 |
 | PoE2 `Thai.xlsx` | `f46736c6501a606a4168a6a6fdd321b30a3feff123fba00031d0d6be992c403a` | 1,390 / 1,250 | 107 | 1,143 |
 
-The raw SD-prefix subset is 173 fields in PoE1 and 1,390 in PoE2. These counts
-follow the implemented contract; the earlier case-insensitive substring research
-counts in [PoE1 compatibility](poe1_workbook_compatibility.md) were not that contract.
+The workbook measurements above are historical evidence from the 20 October
+prefix-based detector, before the 30 October word-rule change. Its raw SD-prefix
+subset was 173 fields in PoE1 and 1,390 in PoE2. The earlier case-insensitive
+substring research in [PoE1 compatibility](poe1_workbook_compatibility.md) also used
+a different rule. These counts do not establish the current word-rule totals.
 No originals were modified, uploaded or committed.
 
 ## Visibility and data safety

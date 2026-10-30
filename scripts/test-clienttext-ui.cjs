@@ -853,13 +853,14 @@ test('ClientText list omits all-blank units and ignores hidden targets in search
     app.ctSearch='Visible translation';app.ctApplySearch();assert.deepEqual(Array.from(app.ctRows,unit=>unit.id),[mixed.id]);
     assert.deepEqual([mixed,blank],snapshot);assert.equal(app.ctCounts.total,2,'status totals continue to describe the retained originals');
 });
-test('DNT visibility uses the exact SD English prefix detector per field, never target text',()=>{
-    const original=namedUnit('DntPrefixes'),base=original.fields[0],sources=['[DNT] hidden','[DNT: hidden','[DNTanything','DNT hidden',
-        'DNT','dnt hidden','[dnt] visible',' [DNT] visible','\tDNT visible','Ordinary [DNT] visible','Ordinary\n[DNT] visible','DNT\tvisible','[NOAUDIO] [DNT] visible'];
+test('DNT visibility matches case-insensitive whole words anywhere in English per field, never target text',()=>{
+    const original=namedUnit('DntWords'),base=original.fields[0],hidden=['[DNT] hidden','[DNT: hidden','DNT] malformed','DNT hidden',
+        'DNT','dnt hidden','[dnt] hidden',' [DNT] hidden','\tDNT hidden','Ordinary [DNT] hidden','Ordinary\n[DNT] hidden','DNT\thidden','[NOAUDIO] [DnT] hidden'],
+        sources=[...hidden,'[DNTanything','ADNT visible','DNT2 visible','DNT_INTERNAL visible','D N T visible','Ordinary source'];
     original.fields=sources.map((source,index)=>({...base,id:'field-'+index,name:'Field '+index,source,target:'[DNT] target stays',targetCell:'D'+(index+2)}));
     original.fields.push({...base,id:'gender',name:'Gender',kind:'gender',source:'',target:'DNT raw metadata'});
-    const snapshot=clone(original),{app,window}=visibleFieldsHarness(original,{hideDNT:true});
-    const expected=original.fields.filter(field=>!window.StatDescCodec.computeIsDNT([field.source]));
+    const snapshot=clone(original),{app}=visibleFieldsHarness(original,{hideDNT:true});
+    const expected=original.fields.slice(hidden.length);
     assert.deepEqual(Array.from(app.ctFieldsFor()),expected);
     assert.deepEqual(Array.from(app.ctTabFields()).map(field=>field.id).sort(),expected.map(field=>field.id).sort());
     assert.deepEqual(original,snapshot);app.hideDNT=false;assert.equal(app.ctFieldsFor().length,original.fields.length);
@@ -880,14 +881,16 @@ test('DNT mixed rows retain ordinary siblings and Gender; all-DNT rows hide with
     app.hideDNT=false;assert.equal(app.ctRows.length,2);
 });
 
-test('ClientText style payloads use the SD marker prefix rule at nested text boundaries',()=>{
+test('ClientText style payloads and inline markers use the same whole-word DNT rule',()=>{
     const {isDNTSource}=require('../public/clientTextUi.js');
     for(const source of ['<b>{[DNT] internal}','<size:+5>{<augurypopuptitle>{[DNT] Title}}\\n\n<augurypopuptext>{[DNT] Advanced Description}',
         '<size:+5>{<augurypopuptitle>{Butcher}}\\n\n<augurypopuptext>{[DNT] Advanced Description}','<rgb:ff0000>{DNT internal}',
-        'An ordinary title <custom>{<i>{[DNT: internal}}'])assert.equal(isDNTSource(source),true,source);
-    for(const source of ['<b>{ [DNT] visible}','<b>{[dnt] visible}','<b>{DNT}','<b>{ordinary [DNT] mention}',
+        'An ordinary title <custom>{<i>{[DNT: internal}}',
+        '<b>{ [DNT] internal}','<b>{[dnt] internal}','<b>{DNT}','<b>{ordinary [DNT] mention}',
         '<b>[DNT] no payload','{[DNT] plain braces}','</b>{[DNT] closing tag}','<b>{ordinary}\n[DNT] later line',
-        '<b:DNT marker>{ordinary}','[Key|DNT displayed text]'])assert.equal(isDNTSource(source),false,source);
+        '<b:DNT marker>{ordinary}','[Key|DNT displayed text]'])assert.equal(isDNTSource(source),true,source);
+    for(const source of ['<b>{[DNTanything}','<b>{DNT2}','<b>{ADNT}','<b>{DNT_INTERNAL}',
+        '<b>{ordinary text}','D N T','D.N.T.'])assert.equal(isDNTSource(source),false,source);
 });
 
 test('DNT manual scans exclude marked fields while scanning ordinary siblings in the same row',async()=>{

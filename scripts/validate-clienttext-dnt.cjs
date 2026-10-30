@@ -9,11 +9,11 @@ async function check(game,filename){
     const bytes=await fs.readFile(filename),originalHash=hash(bytes),parsed=await Codec.parseWorkbook(bytes,{filename:path.basename(filename),game});
     Codec.assertGame(parsed,game);
     const host={hideDNT:true},fieldsFor=unit=>UI.mixin.methods.ctFieldsFor.call(host,unit);
-    let markedFields=0,rawPrefixFields=0,markedRows=0,mixedRows=0,hiddenRows=0;
+    let markedFields=0,rawMarkerFields=0,markedRows=0,mixedRows=0,hiddenRows=0;
     for(const unit of parsed.units){
         const marked=unit.fields.filter(field=>field.kind!=='gender'&&UI.isDNTSource(field.source));
         if(!marked.length)continue;
-        markedFields+=marked.length;markedRows++;rawPrefixFields+=marked.filter(field=>SD.computeIsDNT([field.source])).length;
+        markedFields+=marked.length;markedRows++;rawMarkerFields+=marked.filter(field=>SD.computeIsDNT([field.source])).length;
         const ordinary=unit.fields.filter(field=>field.kind!=='gender'&&field.source.trim()&&!marked.includes(field));
         if(ordinary.length)mixedRows++;else hiddenRows++;
         assert.deepEqual(fieldsFor(unit),ordinary.length?unit.fields.filter(field=>field.kind==='gender'||ordinary.includes(field)):[]);
@@ -40,7 +40,7 @@ async function check(game,filename){
         assert.deepEqual(await exportedZip.file(entry.name).async('uint8array'),await entry.async('uint8array'));untouchedParts++;
     }
     assert.equal(hash(bytes),originalHash);assert.equal(hash(await fs.readFile(filename)),originalHash);
-    console.log(JSON.stringify({game,filename:path.basename(filename),status:'PASS',originalHash,markedFields,rawPrefixFields,markedRows,mixedRows,hiddenRows,
+    console.log(JSON.stringify({game,filename:path.basename(filename),status:'PASS',originalHash,markedFields,rawMarkerFields,markedRows,mixedRows,hiddenRows,
         auguryRows:augury.length,auguryHidden,untouchedParts,noOpByteExact:true,allOtherFieldValuesPreserved:true}));
 }
 const [game,...filenames]=process.argv.slice(2);

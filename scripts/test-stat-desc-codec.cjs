@@ -85,18 +85,22 @@ test('browser and API detect the same game from normalized archive paths', () =>
   }
 });
 
-test('one DNT-marked English entry hides the whole file regardless of entry position', () => {
+test('one case-insensitive DNT word in selected English hides the whole file regardless of position or brackets', () => {
   for (const parser of [codec, browser(), require(vendorPath)]) {
-    for (const marker of ['[DNT] Internal', 'DNT Internal']) {
+    for (const marker of ['[DNT] Internal', 'DNT Internal', 'DNT] Monsters in Area spawn a Golden Volatile on death',
+      '[dnt] Internal', 'DnT] Internal', '[DNT', 'DNT', ' [dnt] Internal',
+      'A reference to [DNT] inside normal text', '<tag>{[DnT-Unused] Internal}']) {
       for (const english of [[marker], [marker, 'Visible'], ['Visible', marker], ['First', 'Second', marker]]) {
         const text = 'description test\n1 damage\n' + english.length + '\n'
           + english.map(line => '# "' + line + '"').join('\n');
         for (const strict of [false, true]) {
-          assert.equal(parser.parseText('source/test.txt', text, 'Thai', { strict }).isDNT, true);
+          const parsed = parser.parseText('source/test.txt', text, 'Thai', { strict });
+          assert.equal(parsed.isDNT, true, marker);
+          assert.deepEqual(plain(parsed.translations.English), english, 'Detection preserves immutable source text.');
         }
       }
     }
-    for (const english of [[], ['Visible', 'Also visible'], ['A reference to [DNT] inside normal text']]) {
+    for (const english of [[], ['Visible', 'Also visible'], ['[DNT_INTERNAL]'], ['ADNT'], ['DNT2'], ['DNTtext'], ['D N T'], ['D.N.T.']]) {
       assert.equal(parser.computeIsDNT(english), false);
     }
     const translatedMarker = source.replace('"ไทย"', '"[DNT] Thai only"');
@@ -105,7 +109,7 @@ test('one DNT-marked English entry hides the whole file regardless of entry posi
 });
 
 test('duplicate English choices recompute DNT from every selected entry without changing baseline hashes', async () => {
-  const text = source + '\nlang "English"\n2\n# "Ordinary first entry"\n# "[DNT] Later entry"';
+  const text = source + '\nlang "English"\n2\n# "Ordinary first entry"\n# "dNt] Later entry"';
   for (const parser of [codec, browser(), require(vendorPath)]) {
     const raw = [parser.parseText('source/test.txt', text, 'Thai', { strict: true })];
     assert.equal(raw[0].isDNT, false, 'An unselected duplicate block cannot hide the file.');

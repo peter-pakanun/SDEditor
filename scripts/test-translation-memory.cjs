@@ -45,6 +45,24 @@ test('learning admits whole validated table and multiline entries, and excludes 
   assert.equal(TM.validatePair('[TentacleSmash::{0}] {1}', '[TentacleSmash::{0}|แส้] {1}').valid, true);
 });
 
+test('TM excludes the same DNT words regardless of case, position or malformed brackets', () => {
+  for (const source of ['DNT', '[dnt] Internal', 'DnT] Internal', '[DNT',
+    'An inline dnt marker', '<tag>{[DNT-Unused] Internal}']) {
+    assert.equal(TM.validatePair(source, source).errors.some(error => error.code === 'dnt'), true, source);
+    const desc = { filepath: 'stats/dnt.txt', translations: { English: ['Ordinary sibling', source] } };
+    assert.deepEqual(TM.unitsFromDescription(desc, ['Ordinary translation', source], 'Thai'), [],
+      'A later DNT entry excludes the whole SD file.');
+  }
+  for (const source of ['[DNT_INTERNAL]', 'ADNT', 'DNT2', 'DNTtext', 'D N T', 'D.N.T.']) {
+    assert.equal(TM.validatePair(source, source).valid, true, source);
+    assert.equal(TM.unitsFromDescription({ filepath: 'stats/ordinary.txt', translations: { English: [source] } },
+      [source], 'Thai').length, 1, source);
+  }
+  assert.equal(TM.validatePair('Ordinary source', 'dnt in target only').valid, true);
+  assert.equal(TM.unitsFromDescription({ filepath: 'stats/ordinary.txt', translations: { English: ['Ordinary source'] } },
+    ['dnt in target only'], 'Thai').length, 1, 'Target markers cannot exclude ordinary English.');
+});
+
 test('TM normalization enforces API field bounds while automatic learning safely excludes oversized pairs or context', () => {
   const base = unit('bounded', 'Damage', 'ความเสียหาย');
   for (const patch of [{ source: 'a'.repeat(32769) }, { target: 'a'.repeat(32769) }, { note: 'a'.repeat(4097) },

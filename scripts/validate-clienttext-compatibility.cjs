@@ -61,8 +61,8 @@ async function check(game,filename){
  const npc=await Npc.buildNpcIndex(parsed.units),convo=await Convo.buildConvoIndex(parsed.units,npc);
  const descriptors=await State.buildDescriptors(parsed.units,[{role:parsed.role,hash:parsed.artifactHash,parserVersion:parsed.parserVersion}]);
  assert.equal(descriptors.descriptors[0].unitCount,parsed.units.length);
- const dntFields=parsed.units.reduce((count,unit)=>count+unit.fields.filter(field=>/DNT/i.test(field.source)).length,0);
- const mixedDntRows=parsed.units.filter(unit=>unit.fields.some(field=>/DNT/i.test(field.source))&&unit.fields.some(field=>field.source.trim()&&!/DNT/i.test(field.source))).length;
+ const dntFields=parsed.units.reduce((count,unit)=>count+unit.fields.filter(field=>/\bDNT\b/i.test(field.source)).length,0);
+ const mixedDntRows=parsed.units.filter(unit=>unit.fields.some(field=>/\bDNT\b/i.test(field.source))&&unit.fields.some(field=>field.source.trim()&&!/\bDNT\b/i.test(field.source))).length;
  assert.equal(hash(await fs.readFile(filename)),originalHash,'Sample file stays unchanged');assert.equal(hash(bytes),originalHash);
  console.log(JSON.stringify({filename:name,game,status:'PASS',originalHash,sheets:parsed.sheets.length,units:parsed.units.length,
   fields:parsed.units.reduce((n,unit)=>n+unit.fields.length,0),warnings:parsed.warnings.length,editedSheets:selected.size,editedFields,untouchedParts,
