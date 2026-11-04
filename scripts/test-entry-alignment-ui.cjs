@@ -350,6 +350,35 @@ test('a failed Save retains the aligned draft, recovery revisions and committed 
   assert.deepEqual(records.get(session.key).alignmentRecovery[0].translations, ['one', 'obsolete', 'three']);
 });
 
+test('Save & close after alignment waits for the transaction and keeps the editor open on rejection', async t => {
+  const { editor, desc, records } = await fixture(t);
+  resolveMiddleRemoval(editor);
+  assert.equal(await editor.applyEntryAlignment(), true);
+  editor.editorBlocks[0].translation = 'edited after alignment';
+  const session = editor._draftSession, original = copy(desc), gate = deferred();
+  editor.initializePendingSaves = () => true;
+  editor.persistTranslationBatch = async (_updates, _origin, options) => {
+    if (options.deferCommit) return { status: 'queued', jobId: 'not-yet-accepted' };
+    return gate.promise;
+  };
+  let finished = false;
+  const saving = editor.editorSave().then(result => { finished = true; return result; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(editor.editorVisible, true, 'Returning to view mode must wait for the aligned save to commit.');
+  assert.equal(editor.editorSaving, true);
+  assert.equal(finished, false);
+  gate.reject(Object.assign(new Error('The committed online translation changed before staging.'), { code: 'DRAFT_BASE_CHANGED' }));
+  assert.equal(await saving, false);
+  assert.equal(editor.editorVisible, true);
+  assert.equal(editor.editorSaving, false);
+  assert.equal(editor._draftSession, session);
+  assert.deepEqual(desc, original);
+  assert.deepEqual(copy(editor.serializeEditorTranslations()), ['edited after alignment', 'three']);
+  assert.deepEqual(records.get(session.key).translations, ['edited after alignment', 'three']);
+  assert.deepEqual(records.get(session.key).alignmentRecovery[0].translations, ['one', 'obsolete', 'three']);
+  assert.match(editor.collaborationNotice, /committed translation or local draft changed/);
+});
+
 test('an aligned Dropped draft can explicitly review a changed committed base before saving', async t => {
   const { editor, desc, records, calls } = await fixture(t);
   resolveMiddleRemoval(editor);

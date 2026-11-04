@@ -7203,7 +7203,11 @@ function formatPageRange(total, page, pageSize) {
           return false;
         }
         const record = session?.record;
-        const deferCommit = !this.testMode && defer && !!this.initializePendingSaves?.();
+        // Keep a completed alignment open until its text and original-block
+        // history commit together. A queued submission can still be rejected;
+        // closing here would make that failure look like an ordinary Close.
+        const deferCommit = !this.testMode && defer && !(close && alignmentRecoveryAtSave.length)
+          && !!this.initializePendingSaves?.();
         const completeDeferredSave = async ack => {
           if (!this.collaborationContextCurrent(context)) return;
           const accepted = context.client?.fileBase(desc.filepath) || this.collaborationFile(desc);

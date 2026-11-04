@@ -405,7 +405,9 @@ async function run() {
     await inlineField(third).fill('Third explicitly staged inline');
     assert.equal(await page.evaluate(() => window.__deferredSaveApp.flushEditorDraft()), true);
     await hold();
-    await row(third).getByRole('button', { name: 'Stage draft', exact: true }).click();
+    // The former Stage draft button was removed; exercise the retained explicit
+    // inline-save command while the worker transaction is held.
+    assert.equal(await page.evaluate(() => window.__deferredSaveApp.saveInlineDraft()), true);
     await page.waitForFunction(() => window.__deferredSaveGate.held.length === 1 && !window.__deferredSaveApp.editorSaving,
       null, { timeout: 2000 });
     assert.deepEqual((await inspect(third)).committed, ['Third draft after next']);
@@ -415,7 +417,7 @@ async function run() {
     await release();
     assert.deepEqual((await inspect(third)).committed, ['Third explicitly staged inline']);
     assert.equal((await inspect(third)).current, first);
-    results.push('Explicit Stage draft released navigation while worker was held; another inline row remained editable before ACK.');
+    results.push('The explicit inline-save command released navigation while worker was held; another inline row remained editable before ACK.');
 
     await row(third).locator('.inlineSourceCell').click(); await waitInline(third);
     await inlineField(third).fill('Rejected inline private draft');
@@ -435,7 +437,7 @@ async function run() {
     const reviewBanner = page.locator('[role="alert"]').filter({ hasText: 'The committed translation or local draft changed' });
     await reviewBanner.getByRole('button', { name: 'Review retained edits', exact: true }).click();
     await page.getByRole('dialog', { name: 'Retained edits', exact: true }).waitFor();
-    assert.equal(await page.getByRole('navigation', { name: 'Preserved drafts' }).getByRole('button').filter({ hasText: third }).count(), 1);
+    assert.equal(await page.getByRole('navigation', { name: 'Retained edits', exact: true }).getByRole('button').filter({ hasText: third }).count(), 1);
     await page.getByRole('dialog', { name: 'Retained edits', exact: true }).getByRole('button', { name: 'Close', exact: true }).click();
     results.push('Injected DRAFT_BASE_CHANGED retained the private inline draft, displayed its scoped review warning, left another row editable and opened Review retained edits successfully.');
     assert.deepEqual(pageErrors, [], 'No uncaught browser errors');

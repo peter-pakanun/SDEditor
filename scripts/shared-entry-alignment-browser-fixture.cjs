@@ -112,6 +112,8 @@ async function run() {
                     remarks: Array.from({ length: count }, () => ''), isDNT: false,
                     translations: { English: Array.from({ length: count }, (_, i) => 'Current English ' + caseIndex + ' entry ' + i),
                         German: Array.from({ length: overflow }, (_, i) => 'Deutscher Block ' + caseIndex + ' Eintrag ' + i) } }));
+                // The reported fishing entry retains only its variable placeholder.
+                source[2].translations.English[0] = source[2].translations.German[0] = '{0}';
                 zip = new JSZip();
                 for (const desc of source) zip.file(desc.filepath, descEncode(desc), { createFolders: false });
                 bytes = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
@@ -136,10 +138,16 @@ async function run() {
             const vm = window.__sharedAlignmentApp, copy = value => JSON.parse(JSON.stringify(value));
             const candidates = window.__sharedAlignmentOriginal.map((desc, index) => {
                 const workspace = copy(vm.localDescs);
-                return WorkspaceState.dropTranslation(workspace, desc, 'German', { id: 'shared-alignment-' + index,
+                const predecessor = copy(desc);
+                predecessor.translations.English = desc.translations.German.map((_, i) => 'Previous English entry ' + i);
+                predecessor.variables = predecessor.translations.English.map(() => '#');
+                predecessor.remarks = predecessor.translations.English.map(() => '');
+                const candidate = WorkspaceState.dropTranslation(workspace, predecessor, 'German', { id: 'shared-alignment-' + index,
                     ownership: 'online', revision: 5 + index, game: 'poe1', originSourceHash: 'e'.repeat(64),
                     originSourceAvailable: false, targetSourceHash: vm.sourceIdentity,
                     reason: 'Shared recovery after deleted source entries' });
+                if (!candidate) throw new Error('Expected a complete predecessor recovery: ' + desc.filepath);
+                return candidate;
             });
             await vm._collaboration.receiveDropped(candidates, vm._collaboration.epoch, { acknowledge: true });
         });
@@ -150,7 +158,7 @@ async function run() {
         });
         const original = await snapshot();
         const report = [];
-        for (const item of cases) {
+        for (const [caseIndex, item] of cases.entries()) {
             assert.equal(await page.evaluate(filepath => window.__sharedAlignmentApp.editFile(filepath, true), item.filepath), true);
             await page.waitForFunction(filepath => {
                 const vm = window.__sharedAlignmentApp;
@@ -180,22 +188,24 @@ async function run() {
             assert.deepEqual(retained.draft.translations, raw.slice(0, item.count));
             assert.deepEqual(retained.draft.base.translations, raw.slice(0, item.count));
             assert.ok(retained.draft.alignmentRecovery.some(row => JSON.stringify(row.translations) === JSON.stringify(raw)));
-            await page.getByRole('button', { name: 'Close', exact: true }).first().click();
-            assert.equal(await page.evaluate(filepath => window.__sharedAlignmentApp.editFile(filepath, true), item.filepath), true);
-            await page.waitForFunction(filepath => {
-                const vm = window.__sharedAlignmentApp;
-                return vm.editorCurrentEditingDesc?.filepath === filepath && vm.editorReady && !vm.editorLoading;
-            }, item.filepath);
-            assert.deepEqual(await page.evaluate(() => window.__sharedAlignmentApp.serializeEditorTranslations()), raw.slice(0, item.count),
-                'Reopening recovers the durable aligned draft');
+            if (caseIndex < 2) {
+                await page.getByRole('button', { name: 'Close', exact: true }).first().click();
+                assert.equal(await page.evaluate(filepath => window.__sharedAlignmentApp.editFile(filepath, true), item.filepath), true);
+                await page.waitForFunction(filepath => {
+                    const vm = window.__sharedAlignmentApp;
+                    return vm.editorCurrentEditingDesc?.filepath === filepath && vm.editorReady && !vm.editorLoading;
+                }, item.filepath);
+                assert.deepEqual(await page.evaluate(() => window.__sharedAlignmentApp.serializeEditorTranslations()), raw.slice(0, item.count),
+                    'Reopening recovers the durable aligned draft');
+            }
             const saveResult = await page.evaluate(async () => {
-                const vm = window.__sharedAlignmentApp, result = await vm.editorSave({ close: true, defer: false });
+                const vm = window.__sharedAlignmentApp, result = await vm.editorSave();
                 return { result, notice: vm.collaborationNotice, error: vm.localSaveError,
                     readonly: vm.editorTranslationReadOnly, loadError: vm.editorLoadError,
                     alignment: !!vm.entryAlignment, findings: vm.inlineDraftFindings[vm.editorCurrentEditingDesc.filepath] };
             });
             assert.equal(saveResult.result, true,
-                'Aligned retained draft saves against raw original + count-limited shared base: ' + JSON.stringify(saveResult));
+                'Aligned draft saves on the first attempt against raw original + count-limited shared base: ' + JSON.stringify(saveResult));
             await page.waitForFunction(() => {
                 const vm = window.__sharedAlignmentApp;
                 return !vm.pendingLocalSaves && !vm._pendingSaves.snapshot().jobs.length;
@@ -250,11 +260,39 @@ async function run() {
             assert.deepEqual(item.english, source.translations.English);
             assert.deepEqual(item.german, source.translations.German.slice(0, source.translations.English.length));
         }
+        await page.reload(); await ready();
+        assert.equal(await page.evaluate(async sourceHash => {
+            const vm = window.__sharedAlignmentApp;
+            await vm.activateGameVersion('poe1', { checkMigration: false });
+            return vm.managedActivateWorkspace(sourceHash, 'German');
+        }, original.identity), true);
+        await page.evaluate(attachSharedClient);
+        for (const item of cases) {
+            const expected = original.source.find(desc => desc.filepath === item.filepath).translations.German.slice(0, item.count);
+            assert.equal(await page.evaluate(filepath => window.__sharedAlignmentApp.editFile(filepath, true), item.filepath), true);
+            const reopened = await page.evaluate(async filepath => {
+                const vm = window.__sharedAlignmentApp;
+                const workspace = await OfflineStore.getWorkspace(vm.managedWorkspaceScope());
+                return { alignment: !!vm.entryAlignment, visible: vm.serializeEditorTranslations(),
+                    committed: [...vm.getDescByFilepath(filepath).translations.German],
+                    staged: workspace.staged?.German?.[filepath]?.translations,
+                    candidate: WorkspaceState.droppedForFile(workspace, filepath, 'German'),
+                    draft: await OfflineStore.getTranslationDraft(vm.editorDraftKey(vm.editorDraftScope(filepath))) };
+            }, item.filepath);
+            assert.equal(reopened.alignment, false, 'Reload must not require repeating the completed alignment');
+            assert.deepEqual(reopened.visible, expected, 'Reload reopens the saved aligned entries');
+            assert.deepEqual(reopened.committed, expected);
+            assert.deepEqual(reopened.staged, expected);
+            assert.equal(reopened.candidate, null);
+            assert.equal(reopened.draft.state, 'promoted');
+            await page.getByRole('button', { name: 'Close', exact: true }).first().click();
+        }
+        assert.deepEqual(await snapshot(), original, 'Reload retains the original immutable source');
         assert.deepEqual(errors, [], 'No uncaught browser errors');
         if (originalHash) assert.equal(digest(readFileSync(process.env.SDEDITOR_GERMAN_ZIP)), originalHash, 'Supplied ZIP bytes remain unchanged');
         console.log(JSON.stringify({ ok: true, input: fixtureZip ? 'supplied ZIP entries' : 'synthetic reported counts',
             ...(originalHash ? { originalZipSha256: originalHash } : {}), files: report,
-            verified: 'Normalized IndexedDB, real save worker, retained drafts, Shared recovery promotion, full original history, immutable baseline, exact wire counts and parsed export' }, null, 2));
+            verified: 'First-attempt Save & close, normalized IndexedDB, real save worker, retained drafts, Shared recovery promotion, full original history, immutable baseline, exact wire counts, parsed export and full reload' }, null, 2));
     } finally {
         await browser?.close();
         await new Promise(resolve => server.close(resolve));
