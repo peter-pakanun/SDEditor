@@ -925,6 +925,29 @@ test('blank-English draft-only records remain discoverable before hydration and 
     assert.equal(app.ctFieldsFor().includes(field),true,'clearing cannot remove the focused cell before Save');
 });
 
+test('Sheets worklist visibility does not read live draft text for fields already visible',()=>{
+    for(const game of ['poe1','poe2']){
+        const original=blankEnglishUnit(),field=original.fields[1],hidden=original.fields[0],
+            {app}=visibleFieldsHarness(original,{gameVersion:game,ctDraftDirty:true});
+        let reads=0;
+        app.ctValues=new Proxy(app.ctValues,{get(values,key){if(key===field.id)reads++;return values[key];}});
+        for(const text of ['a','ab','abc']){
+            app.ctValues[field.id]=text;
+            assert.deepEqual(Array.from(app.ctRows,unit=>unit.id),[original.id]);
+        }
+        assert.equal(reads,0,game+': worklist filtering cannot subscribe to the edited field');
+        assert.equal(app.ctFieldsFor().includes(hidden),false,'unused blank fields stay hidden');
+        app.ctValues[hidden.id]='Retained draft';
+        assert.equal(app.ctFieldsFor().includes(hidden),true,'draft-only fields still become visible');
+        app.ctFocusedField=hidden.id;app.ctValues[hidden.id]='';
+        assert.equal(app.ctFieldsFor().includes(hidden),true,'clearing keeps the focused draft field visible');
+        let focusedReads=0;
+        app.ctValues=new Proxy(app.ctValues,{get(values,key){if(key===hidden.id)focusedReads++;return values[key];}});
+        assert.deepEqual(Array.from(app.ctRows,unit=>unit.id),[original.id]);
+        assert.equal(focusedReads,0,'focused draft-only visibility cannot subscribe to each keystroke either');
+    }
+});
+
 test('ClientText list omits entirely empty unused units and fields',()=>{
     const mixed=blankEnglishUnit(),blank=blankEnglishUnit('AllBlank',' \t\r\n'),snapshot=clone([mixed,blank]),
         {app}=visibleFieldsHarness(mixed,{ctUnits:[mixed,blank],_ctUnitIndex:new Map([[mixed.id,mixed],[blank.id,blank]])});
@@ -1183,6 +1206,19 @@ test('ClientText internal draft tracking includes scoped durable and current dra
     const pending=deferred();app._ctStore.getDraftSummaries=()=>pending.promise;const loading=app.ctRefreshDraftSummaries();
     app.ctWorkspace={scope:{...scope,groupId:'replacement'}};const current=[{unitId:third.id,revision:1,updatedAt:2}];app.ctDraftSummaries=current;
     pending.resolve([{unitId:first.id,revision:9,updatedAt:3}]);await loading;assert.equal(app.ctDraftSummaries,current,'late old-group draft summaries cannot publish into the replacement group');
+});
+test('draft checkpoints preserve worklist membership identity while refreshing summary metadata',async()=>{
+    const {app}=listHarness();let summaries=[{unitId:'first',revision:1,updatedAt:1},{unitId:'second',revision:1,updatedAt:2}];
+    app._ctStore={async getDraftSummaries(){return clone(summaries);}};
+    await app.ctRefreshDraftSummaries();const initial=app.ctDraftSummaries;
+    summaries=[{unitId:'second',revision:2,updatedAt:3},{unitId:'first',revision:3,updatedAt:4}];
+    await app.ctRefreshDraftSummaries();assert.equal(app.ctDraftSummaries,initial);
+    assert.deepEqual(Array.from(app.ctDraftSummaries,summary=>[summary.unitId,summary.revision,summary.updatedAt]),[['first',3,4],['second',2,3]]);
+    summaries=[{unitId:'replacement',revision:1,updatedAt:5},summaries[0]];
+    await app.ctRefreshDraftSummaries();assert.notEqual(app.ctDraftSummaries,initial,'equal-sized membership changes must publish');
+    assert.deepEqual(Array.from(app.ctDraftSummaries,summary=>summary.unitId),['replacement','second']);
+    summaries=[];await app.ctRefreshDraftSummaries();assert.equal(app.ctDraftSummaries.length,0,'discarded drafts leave the worklist');
+    const empty=app.ctDraftSummaries;await app.ctRefreshDraftSummaries();assert.equal(app.ctDraftSummaries,empty);
 });
 test('ClientText draft controls stay hidden for untouched rows, ordinary typing and unrelated errors',()=>{
     const {app,original}=listHarness();assert.equal(app.ctDraftBlocked,false);

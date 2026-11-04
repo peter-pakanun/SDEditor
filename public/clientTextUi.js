@@ -713,7 +713,17 @@
             },
             async ctRefreshDraftSummaries(ctx=this.ctContext()) {
                 if(!this.ctCurrent(ctx) || !this.ctWorkspace)return;
-                try {const summaries=await this.ctStorage(ctx.scope).getDraftSummaries?.(ctx.scope);if(this.ctCurrent(ctx))this.ctDraftSummaries=raw(summaries || []);}
+                try {
+                    const summaries=await this.ctStorage(ctx.scope).getDraftSummaries?.(ctx.scope);
+                    if(!this.ctCurrent(ctx))return;
+                    const next=summaries || [],current=new Map(this.ctDraftSummaries.map(summary=>[summary.unitId,summary]));
+                    // The worklist uses draft membership, not checkpoint revisions
+                    // or timestamps. Keep its raw list stable across ordinary
+                    // checkpoints, including a different storage return order.
+                    if(next.length===current.size && next.every(summary=>current.has(summary.unitId)))
+                        for(const summary of next)Object.assign(current.get(summary.unitId),summary);
+                    else this.ctDraftSummaries=raw(next);
+                }
                 catch(error){if(this.ctCurrent(ctx))this.ctError='Could not load local drafts: '+error.message;}
             },
             ctOpenHighlightDictionary(field,range) {
@@ -1501,8 +1511,11 @@
                 }
                 let visible=item.visible;
                 if(unit.id===this.ctSelection && this.ctDraftDirty){
-                    const draft=field=>field.kind!=='gender' && (String(this.ctValues[field.id] ?? '').trim() || field.id===this.ctFocusedField);
-                    if(unit.fields.some(field=>draft(field) && !visible.includes(field)))
+                    // Check visibility/focus before reading live text, or ctRows
+                    // subscribes to each keystroke and re-filters the full
+                    // Sheets worklist. Focus also keeps cleared drafts visible.
+                    const draft=field=>field.kind!=='gender' && (field.id===this.ctFocusedField || String(this.ctValues[field.id] ?? '').trim());
+                    if(unit.fields.some(field=>!visible.includes(field) && draft(field)))
                         visible=unit.fields.filter(field=>field.kind==='gender' || visible.includes(field) || draft(field));
                 }
                 // A retained draft must be discoverable before its values are
