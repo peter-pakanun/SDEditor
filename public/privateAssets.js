@@ -33,19 +33,66 @@
     function create({ request, current, createObjectURL = blob => root.URL.createObjectURL(blob), revokeObjectURL = url => root.URL.revokeObjectURL(url) } = {}) {
         if (typeof request !== 'function' || typeof current !== 'function') throw new TypeError('Authenticated request and current-context guard are required.');
         let disposed = false, generation = 0;
-        const pending = new Set(), leases = new Set();
+        const pending = new Set(), leases = new Set(), portraits = new Map();
         function clear() {
             generation++;
+            portraits.clear();
             for (const controller of pending) controller.abort();
             pending.clear();
             for (const lease of [...leases]) lease.release();
         }
         function dispose() { disposed = true; clear(); }
+        function trimPortraits() {
+            // Keep at most 32 recent portraits, plus any still displayed images.
+            for (const [key, entry] of portraits) {
+                if (portraits.size <= 32) break;
+                if (entry.users) continue;
+                portraits.delete(key); entry.controller.abort(); entry.lease?.release();
+            }
+        }
         async function load(path, { context, kind = 'image', mime, maxBytes = LIMITS[kind], signal, timeoutMs = 30000 } = {}) {
             if (!validPath(path, kind)) throw failure('Invalid private media path.', 'PRIVATE_ASSET_PATH');
             if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > LIMITS[kind]
                 || mime && !TYPES[kind].includes(mime) || !Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 60000)
                 throw failure('Invalid private media limits.', 'PRIVATE_ASSET_OPTIONS');
+            const options = { context, kind, mime, maxBytes, signal, timeoutMs };
+            if (kind !== 'image' || !path.startsWith('/portraits/')) return fetchAsset(path, options);
+            const epoch = generation, check = () => {
+                if (disposed || signal?.aborted || generation !== epoch) throw cancelled();
+                if (!current(context)) throw Object.assign(failure('Private media access or workspace changed.', 'PRIVATE_ASSET_STALE'), { stale: true });
+            };
+            check();
+            const key = JSON.stringify([path, mime, maxBytes, timeoutMs]), scope = context?.key ?? context;
+            let entry = portraits.get(key);
+            if (entry && ((entry.context?.key ?? entry.context) !== scope || !current(entry.context))) {
+                portraits.delete(key); entry.controller.abort(); entry.lease?.release(); entry = null;
+            }
+            if (!entry) {
+                entry = { context, controller: new root.AbortController(), users: 0 };
+                portraits.set(key, entry);
+                // The cache owns this request so changing inline rows can share it.
+                entry.promise = fetchAsset(path, { ...options, signal: entry.controller.signal }).then(lease => {
+                    if (portraits.get(key) !== entry) { lease.release(); throw cancelled(); }
+                    entry.lease = lease; return lease;
+                }).catch(error => {
+                    if (portraits.get(key) === entry) portraits.delete(key);
+                    throw error;
+                });
+            }
+            portraits.delete(key); portraits.set(key, entry); entry.users++; trimPortraits();
+            let released = false, abort;
+            const release = () => { if (!released) { released = true; entry.users--; trimPortraits(); } };
+            try {
+                const aborted = new Promise((_, reject) => { abort = () => reject(cancelled()); });
+                signal?.addEventListener('abort', abort, { once: true });
+                if (signal?.aborted) abort();
+                const lease = await Promise.race([entry.promise, aborted]);
+                check();
+                return { url: lease.url, release };
+            } catch (error) { release(); throw error; }
+            finally { signal?.removeEventListener('abort', abort); }
+        }
+        async function fetchAsset(path, { context, kind, mime, maxBytes, signal, timeoutMs }) {
             const controller = new root.AbortController(), epoch = generation;
             const abort = () => controller.abort();
             const check = () => {

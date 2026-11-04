@@ -1133,7 +1133,7 @@
             if (Array.isArray(options.draft.base?.translations)
               && !window.WorkspaceState.translationBaseMatches(this.localDescs, this.workspaceSourceFile(desc.filepath) || desc,
                 ctx.language, options.draft.base, current)) {
-              throw Object.assign(new Error('Open the full editor and review this Local draft against the changed committed translation before staging it.'),
+              throw Object.assign(new Error('The committed translation changed since this draft was started. In the full editor, choose Review draft, compare the translations, then Use translation before saving.'),
                 { code: 'DRAFT_BASE_CHANGED', draftReview: 'base', filepath: desc.filepath, currentTranslations: [...current.translations] });
             }
           }

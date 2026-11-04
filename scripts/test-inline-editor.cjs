@@ -2347,10 +2347,43 @@ test('recovery rejects a committed base changed during review and leaves current
   assert.equal(editor.editorBlocks[0].translation, 'existing local draft');
 });
 
+test('direct draft review compares the collaboration base and rejects another shared change during preparation', async () => {
+  const h = harness(), { editor, desc } = h;
+  await editor.editFile(desc.filepath);
+  editor.editorBlocks[0].translation = 'retained translation'; await editor.flushEditorDraft({ force: true });
+  const stored = copy(h.records.get(editor._draftSession.key));
+  let base = { filepath: desc.filepath, translations: ['shared committed'], trackedForExport: true, needsReview: false, revision: 7 };
+  editor._collaboration = { fileBase: () => copy(base) };
+  editor.renderInlineDiffHtml = (before, after) => JSON.stringify([before, after]);
+  assert.equal(editor.editorDraftBaseChanged, true);
+  await editor.reviewEditorDraft();
+  const recovery = editor.draftRecoveryCandidate;
+  assert.deepEqual(copy(recovery.base), base);
+  assert.equal(editor.editorBlocks[0].translationDiffHtml, JSON.stringify(['shared committed', 'retained translation']));
+  const gate = deferred(), prepare = editor.prepareMatchedEditorBlocks;
+  editor.prepareMatchedEditorBlocks = async (...args) => { await gate.promise; return prepare.apply(editor, args); };
+  const applying = editor.applyRecoveredDraft();
+  base = { ...base, revision: 8, translations: ['newer shared committed'] }; gate.resolve();
+  await applying;
+  assert.equal(editor.editorCompareActive, true); assert.equal(editor.draftRecoveryCandidate, recovery);
+  assert.match(editor.collaborationNotice, /committed translation changed/);
+  assert.deepEqual(h.records.get(stored.key), stored); assert.equal(h.calls.promotions.length, 0);
+});
+
+test('direct draft review cannot open a comparison after its context changes while retaining the draft', async () => {
+  const h = harness(), { editor, desc } = h; await editor.editFile(desc.filepath);
+  const gate = deferred(); editor.flushEditorDraft = () => gate.promise;
+  const reviewing = editor.reviewEditorDraft();
+  editor.sourceIdentity = 'another-source'; gate.resolve(true); await reviewing;
+  assert.equal(editor.editorCompareActive, false); assert.equal(editor.draftRecoveryCandidate, null);
+  assert.equal(h.calls.promotions.length, 0);
+});
+
 test('recovery application is guarded by draft revision, source, account, language and editor session', async () => {
   const changes = [editor => { editor._draftSession.expectedRevision = 'another draft revision'; },
     editor => { editor.sourceIdentity = 'other-source'; }, editor => { editor.cloudProfileId = 'other-account'; },
-    editor => { editor.lang = 'German'; }, editor => { editor._editorOpenRun++; }];
+    editor => { editor.lang = 'German'; }, editor => { editor._editorOpenRun++; },
+    editor => { editor._collaboration = {}; }, editor => { editor.cloudUser = { role: 'translator' }; }];
   for (const change of changes) {
     const h = harness(), { editor, desc } = h; await editor.activateInlineRow(desc.filepath);
     editor.editorBlocks[0].translation = 'original local draft'; await editor.flushEditorDraft();

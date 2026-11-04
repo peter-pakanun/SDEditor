@@ -79,6 +79,80 @@ test('clear revokes all retained leases and dispose prevents new requests', asyn
     assert.equal(h.calls.length, 2);
 });
 
+test('portrait leases reuse one validated URL across record replacement and concurrent consumers', async () => {
+    const h = harness(), path = '/portraits/poe2/example.webp?v=4';
+    const [first, second] = await Promise.all([h.loader.load(path, { context: h.context }), h.loader.load(path, { context: h.context })]);
+    assert.equal(h.calls.length, 1); assert.equal(h.created.length, 1); assert.equal(first.url, second.url);
+    first.release(); first.release(); second.release();
+    assert.deepEqual(h.revoked, [], 'replacing an inline editor keeps its portrait warm');
+    const next = await h.loader.load(path, { context: h.context });
+    assert.equal(next.url, first.url); assert.equal(h.calls.length, 1);
+    h.loader.clear(); next.release(); assert.deepEqual(h.revoked, [first.url]);
+    const fresh = await h.loader.load(path, { context: h.context });
+    assert.notEqual(fresh.url, first.url); assert.equal(h.calls.length, 2);
+    h.loader.dispose(); assert.deepEqual(h.revoked, [first.url, fresh.url]);
+});
+
+test('record cancellation detaches promptly while the next record shares the pending portrait', async () => {
+    const pending = deferred(), h = harness({ request: async (...args) => { h.calls.push(args); return pending.promise; } });
+    const controller = new AbortController(), path = '/portraits/poe2/example.webp?v=4';
+    const first = h.loader.load(path, { context: h.context, signal: controller.signal });
+    controller.abort(); await assert.rejects(first, { name: 'AbortError' });
+    assert.equal(h.calls[0][1].signal.aborted, false, 'the cache owns the pending fetch');
+    const second = h.loader.load(path, { context: h.context });
+    pending.resolve(webp()); const lease = await second;
+    assert.equal(h.calls.length, 1); assert.equal(h.created.length, 1);
+    lease.release(); h.loader.dispose(); assert.deepEqual(h.revoked, [lease.url]);
+});
+
+test('portrait cache still validates scope, aborted callers and per-request limits on hits', async () => {
+    const h = harness(), path = '/portraits/poe2/example.webp?v=4';
+    const lease = await h.loader.load(path, { context: h.context }); lease.release();
+    const controller = new AbortController(); controller.abort();
+    await assert.rejects(h.loader.load(path, { context: h.context, signal: controller.signal }), { name: 'AbortError' });
+    await assert.rejects(h.loader.load(path, { context: h.context, maxBytes: 0 }), { code: 'PRIVATE_ASSET_OPTIONS' });
+    await assert.rejects(h.loader.load(path, { context: h.context, maxBytes: 8 }), { code: 'PRIVATE_ASSET_SIZE' });
+    h.change('bob:poe2:Thai:source2:access2');
+    await assert.rejects(h.loader.load(path, { context: 'alice:poe2:Thai:source1:access1' }), { stale: true });
+    const fresh = await h.loader.load(path, { context: h.context });
+    assert.notEqual(fresh.url, lease.url); assert.deepEqual(h.revoked, [lease.url]);
+    h.loader.dispose();
+});
+
+test('portrait cancellation during request startup settles without waiting for the shared fetch', async () => {
+    const controller = new AbortController();
+    const h = harness({ request: () => { controller.abort(); return new Promise(() => {}); } });
+    await assert.rejects(h.loader.load('/portraits/poe2/example.webp?v=4', { context: h.context, signal: controller.signal }), { name: 'AbortError' });
+    h.loader.dispose();
+});
+
+test('failed portraits retry; scope clearing aborts cached pending loads without stale URLs', async () => {
+    let available = false;
+    const h = harness({ request: async (...args) => { h.calls.push(args); if (!available) throw new Error('offline'); return webp(); } });
+    const path = '/portraits/poe2/example.webp?v=4';
+    await assert.rejects(h.loader.load(path, { context: h.context }), /offline/);
+    available = true; const lease = await h.loader.load(path, { context: h.context });
+    assert.equal(h.calls.length, 2); lease.release(); h.loader.dispose();
+    const pending = deferred(), b = harness({ request: () => pending.promise });
+    const first = b.loader.load(path, { context: b.context }), second = b.loader.load(path, { context: b.context });
+    b.loader.clear(); await assert.rejects(first, { name: 'AbortError' }); await assert.rejects(second, { name: 'AbortError' });
+    pending.resolve(webp()); await Promise.resolve(); assert.equal(b.created.length, 0);
+});
+
+test('portrait cache evicts the least recently used idle URL and protects displayed leases', async () => {
+    const h = harness(), path = index => '/portraits/poe2/person-' + index + '.webp?v=4';
+    const displayed = await h.loader.load(path(0), { context: h.context });
+    const idle = [];
+    for (let index = 1; index <= 31; index++) { const lease = await h.loader.load(path(index), { context: h.context }); lease.release(); idle.push(lease); }
+    (await h.loader.load(path(1), { context: h.context })).release();
+    const added = await h.loader.load(path(32), { context: h.context }); added.release();
+    assert.deepEqual(h.revoked, [idle[1].url], 'recently reused and displayed portraits survive eviction');
+    assert.equal((await h.loader.load(path(0), { context: h.context })).url, displayed.url);
+    assert.equal(h.calls.length, 33);
+    displayed.release(); h.loader.dispose();
+    assert.equal(h.revoked.length, h.created.length); assert.equal(new Set(h.revoked).size, h.revoked.length);
+});
+
 test('external abort and timeout cancel with no URL allocation', async () => {
     const h = harness({ request: () => new Promise(() => {}) }), controller = new AbortController();
     const load = h.loader.load(imagePath, { context: h.context, signal: controller.signal }); controller.abort();

@@ -1095,7 +1095,7 @@ test('typing while storage is committing remains an unsaved open draft', async (
   const { editor: e, window, desc } = saveFixture();
   let finish;
   window.OfflineStore.saveWorkspaceWithRevisions = () => new Promise(resolve => { finish = resolve; });
-  const saving = e.editorSave(); e.editorBlocks[0].translation = 'พิมพ์ต่อ'; finish();
+  const saving = e.editorSave(); await pendingTick(); e.editorBlocks[0].translation = 'พิมพ์ต่อ'; finish();
   assert.equal(await saving, false); assert.equal(e.editorVisible, true);
   assert.equal(desc.translations.Thai[0], 'ใหม่'); assert.equal(e.editorBlocks[0].translation, 'พิมพ์ต่อ'); assert.equal(e.editorHaveChanges(), true);
 });
@@ -1119,7 +1119,7 @@ test('typing during a closing save retains an open draft with refreshed highligh
   let finish, highlights = 0, previews = 0;
   window.OfflineStore.saveWorkspaceWithRevisions = () => new Promise(resolve => { finish = resolve; });
   e.refreshEditorHLter = () => { highlights++; }; e.refreshGamePreview = () => { previews++; };
-  const saving = e.editorSave(); e.editorBlocks[0].translation = 'ร่างที่พิมพ์ต่อ'; finish();
+  const saving = e.editorSave(); await pendingTick(); e.editorBlocks[0].translation = 'ร่างที่พิมพ์ต่อ'; finish();
   assert.equal(await saving, false); assert.equal(e.editorVisible, true);
   assert.equal(e.editorHaveChanges(), true); assert.equal(highlights, 1); assert.equal(previews, 1);
 });
@@ -1142,6 +1142,7 @@ test('a collaboration save stages only its file and retains unrelated remote upd
     leaveEdit() {},
   };
   const saving = e.editorSave();
+  await pendingTick();
   assert.equal(payload.workspace.descs.length, 1); assert.equal(payload.workspace.status[desc.filepath].custom, 'kept');
   e.applyCollaborationFiles([{ filepath: other.filepath, translations: ['ทีมแก้ระหว่างบันทึก', 'สอง'], trackedForExport: true, needsReview: false }]);
   let applied;
@@ -1285,7 +1286,7 @@ test('a large pending shared batch cannot touch a workspace selected before its 
 test('account or source change during save never closes or replaces the new editor', async () => {
   const { editor: e, window } = saveFixture(); let finish;
   window.OfflineStore.saveWorkspaceWithRevisions = () => new Promise(resolve => { finish = resolve; });
-  const saving = e.editorSave(); e.sourceIdentity = 'other-source'; const workspace = { descs: [], status: {} }; e.localDescs = workspace;
+  const saving = e.editorSave(); await pendingTick(); e.sourceIdentity = 'other-source'; const workspace = { descs: [], status: {} }; e.localDescs = workspace;
   finish(); assert.equal(await saving, false); assert.equal(e.localDescs, workspace); assert.equal(e.editorVisible, true);
 });
 test('collaboration modal and IME own their keys instead of triggering save-and-next', () => {
@@ -2548,6 +2549,7 @@ test('typing on an unseen remotely merged entry retains its old ancestor and con
   let finish;
   e.persistTranslationBatch = (...args) => new Promise(resolve => { finish = async () => resolve(await persist(...args)); });
   const saving = e.editorSave();
+  await pendingTick();
   e.editorBlocks[0].translation = 'พิมพ์บนข้อความเดิมระหว่างบันทึก';
   await finish(); assert.equal(await saving, false);
   assert.equal(e.editorVisible, true); assert.equal(e.editorHaveChanges(), true);

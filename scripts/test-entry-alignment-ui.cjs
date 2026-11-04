@@ -350,6 +350,36 @@ test('a failed Save retains the aligned draft, recovery revisions and committed 
   assert.deepEqual(records.get(session.key).alignmentRecovery[0].translations, ['one', 'obsolete', 'three']);
 });
 
+test('an aligned Dropped draft can explicitly review a changed committed base before saving', async t => {
+  const { editor, desc, records, calls } = await fixture(t);
+  resolveMiddleRemoval(editor);
+  assert.equal(await editor.applyEntryAlignment(), true);
+  const session = editor._draftSession, retained = copy(records.get(session.key));
+  editor.localDescs.staged.Thai = { [desc.filepath]: { translations: ['peer one', 'peer three'], sourceHash: editor.sourceIdentity } };
+  editor.editorDroppedCandidate = { id: 'older-copy', revision: 2,
+    snapshot: { english: ['One', 'Removed', 'Three'], translations: ['old one', 'removed', 'old three'] } };
+  editor.capturedDroppedPromotion = () => ({ id: 'older-copy', revision: 2 });
+  editor.renderInlineDiffHtml = (before, after) => JSON.stringify([before, after]);
+  assert.equal(editor.editorDraftBaseChanged, true);
+  await editor.reviewEditorDraft();
+  assert.equal(editor.editorCompareActive, true);
+  assert.equal(editor.editorBlocks[0].translationDiffHtml, JSON.stringify(['peer one', 'one']));
+  assert.deepEqual(records.get(session.key), retained, 'Comparison alone cannot rebase or stage the draft.');
+  editor.exitEditorCompareMode();
+  assert.equal(editor.editorDraftBaseChanged, true);
+  assert.deepEqual(copy(editor.serializeEditorTranslations()), ['one', 'three']);
+  await editor.reviewEditorDraft();
+  await editor.applyRecoveredDraft();
+  assert.equal(editor.editorDraftBaseChanged, false);
+  assert.deepEqual(records.get(session.key).base.translations, ['peer one', 'peer three']);
+  assert.deepEqual(records.get(session.key).alignmentRecovery, retained.alignmentRecovery);
+  assert.equal(editor.editorDroppedCandidate.id, 'older-copy');
+  assert.equal(calls.promotions.length, 0);
+  assert.equal(await editor.editorSave({ close: false, defer: false }), true);
+  assert.equal(calls.promotions[0].options.promoteDropped.id, 'older-copy');
+  assert.deepEqual(copy(calls.promotions[0].options.revisions[0].translations), ['one', 'obsolete', 'three']);
+});
+
 test('reopening a retained aligned draft restores its original-block recovery for the eventual Save', async t => {
   const { editor, desc } = await fixture(t);
   resolveMiddleRemoval(editor);

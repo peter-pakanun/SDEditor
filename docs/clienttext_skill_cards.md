@@ -277,8 +277,11 @@ checks captured access before and after asynchronous work and owns revocable
 Blob leases. `privateMediaUi.js` supplies current cloud authentication and the
 selected language privately. Portraits and explicit audio playback use the same
 loader. Native image/audio elements receive Blob URLs only. Logout, role,
-assignment, account, source and language changes revoke leases; replacement and
-unmount also abort pending downloads. Healthy cloud refreshes preserve media.
+assignment, account, source and language changes revoke leases. Card replacement
+and unmount abort pending card downloads. Portraits reuse a bounded in-memory
+cache across record and editor replacement; their subscribers cancel separately
+from shared fetches. See [reference portraits](clienttext_portraits.md) for cache
+limits and cleanup. Healthy cloud refreshes preserve media.
 The catalog is memory-only and all media/catalog requests use `no-store`.
 
 ## Frontend-first rollout

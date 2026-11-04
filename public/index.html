@@ -1103,6 +1103,10 @@
             <template #actions><button v-if="draftRecoveryCandidate" @click="applyRecoveredDraft">Use translation</button>
             <button @click="exitEditorCompareMode">Exit compare</button></template>
           </app-notice>
+          <app-notice v-if="editorDraftBaseChanged" tone="warning" role="alert">
+            <span>The committed translation changed since this draft was started. Compare the draft with the current translation before saving.</span>
+            <template #actions><button type="button" @click="reviewEditorDraft" :disabled="!editorReady || editorSaving || navigationBusy || !!entryAlignment || !!editorDroppedConflict">Review draft</button></template>
+          </app-notice>
           <div v-if="editorDroppedConflict" class="droppedTranslationPanel">
             <app-notice tone="warning" class="droppedTranslationBanner">
               <strong>Competing dropped translations</strong>

@@ -40,6 +40,14 @@
           || (this._draftSession && !this.draftScopeCurrent(this._draftSession.scope))) return false;
         return !equal(this.serializeEditorTranslations(), this.inlineCommittedTranslations);
       },
+      editorDraftBaseChanged() {
+        const desc = this.editorCurrentEditingDesc, session = this._draftSession;
+        if (this.ctActive || !this.editorSessionActive || !desc || !session || !this.draftScopeCurrent(session.scope)
+          || this.editorLoading || this.editorLoadError || this.editorCompareActive) return false;
+        const base = this.inlineDraftFor(desc.filepath)?.base || session.record?.base || session.base;
+        return Array.isArray(base?.translations) && !root.WorkspaceState.translationBaseMatches(this.localDescs,
+          this.workspaceSourceFile?.(desc.filepath) || desc, this.lang, base, this.currentEditorDraftBase(desc));
+      },
       editorDraftBlocked() {
         const desc = this.editorCurrentEditingDesc, session = this._draftSession;
         if (!this.editorSessionActive || !desc?.filepath || !session || !this.draftScopeCurrent(session.scope)
@@ -47,6 +55,7 @@
         const translations = this.serializeEditorTranslations();
         const record = this.inlineDraftFor(desc.filepath);
         const conflict = !!(session.conflict || session.record?.conflicts?.length || record?.conflicts?.length);
+        if (this.editorDraftBaseChanged) return true;
         if (!conflict && equal(translations, this.inlineCommittedTranslations)) return false;
         if (conflict || this.editorDiagnosticErrorCount || this.editorDroppedConflict
           || (this.inlineActive && root.WorkspaceState?.droppedForFile(this.localDescs, desc.filepath, this.lang))) return true;
@@ -941,26 +950,47 @@
         if (!record || !await this.appConfirm('Discard this preserved local draft?', { confirmLabel: 'Discard draft', danger: true })) return;
         if (await this.discardDraftRecord(record)) this.draftRecoverySelected = null;
       },
-      async recoverSelectedDraft() {
-        const record = this.draftRecoverySelected, desc = this.getDescByFilepath(record?.filepath);
+      currentEditorDraftBase(desc = this.editorCurrentEditingDesc) {
+        return this._collaboration?.fileBase?.(desc.filepath) || this.collaborationFile?.(desc)
+          || { translations: desc.translations[this.lang] || [] };
+      },
+      async reviewEditorDraft() {
+        const session = this._draftSession, desc = this.editorCurrentEditingDesc;
+        const context = this.captureCollaborationContext();
+        if (!this.editorVisible || !this.editorReady || this.editorSaving || this.entryAlignment || this.editorCompareActive
+          || this.editorDroppedConflict || !session || !this.draftScopeCurrent(session.scope)) return;
+        if (!await this.flushEditorDraft({ force: true }) || session !== this._draftSession
+          || desc !== this.editorCurrentEditingDesc || !this.draftScopeCurrent(session.scope)
+          || !this.collaborationContextCurrent(context)) return;
+        await this.reviewRetainedDraft(copy(session.record), session);
+      },
+      async recoverSelectedDraft() { return this.reviewRetainedDraft(this.draftRecoverySelected); },
+      async reviewRetainedDraft(record, currentSession = null) {
+        const desc = this.getDescByFilepath(record?.filepath);
         if (!record || !desc || this.draftRecoveryBusy) return;
         this.draftRecoveryBusy = true;
         try {
           const scope = this.editorDraftScope(record.filepath);
+          const context = this.captureCollaborationContext();
           if (record.profile !== scope.profile || record.game !== scope.game || record.language !== scope.language) return;
-          if (!await this.flushEditorDraft()) return;
+          if (!currentSession && !await this.flushEditorDraft()) return;
           if (!this.draftScopeCurrent(scope)) return;
           const translations = copy(record.translations), oldEnglish = copy(record.english || record.source?.translations?.English || []);
           this.closeDraftRecovery();
-          if (!await this.openInlineFullEditor(record.filepath) || !this.draftScopeCurrent(scope) || this.editorCurrentEditingDesc?.filepath !== record.filepath) return;
-          this.draftRecoveryCandidate = { translations, english: oldEnglish, scope, sessionRun: this._editorOpenRun,
+          if (currentSession ? this._draftSession !== currentSession || !this.editorVisible
+            : !await this.openInlineFullEditor(record.filepath)) return;
+          if (!this.draftScopeCurrent(scope) || this.editorCurrentEditingDesc !== desc || !this.collaborationContextCurrent(context)) return;
+          // Keep the captured client identity intact inside Vue's reactive comparison state.
+          this.draftRecoveryCandidate = { translations, english: oldEnglish, scope,
+            context: Vue.markRaw ? Vue.markRaw(context) : context, sessionRun: this._editorOpenRun,
             expectedRevision: this._draftSession?.expectedRevision, originalBlocks: copy(this.editorBlocks),
-            base: copy(this.collaborationFile?.(desc) || { translations: desc.translations[this.lang] || [] }) };
+            base: copy(this.currentEditorDraftBase(desc)) };
           this.editorCompareActive = true; this.editorCompareMode = 'translation';
           this.editorCompareTitle = 'Retained translation — review against this source';
           const english = desc.translations.English;
           const candidate = this.draftRecoveryCandidate;
           const stillCurrent = () => this.draftRecoveryCandidate === candidate && this.draftScopeCurrent(scope)
+            && this.collaborationContextCurrent(context)
             && candidate.sessionRun === this._editorOpenRun && this.editorCurrentEditingDesc === desc;
           const prepared = await this.prepareMatchedEditorBlocks(english, translations, stillCurrent, oldEnglish.length);
           if (!prepared || !stillCurrent()) return;
@@ -977,20 +1007,20 @@
       async applyRecoveredDraft() {
         const recovery = this.draftRecoveryCandidate;
         if (!recovery || !this.editorSessionActive || !this.draftScopeCurrent(recovery.scope)
+          || !this.collaborationContextCurrent(recovery.context)
           || recovery.sessionRun !== this._editorOpenRun || recovery.expectedRevision !== this._draftSession?.expectedRevision) return;
-        const currentBase = this.collaborationFile?.(this.editorCurrentEditingDesc) || { translations: this.editorCurrentEditingDesc.translations[this.lang] || [] };
+        const currentBase = this.currentEditorDraftBase();
         if (!equal(recovery.base, currentBase)) {
           this.collaborationNotice = 'The committed translation changed during recovery. Reopen retained edits and review the current comparison.';
           return;
         }
         const english = this.editorCurrentEditingDesc.translations.English;
         const stillCurrent = () => this.draftRecoveryCandidate === recovery && this.editorSessionActive
-          && this.draftScopeCurrent(recovery.scope) && recovery.sessionRun === this._editorOpenRun
+          && this.draftScopeCurrent(recovery.scope) && this.collaborationContextCurrent(recovery.context) && recovery.sessionRun === this._editorOpenRun
           && recovery.expectedRevision === this._draftSession?.expectedRevision;
         const prepared = await this.prepareMatchedEditorBlocks(english, recovery.translations, stillCurrent);
         if (!prepared || !stillCurrent()) return;
-        const preparedBase = this.collaborationFile?.(this.editorCurrentEditingDesc)
-          || { translations: this.editorCurrentEditingDesc.translations[this.lang] || [] };
+        const preparedBase = this.currentEditorDraftBase();
         if (!equal(recovery.base, preparedBase)) {
           this.collaborationNotice = 'The committed translation changed during recovery. Reopen retained edits and review the current comparison.';
           return;
