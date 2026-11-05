@@ -441,7 +441,7 @@
               <h3 class="versionOfflineSubheading">Latest workbook</h3>
               <article v-for="workspace in ctPrivateLocalWorkspaces.slice(0, 1)" :key="workspace.groupId" class="versionLocalWorkbook versionLatestWorkbook">
                 <strong>{{ workspace.version?.name || 'Local workbook' }}</strong>
-                <p class="versionWorkbookMeta">{{ workspace.language }} · <time tabindex="0" :datetime="new Date(workspace.createdAt).toISOString()" v-tooltip="'Imported ' + new Date(workspace.createdAt).toLocaleString()">{{ new Date(workspace.createdAt).toLocaleDateString() }}</time> · <span class="versionWorkbookId">{{ workspace.groupId.slice(-8) }}</span></p>
+                <p class="versionWorkbookMeta">{{ workspace.language }} · <time tabindex="0" :datetime="new Date(workspace.createdAt).toISOString()" v-tooltip="'Imported ' + new Date(workspace.createdAt).toLocaleString()">{{ new Date(workspace.createdAt).toLocaleString() }}</time> · <span class="versionWorkbookId">{{ workspace.groupId.slice(-8) }}</span></p>
                 <button class="primaryAction" @click="ctOpenCached(workspace)" :disabled="managedVersionBusy || ctBusy || ctLocalBackupBusy || ctUploading">Reopen local workbook</button>
               </article>
               <details v-if="ctPrivateLocalWorkspaces.length > 1" class="versionOfflineDisclosure versionOlderWorkbooks">
@@ -449,7 +449,7 @@
                 <div class="versionOlderWorkbookList">
                   <article v-for="workspace in ctPrivateLocalWorkspaces.slice(1)" :key="workspace.groupId" class="versionLocalWorkbook">
                     <strong>{{ workspace.version?.name || 'Local workbook' }}</strong>
-                    <p class="versionWorkbookMeta">{{ workspace.language }} · <time tabindex="0" :datetime="new Date(workspace.createdAt).toISOString()" v-tooltip="'Imported ' + new Date(workspace.createdAt).toLocaleString()">{{ new Date(workspace.createdAt).toLocaleDateString() }}</time> · <span class="versionWorkbookId">{{ workspace.groupId.slice(-8) }}</span></p>
+                    <p class="versionWorkbookMeta">{{ workspace.language }} · <time tabindex="0" :datetime="new Date(workspace.createdAt).toISOString()" v-tooltip="'Imported ' + new Date(workspace.createdAt).toLocaleString()">{{ new Date(workspace.createdAt).toLocaleString() }}</time> · <span class="versionWorkbookId">{{ workspace.groupId.slice(-8) }}</span></p>
                     <button @click="ctOpenCached(workspace)" :disabled="managedVersionBusy || ctBusy || ctLocalBackupBusy || ctUploading">Reopen local workbook</button>
                   </article>
                 </div>
