@@ -86,7 +86,8 @@ module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}
                     id:JSON.stringify([gender?'gender':'normal',sheet+(gender?'_Gender':''),'GenericReview']),
                     fields:[...forms.map((form,index)=>({...base,id:JSON.stringify(['Text',form]),kind:form?'form':'text',group:'Text',form,
                         target:'Generic '+(form || 'text'),targetCell:String.fromCharCode(68+index)+'3',required:true,originalMissing:false,outdated:true})),
-                        ...previous.fields.slice(1).map((field,index)=>({...field,target:index<2?'Class '+field.form:index===2?' \t':'',required:index<2,originalMissing:false,outdated:true}))]});
+                        ...previous.fields.slice(1).map((field,index)=>({...field,target:index<2?'Class '+field.form:index===2?' \t':'',required:index<=2,
+                            originalMissing:index===2,originalFill:index===2?ClientTextState.FILLS.missing:field.originalFill,outdated:true}))]});
             host.ctUnits=Vue.markRaw([unit]);host._ctUnitIndex=Vue.markRaw(new Map([[unit.id,unit]]));host.ctSelection=unit.id;
             host.ctValues=Object.fromEntries(unit.fields.map(field=>[field.id,field.target]));host.ctReviewed={};host.ctSaved=Vue.markRaw({});
             host.ctVariantSelections={};host.ctChoices=[];host.ctDraftDirty=false;host._ctSaveJob=null;host._ctEditRevision=0;host._ctDraftRevision=null;
@@ -109,6 +110,7 @@ module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}
         assert.equal(preview.value,forms.length===1?'Generic text':'');
         assert.deepEqual(preview.variants,forms.length===1?[]:forms.map(form=>({label:form+' · Generic',value:'Generic '+form})));
         assert.equal(await page.evaluate(()=>{const host=window.__ctLayoutFixture;return host.ctStatus().fields['regular-DexFour'].outdated;}),true);
+        assert.equal(await page.evaluate(()=>window.__ctLayoutFixture.ctStatus().fields['regular-DexFour'].missing),true,name+': original red blank needs the ID Save');
         if(!full){await blank.press('Control+Enter');await page.locator('.ctFullEditor').waitFor();await settle();}
         await page.locator('.ctEditorActionButtons').getByRole('button',{name:'Save',exact:true}).click();await settle();
         assert.deepEqual(await page.evaluate(()=>{const host=window.__ctLayoutFixture;return {generic:host.ctStatus().fields['regular-DexFour'].generic,
@@ -116,6 +118,7 @@ module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}
             target:host.ctSaved[host.ctSelection].values['regular-DexFour'],original:JSON.stringify(host.ctCurrentUnit)===host._dialogueOriginal};}),
             {generic:true,outdated:false,review:'',target:' \t',original:true});
         assert.equal(await page.locator('.ctVariantTabs button.outdated').count(),2,'populated overrides still require their own reviews');
+        assert.equal(await page.evaluate(()=>window.__ctLayoutFixture.ctStatus().fields['regular-DexFour'].missing),false,name+': saved generic resolves the red blank');
         if(theme==='modern-dark' && full){const path=join(fixtureArtifacts,sheet+'-generic-defaults-'+forms.length+'.png');await page.locator('.ctClassVariants').screenshot({path});screenshots.push(path);}
         const genericId=await page.evaluate(()=>window.__ctLayoutFixture.ctCurrentUnit.fields[0].id);
         await page.locator('[data-ct-target]').evaluateAll((elements,id)=>elements.find(element=>element.dataset.ctTarget===id).focus(),genericId);
@@ -124,6 +127,7 @@ module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}
         assert.equal(await page.evaluate(()=>window.__ctLayoutFixture.ctStatus().fields['regular-DexFour'].outdated),false,'draft generic clearing does not change committed review');
         await page.locator('.ctEditorActionButtons').getByRole('button',{name:'Save',exact:true}).click();await settle();
         assert.equal(await page.evaluate(()=>window.__ctLayoutFixture.ctStatus().fields['regular-DexFour'].outdated),true,'saving one absent generic restores blank review');
+        assert.equal(await page.evaluate(()=>window.__ctLayoutFixture.ctStatus().fields['regular-DexFour'].missing),true,'saving one absent generic restores red blank workload');
         assert.equal(await page.getByRole('button',{name:'Review blank variants (10)',exact:true}).count(),1);
         results.push({name:name+' complete and partial defaults, separate previews, saved-only completion and independent populated reviews'});
     }

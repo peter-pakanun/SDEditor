@@ -2476,8 +2476,10 @@ test('bulk dialogue review fences stale groups and blocks conflicts, pending sav
     assert.equal(S.statusFor(app.ctCurrentUnit,{values:app.ctValues,reviewed:app.ctReviewed}).fields[blank.id].missing,true,'reviewing a blank does not erase separately required translation workload');
 });
 
-for(const sheet of ['NPCTextAudio','NPCTalkDialogueTextAudio'])test(sheet+' saved generic dialogue covers blank overrides without approving populated variants; draft generic edits only change presentation',async()=>{
-    const original=dialogueVariantUnit('Generic [Keyword] {0}',sheet),f=fixture();await f.store.import(scope,{units:[original],assets:[asset]});
+for(const sheet of ['NPCTextAudio','NPCTalkDialogueTextAudio'])for(const required of [false,true])test(sheet+' saved generic dialogue covers '+(required?'Missing':'optional')+' blank overrides without approving populated variants; draft generic edits only change presentation',async()=>{
+    const original=dialogueVariantUnit('Generic [Keyword] {0}',sheet);
+    for(const field of original.fields.filter(field=>field.kind==='form'&&!field.target)){field.required=required;field.originalMissing=required;}
+    const f=fixture();await f.store.import(scope,{units:[original],assets:[asset]});
     const {app}=keyboardHarness(original);app._ctStore=f.store;app.ctSync=()=>{};app.ctLoadMemory=()=>{};
     const group=app.ctFieldGroups[0],blank=original.fields.find(field=>field.kind==='form'&&!field.target),generic=original.fields[0],
         populated=app.ctPopulatedVariants(group),before=clone(original);
@@ -2485,15 +2487,22 @@ for(const sheet of ['NPCTextAudio','NPCTalkDialogueTextAudio'])test(sheet+' save
     assert.equal(app.ctFieldController(blank).field.placeholder,'-- Use generic --');assert.equal(app.ctPreviewValue(blank),generic.target);
     assert.equal(app.ctBlankVariantsToReview(group).length,0);assert.equal(app.ctGenericVariantsToSave(group).length,10);
     assert.equal(app.ctStatus().fields[blank.id].outdated,true,'an untouched generic still needs an explicit ID Save before accepted counters change');
+    assert.equal(app.ctStatus().missing,required);
     app.ctMarkReviewed(generic);assert.equal(await app.ctSave(),true);
     assert.equal(app.ctStatus().fields[blank.id].outdated,false);assert.equal(app.ctStatus().fields[blank.id].generic,true);
+    assert.equal(app.ctStatus().missing,false);assert.equal(app.ctFieldStatus(blank).missing,false);
     assert.equal(app.ctStatus().outdated,true);assert.equal(app.ctGenericVariantsToSave(group).length,0);
     for(const field of populated)assert.equal(app.ctStatus().fields[field.id].outdated,true);
-    const saved=(await f.store.getSaved(scope))[original.id];assert.deepEqual(Object.keys(saved.reviewed),[generic.id]);
+    for(const field of populated)app.ctMarkReviewed(field);
+    assert.equal(await app.ctSave(),true);assert.equal(app.ctRowStatusClasses(original).hasChanges,true);
+    assert.equal(app.ctStatusLabel(original),'Saved');assert.equal(app.ctCounts.missing,0);
+    const saved=(await f.store.getSaved(scope))[original.id];
+    assert.deepEqual(Object.keys(saved.reviewed).sort(),[generic,...populated].map(field=>field.id).sort());
     assert.equal(app.ctListTargetParts(original).find(part=>part.english).text,'-- Use generic -- (10 class variants)');
     app.ctValues[generic.id]='';assert.equal(app.ctClassFallback(blank).label,'Use English');
     assert.equal(app.ctStatus().fields[blank.id].outdated,false,'clearing a draft does not rewrite committed completion');
     app.ctDraftDirty=true;assert.equal(await app.ctSave(),true);assert.equal(app.ctStatus().fields[blank.id].outdated,true);
+    assert.equal(app.ctStatus().fields[blank.id].missing,required);
     app.ctValues[generic.id]='A new generic draft';assert.equal(app.ctPreviewValue(blank),'A new generic draft');
     assert.equal(app.ctStatus().fields[blank.id].outdated,true,'typing a generic draft cannot clear review');assert.deepEqual(original,before);
 });

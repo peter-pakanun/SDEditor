@@ -408,7 +408,9 @@
         return fields.length>0 && fields.every(candidate=>String(values?.[candidate.id] ?? '').trim()) ? fields : [];
     }
     function inheritsGenericReview(unit,field,saved,options={}) {
-        if(!saved || saved.saved===false || saved.syncRecovery || field.required || String(saved.values?.[field.id] ?? '').trim())return false;
+        // Saved generic coverage fulfils an override's original red/orange
+        // workload while keeping its exact blank target and immutable facts.
+        if(!saved || saved.saved===false || saved.syncRecovery || String(saved.values?.[field.id] ?? '').trim())return false;
         const generic=dialogueGenericFallback(unit,field,saved.values,options);
         const ids=new Set([field.id,...generic.map(candidate=>candidate.id)]);
         return generic.length>0 && ![...(saved.conflicts || []),...(saved.provenance?.conflicts || [])].some(conflict=>!conflict.fieldId || ids.has(conflict.fieldId));
@@ -420,7 +422,7 @@
             const assignedOutdated = (!!field.outdated || (saved?.outdated || []).includes(field.id)) && !audioOnly(field.source);
             const rawMissing = isAbsent(field,values[field.id]), english = englishIntentFor(field,saved,options);
             const generic=inheritsGenericReview(unit,field,saved,options);
-            const missing = rawMissing && !english, outdated = assignedOutdated && !generic && reviewed[field.id] !== sourceHash(field.source);
+            const missing = rawMissing && !english && !generic, outdated = assignedOutdated && !generic && reviewed[field.id] !== sourceHash(field.source);
             fields[field.id] = { missing,rawMissing,english,...(generic?{generic:true}:{}),outdated,saved:savedPresent,
                 revised:savedPresent && !originalMissing && !assignedOutdated && !audioOnly(field.source) && values[field.id] !== field.target,
                 unchanged:!missing && !outdated && !savedPresent };
@@ -433,7 +435,7 @@
     // A fill override is separate from Saved: an unchanged complete save does
     // not acquire a completion colour. Null preserves the original cell fill.
     function fillFor(field, value, saved, status) {
-        if(status.generic)return field.originalFill===FILLS.outdated?'FFFFFF':null;
+        if(status.generic)return [FILLS.missing,FILLS.outdated].includes(field.originalFill)?'FFFFFF':null;
         const assignedOutdated = (field.outdated || (saved?.outdated || []).includes(field.id)) && !audioOnly(field.source);
         const reviewed = saved?.reviewed?.[field.id] === sourceHash(field.source);
         if (saved?.saved === false && value === field.target && !assignedOutdated && !reviewed && !status.english) return null;

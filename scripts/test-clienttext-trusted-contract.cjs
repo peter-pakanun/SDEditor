@@ -35,11 +35,47 @@ test('generic dialogue review inheritance agrees with sparse API counts and pres
         assert.equal(S.colorCountsFor(original,saved).outdated,forms.length+1);
         assert.equal(S.statusFor(original,saved,{game:'poe1'}).fields[blank.id].outdated,true);
         const required={...original,fields:original.fields.map(value=>value===blank?{...value,required:true}:value)};
-        assert.equal(S.statusFor(required,saved).fields[blank.id].missing,true);assert.equal(S.statusFor(required,saved).fields[blank.id].outdated,true);
+        assert.equal(S.statusFor(required,saved).fields[blank.id].missing,false);assert.equal(S.statusFor(required,saved).fields[blank.id].outdated,false);
         const unrelated={...original,fields:original.fields.map(value=>value===blank?{...value,source:'Different source'}:value)};
         assert.equal(S.statusFor(unrelated,saved).fields[blank.id].outdated,true);
         assert.equal(JSON.stringify(facts),snapshot);assert.deepEqual(A.unitCounts(facts),base,'accepted initial workload stays immutable');
         assert.deepEqual(S.addOriginalSummary(S.emptySummary(),original),base);
+    }
+});
+
+test('saved generic dialogue resolves red blank class workload in browser and API without changing targets, original facts or review hashes',async()=>{
+    const A=await api;
+    for(const sheet of ['NPCTextAudio','NPCTalkDialogueTextAudio'])for(const forms of [[null],['MS','FS','NS','MP','FP','NP']]){
+        const source='Shared current English',gender=forms[0]!==null,original=S.normalizeUnit({role:gender?'gender':'normal',
+            sheet:sheet+(gender?'_Gender':''),recordId:'red-generic-fallback',fields:[
+                ...forms.map(form=>field('Text',form==='NS'?'NONEXISTENT':'Generic '+(form || 'text'),{kind:form?'form':'text',form,source})),
+                ...S.CLASS_FORMS.map((form,index)=>field('Text',index===0?' \t\r\n':'',{kind:'form',form,source,outdated:index===1,originalFill:S.FILLS.missing}))]});
+        const values=S.valuesFor(original),saved={values,reviewed:{}},facts=S.clientFacts(original),snapshot=JSON.stringify([original,values,facts]),
+            initial=A.unitCounts(facts),accepted=A.unitCounts(facts,values,{}, {},{game:'poe2'}),status=S.statusFor(original,saved,{game:'poe2'}),blank=original.fields.at(-1);
+        assert.equal(initial.missingFields,12);assert.equal(initial.workloadFields,12);assert.equal(initial.resolvedFields,0);
+        assert.equal(status.missing,false);assert.equal(status.outdated,false);assert.equal(status.saved,true);
+        assert.equal(accepted.missingFields,0);assert.equal(accepted.outdatedFields,0);assert.equal(accepted.workloadFields,12);assert.equal(accepted.resolvedFields,12);
+        assert.deepEqual(accepted,browserCounts(original,saved));
+        for(const variant of original.fields.filter(f=>S.isClassForm(f))){
+            assert.equal(status.fields[variant.id].generic,true);assert.equal(status.fields[variant.id].rawMissing,true);
+            assert.equal(S.fillFor(variant,values[variant.id],saved,status.fields[variant.id]),'FFFFFF');
+        }
+        assert.equal(S.unitColorFor(original,saved),'');assert.equal(JSON.stringify([original,values,facts]),snapshot);assert.deepEqual(saved.reviewed,{});
+        for(const entry of [
+            {saved:{values,reviewed:{},saved:false},provenance:{sourceOnly:true}},
+            {saved:{values:{...values,[original.fields[0].id]:''},reviewed:{}}},
+            {saved:{values,reviewed:{},conflicts:[{fieldId:blank.id}]},provenance:{conflicts:[{fieldId:blank.id}]}},
+            {saved:{values,reviewed:{},conflicts:[{fieldId:original.fields[0].id}]},provenance:{conflicts:[{fieldId:original.fields[0].id}]}},
+        ]){
+            assert.equal(S.statusFor(original,entry.saved).fields[blank.id].missing,true);
+            assert.deepEqual(A.unitCounts(facts,entry.saved.values,{},entry.provenance || {},{game:'poe2'}),browserCounts(original,entry.saved));
+        }
+        const ordinary={...original,sheet:'OtherSheet'};
+        assert.equal(S.statusFor(ordinary,saved).fields[blank.id].missing,true);
+        assert.equal(S.statusFor(original,saved,{game:'poe1'}).fields[blank.id].missing,true);
+        const override={...values,[blank.id]:'Authored override'};
+        assert.equal(S.statusFor(original,{values:override,reviewed:{},outdated:[blank.id]}).fields[blank.id].outdated,true);
+        assert.deepEqual(A.unitCounts(facts),initial,'the denominator and original Missing facts remain immutable');
     }
 });
 

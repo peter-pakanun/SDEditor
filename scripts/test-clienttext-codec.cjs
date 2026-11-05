@@ -510,7 +510,8 @@ for(const sheetName of ['NPCTextAudio_Gender','NPCTalkDialogueTextAudio_Gender']
     const exported=await Codec.exportWorkbook(original,parsed,saved),result=get(await Codec.parseWorkbook(exported,{filename:'German_Gender.xlsx',role:'gender'}),'dialogue',sheetName);
     assert.equal(field(result,'Text','DexFour').target,'');assert.equal(field(result,'Text','DexFour').outdated,false);
     for(const form of ['MS','FS'])assert.equal(field(result,'Text',form).target,field(current,'Text',form).target);
-    assert.equal(field(result,'Text','IntFour').originalMissing,true,'an explicitly Missing class variant remains red');
+    assert.equal(field(result,'Text','IntFour').originalMissing,false,'generic coverage resolves the originally red blank class variant');
+    assert.equal(field(result,'Text','IntFour').target,'');assert.equal(field(result,'Text','IntFour').originalFill,'FFFFFF');
     assert.equal(saved[current.id].reviewed[blank.id],undefined);
 });
 test('v1 snapshots replay their metadata authority and cannot silently export as v2', async () => {
