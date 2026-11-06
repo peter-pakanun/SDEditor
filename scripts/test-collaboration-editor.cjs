@@ -2386,6 +2386,7 @@ test('normal export includes staged files while full export uses current complet
   saved.name = 'baseline_export_name'; saved.stats = ['baseline_export_stat'];
   saved.remarks = ['baseline_export_remark', ''];
   const complete = description(3, ['Current ZIP translation', 'Second current ZIP translation']); complete.hasChanges = false;
+  complete.languageMetadata = { Thai: { variables: [...complete.variables], remarks: [...complete.remarks] } };
   const previous = JSON.parse(JSON.stringify(complete));
   previous.translations.English[0] = 'Earlier English'; previous.translations.Thai[0] = 'Old hidden dropped text';
   e._workspaceSourceBaseline.push(JSON.parse(JSON.stringify(saved)), JSON.parse(JSON.stringify(complete)));
@@ -3715,4 +3716,102 @@ test('cooperative local export freezes committed encoder inputs before receiving
   const pending=e.exportZip(false),run=e._ctExportRun,delay=run.delay.bind(run);let changed=false;
   run.delay=async ms=>{if(!changed){changed=true;e.descs[100].translations.Thai[0]='Incoming later save';e.descs[100].stats[0]='incoming_metadata';}return delay(ms);};
   assert.equal(await pending,true);assert(changed);assert.match(files[100].text,/Saved first/);assert.doesNotMatch(files[100].text,/Incoming later save|incoming_metadata/);assert.equal(e.descs[100].translations.Thai[0],'Incoming later save');
+});
+
+test('local SD exports rebuild old parsed caches from the matching ZIP and preserve untouched language metadata', async () => {
+  const h = harness(), e = h.editor, Codec = require('../public/statDescCodec.js'), JSZip = require('jszip');
+  const Exporter = require('../public/managedCollectionExports.js'), B = require('../public/sdBaselineFiles.js');
+  const { parseDescription } = require('./validate-statdesc-export-preservation.cjs');
+  const text = 'description preserved\n1 stat\n1\n# "English" English_directive\n'
+    + 'lang "Thai"\n1\n8 "Original Thai" Original_Thai_directive\n'
+    + 'lang "German"\n2\n2 "Deutsch one" German_first\n3 "Deutsch two" German_second';
+  const filepath = 'source/preserved.txt', original = Codec.parseText(filepath, text, 'Thai', { strict: true });
+  const input = new JSZip(); input.file(filepath, Buffer.from('\ufeff' + text, 'utf16le'));
+  const bytes = await input.generateAsync({ type: 'nodebuffer' });
+  const archive = await h.window.CollaborationProtocol.finalizeArchive({ version: 2, zipHash: await h.window.CollaborationProtocol.zipHash(bytes),
+    zipSize: bytes.length, fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [] });
+  const baseline = { archive, source: [original] }, W = h.window.WorkspaceState;
+  e.sourceIdentity = archive.baselineId; e.importBaseline = baseline; e._workspaceSourceBaseline = [original];
+  e.localDescs = { sourceHash: archive.baselineId, importArchive: archive }; e.descs = [structuredClone(original)];
+  W.initializeWorkspace(e.localDescs, { source: [original], sourceHash: archive.baselineId, game: 'poe1', language: 'Thai' });
+  W.stageTranslation(e.localDescs, { filepath, translations: ['Saved Thai'] }, 'Thai', { source: original, sourceHash: archive.baselineId });
+  e.applyWorkspaceOverlay(); e.flushEditorDraft = async () => true;
+  let reads = 0, downloads = [], releases = 0;
+  const cache = Exporter.createBaselineCache(), engine = B.createArchiveEngine({ JSZip, yieldTask: async () => {} });
+  h.window.ManagedCollectionExports = { ...Exporter, collectionBaseline: (manifest, options) => Exporter.collectionBaseline(manifest, { ...options, cache }) };
+  h.window.SDBaselineFiles = { createWorkerClient: () => ({ ...engine, dispose() { releases++; } }) };
+  h.window.OfflineStore.getStatDescriptionZip = async () => { reads++; return bytes; };
+  h.context.JSZip = JSZip; h.context.descEncode = Codec.descEncode;
+  h.context.saveAs = blob => downloads.push(blob);
+  const before = structuredClone(baseline);
+  assert.equal(await e.exportZip(false), true);
+  assert.equal(reads, 1); assert.equal(engine.stats().extractions, 1); assert.equal(releases, 1);
+  const result = await JSZip.loadAsync(await downloads[0].arrayBuffer());
+  const output = parseDescription(await result.file(filepath).async('uint8array'), filepath);
+  assert.deepEqual(output.blocks.find(block => block.language === 'German').entries, [
+    { conditions: '2', text: 'Deutsch one', directives: 'German_first' },
+    { conditions: '3', text: 'Deutsch two', directives: 'German_second' },
+  ]);
+  assert.deepEqual(output.blocks.find(block => block.language === 'Thai').entries, [
+    { conditions: '#', text: 'Saved Thai', directives: 'English_directive' },
+  ]);
+  assert.deepEqual(baseline, before, 'Export metadata must not rewrite the accepted baseline.');
+  assert.equal(baseline.source[0].languageMetadata, undefined);
+  assert.equal(await e.exportZip(false), true); assert.equal(reads, 1, 'Warm export reuses verified metadata.');
+  // A full export of untouched work preserves even the selected language's own metadata.
+  e.localDescs.staged.Thai = {}; e.applyWorkspaceOverlay(); downloads = [];
+  assert.equal(await e.exportZip(true), true);
+  const full = await JSZip.loadAsync(await downloads[0].arrayBuffer());
+  const fullOutput = parseDescription(await full.file(filepath).async('uint8array'), filepath);
+  assert.deepEqual(fullOutput.blocks.find(block => block.language === 'Thai').entries, [
+    { conditions: '8', text: 'Original Thai', directives: 'Original_Thai_directive' },
+  ]);
+});
+
+test('local SD export refuses to invent untouched language metadata when its original ZIP is unavailable', async () => {
+  const h = harness(), e = h.editor;
+  const file = description('no-original'); file.translations.German = ['German first', 'German second'];
+  e.descs = [file]; e.flushEditorDraft = async () => true;
+  e.committedTranslationIssues = () => ({ languageBlockPresent: true, valid: true });
+  h.context.JSZip = class { file() { assert.fail('Metadata loss must fail before adding a ZIP entry.'); } };
+  h.context.descEncode = h.window.StatDescCodec.descEncode;
+  assert.equal(await e.exportZip(false), false);
+  assert.match(e.managedOperationErrors.export, /original language metadata is unavailable/);
+  assert.deepEqual(file.translations.German, ['German first', 'German second']);
+});
+
+test('raw TXT original and draft downloads preserve foreign layouts and ignore a late source switch', async () => {
+  const h = harness(), e = h.editor, Codec = require('../public/statDescCodec.js');
+  const { parseDescription } = require('./validate-statdesc-export-preservation.cjs');
+  h.context.TextDecoder = TextDecoder;
+  h.context.descEncode = Codec.descEncode;
+  const text = 'description raw\n1 stat\n1\n# "English" english_directive\n'
+    + 'lang "Thai"\n1\n4 "Original Thai" original_directive\n'
+    + 'lang "Spanish"\n2\n8 "Uno" uno_directive\n9 "Dos" dos_directive';
+  const original = Codec.parseText('raw.txt', text, 'Thai', { strict: true, preserveLanguageMetadata: true });
+  const desc = structuredClone(original); delete desc.languageMetadata;
+  e.editorVisible = true; e.editorCurrentEditingDesc = desc;
+  e.workspaceSourceFile = () => desc; e.serializeEditorTranslations = () => ['Unsaved Thai'];
+  e.hideTooltip = () => {}; e.$refs.rawFileDialog = { open: false, showModal() { this.open = true; } };
+  let finish; const gate = new Promise(resolve => { finish = resolve; });
+  e.exportSourceFiles = async () => { await gate; return [original]; };
+  const pending = e.openRawFileDialog();
+  await e.openRawFileDialog(); assert.equal(e.$refs.rawFileDialog.open, false, 'Only one preparation may run.');
+  finish(); await pending;
+  assert.equal(e.$refs.rawFileDialog.open, true, JSON.stringify({ alerts: h.alerts, loading: e.editorLoading,
+    error: e.editorLoadError, saving: e.editorSaving, busy: e.navigationBusy }));
+  const source = parseDescription(Codec.descEncode(original, { preserveOtherLanguages: true }), original.filepath);
+  for (const mode of ['original', 'translated']) {
+    const output = parseDescription(e._rawFileDownloadBuffers[mode], original.filepath);
+    assert.deepEqual(output.blocks.find(block => block.language === 'Spanish'), source.blocks.find(block => block.language === 'Spanish'));
+    const thai = output.blocks.find(block => block.language === 'Thai').entries;
+    assert.deepEqual(thai, mode === 'original' ? [{ conditions: '4', text: 'Original Thai', directives: 'original_directive' }]
+      : [{ conditions: '#', text: 'Unsaved Thai', directives: 'english_directive' }]);
+  }
+  assert.equal(desc.translations.Thai[0], 'Original Thai');
+  e.rawFileDialogClosed(); e.$refs.rawFileDialog.open = false;
+  let release; e.exportSourceFiles = () => new Promise(resolve => { release = resolve; });
+  const late = e.openRawFileDialog(); e.lang = 'German'; release([original]); await late;
+  assert.equal(e.$refs.rawFileDialog.open, false); assert.equal(e.rawFilePreview, null);
+  assert.equal(e._rawFilePreparing, null);
 });

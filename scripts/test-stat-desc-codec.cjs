@@ -144,6 +144,56 @@ test('UTF-16LE encoding retains BOM, all baseline languages, remarks and intenti
   assert.throws(() => codec.decodeUTF16('text'), /bytes are required/);
 });
 
+test('export-only metadata preserves unequal untouched language layouts without changing baseline identities', async () => {
+  const { parseDescription } = require('./validate-statdesc-export-preservation.cjs');
+  const text = 'description layout\n2 one two\n2\n1 # "First" negate 1\n2 # "Second" English_only\n'
+    + 'lang "Thai"\n3\n7 8 "Old first" Thai_only\n9 10 "Old second"\n11 12 "Old third"\n'
+    + 'lang "Spanish"\n3\n3 # "Uno" Spanish_only\n4 # "Dos"\n5 # "Tres" reminderstring Original\n'
+    + 'lang "German"\n1\n# # "Deutsch" German_only\n';
+  for (const parser of [codec, browser(), require(vendorPath)]) {
+    const ordinary = parser.parseText('source/layout.txt', text, 'Thai', { strict: true });
+    const original = parser.parseText('source/layout.txt', text, 'Thai', { strict: true, preserveLanguageMetadata: true });
+    assert.equal(ordinary.languageMetadata, undefined);
+    assert.equal(parser.hasLanguageMetadata(ordinary), false);
+    assert.equal(parser.hasLanguageMetadata(original), true);
+    assert.deepEqual(plain(protocol.witness(original)), plain(protocol.witness(ordinary)));
+    assert.equal(await protocol.sourceHash([original]), await protocol.sourceHash([ordinary]));
+    const accepted = await parser.applyDuplicateSelections([original], [], { language: 'Thai' });
+    const authored = { ...accepted[0], translations: { ...accepted[0].translations, Thai: ['Saved first', 'Saved second'] } };
+    const output = parseDescription(parser.descEncode(authored, { authoredLanguages: ['Thai'], preserveOtherLanguages: true }), authored.filepath);
+    const before = parseDescription(Buffer.from('\ufeff' + text, 'utf16le'), authored.filepath);
+    for (const language of ['English', 'Spanish', 'German']) {
+      assert.deepEqual(output.blocks.find(block => block.language === language), before.blocks.find(block => block.language === language));
+    }
+    assert.deepEqual(output.blocks.find(block => block.language === 'Thai').entries, [
+      { conditions: '1 #', text: 'Saved first', directives: 'negate 1' },
+      { conditions: '2 #', text: 'Saved second', directives: 'English_only' },
+    ]);
+    assert.deepEqual(plain(original.translations.Thai), ['Old first', 'Old second', 'Old third']);
+    assert.throws(() => parser.descEncode(ordinary, { authoredLanguages: ['Thai'], preserveOtherLanguages: true }), /original language metadata is unavailable/);
+  }
+});
+
+test('export metadata follows accepted duplicate choices, including a different English layout', async () => {
+  const text = source + '\nlang "Spanish"\n1\n3 "Uno" first\nlang "Spanish"\n2\n4 "Dos" second\n5 "Tres" third'
+    + '\nlang "English"\n2\n8 "New first" selected_first\n9 "New second" selected_second';
+  const raw = [codec.parseText('source/duplicate-export.txt', text, 'Thai', { strict: true, preserveLanguageMetadata: true })];
+  const groups = codec.collectDuplicateLangGroups(raw);
+  const decisions = await Promise.all(groups.map(async group => ({ filepath: group.filepath, language: group.lang,
+    occurrence: 2, blockHash: await codec.blockHash(group.options[1]) })));
+  const accepted = (await codec.applyDuplicateSelections(raw, decisions, { language: 'Thai' }))[0];
+  accepted.translations.Thai = ['Saved one', 'Saved two'];
+  const { parseDescription } = require('./validate-statdesc-export-preservation.cjs');
+  const output = parseDescription(codec.descEncode(accepted, { authoredLanguages: ['Thai'], preserveOtherLanguages: true }), accepted.filepath);
+  assert.deepEqual(output.blocks.find(block => block.language === 'Spanish').entries, [
+    { conditions: '4', text: 'Dos', directives: 'second' }, { conditions: '5', text: 'Tres', directives: 'third' },
+  ]);
+  assert.deepEqual(output.blocks.find(block => block.language === 'Thai').entries.map(({ conditions, directives }) => ({ conditions, directives })), [
+    { conditions: '8', directives: 'selected_first' }, { conditions: '9', directives: 'selected_second' },
+  ]);
+  assert.equal(raw[0].languageMetadata.Spanish.variables[0], '3');
+});
+
 test('canonical duplicate decisions fingerprint complete blocks and preserve original parsing', async () => {
   const raw = [codec.parseText('source/test.txt', source + '\nlang "Thai"\n1\n9 "อีก" translated_only\nlang "English"\n1\n8 "[DNT] Alternate" alternate_remark', 'Thai', { strict: true })];
   const before = structuredClone(raw);

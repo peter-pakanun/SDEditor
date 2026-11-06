@@ -72,7 +72,7 @@
     if (!(input instanceof ArrayBuffer) && !ArrayBuffer.isView(input)) throw new TypeError('Archive entry bytes are required.');
     return new TextDecoder('utf-16le').decode(input).replace(/^\uFEFF/, '');
   }
-function parseDesc(filepath, text, lang, { strict = false, onMalformed = () => {} } = {}) {
+function parseDesc(filepath, text, lang, { strict = false, onMalformed = () => {}, preserveLanguageMetadata = false } = {}) {
   text = text.replace(/\t/g, ' ').replace(/\r/g, '');
   const malformed = (message, lineIndex) => {
     throw new Error(`Malformed source: ${filepath}${lineIndex == null ? '' : ':' + (lineIndex + 1)}: ${message}`);
@@ -314,6 +314,9 @@ function parseDesc(filepath, text, lang, { strict = false, onMalformed = () => {
     delete group.optionKeys;
   }
 
+  // Export-only metadata is reconstructed from the matching original ZIP. It
+  // does not enter the canonical baseline witness, source identity or storage.
+  if (preserveLanguageMetadata) desc.languageMetadata = {};
   // remove the count and replace the translation block with the array of all the text in that langauge
   for (let lang in desc.tempTranslations) {
     if (desc.tempTranslations.hasOwnProperty(lang)) {
@@ -322,6 +325,9 @@ function parseDesc(filepath, text, lang, { strict = false, onMalformed = () => {
         continue;
       }
       desc.translations[lang] = desc.tempTranslations[lang].content;
+      if (preserveLanguageMetadata) desc.languageMetadata[lang] = {
+        variables: [...desc.tempTranslations[lang].variables], remarks: [...desc.tempTranslations[lang].remarks]
+      };
       delete desc.tempTranslations[lang];
     }
   }
@@ -339,15 +345,15 @@ function parseDesc(filepath, text, lang, { strict = false, onMalformed = () => {
  * @param {StatDesc} desc
  * @returns {Uint8Array}
  */
-function descEncode(desc) {
+function descEncode(desc, options = {}) {
   var text = `description ${desc.name || ""}`.trim() + '\r\n';
   text += `\t${desc.stats.length} ${desc.stats.join(' ')}\r\n`;
-  text += generateTranslationBlock(desc, 'English');
+  text += generateTranslationBlock(desc, 'English', options);
   for (var lang in desc.translations) {
     if (desc.translations.hasOwnProperty(lang)) {
       if (lang == 'English') continue;
       text += `\tlang "${lang}"\r\n`
-      text += generateTranslationBlock(desc, lang);
+      text += generateTranslationBlock(desc, lang, options);
     }
   }
 
@@ -366,13 +372,29 @@ function descEncode(desc) {
  * @param {string} lang
  * @returns {string}
  */
-function generateTranslationBlock(desc, lang) {
+function validLanguageMetadata(metadata, count) {
+  return metadata && ['variables', 'remarks'].every(field => Array.isArray(metadata[field])
+    && metadata[field].length === count && metadata[field].every(value => typeof value === 'string'));
+}
+function hasLanguageMetadata(desc) {
+  return Object.entries(desc?.translations || {}).every(([language, lines]) => language === 'English'
+    || validLanguageMetadata(desc.languageMetadata?.[language], lines.length));
+}
+function generateTranslationBlock(desc, lang, { languageMetadata = desc.languageMetadata, authoredLanguages = [], preserveOtherLanguages = false } = {}) {
+  const untouched = lang !== 'English' && !authoredLanguages.includes(lang);
+  const metadata = untouched ? languageMetadata?.[lang] : null;
+  const valid = validLanguageMetadata(metadata, desc.translations[lang]?.length || 0);
+  if (untouched && preserveOtherLanguages && !valid) {
+    throw new Error('The original language metadata is unavailable for ' + desc.filepath + ' (' + lang + '). Reimport the matching original ZIP before exporting.');
+  }
+  const variables = untouched && valid ? metadata.variables : desc.variables;
+  const remarks = untouched && valid ? metadata.remarks : desc.remarks;
   var text = `\t${desc.translations[lang]?.length || "0"}\r\n`;
   for (let i = 0; i < desc.translations[lang]?.length; i++) {
     const translation = desc.translations[lang][i] || "";
-    text += `\t\t${desc.variables[i] || ""} "${translation}"`;
-    if (desc.remarks[i])
-      text += ` ${desc.remarks[i]}`;
+    text += `\t\t${variables[i] || ""} "${translation}"`;
+    if (remarks[i])
+      text += ` ${remarks[i]}`;
     text += `\r\n`;
   }
   return text;
@@ -435,6 +457,9 @@ function strEncodeUTF16(str) {
       if (!selected || await blockHash(selected) !== record.blockHash) throw new Error('A shared duplicate language choice does not match the original ZIP.');
       const desc = source[group.descIndex];
       desc.translations[group.lang] = [...selected.content];
+      if (desc.languageMetadata) desc.languageMetadata[group.lang] = {
+        variables: [...selected.variables], remarks: [...selected.remarks]
+      };
       if (group.lang === 'English') {
         desc.variables = [...selected.variables]; desc.remarks = [...selected.remarks];
         desc.duplicateLangEntries = (desc.duplicateLangEntries || []).filter(entry => entry.lang !== 'English');
@@ -445,5 +470,5 @@ function strEncodeUTF16(str) {
     return source.filter(Boolean);
   }
   return { parserVersion: 1, isBlankTranslation, translationIssues, baselineTranslationIssues, assertCompleteTranslation, detectGameVersionFromFilepaths, computeIsDNT, parseDesc, parseText, descEncode, generateTranslationBlock, strEncodeUTF16,
-    decodeUTF16, collectDuplicateLangGroups, applyDuplicateSelections, blockHash };
+    decodeUTF16, collectDuplicateLangGroups, applyDuplicateSelections, blockHash, hasLanguageMetadata };
 });

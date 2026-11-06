@@ -22,7 +22,7 @@ async function fixture() {
   zip.file('source/a.txt', new Uint8Array(Codec.strEncodeUTF16(text).buffer));
   zip.file('notice.txt', 'No description here');
   const bytes = await zip.generateAsync({ type: 'uint8array' });
-  const rawSource = [Codec.parseText('source/a.txt', text, 'Thai', { strict: true }), Codec.parseText('source/b.txt', other, 'Thai', { strict: true })];
+  const rawSource = [Codec.parseText('source/a.txt', text, 'Thai', { strict: true, preserveLanguageMetadata: true }), Codec.parseText('source/b.txt', other, 'Thai', { strict: true, preserveLanguageMetadata: true })];
   const groups = Codec.collectDuplicateLangGroups(rawSource);
   const decisions = await Promise.all(groups.map(async group => ({ filepath: group.filepath, language: group.lang,
     occurrence: 2, blockHash: await Codec.blockHash(group.options[1]) })));
@@ -78,6 +78,63 @@ test('cached browser baseline is structurally validated without proof data', asy
   assert.equal(await Exports.cachedBaseline(different, archive), null);
 });
 
+async function metadataFixture() {
+  const text = 'description metadata\n1 damage\n2\n1 "First English" english_one\n2 "Second English" english_two\n'
+    + 'lang "Thai"\n3\n7 "Old first" old_one\n8 "Old second" old_two\n9 "Old third" old_three\n'
+    + 'lang "French"\n2\n11 "Premier" french_one\n12 "Deuxième" french_two\n'
+    + 'lang "German"\n3\n1 "Ignored one" ignored\n2 "Ignored two" ignored\n3 "Ignored three" ignored\n'
+    + 'lang "German"\n3\n21 "Erste" german_one\n22 "Zweite" german_two\n23 "Dritte" german_three';
+  const filepath = 'source/metadata.txt';
+  const raw = Codec.parseText(filepath, text, 'Thai', { strict: true, preserveLanguageMetadata: true });
+  const selected = Codec.collectDuplicateLangGroups([raw])[0].options[1];
+  const decision = { filepath, language: 'German', occurrence: 2, blockHash: await Codec.blockHash(selected) };
+  const source = await Codec.applyDuplicateSelections([raw], [decision], { language: 'Thai' });
+  const zip = new JSZip(); zip.file(filepath, new Uint8Array(Codec.strEncodeUTF16(text).buffer));
+  const bytes = await zip.generateAsync({ type: 'uint8array' });
+  const archive = await Protocol.finalizeArchive({ version: 2, zipHash: await Protocol.zipHash(bytes), zipSize: bytes.byteLength,
+    fileCount: 1, descriptionCount: 1, parserVersion: 1, decisions: [decision] });
+  return { bytes, archive, source, filepath, manifest: { archive, language: 'Thai', files: [{ filepath, translations: ['Saved first', 'Saved second'] }] } };
+}
+
+test('collection export preserves foreign structures with equal or different counts while repairing only the authored language', async () => {
+  const data = await metadataFixture();
+  const source = await Exports.parseOriginal(data.bytes, data.archive, 'Thai', JSZip);
+  assert.equal(Codec.hasLanguageMetadata(source[0]), true);
+  assert.deepEqual(Protocol.witness(source[0]), Protocol.witness(data.source[0]), 'Transient metadata does not alter accepted canonical facts');
+  assert.equal(Protocol.witness(source[0]).languageMetadata, undefined);
+  const bytes = await Exports.generate(data.manifest, source, JSZip, { type: 'uint8array' });
+  const zip = await JSZip.loadAsync(bytes);
+  const output = Codec.parseText(data.filepath, Codec.decodeUTF16(await zip.file(data.filepath).async('uint8array')), 'Thai', { strict: true, preserveLanguageMetadata: true });
+  assert.deepEqual(output.translations.Thai, ['Saved first', 'Saved second']);
+  assert.deepEqual(output.languageMetadata.Thai, { variables: ['1', '2'], remarks: ['english_one', 'english_two'] });
+  for (const language of ['French', 'German']) {
+    assert.deepEqual(output.translations[language], data.source[0].translations[language]);
+    assert.deepEqual(output.languageMetadata[language], data.source[0].languageMetadata[language]);
+  }
+  assert.deepEqual(output.translations.English, data.source[0].translations.English);
+  assert.equal(output.duplicateLangGroups.length, 0, 'Only the accepted German duplicate survives');
+});
+
+test('old parsed and bounded export caches rebuild metadata from a matching cached ZIP without downloading', async () => {
+  const data = await metadataFixture(), B = require('../public/sdBaselineFiles.js'), cache = Exports.createBaselineCache();
+  const canonical = data.source.map(Protocol.witness), baseline = { archive: data.archive, source: canonical };
+  assert.equal(await Exports.cachedBaseline(baseline, data.archive), null);
+  cache.put(JSON.stringify(data.archive), canonical[0]);
+  assert.equal(cache.stats().files, 0, 'A metadata-less original cannot become an export cache hit');
+  const engine = B.createArchiveEngine({ JSZip, yieldTask: async () => {} }); let downloads = 0;
+  const originalJSON = JSON.stringify(baseline);
+  const options = { baseline, cache, sourceWorker: () => engine, readZip: async hash => { assert.equal(hash, data.archive.zipHash); return data.bytes; },
+    fetchZip: async () => { downloads++; throw Error('Cached ZIP should be used'); } };
+  const first = await Exports.collectionBaseline(data.manifest, options);
+  assert.equal(downloads, 0); assert.equal(engine.stats().extractions, 1); assert.equal(Codec.hasLanguageMetadata(first[0]), true);
+  assert.equal(JSON.stringify(baseline), originalJSON, 'The persisted/canonical baseline is never enriched');
+  first[0].languageMetadata.German.variables[2] = 'Mutable return';
+  const second = await Exports.collectionBaseline(data.manifest, options);
+  assert.equal(second[0].languageMetadata.German.variables[2], '23');
+  assert.equal(engine.stats().extractions, 1, 'Only metadata-bearing immutable cache entries can be reused');
+  await assert.rejects(Exports.generate(data.manifest, canonical, JSZip), /original language metadata is unavailable/);
+});
+
 test('wrong ZIP, parser choices, archive identity, team and frozen file metadata are rejected', async () => {
   const data = await fixture();
   const wrongBytes = data.bytes.slice(); wrongBytes[0] ^= 1;
@@ -117,6 +174,10 @@ function appHarness(data, { cache = data.baseline, request, JSZipOverride, stora
   const writes = [], downloads = [], requests = [];
   const originalCache = Exports.createBaselineCache();
   const window = { ManagedCollectionExports: { ...Exports, collectionBaseline: (manifest, options) => Exports.collectionBaseline(manifest, { ...options, cache: originalCache }) }, JSZip: JSZipOverride || JSZip,
+    SDBaselineFiles: { createWorkerClient() {
+      const engine = require('../public/sdBaselineFiles.js').createArchiveEngine({ JSZip, yieldTask: async () => {} });
+      return { ...engine, dispose() { engine.clear(); } };
+    } },
     OfflineStore: { async getImportedBaseline() { return cache; }, ...storage },
     saveAs(blob, name) { downloads.push({ blob, name }); } };
   const context = vm.createContext({ window, URL, URLSearchParams, console, setTimeout, clearTimeout });
@@ -164,6 +225,18 @@ test('cache miss builds collection from original ZIP without activating or writi
   assert.equal(await app.managedDownloadCollection({ language: 'Thai', latestCollection: data.collection }), true);
   assert.deepEqual(requests.map(call => call.route), ['/v1/collections/frozen-1/manifest', '/v1/versions/weekly-1/original']);
   assert.equal(downloads.length, 1); assert.deepEqual(writes, []);
+});
+
+test('managed manifest download rebuilds an old parsed cache from its retained ZIP before considering network', async () => {
+  const data = await fixture();
+  const baseline = { archive: data.baseline.archive, source: data.baseline.source.map(Protocol.witness) };
+  const before = copy(baseline);
+  const { app, downloads, requests } = appHarness(data, { cache: baseline, storage: {
+    async getStatDescriptionZip(hash) { assert.equal(hash, data.baseline.archive.zipHash); return data.bytes; }
+  } });
+  assert.equal(await app.managedDownloadCollection({ language: 'Thai', latestCollection: data.collection }), true);
+  assert.deepEqual(requests.map(call => call.route), ['/v1/collections/frozen-1/manifest']);
+  assert.deepEqual(baseline, before); assert.equal(downloads.length, 1);
 });
 
 test('sparse collections use verified parsed originals or persisted ZIPs and share no Saved targets', async () => {
@@ -214,7 +287,7 @@ test('cancelled sparse batches cannot publish or cache late source results', asy
   const data = await fixture(), cache = Exports.createBaselineCache(), gate = deferred(); let current = true, entered;
   const started = new Promise(resolve => { entered = resolve; });
   const pending = Exports.collectionBaseline({ ...data.response.manifest, archive: data.baseline.archive }, { cache, current: () => current,
-    fetchZip: async () => data.bytes, sourceWorker: () => ({ prepare: async () => {}, extractMany: async () => { entered(); await gate.promise; return [data.baseline.source[0]]; } }) });
+    fetchZip: async () => data.bytes, sourceWorker: () => ({ prepare: async () => {}, extractExportMany: async () => { entered(); await gate.promise; return [data.baseline.source[0]]; } }) });
   await started; current = false; gate.resolve(); await assert.rejects(pending, error => error.stale);
   assert.equal(cache.stats().files, 0);
 });

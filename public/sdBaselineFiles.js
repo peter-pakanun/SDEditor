@@ -64,7 +64,7 @@
       }
       return opening.get(key);
     }
-    async function extract(blob, archive, filepath, yieldBefore = true) {
+    async function extract(blob, archive, filepath, yieldBefore = true, preserveLanguageMetadata = false) {
       const descriptor = await protocol.finalizeArchive(archive);
       if (!validPath(filepath) || !/\.txt$/i.test(filepath)) throw new Error('Invalid SD comparison filepath.');
       const value = await open(blob, descriptor);
@@ -74,19 +74,22 @@
       if (yieldBefore) await yieldTask();
       const bytes = await entry.async('uint8array'); extractions++;
       if (bytes.byteLength > 2 * 1024 * 1024) throw unavailable('The source file exceeds the extracted-size limit.');
-      const raw = codec.parseText(filepath, codec.decodeUTF16(bytes), 'English', { strict: true });
+      const raw = codec.parseText(filepath, codec.decodeUTF16(bytes), 'English', { strict: true, preserveLanguageMetadata });
       if (!raw) throw unavailable('This file does not contain a StatDescription source.');
       const files = await codec.applyDuplicateSelections([raw], descriptor.decisions.filter(decision => decision.filepath === filepath), { language: 'English' });
-      return protocol.witness(files[0]);
+      const file = protocol.witness(files[0]);
+      if (preserveLanguageMetadata) file.languageMetadata = copy(files[0].languageMetadata);
+      return file;
     }
-    async function extractMany(blob, archive, filepaths) {
+    async function extractMany(blob, archive, filepaths, preserveLanguageMetadata = false) {
       if (!Array.isArray(filepaths) || filepaths.length > 64) throw new Error('Invalid SD extraction batch.');
       await yieldTask();
       const result = [];
-      for (const filepath of filepaths) result.push(await extract(blob, archive, filepath, false));
+      for (const filepath of filepaths) result.push(await extract(blob, archive, filepath, false, preserveLanguageMetadata));
       return result;
     }
-    return { extract, extractMany, verifyZip, async prepare(blob, archive) {
+    return { extract, extractMany: (blob, archive, filepaths) => extractMany(blob, archive, filepaths),
+      extractExportMany: (blob, archive, filepaths) => extractMany(blob, archive, filepaths, true), verifyZip, async prepare(blob, archive) {
       const descriptor = await protocol.finalizeArchive(archive);
       const value = await open(blob, descriptor);
       if (value.fileCount !== descriptor.fileCount) throw unavailable('The accepted ZIP file count changed.');
@@ -123,6 +126,7 @@
       if (type === 'hash') return { zipHash: await protocol.zipHash(input.blob), zipSize: input.blob.size ?? input.blob.byteLength };
       if (type === 'prepare') return engine.prepare(input.blob, input.archive);
       if (type === 'extractMany') return engine.extractMany(input.blob, input.archive, input.filepaths);
+      if (type === 'extractExportMany') return engine.extractExportMany(input.blob, input.archive, input.filepaths);
       return type === 'verify' ? engine.verifyZip(input.blob, input.archive).then(({ descriptor }) => descriptor) : engine.extract(input.blob, input.archive, input.filepath);
     };
     async function run(type, input) {
@@ -141,6 +145,7 @@
     }
     return { extract: (blob, archive, filepath) => run('extract', { blob, archive, filepath }),
       extractMany: (blob, archive, filepaths) => run('extractMany', { blob, archive, filepaths }),
+      extractExportMany: (blob, archive, filepaths) => run('extractExportMany', { blob, archive, filepaths }),
       prepare: (blob, archive) => run('prepare', { blob, archive }), verify: (blob, archive) => run('verify', { blob, archive }),
       hash: blob => run('hash', { blob }), dispose() { disposed = true; fail(); } };
   }

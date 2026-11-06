@@ -38,6 +38,41 @@ test('collection batches verify once, inflate only selected paths, and yield per
   assert.deepEqual(f.reads, ['source/b.txt', 'source/a.txt']); assert.equal(f.opens(), 1); assert.equal(yields - before, 1);
   await assert.rejects(engine.extractMany(f.blob, f.descriptor, Array(65).fill('source/a.txt')), /batch/);
 });
+
+test('export-only extraction retains each selected language metadata without widening ordinary source witnesses', async () => {
+  const source = 'description sample\n1 damage\n1\n# "English" english_directive\n'
+    + 'lang "German"\n2\n1 "Erste" german_one\n2 "Zweite" german_two\n'
+    + 'lang "German"\n2\n3 "Gewählt eins" chosen_one\n4 "Gewählt zwei" chosen_two';
+  const raw = codec.parseText('source/a.txt', source, 'Thai', { strict: true });
+  const selected = codec.collectDuplicateLangGroups([raw])[0].options[1];
+  const decision = { filepath: 'source/a.txt', language: 'German', occurrence: selected.occurrence, blockHash: await codec.blockHash(selected) };
+  const f = await archive({ texts: { 'source/a.txt': source, 'source/b.txt': text }, decisions: [decision] });
+  const engine = B.createArchiveEngine({ JSZip: f.JSZip, yieldTask: async () => {} });
+  const [exported] = await engine.extractExportMany(f.blob, f.descriptor, ['source/a.txt']);
+  assert.deepEqual(exported.languageMetadata.German, { variables: ['3', '4'], remarks: ['chosen_one', 'chosen_two'] });
+  assert.deepEqual(exported.translations.German, ['Gewählt eins', 'Gewählt zwei']);
+  const ordinary = await engine.extract(f.blob, f.descriptor, 'source/a.txt');
+  assert.equal(ordinary.languageMetadata, undefined);
+  assert.deepEqual(P.witness(exported), ordinary);
+  assert.deepEqual((await engine.extractMany(f.blob, f.descriptor, ['source/a.txt']))[0], ordinary);
+  assert.deepEqual(f.reads, ['source/a.txt', 'source/a.txt', 'source/a.txt']);
+  await assert.rejects(engine.extractExportMany(f.blob, f.descriptor, Array(65).fill('source/a.txt')), /batch/);
+});
+
+test('export-only worker extraction falls back on failure and rejects work after disposal', async () => {
+  const f = await archive(), engine = B.createArchiveEngine({ JSZip: f.JSZip, yieldTask: async () => {} });
+  class Worker {
+    constructor() { queueMicrotask(() => this.onmessage({ data: { type: 'ready' } })); }
+    postMessage(message) { assert.equal(message.type, 'extractExportMany'); queueMicrotask(() => this.onerror()); }
+    terminate() {}
+  }
+  const client = B.createWorkerClient({ Worker, engine });
+  const [file] = await client.extractExportMany(f.blob, f.descriptor, ['source/a.txt']);
+  assert.equal(codec.hasLanguageMetadata(file), true);
+  assert.deepEqual(file.languageMetadata.Thai, { variables: ['#'], remarks: [''] });
+  client.dispose();
+  await assert.rejects(client.extractExportMany(f.blob, f.descriptor, ['source/a.txt']), { name: 'AbortError' });
+});
 test('failed collection worker falls back to the verified sparse engine and remains disposable', async () => {
   const f = await archive(), engine = B.createArchiveEngine({ JSZip: f.JSZip, yieldTask: async () => {} });
   class Worker {

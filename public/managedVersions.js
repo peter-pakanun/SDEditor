@@ -1080,21 +1080,14 @@
             run.phase('Manifest verification');
             const manifest = await run.wait(exporter.validateManifest(response, { collectionId: collection.id, versionId: version.id,
               game: version.game, branchId: version.branchId || DEFAULT_BRANCH, sourceHash: version.sourceHash, zipHash: version.zipHash, language }, options)); run.check();
-            run.phase('Baseline lookup / reuse');
-            let baseline = this.importBaseline?.archive?.baselineId === manifest.archive.baselineId ? this.importBaseline : null;
-            if (!baseline) baseline = await run.wait(root.OfflineStore.getImportedBaseline?.(manifest.archive.baselineId, version.game)); run.check();
-            let files;
-            if (baseline) {
-              run.phase('Cached baseline verification');
-              try { files = await run.wait(exporter.cachedBaseline(baseline, manifest.archive, options)); }
-              catch (error) { if (error.stale || run.signal.aborted) throw error; /* Rebuild the same invalid cache from its verified ZIP. */ }
-            }
-            run.check();
-            if (!files) {
-              run.phase('Baseline download (network + server)');
-              const original = await run.wait(client.request('/v1/versions/' + encodeURIComponent(version.id) + '/original', { responseType: 'blob', timeout: 120000, signal: run.signal })); run.check();
-              files = await run.wait(exporter.parseOriginal(original, manifest.archive, language, root.JSZip, options)); run.check();
-            }
+            const files = await run.wait(exporter.collectionBaseline(manifest, { ...options,
+              baseline: this.importBaseline?.archive?.baselineId === manifest.archive.baselineId ? this.importBaseline : null,
+              readBaseline: () => root.OfflineStore.getImportedBaseline?.(manifest.archive.baselineId, version.game),
+              readZip: hash => root.OfflineStore.getStatDescriptionZip?.(hash),
+              fetchZip: () => client.request('/v1/versions/' + encodeURIComponent(version.id) + '/original', { responseType: 'blob', timeout: 120000, signal: run.signal }),
+              sourceWorker: () => run.worker ||= root.SDBaselineFiles.createWorkerClient(),
+              storeZip: (hash, original, evidence) => root.OfflineStore.putStatDescriptionZip?.(hash, original, evidence),
+            })); run.check();
             blob = await run.wait(exporter.generate(manifest, files, root.JSZip, options)); run.check();
           }
           run.phase('Download initiation'); root.saveAs(blob, name); run.state.downloadStarted = true;

@@ -123,6 +123,8 @@ Selecting an existing named version is activation, not **Import Next Version**. 
 - **Normal export (click :floppy_disk:)** includes files with **Saved** translations.
   - Main way to submit your work.
 - **Full export (Ctrl+Click :floppy_disk:)** includes current ZIP and staged translations. It leaves out an incomplete ZIP translation with an unresolved dropped copy when no staged save exists. Export blocks if an included present selected-language block has a blank entry or a different English entry count. Untouched files without that language tag keep it absent; empty editor fields are not exported as a new translation block. Complete staged saves remain included; a complete current ZIP translation can also be exported while its older dropped copy remains unresolved. The dropped snapshot is never encoded.
+
+ZIP exports and the raw-file text download preserve each untouched language's own entry conditions and remarks, including languages whose entry counts differ from English. Authored text in the selected language uses the current English conditions and remarks. Export reconstructs this metadata from the matching original ZIP, reusing its verified browser cache when available; older parsed caches alone do not contain it. If the original is unavailable, reimport that exact original ZIP before exporting. This preparation does not change saved translations or accepted source identities.
   - Good for building a “release” ZIP of everything (take a while to do).
 
 ## Common Workflows

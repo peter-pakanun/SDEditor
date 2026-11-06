@@ -32,6 +32,6 @@ async function parseFile(filepath, zipObject, lang, { strict = false } = {}) {
 function parseDesc(filepath, text, lang, { strict = false } = {}) {
   return statDescCodec().parseDesc(filepath, text, lang, { strict, onMalformed: parserMalformed });
 }
-function descEncode(desc) { return statDescCodec().descEncode(desc); }
+function descEncode(desc, options) { return statDescCodec().descEncode(desc, options); }
 function generateTranslationBlock(desc, lang) { return statDescCodec().generateTranslationBlock(desc, lang); }
 function strEncodeUTF16(text) { return statDescCodec().strEncodeUTF16(text); }

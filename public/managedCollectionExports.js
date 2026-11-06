@@ -51,13 +51,21 @@
   }
   async function verifyBaseline(source, archive, { current } = {}) {
     checkpoint(current);
-    return protocol.validateBaselineSource(source, archive);
+    const files = protocol.validateBaselineSource(source, archive), originals = new Map(source.map(file => [file.filepath, file]));
+    // The canonical witness remains the source identity/storage boundary. These
+    // ZIP-derived language arrays live only in the bounded export cache.
+    return files.map(file => {
+      const original = originals.get(file.filepath);
+      if (codec.hasLanguageMetadata(original)) file.languageMetadata = copy(original.languageMetadata || {});
+      return file;
+    });
   }
   async function cachedBaseline(baseline, archive, options = {}) {
     if (!baseline?.source?.length || !baseline.archive) return null;
     const descriptor = await protocol.finalizeArchive(baseline.archive);
     checkpoint(options.current);
     if (JSON.stringify(descriptor) !== JSON.stringify(archive)) return null;
+    if (baseline.source.some(file => !codec.hasLanguageMetadata(file))) return null;
     return verifyBaseline(baseline.source, archive, options);
   }
   // Only immutable, verified originals enter this bounded cache. Collection
@@ -68,11 +76,12 @@
     return {
       get(key, filepath) {
         const files = baselines.get(key), row = files?.get(filepath);
-        if (!row) return null;
+        if (!row || !codec.hasLanguageMetadata(row.file)) return null;
         baselines.delete(key); baselines.set(key, files); files.delete(filepath); files.set(filepath, row);
         return copy(row.file);
       },
       put(key, file) {
+        if (!codec.hasLanguageMetadata(file)) return;
         const size = new TextEncoder().encode(JSON.stringify(file)).byteLength;
         if (size > maxBytes) return;
         let files = baselines.get(key);
@@ -134,9 +143,9 @@
     const missing = [...paths].filter(path => !found.has(path));
     for (let start = 0; start < missing.length; start += 64) {
       checkpoint(current);
-      const batch = missing.slice(start, start + 64), extracted = await worker.extractMany(blob, archive, batch);
+      const batch = missing.slice(start, start + 64), extracted = await worker.extractExportMany(blob, archive, batch);
       checkpoint(current);
-      if (extracted.length !== batch.length || extracted.some((file, index) => file.filepath !== batch[index])) throw new Error('The extracted originals differ from the requested collection files.');
+      if (extracted.length !== batch.length || extracted.some((file, index) => file.filepath !== batch[index] || !codec.hasLanguageMetadata(file))) throw new Error('The extracted originals differ from the requested collection files or lack original language metadata.');
       for (const file of extracted) { cache.put(key, file); found.set(file.filepath, file); }
     }
     return [...found.values()];
@@ -172,7 +181,7 @@
       checkpoint(current);
       expanded += data.byteLength - (entry._data?.uncompressedSize || 0);
       if (data.byteLength > 2 * 1024 * 1024 || expanded > 256 * 1024 * 1024) throw new Error('The original ZIP exceeds the extracted-size limit.');
-      const desc = codec.parseText(entry.name, codec.decodeUTF16(data), language, { strict: true });
+      const desc = codec.parseText(entry.name, codec.decodeUTF16(data), language, { strict: true, preserveLanguageMetadata: true });
       if (desc) rawSource.push(desc);
     }
     phase?.('Applying duplicate decisions');
@@ -194,7 +203,7 @@
       const original = source.get(saved.filepath);
       if (!original) throw new Error('A Saved collection file is absent from its original ZIP: ' + saved.filepath);
       const desc = { ...original, translations: { ...original.translations, [manifest.language]: [...saved.translations] } };
-      zip.file(saved.filepath, codec.descEncode(desc), { date: new Date('2000-01-01T00:00:00Z'), createFolders: false });
+      zip.file(saved.filepath, codec.descEncode(desc, { authoredLanguages: [manifest.language], preserveOtherLanguages: true }), { date: new Date('2000-01-01T00:00:00Z'), createFolders: false });
     }
     phase?.('Compression');
     const blob = await zip.generateAsync({ type, compression: 'DEFLATE', compressionOptions: { level: 5 } }, metadata => {

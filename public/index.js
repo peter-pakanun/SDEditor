@@ -2907,31 +2907,53 @@ function formatPageRange(total, page, pageSize) {
       }
       return refreshed;
     },
-    openRawFileDialog() {
-      if (!this.editorVisible || this.editorLoading || this.editorLoadError || this.editorSaving || this.navigationBusy) return;
+    async openRawFileDialog() {
+      if (!this.editorVisible || this.editorLoading || this.editorLoadError || this.editorSaving || this.navigationBusy
+        || this._rawFilePreparing?.scope === this.rawFileScope) return;
       const dialog = this.$refs.rawFileDialog;
       const desc = this.editorCurrentEditingDesc;
       const original = desc && this.workspaceSourceFile(desc.filepath);
       if (!dialog || dialog.open || !original) return;
       const translations = this.serializeEditorTranslations();
-      const applied = { ...original, translations: { ...original.translations, [this.lang]: translations } };
-      // Render both views through the export encoder without changing source or saved text.
-      const originalBytes = descEncode(original), translatedBytes = descEncode(applied);
-      this._rawFileDownloadBuffers = { original: originalBytes, translated: translatedBytes };
-      this.rawFilePreview = {
-        filepath: desc.filepath,
-        filename: desc.filename || desc.filepath.split('/').pop(),
-        language: this.lang,
-        original: window.StatDescCodec.decodeUTF16(originalBytes),
-        translated: window.StatDescCodec.decodeUTF16(translatedBytes),
-      };
-      this.rawFileMode = 'original';
-      this._rawFileScope = this.rawFileScope;
-      this._rawFileReturnFocus = document.activeElement;
-      this.closeHlPopup();
-      this.hideTooltip();
-      dialog.showModal();
-      this.$nextTick(() => this.$refs.rawFileMode?.focus());
+      const language = this.lang, scope = this.rawFileScope, preparation = { scope };
+      const context = this.captureCollaborationContext?.();
+      const current = () => this._rawFilePreparing === preparation && this.editorVisible
+        && this.editorCurrentEditingDesc === desc && this.rawFileScope === scope
+        && (!context || this.collaborationContextCurrent(context));
+      this._rawFilePreparing = preparation;
+      const workKey = 'raw-file-' + scope;
+      let worker;
+      this.setBrowserWork?.(workKey, { key: workKey, label: 'Preparing raw StatDescription file', active: true });
+      try {
+        const [exportOriginal] = await this.exportSourceFiles([original], { current,
+          sourceWorker: () => worker ||= window.SDBaselineFiles.createWorkerClient() });
+        if (!current()) return;
+        const applied = { ...exportOriginal, translations: { ...exportOriginal.translations, [language]: translations } };
+        // Render both views through the export encoder without changing source or saved text.
+        const originalBytes = descEncode(exportOriginal, { preserveOtherLanguages: true });
+        const translatedBytes = descEncode(applied, { authoredLanguages: [language], preserveOtherLanguages: true });
+        this._rawFileDownloadBuffers = { original: originalBytes, translated: translatedBytes };
+        this.rawFilePreview = {
+          filepath: desc.filepath,
+          filename: desc.filename || desc.filepath.split('/').pop(),
+          language,
+          original: window.StatDescCodec.decodeUTF16(originalBytes),
+          translated: window.StatDescCodec.decodeUTF16(translatedBytes),
+        };
+        this.rawFileMode = 'original';
+        this._rawFileScope = this.rawFileScope;
+        this._rawFileReturnFocus = document.activeElement;
+        this.closeHlPopup();
+        this.hideTooltip();
+        dialog.showModal();
+        this.$nextTick(() => this.$refs.rawFileMode?.focus());
+      } catch (error) {
+        if (current() && !error.stale) await this.appAlert('Could not prepare the raw file. ' + error.message);
+      } finally {
+        worker?.dispose?.();
+        if (this._rawFilePreparing === preparation) this._rawFilePreparing = null;
+        this.clearBrowserWork?.(workKey);
+      }
     },
     closeRawFileDialog() {
       const dialog = this.$refs.rawFileDialog;
@@ -8044,6 +8066,7 @@ function formatPageRange(total, page, pageSize) {
         run.phase('Encoding');
         // Freeze the same committed encoder inputs before yielding for Abort.
         // Incoming saves during a cooperative pause must not change this export.
+        const language = this.lang;
         const exportInputs = descsToExport.map(desc => {
           const translations = { ...desc.translations };
           const baseline = this.workspaceSourceFile?.(desc.filepath);
@@ -8055,13 +8078,29 @@ function formatPageRange(total, page, pageSize) {
           else if (committed) translations[this.lang] = [...committed.translations];
           const original = baseline || desc;
           return { ...original, stats: [...original.stats], variables: [...original.variables], remarks: [...original.remarks],
-            translations: Object.fromEntries(Object.entries(translations).map(([language, lines]) => [language, [...lines]])) };
+            translations: Object.fromEntries(Object.entries(translations).map(([language, lines]) => [language, [...lines]])),
+            authoredLanguages: (committed ? committed.hasChanges : desc.hasChanges) ? [language] : [] };
         });
+        // Older parsed baselines retain only English metadata. Resolve export
+        // originals from their exact ZIP rather than rewriting other languages.
+        const files = await run.wait(this.exportSourceFiles(exportInputs, {
+          current: () => !run.signal.aborted && run.current(), phase: label => run.phase(label), signal: run.signal,
+          sourceWorker: () => run.worker ||= window.SDBaselineFiles.createWorkerClient(),
+        }));
+        run.check();
+        const originals = new Map(files.map(file => [file.filepath, file]));
+        run.phase('Encoding');
         const zip = new JSZip(); let processed = 0;
-        for (const desc of exportInputs) {
+        for (const input of exportInputs) {
           run.check();
           if (++processed % 64 === 0) { await run.delay(0); run.check(); }
-          zip.file(desc.filepath, descEncode(desc));
+          const original = originals.get(input.filepath) || input;
+          const translations = { ...original.translations };
+          if (Object.hasOwn(input.translations, language)) translations[language] = input.translations[language];
+          else delete translations[language];
+          zip.file(input.filepath, descEncode({ ...original, translations }, {
+            authoredLanguages: input.authoredLanguages, preserveOtherLanguages: true,
+          }));
         }
         run.check(); run.phase('Compression');
         const zippedBuffer = await run.wait(zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 5 } }, () => run.check()));
@@ -8076,6 +8115,29 @@ function formatPageRange(total, page, pageSize) {
         this.managedFinishExport(run, completed);
         if (show) this.ctShowExport();
       }
+    },
+    async exportSourceFiles(files, { current, phase, sourceWorker, signal } = {}) {
+      const archive = this.importBaseline?.archive || this.localDescs?.importArchive;
+      if (!archive) return files;
+      const version = this.managedActiveVersion, group = this.activeContentGroup;
+      const language = this.lang, game = this.gameVersion, sourceHash = this.sourceIdentity;
+      return window.ManagedCollectionExports.collectionBaseline({ archive,
+        files: files.map(file => ({ filepath: file.filepath, translations: file.translations[language] || [] })) }, {
+        current, phase, baseline: this.importBaseline,
+        readBaseline: () => window.OfflineStore.getImportedBaseline?.(archive.baselineId, game),
+        readZip: hash => window.OfflineStore.getStatDescriptionZip?.(hash), sourceWorker,
+        fetchZip: () => {
+          window.SDBaselineFiles.checkpoint({ current, signal });
+          if (!this.managedOnlineAvailable || !version || version.sourceHash !== sourceHash || archive.baselineId !== sourceHash) {
+            throw new Error('The original ZIP is unavailable. Reimport the matching original ZIP before exporting; your saved translations are preserved.');
+          }
+          const route = group && !group.legacyVersionId
+            ? '/v1/content-groups/' + encodeURIComponent(group.id) + '/assets/source/original'
+            : '/v1/versions/' + encodeURIComponent(version.id) + '/original';
+          return this._cloud.request(route, { responseType: 'blob', timeout: 120000, signal });
+        },
+        storeZip: (hash, blob, evidence) => window.OfflineStore.putStatDescriptionZip?.(hash, blob, evidence),
+      });
     },
     
     // Multi-instance detection methods
