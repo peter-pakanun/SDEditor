@@ -12,8 +12,8 @@
         const scope = Object.freeze(Storage.normalizeScope(options.scope)), store = options.store || Storage.create();
         const base = '/v1/content-groups/' + encodeURIComponent(scope.groupId);
         const language = 'language=' + encodeURIComponent(scope.language);
-        let stopped = false, queue = Promise.resolve(), timer = null;
-        const errors = { pull:null, flush:null };
+        let stopped = false, queue = Promise.resolve(), timer = null, coverageAccepted=false;
+        const errors = { pull:null, flush:null, coverage:null };
         const current = () => !stopped && (!options.isCurrent || options.isCurrent(scope));
         const guard = () => { if (!current()) throw Object.assign(new Error('ClientText sync context changed.'), { stale:true }); };
         const notify = (name,value) => { try { options[name]?.(value); } catch (_) {} };
@@ -36,8 +36,17 @@
             queue = result; return result;
         }
         function snapshot() {
-            return { scope, stopped, error: errors.flush?.message || errors.pull?.message || '',
-                pullError:errors.pull?.message||'',flushError:errors.flush?.message||'' };
+            return { scope, stopped, error: errors.flush?.message || errors.coverage?.message || errors.pull?.message || '',
+                pullError:errors.pull?.message||'',flushError:errors.flush?.message||'',coverageError:errors.coverage?.message||'' };
+        }
+        function refreshCoverage() {
+            return serialized('coverage',async()=>{
+                if(coverageAccepted || !options.genericCoverage)return false;
+                const body=await options.genericCoverage({guard:current});guard();
+                const accepted=await request(base+'/generic-coverage?'+language,{method:'POST',body,headers:{'X-SDEditor-ClientText-Protocol':PROTOCOL}});
+                if(accepted?.protocol!==body.protocol)throw new Error('The API did not acknowledge the ClientText completion projection.');
+                coverageAccepted=true;return true;
+            });
         }
         function pull() {
             return serialized('pull', async () => {
@@ -121,7 +130,7 @@
         }
         function stop(){stopped=true;if(timer)clearInterval(timer);timer=null;
             root.removeEventListener?.('online',tick);root.document?.removeEventListener('visibilitychange',tick);}
-        return {scope,pull,flush,start,stop,snapshot};
+        return {scope,pull,flush,refreshCoverage,start,stop,snapshot};
     }
     return {create,PROTOCOL};
 });

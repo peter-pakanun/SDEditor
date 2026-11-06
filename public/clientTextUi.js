@@ -1913,7 +1913,12 @@
                     if(this.queueWorkspaceBackground)this.queueWorkspaceBackground('clienttext-mtl',mtl);else mtl();
                     if (this.managedOnlineAvailable && (this.cloudCanAccessAllLanguages || scope.language===this.cloudUser?.language) && !String(scope.groupId).startsWith('local:')) {
                         const request = (path, options) => this._cloud.request(path, options);
-                        this._ctSync = root.ClientTextSync.create({ scope, store: this._ctStore, request, isCurrent: () => this.ctCurrent(ctx) && this.ctActive });
+                        this._ctSync = root.ClientTextSync.create({ scope, store: this._ctStore, request, isCurrent: () => this.ctCurrent(ctx) && this.ctActive,
+                            genericCoverage:async({guard})=>{
+                                const descriptors=metadata.descriptors,summaries=await root.ClientTextState.genericCoverageSummaries(units,{game:scope.game,guard});
+                                return {protocol:root.ClientTextState.GENERIC_COVERAGE_PROTOCOL,assets:descriptors.map(descriptor=>({role:descriptor.role,
+                                    assetHash:descriptor.assetHash,parserVersion:descriptor.parserVersion,summary:summaries[descriptor.role]}))};
+                            } });
                         const background=()=>{if(this.ctCurrent(ctx) && this.ctActive)this.ctSync(ctx);};
                         if(this.queueWorkspaceBackground)this.queueWorkspaceBackground('clienttext-sync',background);else background();
                         this._ctSyncTimer = setInterval(() => { if (!root.document.hidden) this.ctSync(ctx); }, 20000);
@@ -1953,6 +1958,10 @@
                 const operation=(async()=>{
                     try {
                         if(!this.ctPolicy?.clientTextStorageProtocols?.includes(trustedProtocol))await this.ctRequireTrustedProtocol();
+                        if(!this.ctCurrent(ctx)||this._ctSync!==sync)return;
+                        if(this.ctPolicy?.clientTextGenericCoverage===root.ClientTextState.GENERIC_COVERAGE_PROTOCOL){
+                            try{await sync.refreshCoverage();}catch(error){if(error.stale)throw error;}
+                        }
                         if(!this.ctCurrent(ctx)||this._ctSync!==sync)return;
                         const flushed=await sync.flush();if(!this.ctCurrent(ctx)||this._ctSync!==sync)return;
                         await sync.pull();if(!this.ctCurrent(ctx)||this._ctSync!==sync)return;

@@ -4,6 +4,22 @@ const Sync=require('../public/clientTextSync.js');
 const S=require('../public/clientTextState.js');
 const {fixture,scope,fieldId,unit,asset}=require('./clienttext-storage-fixture.cjs');
 async function prepared(){const f=fixture();await f.store.import(scope,{units:[unit()],assets:[asset]});return f;}
+
+test('generic coverage refresh retries silently under captured scope and needs no translation mutation',async()=>{
+    const f=await prepared(),calls=[],body={protocol:S.GENERIC_COVERAGE_PROTOCOL,assets:[{role:'normal',assetHash:asset.hash,parserVersion:S.PARSER_VERSION,summary:{}}]},
+        before=JSON.stringify([...f.tables].map(([name,rows])=>[name,[...rows]]));let attempts=0;
+    const sync=Sync.create({scope,store:f.store,genericCoverage:async({guard})=>{assert.equal(guard(),true);return body;},request:async(path,init)=>{
+        calls.push({path,body:structuredClone(init.body)});if(++attempts===1)throw new Error('Projection response lost');return {protocol:S.GENERIC_COVERAGE_PROTOCOL,updated:false};
+    }});
+    await assert.rejects(sync.refreshCoverage(),/response lost/);assert.match(sync.snapshot().error,/response lost/);
+    assert.equal(await sync.refreshCoverage(),true);assert.equal(await sync.refreshCoverage(),false);assert.equal(sync.snapshot().error,'');
+    assert.deepEqual(calls[0],calls[1]);assert.match(calls[0].path,/generic-coverage\?language=Thai/);
+    assert.equal(JSON.stringify([...f.tables].map(([name,rows])=>[name,[...rows]])),before);
+    let current=true,release;const gate=new Promise(resolve=>release=resolve),stale=Sync.create({scope,store:f.store,isCurrent:()=>current,
+        genericCoverage:async()=>{await gate;return body;},request:()=>{throw new Error('A changed scope must not publish');}});
+    const pending=stale.refreshCoverage();await new Promise(resolve=>setImmediate(resolve));current=false;release();
+    await assert.rejects(pending,error=>error.stale===true);
+});
 test('paged events commit only the consumed cursor and replay durable saved units',async()=>{
     const f=await prepared(),calls=[];
     const sync=Sync.create({scope,store:f.store,isCurrent:()=>true,request:async(path)=>{calls.push(path);
@@ -48,6 +64,17 @@ test('shared conflicts preserve current local text and stop automatic retry',asy
     const sync=Sync.create({scope,store:f.store,isCurrent:()=>true,request:async()=>{calls++;throw Object.assign(new Error('Peer changed the unit'),{status:409,current:{unitId:unit().id,values:{[fieldId]:'Peer'},reviewed:{},revision:1}});}});
     await assert.rejects(sync.flush(),/Peer/);assert.equal((await f.store.getSaved(scope))[unit().id].values[fieldId],'Local');
     const second=await sync.flush();assert.equal(second.conflicts,1);assert.equal(calls,1);
+});
+
+test('a failed coverage refresh remains visible through unrelated successful translation pulls and flushes',async()=>{
+    const f=await prepared();let failure=true;
+    const sync=Sync.create({scope,store:f.store,genericCoverage:async()=>({protocol:S.GENERIC_COVERAGE_PROTOCOL,assets:[]}),request:async path=>{
+        if(path.includes('/events'))return {events:[],sequence:0,hasMore:false};
+        if(failure)throw new Error('Original completion counts could not be refreshed');
+        return {protocol:S.GENERIC_COVERAGE_PROTOCOL,updated:false};
+    }});
+    await assert.rejects(sync.refreshCoverage(),/completion counts/);await sync.pull();await sync.flush();assert.match(sync.snapshot().error,/completion counts/);
+    failure=false;await sync.refreshCoverage();assert.equal(sync.snapshot().error,'');
 });
 
 test('legacy uncertain requests replay their durable exact body and ID after cache cleanup',async()=>{

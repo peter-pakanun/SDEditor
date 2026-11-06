@@ -27,7 +27,7 @@ test('generic dialogue review inheritance agrees with sparse API counts and pres
             {saved:{values,reviewed:{},conflicts:[{fieldId:blank.id}]},provenance:{conflicts:[{fieldId:blank.id}]}},
             {saved:{values,reviewed:Object.fromEntries(forms.map((_,index)=>[original.fields[index].id,S.sourceHash(source)]))}}];
         for(const {saved,provenance} of rows){
-            assert.deepEqual(A.unitCounts(facts,saved?.values || null,saved?.reviewed || {},provenance || {},{game:'poe2'}),browserCounts(original,saved));
+            assert.deepEqual(A.unitCounts(facts,saved?.values || null,saved?.reviewed || {},provenance || {},{game:'poe2',originalValues:S.originalValues(original)}),browserCounts(original,saved));
         }
         const saved={values,reviewed:{}},status=S.statusFor(original,saved,{game:'poe2'});
         assert.equal(status.fields[blank.id].generic,true);assert.equal(status.fields[blank.id].outdated,false);
@@ -62,7 +62,6 @@ test('saved generic dialogue resolves red blank class workload in browser and AP
         }
         assert.equal(S.unitColorFor(original,saved),'');assert.equal(JSON.stringify([original,values,facts]),snapshot);assert.deepEqual(saved.reviewed,{});
         for(const entry of [
-            {saved:{values,reviewed:{},saved:false},provenance:{sourceOnly:true}},
             {saved:{values:{...values,[original.fields[0].id]:''},reviewed:{}}},
             {saved:{values,reviewed:{},conflicts:[{fieldId:blank.id}]},provenance:{conflicts:[{fieldId:blank.id}]}},
             {saved:{values,reviewed:{},conflicts:[{fieldId:original.fields[0].id}]},provenance:{conflicts:[{fieldId:original.fields[0].id}]}},
@@ -76,6 +75,13 @@ test('saved generic dialogue resolves red blank class workload in browser and AP
         const override={...values,[blank.id]:'Authored override'};
         assert.equal(S.statusFor(original,{values:override,reviewed:{},outdated:[blank.id]}).fields[blank.id].outdated,true);
         assert.deepEqual(A.unitCounts(facts),initial,'the denominator and original Missing facts remain immutable');
+        for(const committed of [null,{values,reviewed:{},saved:false,provenance:{sourceOnly:true}},{values:{},reviewed:{},saved:true}]){
+            const derived=S.statusFor(original,committed);
+            assert.equal(derived.missing,false);assert.equal(derived.outdated,false);assert.equal(derived.saved,!!committed && committed.saved!==false);
+        }
+        const projected=(await S.genericCoverageSummaries([original],{game:'poe2'}))[original.role];
+        assert.equal(projected.missingFields,0);assert.equal(projected.resolvedFields,12);assert.equal(projected.workloadFields,initial.workloadFields);assert.equal(projected.saved,0);
+        assert.deepEqual(projected,A.unitCounts(facts,null,{}, {},{game:'poe2',originalValues:values}));
     }
 });
 

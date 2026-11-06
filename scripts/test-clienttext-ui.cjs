@@ -2476,7 +2476,7 @@ test('bulk dialogue review fences stale groups and blocks conflicts, pending sav
     assert.equal(S.statusFor(app.ctCurrentUnit,{values:app.ctValues,reviewed:app.ctReviewed}).fields[blank.id].missing,true,'reviewing a blank does not erase separately required translation workload');
 });
 
-for(const sheet of ['NPCTextAudio','NPCTalkDialogueTextAudio'])for(const required of [false,true])test(sheet+' saved generic dialogue covers '+(required?'Missing':'optional')+' blank overrides without approving populated variants; draft generic edits only change presentation',async()=>{
+for(const sheet of ['NPCTextAudio','NPCTalkDialogueTextAudio'])for(const required of [false,true])test(sheet+' committed generic dialogue covers '+(required?'Missing':'optional')+' blank overrides without approving populated variants; draft generic edits only change presentation',async()=>{
     const original=dialogueVariantUnit('Generic [Keyword] {0}',sheet);
     for(const field of original.fields.filter(field=>field.kind==='form'&&!field.target)){field.required=required;field.originalMissing=required;}
     const f=fixture();await f.store.import(scope,{units:[original],assets:[asset]});
@@ -2485,9 +2485,9 @@ for(const sheet of ['NPCTextAudio','NPCTalkDialogueTextAudio'])for(const require
         populated=app.ctPopulatedVariants(group),before=clone(original);
     assert.equal(app.ctClassFallback(blank).label,'Use generic');assert.equal(app.ctClassVariantCounts(group),'2 translated · 10 use generic');
     assert.equal(app.ctFieldController(blank).field.placeholder,'-- Use generic --');assert.equal(app.ctPreviewValue(blank),generic.target);
-    assert.equal(app.ctBlankVariantsToReview(group).length,0);assert.equal(app.ctGenericVariantsToSave(group).length,10);
-    assert.equal(app.ctStatus().fields[blank.id].outdated,true,'an untouched generic still needs an explicit ID Save before accepted counters change');
-    assert.equal(app.ctStatus().missing,required);
+    assert.equal(app.ctBlankVariantsToReview(group).length,0);assert.equal(app.ctGenericVariantsToSave(group).length,0);
+    assert.equal(app.ctStatus().fields[blank.id].outdated,false,'committed workbook defaults cover blank variants before any Save');
+    assert.equal(app.ctStatus().missing,false);assert.equal(app.ctStatus().saved,false);
     app.ctMarkReviewed(generic);assert.equal(await app.ctSave(),true);
     assert.equal(app.ctStatus().fields[blank.id].outdated,false);assert.equal(app.ctStatus().fields[blank.id].generic,true);
     assert.equal(app.ctStatus().missing,false);assert.equal(app.ctFieldStatus(blank).missing,false);
@@ -2505,6 +2505,29 @@ for(const sheet of ['NPCTextAudio','NPCTalkDialogueTextAudio'])for(const require
     assert.equal(app.ctStatus().fields[blank.id].missing,required);
     app.ctValues[generic.id]='A new generic draft';assert.equal(app.ctPreviewValue(blank),'A new generic draft');
     assert.equal(app.ctStatus().fields[blank.id].outdated,true,'typing a generic draft cannot clear review');assert.deepEqual(original,before);
+});
+
+test('reopening imported and historical saved dialogue resolves generic blanks without writing saves, drafts, history or outbox',async()=>{
+    for(const sourceState of ['original','saved','source-only','sparse-saved']){
+        const original=dialogueVariantUnit('Existing workbook translation');
+        original.fields=original.fields.filter(field=>field.kind==='text' || !field.target.trim());
+        original.fields[0].outdated=false;
+        for(const field of original.fields.slice(1)){field.required=true;field.originalMissing=true;}
+        const f=fixture();await f.store.import(scope,{units:[original],assets:[asset]});
+        const values=S.valuesFor(original);
+        if(sourceState!=='original'){
+            const id=Store.scopeKey(scope),key=JSON.stringify([id,original.id]);
+            f.tables.get(Store.stores.saved).set(key,{key,scope:id,value:{unitId:original.id,revision:7,saved:sourceState!=='source-only',
+                values:sourceState==='sparse-saved'?{}:values,reviewed:{},...(sourceState==='source-only'?{provenance:{sourceOnly:true}}:{})}});
+        }
+        const before=JSON.stringify([...f.tables].map(([name,rows])=>[name,[...rows]])),saved=await f.store.getSaved(scope),
+            fresh=keyboardHarness((await f.store.getUnits(scope))[0],{ctSaved:saved}).app;
+        assert.equal(fresh.ctStatus().missing,false,sourceState);assert.equal(fresh.ctStatus().outdated,false,sourceState);
+        assert.equal(fresh.ctStatus().saved,['saved','sparse-saved'].includes(sourceState));assert.equal(fresh.ctNeedsAttention(original),false);
+        assert.equal(fresh.ctCounts.missing,0);assert.equal(fresh.ctCounts.outdated,0);
+        assert.equal(fresh.ctGenericVariantsToSave(fresh.ctFieldGroups[0]).length,0);
+        assert.equal(JSON.stringify([...f.tables].map(([name,rows])=>[name,[...rows]])),before,sourceState+' is a derived read');
+    }
 });
 
 for(const sheet of ['NPCTextAudio','NPCTalkDialogueTextAudio'])test(sheet+' Gender dialogue fallbacks require every generic form and preview each form separately without choosing a gender',()=>{
@@ -2725,10 +2748,10 @@ test('hidden blank variants expose committed workload, missing/outdated facts an
         missing=group.fields.find(field=>field.form==='IntFourb'),optional=group.fields.find(field=>field.form==='IntFour'),
         outdated=group.fields.find(field=>field.form==='StrFourb');
     app.ctDiagnostics={[app.ctSelection]:[{fieldId:optional.id,severity:'warning',message:'Preserved manual finding'}]};
-    assert.equal(app.ctVariantLabel(missing),'Sorceress (IntFourb) (Use generic) · Missing');
+    assert.equal(app.ctVariantLabel(missing),'Sorceress (IntFourb) (Use generic)');
     assert.equal(app.ctVariantLabel(optional),'Witch (IntFour) (Use generic) · Warning');assert.equal(app.ctVariantFacts(optional).missing,false);
     assert.equal(app.ctVariantLabel(outdated),'Warrior (StrFourb) · Outdated');
-    assert.equal(app.ctVariantSummary(app.ctClassFields(group)),'2 Workload · 1 Missing · 1 Outdated · 1 Warning');
+    assert.equal(app.ctVariantSummary(app.ctClassFields(group)),'2 Workload · 1 Outdated · 1 Warning');
     const diagnostics=app.ctDiagnostics;app.ctSelectVariant(group,optional.id,{focus:false});
     assert.equal(app.ctDiagnostics,diagnostics,'display changes do not rerun or clear completed diagnostics');
     app.ctFocusSource(group,app.ctGroupSources(group)[0]);
@@ -3697,6 +3720,15 @@ test('cached status rows re-evaluate only changed saved objects and distinguish 
     assert.equal(app.ctStatus(original).revised,true);assert.equal(evaluated,2);
     const next=clone(original);next.fields[0].target='Different original';app.ctStatus(next);assert.equal(evaluated,3);
 });
+test('coverage refresh failure does not block saved translation synchronization or clear its warning',async()=>{
+    const {app}=harness(),calls=[];
+    app.ctPolicy={clientTextStorageProtocols:[S.STORAGE_PROTOCOL],clientTextGenericCoverage:S.GENERIC_COVERAGE_PROTOCOL};
+    app.ctRefreshSharedSaved=async()=>true;app.ctPresence=async()=>{};app.ctMtlSync=async()=>{};
+    app._ctSync={async refreshCoverage(){calls.push('coverage');throw new Error('Completion projection failed');},
+        async flush(){calls.push('flush');return{};},async pull(){calls.push('pull');},snapshot(){return {error:'Completion projection failed'};}};
+    await app.ctSync();assert.deepEqual(calls,['coverage','flush','pull']);assert.equal(app.ctError,'Completion projection failed');
+});
+
 test('unchanged sync remains silent, retains saved identity and actionable conflicts, and fences late requests',async()=>{
     const {app,original}=harness(),saved={unitId:original.id,values:{[fieldId]:'Saved'},reviewed:{},revision:1,serverRevision:1};
     app.ctSaved={[original.id]:saved};app.ctRevision=3;app._ctStore={async getSaved(){return{[original.id]:clone(saved)};}};

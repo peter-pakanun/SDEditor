@@ -109,8 +109,9 @@ module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}
                 buildGamePreviewSegments:host.buildGamePreviewSegments}).map(variant=>({label:variant.label,value:variant.segments[0].text}))};});
         assert.equal(preview.value,forms.length===1?'Generic text':'');
         assert.deepEqual(preview.variants,forms.length===1?[]:forms.map(form=>({label:form+' · Generic',value:'Generic '+form})));
-        assert.equal(await page.evaluate(()=>{const host=window.__ctLayoutFixture;return host.ctStatus().fields['regular-DexFour'].outdated;}),true);
-        assert.equal(await page.evaluate(()=>window.__ctLayoutFixture.ctStatus().fields['regular-DexFour'].missing),true,name+': original red blank needs the ID Save');
+        assert.equal(await page.evaluate(()=>{const host=window.__ctLayoutFixture;return host.ctStatus().fields['regular-DexFour'].outdated;}),false);
+        assert.equal(await page.evaluate(()=>window.__ctLayoutFixture.ctStatus().fields['regular-DexFour'].missing),false,name+': original generic covers the red blank without Save');
+        assert.equal(await page.evaluate(()=>window.__ctLayoutFixture._dialogueSaveCount),0,name+': opening does not create a Save');
         if(!full){await blank.press('Control+Enter');await page.locator('.ctFullEditor').waitFor();await settle();}
         await page.locator('.ctEditorActionButtons').getByRole('button',{name:'Save',exact:true}).click();await settle();
         assert.deepEqual(await page.evaluate(()=>{const host=window.__ctLayoutFixture;return {generic:host.ctStatus().fields['regular-DexFour'].generic,
@@ -129,7 +130,38 @@ module.exports=async function({page,settle,fixtureArtifacts,results,screenshots}
         assert.equal(await page.evaluate(()=>window.__ctLayoutFixture.ctStatus().fields['regular-DexFour'].outdated),true,'saving one absent generic restores blank review');
         assert.equal(await page.evaluate(()=>window.__ctLayoutFixture.ctStatus().fields['regular-DexFour'].missing),true,'saving one absent generic restores red blank workload');
         assert.equal(await page.getByRole('button',{name:'Review blank variants (10)',exact:true}).count(),1);
-        results.push({name:name+' complete and partial defaults, separate previews, saved-only completion and independent populated reviews'});
+        results.push({name:name+' complete and partial defaults, separate previews, committed completion and independent populated reviews'});
+    }
+    for(const theme of ['light','grey','dark','modern-dark'])for(const full of [false,true]){
+        await page.evaluate(({sheet,theme,full})=>{
+            document.documentElement.dataset.theme=theme;
+            const host=window.__ctLayoutFixture;host.ctStartClassVariantFixture(true);
+            const previous=host.ctCurrentUnit,unit=Vue.markRaw({...previous,role:'normal',sheet,recordId:'ExistingReimport',id:JSON.stringify(['normal',sheet,'ExistingReimport']),
+                fields:previous.fields.map((field,index)=>({...field,target:index?'':'Existing [Keyword] {0}',required:true,originalMissing:index>0,outdated:index>0,
+                    originalFill:index?ClientTextState.FILLS.missing:ClientTextState.FILLS.filled}))});
+            host.ctUnits=Vue.markRaw([unit]);host._ctUnitIndex=Vue.markRaw(new Map([[unit.id,unit]]));host.ctSelection=unit.id;
+            host.ctValues=ClientTextState.valuesFor(unit);host.ctSaved=Vue.markRaw({});host.ctReviewed={};host.ctChoices=[];host.ctDraftDirty=false;
+            host.ctVariantSelections={};host.ctSheet='';host.ctSearch='';host.ctAppliedSearch='';host.ctSelectedFilters=['missing','outdated','saved','revised','unchanged'];
+            host.ctEditor=full;host.ctInlineClosed=false;host._dialogueSaveCount=0;host.ctInitializeVariants();
+            host.ctSelectVariant(host.ctFieldGroups[0],'regular-DexFour',{focus:false});host.ctRevision++;
+        },{sheet,theme,full});await settle();
+        const name=sheet+' '+theme+' '+(full?'full':'inline')+' reimported existing translation';
+        for(const phase of ['opening','reopening']){
+            assert.deepEqual(await page.evaluate(()=>{const host=window.__ctLayoutFixture,status=host.ctStatus();return {
+                missing:status.missing,outdated:status.outdated,saved:status.saved,unchanged:status.unchanged,saves:host._dialogueSaveCount,attention:host.ctNeedsAttention(host.ctCurrentUnit)
+            };}),{missing:false,outdated:false,saved:false,unchanged:true,saves:0,attention:false},name+' '+phase);
+            assert.equal(await page.locator('[data-ct-target="regular-DexFour"]').getAttribute('placeholder'),'-- Use generic --');
+            assert.equal(await page.locator('.ctClassVariants .ctTarget .ctFieldFacts').count(),0,name+': covered empty fields have no Missing/Outdated action');
+            if(phase==='opening'){
+                await page.evaluate(()=>{const host=window.__ctLayoutFixture,unit=Vue.markRaw(JSON.parse(JSON.stringify(host.ctCurrentUnit)));
+                    host.ctUnits=Vue.markRaw([unit]);host._ctUnitIndex=Vue.markRaw(new Map([[unit.id,unit]]));host._ctStatusCache=new WeakMap();host.ctRevision++;
+                });await settle();
+            }
+        }
+        if(full && ['light','modern-dark'].includes(theme)){
+            const path=join(fixtureArtifacts,sheet+'-existing-reimport-'+theme+'.png');await page.locator('.ctClassVariants').screenshot({path});screenshots.push(path);
+        }
+        results.push({name:name+' resolves on open and reopen without Saved, review actions or row-by-row saves'});
     }
     }
 };

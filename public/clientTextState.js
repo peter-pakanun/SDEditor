@@ -7,6 +7,7 @@
     'use strict';
     const FORMAT = 'clienttext-v1', TRUSTED_FORMAT = 'clienttext-trusted-v1', STORAGE_PROTOCOL = TRUSTED_FORMAT, PARSER_VERSION = 'clienttext-v4';
     const PARSER_VERSIONS = Object.freeze(['clienttext-v1', 'clienttext-v2', 'clienttext-v3', PARSER_VERSION]);
+    const GENERIC_COVERAGE_PROTOCOL = 'clienttext-generic-coverage-v1';
     const FILLS = Object.freeze({ missing: 'FA8072', outdated: 'FF9966', filled: 'D9D9D9', reviewed: 'C6EFCE', revised: 'D9D2E9' });
     const SHEET_COLORS = Object.freeze(['missing', 'outdated', 'revised', 'reviewed', 'filled', '']);
     const COLOR_BY_FILL = Object.freeze(Object.fromEntries(Object.entries(FILLS).map(([color, fill]) => [fill, color])));
@@ -257,6 +258,27 @@
         summary.workload += Number(workload); summary.resolved += Number(workload && !missing && !outdated);
         return summary;
     }
+    async function genericCoverageSummaries(units, options={}) {
+        const summaries={},pause=options.yield || (()=>new Promise(resolve=>setTimeout(resolve,0)));
+        for(let index=0;index<units.length;index++){
+            if(options.guard && !options.guard())throw Object.assign(new Error('ClientText scope changed.'),{stale:true});
+            const unit=units[index],summary=addOriginalSummary(summaries[unit.role] ||= emptySummary(),unit);
+            if((!options.game || options.game==='poe2') && ['NPCTextAudio','NPCTalkDialogueTextAudio'].includes(unit.sheet.replace(/_Gender$/,''))){
+                const status=statusFor(unit,null,options);let wasMissing=false,wasOutdated=false,missing=false,outdated=false,workload=false;
+                for(const field of unit.fields){
+                    if(audioOnly(field.source))continue;
+                    const absent=!!field.required && !!field.originalMissing,stale=!!field.outdated,assigned=!!field.originalMissing || stale,current=status.fields[field.id];
+                    summary.missingFields+=Number(current.missing)-Number(absent);summary.outdatedFields+=Number(current.outdated)-Number(stale);
+                    summary.resolvedFields+=Number(assigned && !current.missing && !current.outdated)-Number(assigned && !absent && !stale);
+                    wasMissing ||= absent;wasOutdated ||= stale;missing ||= current.missing;outdated ||= current.outdated;workload ||= assigned;
+                }
+                summary.missing+=Number(missing)-Number(wasMissing);summary.outdated+=Number(outdated)-Number(wasOutdated);
+                summary.resolved+=Number(workload && !missing && !outdated)-Number(workload && !wasMissing && !wasOutdated);
+            }
+            if(index%256===255)await pause();
+        }
+        return summaries;
+    }
     function originalCacheKey(assetHash, parserVersion, role, options = {}) {
         if (assetHash && typeof assetHash === 'object') {
             const asset = assetHash; options = parserVersion || {}; role = asset.role;
@@ -407,13 +429,13 @@
         const fields=dialogueGenericFields(unit,field,options).filter(candidate=>!(allowsNonexistent(candidate) && String(values?.[candidate.id] ?? '').trim()==='NONEXISTENT'));
         return fields.length>0 && fields.every(candidate=>String(values?.[candidate.id] ?? '').trim()) ? fields : [];
     }
-    function inheritsGenericReview(unit,field,saved,options={}) {
-        // Saved generic coverage fulfils an override's original red/orange
-        // workload while keeping its exact blank target and immutable facts.
-        if(!saved || saved.saved===false || saved.syncRecovery || String(saved.values?.[field.id] ?? '').trim())return false;
-        const generic=dialogueGenericFallback(unit,field,saved.values,options);
+    function inheritsGenericReview(unit,field,saved,options={},values=valuesFor(unit,saved)) {
+        // Workbook originals, carried text and saved overlays are committed
+        // values. Resolving their fallback never creates an authored Save.
+        if(saved?.syncRecovery || String(values[field.id] ?? '').trim())return false;
+        const generic=dialogueGenericFallback(unit,field,values,options);
         const ids=new Set([field.id,...generic.map(candidate=>candidate.id)]);
-        return generic.length>0 && ![...(saved.conflicts || []),...(saved.provenance?.conflicts || [])].some(conflict=>!conflict.fieldId || ids.has(conflict.fieldId));
+        return generic.length>0 && ![...(saved?.conflicts || []),...(saved?.provenance?.conflicts || [])].some(conflict=>!conflict.fieldId || ids.has(conflict.fieldId));
     }
     function statusFor(unit, saved = null, options = {}) {
         const values = valuesFor(unit, saved), reviewed = saved?.reviewed || {}, fields = {}, savedPresent = !!saved && saved.saved !== false;
@@ -421,7 +443,7 @@
             const originalMissing = isAbsent(field,field.target) || !!field.originalMissing;
             const assignedOutdated = (!!field.outdated || (saved?.outdated || []).includes(field.id)) && !audioOnly(field.source);
             const rawMissing = isAbsent(field,values[field.id]), english = englishIntentFor(field,saved,options);
-            const generic=inheritsGenericReview(unit,field,saved,options);
+            const generic=inheritsGenericReview(unit,field,saved,options,values);
             const missing = rawMissing && !english && !generic, outdated = assignedOutdated && !generic && reviewed[field.id] !== sourceHash(field.source);
             fields[field.id] = { missing,rawMissing,english,...(generic?{generic:true}:{}),outdated,saved:savedPresent,
                 revised:savedPresent && !originalMissing && !assignedOutdated && !audioOnly(field.source) && values[field.id] !== field.target,
@@ -681,5 +703,5 @@
         clientFacts, originalValues, emptySummary, addOriginalSummary, originalCacheKey, buildDescriptors,
         normalizeUnit, compactUnit, normalizeCompact, leafHash, nodeHash, buildManifest, proofFor, verifyWitness,
         ENGLISH_INTENT_PROTOCOL, ENGLISH_ELIGIBILITY_PROTOCOL, englishEligible, englishIntentFor, normalizeEnglishIntent, applyEnglishActions, carryEnglishIntent,
-        normalizeValues, normalizeReviewed, valuesFor, needsSourceReview, dialogueGenericFields, dialogueGenericFallback, inheritsGenericReview, statusFor, counts, carryForward, reviewAudioMarkerChanges, tokenize, maskAudioMarkers, tokenInsertion, extractVariables, variableIdentityKey, diagnose, suggestions, copy };
+        GENERIC_COVERAGE_PROTOCOL, genericCoverageSummaries, normalizeValues, normalizeReviewed, valuesFor, needsSourceReview, dialogueGenericFields, dialogueGenericFallback, inheritsGenericReview, statusFor, counts, carryForward, reviewAudioMarkerChanges, tokenize, maskAudioMarkers, tokenInsertion, extractVariables, variableIdentityKey, diagnose, suggestions, copy };
 });
