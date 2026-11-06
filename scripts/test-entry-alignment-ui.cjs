@@ -81,7 +81,7 @@ function harness({ records = new Map(), tm = false } = {}) {
       const record = records.get(options.draft.key);
       if (record?.revision === options.draft.revision) records.set(record.key, { ...record, state: 'promoted', revision: record.revision + ':promoted', translations: [] });
     }
-    return { status: 'local', draftConsumed: true };
+    return { status: 'local', durable: true, draftConsumed: true };
   };
   editor.rebaseEditorAfterCommit = accepted => {
     editor.editorOriginalTranslations = [...accepted.translations];
@@ -334,6 +334,28 @@ test('Save submits aligned text together with original-block recovery revisions'
   assert.deepEqual(copy(submitted.options.revisions.map(item => item.translations)),
     [['one', 'obsolete', 'three'], ['one', 'three']]);
   assert.equal(submitted.options.revisions[0].note, 'Before entry alignment');
+});
+
+test('an aligned editor cannot close on a success response that did not stage its translation', async t => {
+  const { editor, desc, records } = await fixture(t);
+  resolveMiddleRemoval(editor); assert.equal(await editor.applyEntryAlignment(), true);
+  const session = editor._draftSession, original = copy(desc);
+  editor.persistTranslationBatch = async () => ({ status: 'local', durable: true });
+  assert.equal(await editor.editorSave(), false);
+  assert.equal(editor.editorVisible, true);
+  assert.equal(editor._draftSession, session);
+  assert.deepEqual(desc, original);
+  assert.deepEqual(copy(editor.serializeEditorTranslations()), ['one', 'three']);
+  assert.deepEqual(records.get(session.key).alignmentRecovery[0].translations, ['one', 'obsolete', 'three']);
+  assert.match(editor.collaborationNotice, /verify.*saved translation/i);
+});
+
+test('worklist alignment actions resolve source counts from the actual descriptor', async t => {
+  const { editor, desc } = await fixture(t);
+  const row = { filepath: desc.filepath, filename: desc.filename, isMissing: true };
+  assert.equal(editor.fileNeedsEntryAlignment(row), true);
+  resolveMiddleRemoval(editor); assert.equal(await editor.applyEntryAlignment(), true);
+  assert.equal(editor.fileNeedsEntryAlignment(row), false);
 });
 
 test('a failed Save retains the aligned draft, recovery revisions and committed original', async t => {

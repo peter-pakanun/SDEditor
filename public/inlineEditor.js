@@ -640,6 +640,8 @@
           && cancelRevision === (this._editorOpenCancelRevision || 0);
         const automaticPath = options.automatic ? filepath : null;
         const activation = this._inlineActivationToken = {};
+        const visibleRows = this.descsDisplay.slice();
+        let heldRows = null;
         // The outgoing promotion writes the store used to hydrate the next draft.
         // Prepare and paint the next inline row before starting that queued write.
         const releaseLocalSaves = this.inlineActive
@@ -650,16 +652,21 @@
           filepath = this._inlineRequestedPath;
           if (!this.descsDisplay.some(row => row.filepath === filepath)) {
             if (!this.filteredDescs.some(row => row.filepath === filepath)) {
-              this.searchText = ''; this.selectedFileFilters = this.fileFilterOptions.map(option => option.key); this.filterDesc();
+              // Promotion or an earlier save can remove a still-visible row
+              // from the results. Retain its page for this editing session;
+              // stale focus/click requests must never broaden the filters.
+              if (!visibleRows.some(row => row.filepath === filepath)) return false;
+              heldRows = visibleRows;
+            } else {
+              const sorted = this.filteredDescs.slice().sort((a, b) => {
+                const direction = this.currentSortDir === 'desc' ? -1 : 1;
+                return a[this.currentSort] < b[this.currentSort] ? -direction : a[this.currentSort] > b[this.currentSort] ? direction : 0;
+              });
+              const position = sorted.findIndex(row => row.filepath === filepath);
+              if (position >= 0) this.currentPage = Math.floor(position / this.pageSize) + 1;
             }
-            const sorted = this.filteredDescs.slice().sort((a, b) => {
-              const direction = this.currentSortDir === 'desc' ? -1 : 1;
-              return a[this.currentSort] < b[this.currentSort] ? -direction : a[this.currentSort] > b[this.currentSort] ? direction : 0;
-            });
-            const position = sorted.findIndex(row => row.filepath === filepath);
-            if (position >= 0) this.currentPage = Math.floor(position / this.pageSize) + 1;
           }
-          this._inlineHeldRows = this.descsDisplay.slice();
+          this._inlineHeldRows = heldRows || this.descsDisplay.slice();
           if (!['dictionary', 'lookup', 'tm', 'preview', 'comments'].includes(this.sideTab)) this.sideTab = 'dictionary';
           this._nextEditorSurface = 'inline';
           // Reopening a pending draft waits for its save; allow that queue to run.

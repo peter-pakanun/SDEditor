@@ -36,6 +36,8 @@
         this._entryAlignmentBinding = null;
       },
       fileNeedsEntryAlignment(desc) {
+        // Worklist rows contain rendered text and statuses, not source arrays.
+        desc = this.getDescByFilepath(desc.filepath) || desc;
         const lines = this.inlineDraftFor?.(desc.filepath)?.translations || desc.translations?.[this.lang] || [];
         return lines.length > (desc.translations?.English || []).length;
       },

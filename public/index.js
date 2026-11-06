@@ -6661,7 +6661,11 @@ function formatPageRange(total, page, pageSize) {
         if (this.flushEditorDraft) { if (!await this.flushEditorDraft()) return; }
         else if (this.editorVisible && this.editorHaveChanges() && !await this.editorSave({ close: false })) return;
         if (!this.collaborationContextCurrent(context)) return;
-        const opened = this.inlineEditor && !this.editorVisible && this.activateInlineRow
+        // A comment may target a file outside the current search. Open that
+        // file in the full editor without changing the workspace filters.
+        const openInline = this.inlineEditor && !this.editorVisible && this.activateInlineRow
+          && (this.descsDisplay.some(row => row.filepath === filepath) || this.filteredDescs.some(row => row.filepath === filepath));
+        const opened = openInline
           ? await this.activateInlineRow(filepath) : await this.editFile(filepath, true);
         if (opened === false || !this.collaborationContextCurrent(context)) return;
         this.commentsAllVisible = false;
@@ -7253,6 +7257,12 @@ function formatPageRange(total, page, pageSize) {
           ...(deferCommit ? { deferCommit: true, onCommitted: completeDeferredSave, onRejected: rejectDeferredSave } : {}),
         });
         if (result.stale || result.status === 'conflict') return false;
+        if (close && alignmentRecoveryAtSave.length) {
+          const saved = window.WorkspaceState.workspaceFile(this.localDescs, this.workspaceSourceFile(desc.filepath) || desc, this.lang);
+          if (result.status === 'queued' || result.durable === false || !saved.staged) {
+            throw new Error('Could not verify the saved translation. The aligned draft is still open; review the save error before trying again.');
+          }
+        }
         if(result.status!=='queued')this.sdSaved?.(sdMtl);
         if (this.editorBlocks !== blocksAtSave || !this.collaborationContextCurrent(context)) return false;
         if (deferCommit && result.status === 'queued') {

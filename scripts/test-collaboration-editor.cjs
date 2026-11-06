@@ -221,6 +221,21 @@ function enablePending(h) {
 }
 const pendingTick = () => new Promise(resolve => setTimeout(resolve, 5));
 
+test('a reviewed submission removed before the save waiter starts cannot report a durable save', async () => {
+  const { editor: e, desc, calls } = enablePending(saveFixture());
+  const rejection = Object.assign(new Error('Committed translation changed before staging'), { code: 'DRAFT_BASE_CHANGED' });
+  const journal = e.journalPendingSave;
+  e.journalPendingSave = async function (...args) {
+    const job = await journal.apply(this, args);
+    await pendingTick(); calls[0].reject(rejection);
+    while (this._pendingSaves.snapshot().jobs.length) await pendingTick();
+    return job;
+  };
+  await assert.rejects(e.persistTranslationBatch([{ desc, lines: ['New text', 'Second'] }], 'save'),
+    error => error === rejection);
+  assert.notDeepEqual(e.localDescs.staged?.Thai?.[desc.filepath]?.translations, ['New text', 'Second']);
+});
+
 test('confirmed Save, promotion, restore and consistency paths submit detached TM captures through the durable command',async t=>{
   for(const origin of ['save','confirm','restore','consistency']) await t.test(origin,async()=>{
     const h=enablePending(saveFixture()),{editor:e,window,desc}=h;

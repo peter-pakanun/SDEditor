@@ -3323,6 +3323,55 @@ test('navigation snapshots the outgoing anchor before draft promotion removes it
   assert.equal(editor.currentPage, 1, 'The remaining first result moves onto the first page');
 });
 
+test('a stale inline row request after saving cannot clear the search or status filters', async () => {
+  const { editor, desc, config, calls } = harness();
+  editor.filterDesc = config.methods.filterDesc;
+  editor.searchText = 'translation'; editor.selectedFileFilters = ['unchanged'];
+  editor.filterDesc();
+  assert.equal(await editor.activateInlineRow(desc.filepath), true);
+  editor.editorBlocks[0].translation = 'corrected text';
+  assert.equal(await editor.finishInlineSession(), true);
+  assert.equal(editor.filteredDescs.some(row => row.filepath === desc.filepath), false);
+  assert.equal(await editor.activateInlineRow(desc.filepath), false);
+  assert.equal(editor.searchText, 'translation');
+  assert.deepEqual(copy(editor.selectedFileFilters), ['unchanged']);
+  assert.equal(editor.inlineActive, false); assert.equal(calls.promotions.length, 1);
+  assert.equal(desc.translations.Thai[0], 'corrected text');
+});
+
+test('opening a visible held row keeps the filters when its committed status has changed', async () => {
+  const { editor, desc, config } = harness(), next = editor.descs[1];
+  editor.filterDesc = config.methods.filterDesc;
+  editor.searchText = 'translation'; editor.selectedFileFilters = ['unchanged'];
+  editor.filterDesc();
+  assert.equal(await editor.activateInlineRow(desc.filepath), true);
+  const held = editor.descsDisplay.slice();
+  await editor.persistTranslationBatch([{ desc: next, lines: ['saved text'] }], 'fixture', {});
+  editor.filterDesc({ changedFilepaths: [next.filepath] });
+  assert.equal(editor.filteredDescs.some(row => row.filepath === next.filepath), false);
+  assert.equal(editor.descsDisplay.some(row => row.filepath === next.filepath), true);
+  assert.equal(await editor.activateInlineRow(next.filepath), true);
+  assert.equal(editor.searchText, 'translation');
+  assert.deepEqual(copy(editor.selectedFileFilters), ['unchanged']);
+  assert.deepEqual(copy(editor.descsDisplay), copy(held));
+  assert.equal(editor.editorCurrentEditingDesc.filepath, next.filepath);
+  assert.equal(await editor.finishInlineSession(), true);
+  assert.equal(editor.descsDisplay.some(row => row.filepath === next.filepath), false);
+});
+
+test('a comment opens a filtered-out file in the full editor without resetting the workspace', async () => {
+  const { editor, config } = harness(), next = editor.descs[1];
+  editor.filterDesc = config.methods.filterDesc;
+  editor.searchText = 'first.txt'; editor.selectedFileFilters = ['unchanged'];
+  editor.filterDesc();
+  await editor.commentsOpenFile(next.filepath);
+  assert.equal(editor.editorCurrentEditingDesc.filepath, next.filepath);
+  assert.equal(editor.editorVisible, true); assert.equal(editor.inlineActive, false);
+  assert.equal(editor.sideTab, 'comments'); assert.equal(editor.navigationBusy, false);
+  assert.equal(editor.searchText, 'first.txt');
+  assert.deepEqual(copy(editor.selectedFileFilters), ['unchanged']);
+});
+
 test('inline keyboard navigation skips occupied files and requests claims without interrupting prompts', async () => {
   const { editor, rows } = await inlineNavigationHarness();
   const claims = [];

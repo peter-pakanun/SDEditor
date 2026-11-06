@@ -1198,6 +1198,9 @@
             // Committed UI waits for staging, history, outbox, receipt and exact
             // checkpoint consumption to acknowledge together.
             await this._pendingSaves.drain();
+            // A rejected submission can leave the queue after being retained
+            // for review. An empty queue does not acknowledge this job.
+            if (!job.durable) throw job.error || new Error('The translation save did not commit. Review the retained draft before saving again.');
             return { status: 'local', jobId: batch.jobId, durable: job.durable,
               draftConsumed: job.ack?.draftConsumed === true, ...(!this.collaborationContextCurrent(ctx) ? { stale: true } : {}) };
           }

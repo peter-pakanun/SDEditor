@@ -1,5 +1,8 @@
 // Disposable online acceptance: real API, signed-in Translator, managed group,
 // normalized IndexedDB, save worker and server round trip. No hosted services.
+// SDEDITOR_PRODUCTION_ZIP adds the reported minion entry verbatim. Set
+// SDEDITOR_PRODUCTION_FULL=1 to use the entire ZIP, and
+// SDEDITOR_ALIGNMENT_LEGACY=1 to exercise the earlier managed-version rooms.
 const assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
 const { resolve, join } = require('node:path');
@@ -50,13 +53,34 @@ async function run() {
         variables: Array(count).fill('#'), remarks: Array(count).fill(''),
         translations: { English: Array.from({ length: count }, (_, index) => index ? 'Second source' : '{0}'),
             Thai: Array.from({ length: overflow }, (_, index) => index ? 'คำแปล ' + index : '{0}') } }));
+    if (process.env.SDEDITOR_PRODUCTION_ZIP) {
+        const original = await fromApi('jszip').loadAsync(readFileSync(process.env.SDEDITOR_PRODUCTION_ZIP));
+        const filepath = 'stat_descriptions/maximum_number_of_X_minion_type_doubled.txt';
+        const entry = original.file(filepath); assert.ok(entry, 'The reported file exists in the supplied ZIP');
+        const desc = codec.parseText(filepath, codec.decodeUTF16(await entry.async('nodebuffer')), 'Thai', { strict: true });
+        cases.push({ filepath, count: desc.translations.English.length, overflow: desc.translations.Thai.length,
+            expected: desc.translations.Thai[0] });
+        source.push(desc);
+    }
+    if (process.env.SDEDITOR_PRODUCTION_FULL) { cases.splice(0, 2); source.splice(0, 2); }
     const zip = new (fromApi('jszip'))();
     for (const desc of source) zip.file(desc.filepath, codec.descEncode(desc), { createFolders: false });
-    const bytes = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
-    const upload = api.locals.content.createUpload('admin', { game: 'poe1', name: 'Online alignment fixture',
-        contentMode: 'statdescription', assignments: ['Thai'], idempotencyKey: randomUUID() });
-    await api.locals.content.receiveAsset(upload.upload.id, 'source', 'admin', Readable.from([bytes]), 'StatDescriptions.zip');
-    const published = await api.locals.content.finalize(upload.upload.id, 'admin', { idempotencyKey: randomUUID() });
+    const bytes = process.env.SDEDITOR_PRODUCTION_FULL ? readFileSync(process.env.SDEDITOR_PRODUCTION_ZIP)
+        : await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    let published;
+    if (process.env.SDEDITOR_ALIGNMENT_LEGACY) {
+        const versions = api.locals.versions;
+        const upload = versions.createUpload('admin', { game: 'poe1', name: 'Legacy online alignment fixture', idempotencyKey: randomUUID() });
+        await versions.receiveArchive(upload.upload.id, 'admin', Readable.from([bytes]));
+        versions.prepare(upload.upload.id, 'admin', {}); await versions.idle();
+        const version = versions.publish(upload.upload.id, 'admin', { expectedHeadId: null, overrideUnfinished: true, idempotencyKey: randomUUID() }).version;
+        published = { version, group: api.locals.content.groups(version.id, 'translator')[0] };
+    } else {
+        const upload = api.locals.content.createUpload('admin', { game: 'poe1', name: 'Online alignment fixture',
+            contentMode: 'statdescription', assignments: ['Thai'], idempotencyKey: randomUUID() });
+        await api.locals.content.receiveAsset(upload.upload.id, 'source', 'admin', Readable.from([bytes]), 'StatDescriptions.zip');
+        published = await api.locals.content.finalize(upload.upload.id, 'admin', { idempotencyKey: randomUUID() });
+    }
     const session = store.createSession('translator');
     let browser, page;
     const errors = [], requests = [];
@@ -83,7 +107,8 @@ async function run() {
         for (const [caseIndex, item] of cases.entries()) {
             await page.evaluate(() => { window.__onlineAlignmentApp.inlineEditor = true; });
             assert.equal(await page.evaluate(filepath => window.__onlineAlignmentApp.activateInlineRow(filepath), item.filepath), true);
-            assert.equal(await page.evaluate(filepath => window.__onlineAlignmentApp.openFileEntryAlignment(filepath), item.filepath), true);
+            const row = page.locator('tr[data-filepath="' + item.filepath + '"]');
+            await row.getByRole('button', { name: 'Align translation entries', exact: true }).click();
             const panel = page.getByRole('region', { name: 'Align translation entries', exact: true }); await panel.waitFor();
             for (let i = item.count; i < item.overflow; i++) await panel.locator('.entryAlignmentPool .entryAlignmentCard')
                 .filter({ has: page.getByRole('button', { name: 'Select block #' + (i + 1), exact: true }) })
@@ -94,7 +119,8 @@ async function run() {
             }
             await panel.getByRole('button', { name: 'Continue editing', exact: true }).click();
             const field = page.locator('.editor .edit [data-editor-ref="translation_0"]');
-            await field.waitFor(); await field.fill('{0} แก้ไขแล้ว');
+            await field.waitFor();
+            if (!item.expected) await field.fill('{0} แก้ไขแล้ว');
             await page.evaluate(() => {
                 const vm = window.__onlineAlignmentApp, save = vm._saveWorker.save.bind(vm._saveWorker);
                 const gate = window.__onlineAlignmentGate = { started: false };
@@ -105,12 +131,24 @@ async function run() {
                     return save(batch);
                 };
             });
+            if (item.expected) await page.evaluate(() => {
+                const vm = window.__onlineAlignmentApp, journal = vm.journalPendingSave;
+                // Let a fast rejection finish its review bookkeeping before
+                // the caller starts waiting on the now-empty queue.
+                vm.journalPendingSave = async function (...args) {
+                    const job = await journal.apply(this, args);
+                    while (this._pendingSaves.snapshot().jobs.some(item => item.id === job.id))
+                        await new Promise(resolve => setTimeout(resolve, 1));
+                    this.journalPendingSave = journal;
+                    return job;
+                };
+            });
             await page.getByRole('button', { name: 'Save & close', exact: true }).click();
             await page.waitForFunction(() => window.__onlineAlignmentGate.started);
             assert.equal(await page.evaluate(() => window.__onlineAlignmentApp.editorVisible), true,
                 'Aligned Save & close must keep the reviewed text open until the transaction acknowledges');
             assert.equal(await page.evaluate(() => window.__onlineAlignmentApp.editorSaving), true);
-            if (caseIndex === 1) {
+            if (caseIndex === 1 && !process.env.SDEDITOR_PRODUCTION_FULL) {
                 // Another tab accepts a team save after our submission was
                 // captured but before the worker validates its committed base.
                 await page.evaluate(async ({ filepath, count }) => {
@@ -128,8 +166,16 @@ async function run() {
                     } finally { peer.destroy(); }
                 }, item);
             }
+            if (item.expected) await page.evaluate(async original => {
+                const vm = window.__onlineAlignmentApp;
+                const record = await OfflineStore.getTranslationDraft(vm._draftSession.key);
+                const peer = { ...record, id: crypto.randomUUID(), revision: crypto.randomUUID(),
+                    translations: original.translations.Thai, updatedAt: Date.now() };
+                const result = await OfflineStore.putTranslationDraft(peer, { expectedRevision: null });
+                if (result.status !== 'conflict') throw new Error('Expected the other tab to retain a competing draft.');
+            }, source[caseIndex]);
             await page.evaluate(() => window.__onlineAlignmentGate.release());
-            if (caseIndex === 1) {
+            if (item.expected || caseIndex === 1 && !process.env.SDEDITOR_PRODUCTION_FULL) {
                 await page.waitForFunction(() => !window.__onlineAlignmentApp.editorSaving
                     && !window.__onlineAlignmentApp._pendingSaves.snapshot().jobs.length);
                 const retained = await page.evaluate(() => ({ open: window.__onlineAlignmentApp.editorVisible,
@@ -138,9 +184,17 @@ async function run() {
                     recovery: window.__onlineAlignmentApp._draftSession?.alignmentRecovery[0]?.translations }));
                 assert.equal(retained.open, true, 'A rejected online save must keep the aligned editor open');
                 assert.equal(retained.alignment, false, 'Reviewing the failed save must not repeat block alignment');
-                assert.equal(retained.text, '{0} แก้ไขแล้ว'); assert.deepEqual(retained.recovery, source[caseIndex].translations.Thai);
+                assert.equal(retained.text, item.expected || '{0} แก้ไขแล้ว'); assert.deepEqual(retained.recovery, source[caseIndex].translations.Thai);
+                if (item.expected) assert.equal(await page.evaluate(filepath => window.__onlineAlignmentApp.getDescByFilepath(filepath).isMissing, item.filepath), true,
+                    'The rejected production save leaves committed Error/Missing intact while keeping the aligned draft open');
                 await page.evaluate(() => window.__onlineAlignmentApp._collaboration.sync());
-                await page.getByRole('button', { name: 'Review draft', exact: true }).click();
+                if (item.expected) {
+                    await page.getByRole('button', { name: 'Review competing edits', exact: true }).click();
+                    const dialog = page.getByRole('dialog', { name: 'Retained edits', exact: true });
+                    await dialog.getByRole('navigation', { name: 'Retained edits', exact: true }).getByRole('button')
+                        .filter({ hasText: item.filepath }).first().click();
+                    await dialog.getByRole('button', { name: 'Review in editor', exact: true }).click();
+                } else await page.getByRole('button', { name: 'Review draft', exact: true }).click();
                 await page.getByRole('button', { name: 'Use translation', exact: true }).click();
                 await page.waitForFunction(() => !window.__onlineAlignmentApp.editorCompareActive && !window.__onlineAlignmentApp.draftWritePending);
                 assert.equal(await page.evaluate(() => !!window.__onlineAlignmentApp.entryAlignment), false);
@@ -157,13 +211,21 @@ async function run() {
                     pending: client.snapshot().pending, conflicts: client.snapshot().conflicts, error: vm.localSaveError,
                     notice: vm.collaborationNotice, findings: vm.inlineDraftFindings[filepath] };
             }, item.filepath);
-            assert.equal(result.committed[0], '{0} แก้ไขแล้ว', JSON.stringify(result));
+            assert.equal(result.committed[0], item.expected || '{0} แก้ไขแล้ว', JSON.stringify(result));
             assert.deepEqual(result.staged, result.committed); assert.deepEqual(result.shared.translations, result.committed);
             assert.equal(result.pending, 0, JSON.stringify(result)); assert.deepEqual(result.conflicts, []);
+            const rendered = await page.evaluate(filepath => {
+                const vm = window.__onlineAlignmentApp, row = vm.filteredDescs.find(row => row.filepath === filepath);
+                return row && { missing: row.isMissing, error: row.hasDiagnosticError, saved: row.hasChanges };
+            }, item.filepath);
+            assert.deepEqual(rendered, { missing: false, error: false, saved: true },
+                'The worklist must immediately display the committed save without Error/Missing or another alignment action');
+            assert.equal(await row.getByRole('button', { name: 'Align translation entries', exact: true }).count(), 0,
+                'The completed save no longer offers redundant alignment');
             const shared = api.locals.collaboration.snapshot(published.group.teams[0].roomId, 'translator');
-            assert.equal(shared.files.find(file => file.filepath === item.filepath)?.translations[0], '{0} แก้ไขแล้ว');
+            assert.equal(shared.files.find(file => file.filepath === item.filepath)?.translations[0], item.expected || '{0} แก้ไขแล้ว');
         }
-        assert.equal(requests.filter(request => request.status === 200).length, cases.length + 1, 'One peer save and two reviewed saves reached the API');
+        assert.equal(requests.filter(request => request.status === 200).length, cases.length + (cases.length > 1 ? 1 : 0), 'Reviewed saves reached the API');
         await page.reload(); await ready();
         await page.evaluate(async published => {
             const vm = window.__onlineAlignmentApp;
@@ -176,7 +238,7 @@ async function run() {
         for (const item of cases) {
             assert.notEqual(await page.evaluate(filepath => window.__onlineAlignmentApp.openInlineFullEditor(filepath), item.filepath), false);
             assert.deepEqual(await page.evaluate(() => ({ alignment: !!window.__onlineAlignmentApp.entryAlignment,
-                text: window.__onlineAlignmentApp.serializeEditorTranslations()[0] })), { alignment: false, text: '{0} แก้ไขแล้ว' });
+                text: window.__onlineAlignmentApp.serializeEditorTranslations()[0] })), { alignment: false, text: item.expected || '{0} แก้ไขแล้ว' });
             await page.getByRole('button', { name: 'Close', exact: true }).first().click();
         }
         assert.deepEqual(errors, []); console.log('PASS: online managed alignment, unused-first placement, edited text, delayed local acknowledgment, rejected peer-raced save retained without realignment, reviewed retry, real API acceptance and full reload.');
