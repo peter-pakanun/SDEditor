@@ -22,7 +22,8 @@
   // their local-only memory scope, restore readiness and original bindings.
   // No stores are removed and no authored records or retry bodies are rewritten.
   // v26 fences older writers before private SD MTL review acceptance joins atomic saves.
-  const DB_VERSION = 26;
+  // v27 fences writers unaware of private ClientText TM review candidates.
+  const DB_VERSION = 27;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
   const tmListeners = new Set();
@@ -236,11 +237,13 @@
         for (const name of ['clienttext_workspaces','clienttext_assets','clienttext_units','clienttext_saved',
           'clienttext_drafts','clienttext_history','clienttext_outbox','clienttext_receipts','clienttext_requests','clienttext_memory','clienttext_memory_history',
           'clienttext_original_caches','clienttext_original_assets','clienttext_original_units',
-          'clienttext_mtl_candidates','clienttext_mtl_reviews','clienttext_mtl_meta','clienttext_mtl_outbox','clienttext_mtl_receipts']) {
+          'clienttext_mtl_candidates','clienttext_mtl_reviews','clienttext_mtl_meta','clienttext_mtl_outbox','clienttext_mtl_receipts',
+          'clienttext_tm_candidates','clienttext_tm_reviews']) {
           const store = db.objectStoreNames.contains(name) ? req.transaction.objectStore(name) : db.createObjectStore(name, { keyPath:'key' });
           if (!store.indexNames.contains('by_scope')) store.createIndex('by_scope','scope');
+          if (['clienttext_mtl_candidates','clienttext_mtl_meta'].includes(name) && !store.indexNames.contains('by_scope_unit')) store.createIndex('by_scope_unit',['scope','value.unitId']);
           if (name === 'clienttext_workspaces' && !store.indexNames.contains('by_account')) store.createIndex('by_account','accountId');
-          if (['clienttext_history','clienttext_drafts','clienttext_outbox','clienttext_memory_history'].includes(name) && !store.indexNames.contains('by_unit')) store.createIndex('by_unit','unitKey');
+          if (['clienttext_history','clienttext_drafts','clienttext_outbox','clienttext_memory_history','clienttext_tm_candidates','clienttext_tm_reviews'].includes(name) && !store.indexNames.contains('by_unit')) store.createIndex('by_unit','unitKey');
         }
       };
       req.onsuccess = () => {

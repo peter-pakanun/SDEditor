@@ -5,7 +5,8 @@
     else root.ClientTextLocalStore = api;
 })(typeof window === 'object' ? window : globalThis, function (root) {
     'use strict';
-    const protocol = 'clienttext-local-v2';
+    const protocol = 'clienttext-local-v3';
+    const protocols = ['clienttext-local-v1','clienttext-local-v2',protocol];
     const state = () => root.ClientTextState;
     const core = () => root.ClientTextStore;
     const clone = value => state().copy(value);
@@ -61,6 +62,15 @@
             },
             listWorkspaces: (filter, options) => base.listWorkspaces(filter, options),
         };
+        if(root.ClientTextTmStore){
+            const tm=root.ClientTextTmStore.create();result.tm={};
+            const positions={list:0,get:1,getCandidate:1,putBatch:1,getReview:2,putReview:3,dismiss:1,listReviews:1,revalidate:1,putRecovery:3,listRecoveries:1};
+            for(const [method,position]of Object.entries(positions))result.tm[method]=(scope,...args)=>{
+                normalizeScope(scope);
+                if(['putBatch','putReview','dismiss','revalidate','putRecovery'].includes(method))args[position]=optionsFor(scope,args[position]);
+                return tm[method](scope,...args);
+            };
+        }
         for (const method of ['getMetadata','getUnits','getUnitsByIds','getUnit','getSaved','getAsset','putDraft','getDraft','getDraftSummaries','discardDraft','save','listHistory','seedMemory','getMemory']) {
             result[method] = (scope, ...args) => {
                 normalizeScope(scope);
@@ -76,7 +86,7 @@
         async function snapshot(scope) {
             normalizeScope(scope);
             const db = await root.OfflineStore.openClientTextDb(), id = identity(scope);
-            const labels = ['saved','drafts','history','receipts','memory','memoryHistory'];
+            const labels = ['saved','drafts','history','receipts','memory','memoryHistory','tmCandidates','tmReviews'];
             const tx = db.transaction(labels.map(label => core().stores[label]), 'readonly');
             const done = new Promise((resolve,reject) => {tx.oncomplete=resolve;tx.onabort=tx.onerror=()=>reject(tx.error || fail('Backup read failed.'));});
             const reads = labels.map(label => new Promise((resolve,reject) => {
@@ -93,7 +103,7 @@
                 // Each authored snapshot is one readonly transaction. Previous
                 // comparison reads never acquire/release an editor's ownership.
                 const metadata=await base.getMetadata(input), assets=[];
-                if(!metadata || !['clienttext-local-v1',protocol].includes(metadata.localProtocol))throw fail('Unsupported local workbook version. Its browser data is retained.');
+                if(!metadata || !protocols.includes(metadata.localProtocol))throw fail('Unsupported local workbook version. Its browser data is retained.');
                 for(const descriptor of metadata.descriptors) {
                     const asset=await base.getAsset(input,descriptor.role), path='originals/'+workspaces.length+'/'+descriptor.role+'.bin';
                     if(!(asset?.blob instanceof Blob))throw fail('The retained original workbook is unavailable. Browser data is retained.');
@@ -113,14 +123,14 @@
             if(!file || file._data?.uncompressedSize>128*1024*1024)throw fail('This is not a supported local workbook backup.');
             const manifestText=await file.async('string');if(manifestText.length>64*1024*1024)throw fail('Backup metadata exceeds the import limit.');
             const manifest=JSON.parse(manifestText);
-            if(!['clienttext-local-v1',protocol].includes(manifest.protocol) || !Array.isArray(manifest.workspaces) || !manifest.workspaces.length || manifest.workspaces.length>20)throw fail('Unsupported local backup format.');
+            if(!protocols.includes(manifest.protocol) || !Array.isArray(manifest.workspaces) || !manifest.workspaces.length || manifest.workspaces.length>20)throw fail('Unsupported local backup format.');
             const mapped=new Map(), prepared=[];
             for(const record of manifest.workspaces) {
                 const old=normalizeScope(record.scope), scope={...old,...owner,versionId:'local:test:'+root.crypto.randomUUID(),groupId:'local:test:'+root.crypto.randomUUID()};
                 if(old.game!==owner.game)throw fail('Select the backup’s game before restoring.');
                 const oldId=identity(old);if(mapped.has(oldId))throw fail('Duplicate workbook identity in backup.');mapped.set(oldId,scope);
                 core().validateLocalMetadata(old,record.metadata);
-                if(!['clienttext-local-v1',protocol].includes(record.metadata?.localProtocol) || !Array.isArray(record.assets) || !record.assets.length || record.assets.length>2)throw fail('Malformed backup metadata.');
+                if(!protocols.includes(record.metadata?.localProtocol) || !Array.isArray(record.assets) || !record.assets.length || record.assets.length>2)throw fail('Malformed backup metadata.');
                 const assets=[],units=[],roles=new Set();
                 for(const item of record.assets) {
                     if(!['normal','gender'].includes(item.role) || roles.has(item.role))throw fail('Duplicate or unsupported backup workbook role.');roles.add(item.role);
@@ -132,7 +142,7 @@
                 }
                 const built=await state().buildDescriptors(units,assets,options);
                 if(state().hash({descriptors:built.descriptors,unitCount:units.length})!==record.metadata.signature)throw fail('Backup parser identity differs from its original workbook.');
-                validateRows(record.rows,units);
+                validateRows(record.rows,units,manifest.protocol,built.descriptors);
                 prepared.push({record,scope,assets,units,built});
             }
             // Every package and authored row is checked before any workspace is
@@ -149,8 +159,9 @@
             }
             return prepared[0].scope;
         };
-        function validateRows(rows,units) {
+        function validateRows(rows,units,sourceProtocol,descriptors) {
             if(!rows || ['saved','drafts','history','receipts','memory','memoryHistory'].some(key=>!Array.isArray(rows[key])))throw fail('Malformed backup work records.');
+            if(sourceProtocol===protocol && ['tmCandidates','tmReviews'].some(label=>!Array.isArray(rows[label])))throw fail('Missing TM review recovery records.');
             const byId=new Map(units.map(unit=>[unit.id,unit]));
             const valid = (value, options = {}) => {
                 const unit=byId.get(value?.unitId);if(!unit || !Number.isSafeInteger(value.revision) || value.revision<0)throw fail('Invalid backup translation identity.');
@@ -167,10 +178,18 @@
             for(const row of rows.drafts)valid(row,{draft:true});
             for(const row of rows.history){if(typeof row.origin!=='string' || !row.after || !byId.has(row.unitId) || row.before && row.before.unitId!==row.unitId || row.after.unitId!==row.unitId)throw fail('Invalid backup history.');if(row.before)valid(row.before,{historical:true});valid(row.after,{historical:true});}
             for(const row of rows.receipts){if(row.unitId!==row.saved?.unitId)throw fail('Invalid backup receipt.');valid(row.saved);}
+            const candidates=new Map();
+            for(const input of rows.tmCandidates||[]){const candidate=root.ClientTextTmState.normalizeCandidate(input),unit=byId.get(candidate.unitId),field=unit?.fields.find(field=>field.id===candidate.fieldId),descriptor=descriptors?.find(value=>value.role===unit?.role);
+                if(candidates.has(candidate.id)||!field||candidate.role!==unit.role||candidate.source!==field.source||candidate.rawSourceHash!==root.ClientTextTmState.rawSourceHash(field.source)
+                    ||candidate.assetHash!==descriptor?.assetHash||candidate.parserVersion!==descriptor?.parserVersion)throw fail('Invalid TM candidate recovery identity.');candidates.set(candidate.id,candidate);}
+            const reviews=new Set();for(const input of rows.tmReviews||[]){const candidate=candidates.get(input.candidateId),unit=byId.get(input.unitId),field=unit?.fields.find(value=>value.id===input.fieldId),name=JSON.stringify([input.unitId,input.fieldId,input.recoveryId||(input.archived?input.candidateId:null)]);
+                if(!field||input.rawSourceHash!==root.ClientTextTmState.rawSourceHash(field.source)||reviews.has(name)||(!input.recoveryId&&(!candidate||candidate.unitId!==input.unitId||candidate.fieldId!==input.fieldId)))throw fail('Invalid TM review recovery identity.');
+                if(input.recoveryId)root.ClientTextTmStore.normalizeRecovery(input.unitId,input.fieldId,input,{recoveryId:input.recoveryId,editRevision:input.editRevision},null);
+                else root.ClientTextTmStore.normalizeReview(input.unitId,input.fieldId,input,null);reviews.add(name);}
         }
         async function restoreRows(scope,rows,mapped,options) {
             owned(scope);const db=await root.OfflineStore.openClientTextDb(),names=core().stores;
-            const labels=['saved','drafts','history','receipts'];
+            const labels=['saved','drafts','history','receipts','tmCandidates','tmReviews'];
             const tx=db.transaction([names.meta,...labels.map(key=>names[key])],'readwrite',{durability:'strict'});
             const done=new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onabort=tx.onerror=()=>reject(tx.error || fail('Restore transaction failed.'));});
             try {
@@ -178,14 +197,17 @@
                 const metadataRow=await new Promise((resolve,reject)=>{const req=tx.objectStore(names.meta).get(JSON.stringify([id,'meta']));req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});
                 if(!metadataRow)throw fail('Restore workspace metadata is missing. Stored data has been retained.');
                 core().validateLocalMetadata(scope,metadataRow.value);
-                for(const label of labels)for(const raw of rows[label]){
-                    const value=clone(raw),unitId=label==='history'?value.id:label==='receipts'?value.jobId:value.unitId;
+                for(const label of labels)for(const raw of rows[label]||[]){
+                    const value=clone(raw),unitId=label==='history'?value.id:label==='receipts'?value.jobId:label==='tmCandidates'?value.id:label==='tmReviews'?JSON.stringify(value.recoveryId?['recovery',value.unitId,value.fieldId,value.recoveryId]:value.archived?['archive',value.unitId,value.fieldId,value.candidateId]:[value.unitId,value.fieldId]):value.unitId;
                     if(label==='drafts' && value.mtlAcceptances){value.restoredMtlAcceptances=value.mtlAcceptances;delete value.mtlAcceptances;}
+                    if(label==='drafts' && value.tmAcceptances){value.restoredTmAcceptances=value.tmAcceptances;delete value.tmAcceptances;}
+                    if(label==='tmCandidates'){value.restored=true;}
+                    if(label==='tmReviews'){if(!value.recoveryId){value.acceptedDraft=false;value.matchId=null;delete value.previousDraft;}value.restored=true;}
                     // Rebind only local comparison references. Historical receipt
                     // bodies/signatures remain unchanged as recovery evidence.
                     const rebind=value=>{if(value?.provenance?.groupId){for(const [old,next]of mapped)if(JSON.parse(old)[4]===value.provenance.groupId)value.provenance.groupId=next.groupId;}};
                     if(label!=='receipts'){rebind(value);rebind(value.before);rebind(value.after);}
-                    tx.objectStore(names[label]).put({key:JSON.stringify([id,unitId]),scope:id,value,...(['drafts','history'].includes(label)?{unitKey:JSON.stringify([id,value.unitId])}:{})});
+                    tx.objectStore(names[label]).put({key:JSON.stringify([id,unitId]),scope:id,value,...(['drafts','history','tmCandidates','tmReviews'].includes(label)?{unitKey:JSON.stringify([id,value.unitId])}:{})});
                 }
                 metadataRow.value.localRestorePending=false;tx.objectStore(names.meta).put(metadataRow);
                 if(options.guard && !options.guard())tx.abort();

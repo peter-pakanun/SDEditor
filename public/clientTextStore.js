@@ -10,9 +10,11 @@
         saved: 'clienttext_saved', drafts: 'clienttext_drafts', history: 'clienttext_history',
         outbox: 'clienttext_outbox', receipts: 'clienttext_receipts', requests: 'clienttext_requests',
         memory: 'clienttext_memory', memoryHistory: 'clienttext_memory_history',
-        cacheMeta: 'clienttext_original_caches', cacheAssets: 'clienttext_original_assets', cacheUnits: 'clienttext_original_units' };
+        cacheMeta: 'clienttext_original_caches', cacheAssets: 'clienttext_original_assets', cacheUnits: 'clienttext_original_units',
+        tmCandidates:'clienttext_tm_candidates',tmReviews:'clienttext_tm_reviews' };
     const names = Object.values(stores), own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
     const mtlStorage = () => root.ClientTextMtlStore || (typeof require === 'function' ? require('./clientTextMtlStore.js') : null);
+    const tmStorage = () => root.ClientTextTmStore || (typeof require === 'function' ? require('./clientTextTmStore.js') : null);
     const copy = S.copy, key = (...values) => JSON.stringify(values);
     const request = req => new Promise((resolve, reject) => { req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
     const completed = tx => new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = tx.onerror = () => reject(tx.error || new Error('ClientText transaction aborted.')); });
@@ -28,14 +30,14 @@
     const pendingError = message => Object.assign(new Error(message),{code:'CLIENTTEXT_PENDING_RESOLUTION_REQUIRED'});
     const pendingChain = value => {const result=[];for(let item=value;item;item=item.predecessor)result.push(item);return result;};
     const blockedPending = value => pendingChain(value).some(item=>item.state==='rejected' || item.state==='conflict' && (!!item.englishActions || item.requiresResolution===true));
-    const LOCAL_PROTOCOL = 'clienttext-local-v2';
+    const LOCAL_PROTOCOL = 'clienttext-local-v2', LOCAL_TM_PROTOCOL='clienttext-local-v3';
     const scopeFromKey = id => Object.fromEntries(['accountId','game','branchId','versionId','groupId','language'].map((name,index)=>[name,JSON.parse(id)[index]]));
     const corrupt = message => Object.assign(new Error('Local workbook recovery data is invalid: ' + message + '. The stored data has been retained.'), {code:'CLIENTTEXT_LOCAL_INVALID'});
     function validateLocalProtocols(value) {
         // v1 is the first durable private format. Missing tags are not evidence
         // of an older compatible format; never infer or downgrade stored data.
-        if(!['clienttext-local-v1',LOCAL_PROTOCOL].includes(value?.localProtocol) || value?.storageProtocol!==S.STORAGE_PROTOCOL)
-            throw Object.assign(new Error('Unsupported or missing local workbook protocol. This editor supports '+LOCAL_PROTOCOL+' and '+S.STORAGE_PROTOCOL+'. Stored data has been retained. Open it with a compatible editor; do not clear browser data.'),{code:'CLIENTTEXT_LOCAL_PROTOCOL_UNSUPPORTED'});
+        if(!['clienttext-local-v1',LOCAL_PROTOCOL,LOCAL_TM_PROTOCOL].includes(value?.localProtocol) || value?.storageProtocol!==S.STORAGE_PROTOCOL)
+            throw Object.assign(new Error('Unsupported or missing local workbook protocol. This editor supports through '+LOCAL_TM_PROTOCOL+' and '+S.STORAGE_PROTOCOL+'. Stored data has been retained. Open it with a compatible editor; do not clear browser data.'),{code:'CLIENTTEXT_LOCAL_PROTOCOL_UNSUPPORTED'});
     }
     function validateLocalMetadata(scope, value) {
         if (!value || !isLocal(scope)) return value;
@@ -75,9 +77,10 @@
             const store = db.objectStoreNames.contains(name) ? tx.objectStore(name) : db.createObjectStore(name, { keyPath: 'key' });
             if (!store.indexNames.contains('by_scope')) store.createIndex('by_scope', 'scope');
             if (name === stores.meta && !store.indexNames.contains('by_account')) store.createIndex('by_account', 'accountId');
-            if ([stores.history,stores.drafts,stores.outbox,stores.memoryHistory].includes(name) && !store.indexNames.contains('by_unit')) store.createIndex('by_unit', 'unitKey');
+            if ([stores.history,stores.drafts,stores.outbox,stores.memoryHistory,stores.tmCandidates,stores.tmReviews].includes(name) && !store.indexNames.contains('by_unit')) store.createIndex('by_unit', 'unitKey');
         }
         mtlStorage()?.upgrade(db, tx);
+        tmStorage()?.upgrade(db, tx);
     }
     function create(dependencies = {}) {
         const getDb = dependencies.openDb || (() => {
@@ -739,7 +742,8 @@
                 if(isLocal(rawScope) && previous)validateLocalRecord(unit,previous,{draft:true});
                 if(own(options,'expectedRevision')&&(previous?.revision||null)!==options.expectedRevision)throw Object.assign(new Error('Another tab changed this ClientText draft.'),{code:'DRAFT_CHANGED'});
                 const draft={unitId,values,reviewed,revision:(previous?.revision||0)+1,updatedAt:Date.now(),
-                    ...(input.mtlAcceptances?.length ? {mtlAcceptances:copy(input.mtlAcceptances)} : {})};
+                    ...(input.mtlAcceptances?.length ? {mtlAcceptances:copy(input.mtlAcceptances)} : {}),
+                    ...(input.tmAcceptances?.length ? {tmAcceptances:copy(input.tmAcceptances)} : {})};
                 put(tx,stores.drafts,scope,unitId,draft,{unitKey:key(scope,unitId)});return draft;
             },options);
         }
@@ -775,13 +779,16 @@
                 ...(own(input,'englishEligibility')?{englishEligibility:copy(input.englishEligibility)}:{}),
                 ...(own(input,'pendingResolution')?{pendingResolution:copy(input.pendingResolution)}:{}),
                 ...(input.mtlAcceptances?.length ? {mtlAcceptances:copy(input.mtlAcceptances)} : {}),
+                ...(input.tmAcceptances?.length ? {tmAcceptances:copy(input.tmAcceptances)} : {}),
                 ...(own(input,'origin')?{origin:input.origin}:{}),
                 ...(own(input,'baseRevision')?{baseRevision:input.baseRevision}:{}),
                 ...(own(input,'expectedRevision')?{expectedRevision:input.expectedRevision}:{}),
                 ...(own(input,'expectedDraftRevision')?{expectedDraftRevision:input.expectedDraftRevision}:{})};
             const signature=S.hash(command);
             const mtl=input.mtlAcceptances?.length ? mtlStorage() : null;
-            return transaction([stores.meta,stores.cacheUnits,stores.saved,stores.drafts,stores.history,stores.outbox,stores.receipts,stores.memory,stores.memoryHistory,...(mtl?.names || [])],'readwrite',async tx=>{
+            const tm=input.tmAcceptances?.length ? tmStorage() : null;
+            if(tm&&input.mtlAcceptances?.some(claim=>input.tmAcceptances.some(other=>other.fieldId===claim.fieldId)))throw new TypeError('A field cannot accept TM and MTL suggestions in the same Save.');
+            return transaction([stores.meta,stores.cacheUnits,stores.saved,stores.drafts,stores.history,stores.outbox,stores.receipts,stores.memory,stores.memoryHistory,...(mtl?.names || []),...(tm?.names || [])],'readwrite',async tx=>{
                 await validateLocalWrite(tx,rawScope);
                 const receipt=await get(tx,stores.receipts,key(scope,input.jobId));
                 if(receipt){if(receipt.signature!==signature)throw Object.assign(new Error('ClientText job ID was reused for different content.'),{code:'SAVE_RECEIPT_MISMATCH'});if(isLocal(rawScope))validateLocalRecord(unit,receipt.saved);return {saved:receipt.saved,receipt,replayed:true};}
@@ -799,11 +806,13 @@
                 if(own(input,'expectedDraftRevision')&&(draft?.revision||null)!==input.expectedDraftRevision)throw Object.assign(new Error('Another tab changed this ClientText draft.'),{code:'DRAFT_CHANGED'});
                 if((own(input,'englishActions') || Object.keys(before?.englishIntent || before?.provenance?.englishIntent || {}).length) && input.intentProtocol!==S.ENGLISH_INTENT_PROTOCOL)throw new TypeError('Update the editor before changing work with Use English decisions.');
                 if(input.englishActions && input.mtlAcceptances?.length)throw new TypeError('Resolve the MTL candidate separately before using English.');
+                if(input.englishActions && input.tmAcceptances?.length)throw new TypeError('Resolve the TM suggestion separately before using English.');
                 const intent=S.applyEnglishActions(unit,before,values,input.englishActions,input.jobId,captured.scope.game);
-                if(isLocal(rawScope) && Object.keys(intent.englishIntent).length){currentMetadata.localProtocol=LOCAL_PROTOCOL;put(tx,stores.meta,scope,'meta',currentMetadata,{accountId:captured.scope.accountId});}
+                if(isLocal(rawScope) && Object.keys(intent.englishIntent).length){if(currentMetadata.localProtocol!==LOCAL_TM_PROTOCOL)currentMetadata.localProtocol=LOCAL_PROTOCOL;put(tx,stores.meta,scope,'meta',currentMetadata,{accountId:captured.scope.accountId});}
                 const policyOnly=!!input.englishActions && S.stableStringify(values)===S.stableStringify(S.valuesFor(unit,before));
                 const descriptor=metadata.descriptors.find(value=>value.role===unit.role);
                 const acceptedMtl=mtl ? await mtl.validateAcceptancesTx(tx,captured.scope,unit,input.mtlAcceptances,values,descriptor) : [];
+                const acceptedTm=tm ? await tm.validateAcceptancesTx(tx,captured.scope,unit,input.tmAcceptances,values,descriptor,S.valuesFor(unit,before)) : [];
                 if(acceptedMtl.length && ((input.origin||options.origin)==='restore' || acceptedMtl.some(claim=>({...before?.reviewed,...reviewed})[claim.fieldId]!==claim.candidate.sourceHash)))
                     throw Object.assign(new Error('MTL acceptance requires a normal Save reviewed against the current source.'),{code:'MTL_REVIEW_MISMATCH'});
                 const after={unitId,values,reviewed:{...before?.reviewed,...reviewed},saved:policyOnly?!!before && before.saved!==false:true,revision:(before?.revision||0)+1,
@@ -811,8 +820,10 @@
                     ...(before?.provenance?{provenance:{...copy(before.provenance),conflicts:[]}}:{}),
                     serverRevision:before?.serverRevision||input.baseRevision||0,baseRevision:before?.serverRevision||input.baseRevision||0,
                     savedAt:Date.now(),jobId:input.jobId,origin:input.origin||options.origin||'save',outdated:before?.outdated||[],
-                    ...(acceptedMtl.length ? {mtlAcceptances:copy(input.mtlAcceptances)} : {})};
+                    ...(acceptedMtl.length ? {mtlAcceptances:copy(input.mtlAcceptances)} : {}),
+                    ...(acceptedTm.length ? {tmAcceptances:copy(input.tmAcceptances)} : {})};
                 if(mtl)await mtl.resolveAcceptancesTx(tx,captured.scope,acceptedMtl,{jobId:input.jobId,now:after.savedAt});
+                if(tm)await tm.resolveAcceptancesTx(tx,captured.scope,acceptedTm,{jobId:input.jobId,now:after.savedAt});
                 put(tx,stores.saved,scope,unitId,after);
                 await learnMemory(tx,captured.scope,unit,after,input.jobId,after.origin);
                 put(tx,stores.history,scope,input.jobId,{id:input.jobId,unitId,before:before||null,after,origin:after.origin,createdAt:after.savedAt,...(Object.keys(intent.changes).length?{intentChanges:intent.changes}:{}),...(input.pendingResolution?{syncRecovery:{resolution:'reapply',operation:copy(priorPending),...(recoveryEditorValues?{editorBeforeValues:recoveryEditorValues}:{})}}:{})},{unitKey:key(scope,unitId)});

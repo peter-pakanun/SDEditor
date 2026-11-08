@@ -250,7 +250,21 @@ test('v4 to current storage upgrade preserves every KV record and revision store
   const { store } = loadStore(fixture);
   assert.deepEqual(await store.getSettings(), before[0][1].find(([key]) => key === 'settings')[1].value);
   assert.equal(fixture.version, CURRENT_STORAGE_VERSION); assert.equal(fixture.requests[0].version, CURRENT_STORAGE_VERSION);
-  assert.deepEqual(fixture.createdStores, ['sd_mtl', 'statdescription_zips', ...require('../public/clientTextStore.js').names, ...require('../public/clientTextMtlStore.js').names]); assert.deepEqual(fixture.snapshot(), before);
+  assert.deepEqual(fixture.createdStores.slice().sort(), ['sd_mtl', 'statdescription_zips', ...require('../public/clientTextStore.js').names, ...require('../public/clientTextMtlStore.js').names].sort()); assert.deepEqual(fixture.snapshot(), before);
+});
+
+test('v26 writers close before private TM review stores are added and existing workbook evidence is retained', async () => {
+  const fixture = versionedStorage(26);
+  for (const name of ['clienttext_saved','clienttext_drafts','clienttext_receipts','clienttext_mtl_reviews']) fixture.tables.set(name,new Map());
+  fixture.tables.get('clienttext_drafts').set('draft', { key:'draft',value:{values:{text:'Exact authored draft'},revision:3} });
+  fixture.tables.get('clienttext_receipts').set('receipt', { key:'receipt',value:{jobId:'old-job',signature:'exact-old-signature'} });
+  fixture.tables.get('clienttext_mtl_reviews').set('review', { key:'review',value:{text:'Edited MTL review',acceptedDraft:false} });
+  const before=fixture.snapshot(),older=await openVersion(fixture,26);older.onversionchange=()=>older.close();
+  await loadStore(fixture).store.getSettings();
+  assert.equal(fixture.version,CURRENT_STORAGE_VERSION);assert.equal(older.closed,true);assert.deepEqual(fixture.snapshot(),before);
+  for (const name of ['clienttext_tm_candidates','clienttext_tm_reviews']) assert.ok(fixture.tables.has(name));
+  await assert.rejects(openVersion(fixture,26),error=>error.name==='VersionError');
+  assert.throws(()=>older.transaction('clienttext_drafts','readwrite'),error=>error.name==='InvalidStateError');
 });
 
 test('v11 ClientText writers are fenced while original assets, work, history and retry evidence are retained', async () => {

@@ -6,6 +6,8 @@ function fixture(dependencies = {}) {
     const clone = value => value === undefined ? undefined : structuredClone(value);
     const keyRange={bound:(lower,upper,lowerOpen=false,upperOpen=false)=>({lower,upper,lowerOpen,upperOpen})};
     const matches=(id,query)=>query&&typeof query==='object'?(query.lowerOpen?id>query.lower:id>=query.lower)&&(query.upperOpen?id<query.upper:id<=query.upper):id===query;
+    const indexValue=(row,index)=>index==='by_scope_unit'?[row.scope,row.value?.unitId]:row[index==='by_scope'?'scope':index==='by_unit'?'unitKey':'accountId'];
+    const indexMatches=(row,index,value)=>index==='by_scope_unit'?JSON.stringify(indexValue(row,index))===JSON.stringify(value):indexValue(row,index)===value;
     const db = { objectStoreNames:{contains:name=>tables.has(name)},transaction(names,mode){
         const working = new Map(names.map(name=>[name,new Map([...tables.get(name)].map(([id,row])=>[id,clone(row)]))]));
         let pending=0,ended=false,timer;const writes=[];
@@ -18,9 +20,9 @@ function fixture(dependencies = {}) {
                 getAll:(query,count)=>run('getAll',{query,count},()=>[...working.get(name).values()].filter(row=>matches(row.key,query)).sort((a,b)=>a.key<b.key?-1:a.key>b.key?1:0).slice(0,count).map(clone)),
                 put:row=>run('put',row.key,()=>{if(mode!=='readwrite')throw new Error('Readonly write');working.get(name).set(row.key,clone(row));writes.push({name,key:row.key});return row.key;}),
                 delete:id=>run('delete',id,()=>{if(mode!=='readwrite')throw new Error('Readonly delete');working.get(name).delete(id);writes.push({name,key:id});}),
-                index:index=>({count:value=>run('index.count',value,()=>[...working.get(name).values()].filter(row=>row[index==='by_scope'?'scope':index==='by_unit'?'unitKey':'accountId']===value).length),
-                    getAll:value=>run('index.getAll',value,()=>[...working.get(name).values()].filter(row=>row[index==='by_scope'?'scope':index==='by_unit'?'unitKey':'accountId']===value).map(clone)),
-                    getAllKeys:value=>run('index.getAllKeys',value,()=>[...working.get(name).values()].filter(row=>row[index==='by_scope'?'scope':index==='by_unit'?'unitKey':'accountId']===value).map(row=>row.key))})};
+                index:index=>({count:value=>run('index.count',value,()=>[...working.get(name).values()].filter(row=>indexMatches(row,index,value)).length),
+                    getAll:value=>run('index.getAll',value,()=>[...working.get(name).values()].filter(row=>indexMatches(row,index,value)).map(clone)),
+                    getAllKeys:value=>run('index.getAllKeys',value,()=>[...working.get(name).values()].filter(row=>indexMatches(row,index,value)).map(row=>row.key))})};
         },abort(){if(ended)return;ended=true;clearImmediate(timer);queueMicrotask(()=>tx.onabort?.());}};
         function finish(){if(ended||pending)return;clearImmediate(timer);timer=setImmediate(()=>{if(ended||pending)return;ended=true;
             if(mode==='readwrite'){for(const[name,rows]of working)tables.set(name,rows);commits.push(writes);}tx.oncomplete?.();});}

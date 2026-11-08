@@ -50,11 +50,12 @@
                     get(_, property) {
                         if (typeof property !== 'string') return host.ctValues?.[property];
                         const field = host.ctCurrentUnit?.fields.find(field => field.id === property);
-                        return field ? host.ctMtlFieldValue(field) : host.ctValues?.[property];
+                        return field ? host.ctTmCandidate?.(field) ? host.ctTmFieldValue(field) : host.ctMtlFieldValue(field) : host.ctValues?.[property];
                     },
                     set(_, property, text) {
                         const field = host.ctCurrentUnit?.fields.find(field => field.id === property);
                         if (field && host.ctMtlBusy(field)) return true;
+                        if (field && host.ctTmEdited?.(field, String(text ?? ''))) return true;
                         if (!field || !host.ctMtlEdited(field, String(text ?? ''))) host.ctValues[property] = text;
                         return true;
                     },
@@ -432,6 +433,8 @@
                     this.ctDictionaryTarget?.(field.id)?.focus?.({ preventScroll: true });
             },
             ctMtlHint(field) {
+                if (this.ctTmBusy) return 'Wait for TM preparation to finish or stop it before requesting MTL.';
+                if (this.ctTmPendingCandidate?.(field) || this.ctTmAccepted?.(field)) return 'Accept and save, or dismiss, the TM suggestion before requesting MTL.';
                 if (this.ctMtlBusy(field)) return 'Generating MTL for this field';
                 if(this.ctMtlDismissBusyFor(field)||this.ctMtlPendingDismissal(field))return 'Finish the pending dismissal upload before requesting another translation.';
                 if (this.ctMtlPendingGeneration(field)) return 'Check the pending MTL request';
@@ -443,7 +446,8 @@
                 return 'MTL · Translate this field' + (this.mtlShortcut === 'f8' ? ' (F8)' : this.mtlShortcut === 'ctrl-alt-f8' ? ' (Ctrl+Alt+F8)' : '');
             },
             ctMtlCanGenerate(field) {
-                return visible(this) && this.ctActive && !this.ctBusy && !this.ctHistoryViewer && this.ctCurrentUnit?.fields.includes(field)
+                return visible(this) && this.ctActive && !this.ctBusy && !this.ctTmBusy && !this.ctHistoryViewer && this.ctCurrentUnit?.fields.includes(field)
+                    && !this.ctTmPendingCandidate?.(field) && !this.ctTmAccepted?.(field)
                     && M.eligible(field) && !this.ctMtlBusy(field) && permissions(this, this.ctContext())
                     && !this.ctMtlAccepted(field)&&!this.ctMtlDismissBusyFor(field)&&!this.ctMtlPendingDismissal(field)
                     && (this.ctMtlCapabilities === null || this.ctMtlCapabilities?.enabled === true || !!this.ctMtlPendingGeneration(field));
@@ -564,6 +568,15 @@
                     reviews[name] = { ...review, acceptedDraft: !!claim };
                 }
                 this.ctMtlReviews = reviews; this.ctMtlRevision++;
+            },
+            ctMtlReviewController(field) {
+                const opened = !!this.ctMtlCandidate(field), accepted = !!this.ctMtlAccepted(field);
+                return { sourceLabel: 'MTL', status: accepted ? 'Accepted draft · Save to apply' : 'Needs review', opened, accepted,
+                    busy: this.ctBusy || this.ctMtlBusy(field) || this.ctMtlDismissBusyFor(field),
+                    accept: () => this.ctMtlAccept(field), dismiss: () => this.ctMtlDismiss(field),
+                    show: () => this.ctMtlShow(field), undo: () => this.ctMtlUndoAccept(field),
+                    focus: event => this.ctMtlReviewFocus(field, event),
+                    recover: this.ctMtlRecoveryReviews(field).length ? () => this.ctMtlRecoverReview(field) : null };
             },
             async ctMtlShow(field) {
                 const candidate = this.ctMtlPendingCandidate(field); if (!candidate || this.ctBusy||this.ctHistoryViewer||this.ctMtlBusy(field)||this.ctMtlDismissBusyFor(field)) return false;

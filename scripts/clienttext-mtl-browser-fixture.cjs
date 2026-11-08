@@ -36,7 +36,7 @@ async function run(){
     const consentHtml=html.match(/<label class="settingsToggle"><input type="checkbox" v-model="mtlConsentVersion"[\s\S]*?<\/details>/)?.[0];
     assert.ok(consentHtml,'Actual Settings consent and privacy details are available');
     const styles=[...html.matchAll(/<link\b[^>]*rel="stylesheet"[^>]*href="([^"/:]+\.css)"[^>]*>/g)].map(match=>match[0].replace('href="','href="/')).join('\n');
-    const scripts=['workspaceState.js','dictionaryScope.js','dictionaryMatching.js','regexEngine.js','translationDiagnostics.js','translationMemory.js',
+    const scripts=['workspaceState.js','statDescCodec.js','dictionaryScope.js','dictionaryMatching.js','regexEngine.js','translationDiagnostics.js','translationMemory.js',
         'normalizedStore.js','normalizedRooms.js','offlineStore.js','clientTextState.js','contentAdapters.js','clientTextStore.js',
         'clientTextMtlState.js','clientTextMtlStore.js','clientTextMtlMemoryStore.js','clientTextMtlSync.js','clientTextMemoryStore.js',
         'vendor/fast-xml-parser-5.11.2.min.js','clientTextCodec.js','editorComponents.js','clientTextFormatting.js','clientTextComparisons.js',
@@ -145,6 +145,7 @@ const options={
 const vue=Vue.createApp(options);vue.directive('tooltip',{});
 vue.component('ct-fields',ClientTextUI.fieldsComponent);vue.component('ct-target',ClientTextUI.targetComponent);
 vue.component('editor-native-field',EditorComponents.NativeField);vue.component('editor-field-toolbar',EditorComponents.FieldToolbar);
+vue.component('editor-candidate-review',EditorComponents.CandidateReview);
 vue.component('editor-diagnostic-meta',EditorComponents.DiagnosticMeta);vue.component('app-notice',EditorComponents.Notice);
 vue.component('ct-mtl-debug-dialog',ClientTextMtlDebug.Dialog);
 vue.component('ct-mtl-progress',ClientTextMtlProgress.Overlay);

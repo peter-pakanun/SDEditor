@@ -463,9 +463,9 @@
                 }));return this._ctDiagnosticScanController;
             },
             ctStatusFilterOptions() {
-                const counts={...this.ctCounts,error:0,warning:0,draft:this.ctDraftCount,mtl:this.ctMtlCount || 0};
+                const counts={...this.ctCounts,error:0,warning:0,draft:this.ctDraftCount,mtl:this.ctMtlCount || 0,tm:this.ctTmCount || 0};
                 for(const issues of Object.values(this.ctDiagnostics))for(const severity of ['error','warning'])if(issues.some(issue=>issue.severity===severity))counts[severity]++;
-                return [...statusFilters,...(this.ctMtlVisible && counts.mtl ? [{key:'mtl',label:'MTL',tone:'mtl'}] : [])].map(item=>({...item,count:counts[item.key] || 0}));
+                return [...statusFilters,...(this.ctMtlVisible && counts.mtl ? [{key:'mtl',label:'MTL',tone:'mtl'}] : []),...(counts.tm ? [{key:'tm',label:'TM review',tone:'mtl'}] : [])].map(item=>({...item,count:counts[item.key] || 0}));
             },
             ctEffectivePageSize() { return Math.max(1,Math.floor(Number(this.pageSize || this.ctPageSize) || 20)); },
             ctRows() {
@@ -478,10 +478,10 @@
                     const status = this.ctStatus(unit);
                     if (this.ctFilter === 'error' || this.ctFilter === 'warning') {
                         if (!(this.ctDiagnostics[unit.id] || []).some(item => item.severity === this.ctFilter)) return false;
-                    } else if (this.ctFilter === 'mtl' ? !this.ctMtlUnitIds?.has(unit.id) : this.ctFilter === 'draft' ? !this.ctDraftUnitIds.has(unit.id) : this.ctFilter && !status[this.ctFilter]) return false;
+                    } else if (this.ctFilter === 'mtl' ? !this.ctMtlUnitIds?.has(unit.id) : this.ctFilter === 'tm' ? !this.ctTmUnitIds?.has(unit.id) : this.ctFilter === 'draft' ? !this.ctDraftUnitIds.has(unit.id) : this.ctFilter && !status[this.ctFilter]) return false;
                     if(!this.ctFilter && !this.ctSelectedFilters.some(key=>key==='error'||key==='warning'
                         ? (this.ctDiagnostics[unit.id] || []).some(issue=>issue.severity===key) : key==='draft'
-                            ? this.ctDraftUnitIds.has(unit.id) : key==='mtl' ? this.ctMtlUnitIds?.has(unit.id) : status[key]))return false;
+                            ? this.ctDraftUnitIds.has(unit.id) : key==='mtl' ? this.ctMtlUnitIds?.has(unit.id) : key==='tm' ? this.ctTmUnitIds?.has(unit.id) : status[key]))return false;
                     if (!query) return true;
                     const values = root.ClientTextState.valuesFor(unit, this.ctSaved[unit.id]);
                     return [unit.recordId, unit.sheet, ...fields.flatMap(field => [field.source, values[field.id]]), ...this.ctNotes(unit)].some(text => {
@@ -1322,7 +1322,7 @@
                     if(this._ctDraftRevision===revision){this._ctDraftRevision=null;const head=this._ctDraftHeads?.get(JSON.stringify([root.ClientTextStore.scopeKey(ctx.scope),unitId]));if(head&&!head.pending){head.revision=null;head.signature=null;}}
                     if(signature!==JSON.stringify([this.ctValues,this.ctReviewed])){this.ctQueueDraft();return false;}
                     this.ctValues=this.ctValuesFor(this.ctCurrentUnit);this.ctReviewed={...(this.ctSaved[unitId]?.reviewed || {})};
-                    this.ctMtlRestoreAcceptances?.(null);
+                    this.ctMtlRestoreAcceptances?.(null);this.ctTmRestoreAcceptances?.(null);
                     this.ctChoices=copy(this.ctSaved[unitId]?.conflicts || []);this.ctDraftDirty=false;this.ctDraftStageFailure=null;this.ctCloseCompletion();await this.ctRefreshDraftSummaries(ctx);return true;
                 } catch(error){if(this.ctCurrent(ctx))this.ctError='Draft was not discarded: '+error.message;return false;}
                 finally{if(this.ctCurrent(ctx))this.ctBusy=false;}
@@ -1436,7 +1436,7 @@
                 localFlush.finally(()=>releaseLocal?.()).catch(()=>{});
                 this.ctFlushCommentDraft().catch(()=>{});
                 this.ctFlushReplyCommentDrafts().catch(()=>{});
-                this.ctMtlReset?.();
+                this.ctMtlReset?.();this.ctTmReset?.();
                 this.ctClearResourceSync?.();
                 this.ctEndTestDictionary();
                 this._ctEpoch = (this._ctEpoch || 0) + 1; this._ctAbort?.abort(); clearInterval(this._ctSyncTimer); clearTimeout(this._ctDraftTimer);clearTimeout(this._ctSearchTimer);
@@ -1905,6 +1905,7 @@
                     },initialization);
                     await this.ctInitializationStep('Opening ClientText workspace',async()=>{
                     check();this.ctActive = true; this.versionChooserVisible = false; this.editorVisible = false;
+                    await this.ctTmActivate?.(ctx);check();
                     if(test){this._ctTestTool=this.ctTool;this._ctTestFilters=this.ctSelectedFilters.slice();this.ctSelectedFilters=[...statusFilters.map(item=>item.key),'mtl'];}
                     const memory=()=>{if(this.ctCurrent(ctx) && this.ctActive)return this.ctLoadMemory(ctx);};
                     if(this.queueWorkspaceBackground)this.queueWorkspaceBackground('clienttext-memory',memory);else setTimeout(memory,0);
@@ -2016,6 +2017,8 @@
                 if (draft?.values) { this.ctValues = { ...this.ctValues, ...draft.values }; this.ctReviewed = { ...this.ctReviewed, ...draft.reviewed }; this.ctDraftDirty = true;this.ctLocalDraftState='checkpointed'; }
                 await this.ctMtlLoadReviews?.(unit);if(!current())return false;
                 this.ctMtlRestoreAcceptances?.(draft);
+                await this.ctTmLoadReviews?.(unit,ctx);if(!current())return false;
+                this.ctTmRestoreAcceptances?.(draft);
                 this.ctInitializeVariants(unit);const displayed=this.ctDisplayedFields(unit);
                 this.ctFocusedField=this.ctTabFields(unit).find(field=>displayed.includes(field))?.id || '';
                 this.ctResetHistory(); this.ctComments = [];
@@ -2154,8 +2157,9 @@
                 const scrollTop=field.scrollTop;field.style.height='auto';field.style.height=field.scrollHeight+2+'px';field.scrollTop=scrollTop;
             },
             ctEdited(field) {
-                if(this.ctMtlCandidate?.(field))return;
+                if(this.ctMtlCandidate?.(field) || this.ctTmCandidate?.(field))return;
                 this.ctMtlUnderlyingEdited?.(field);
+                this.ctTmUnderlyingEdited?.(field);
                 this.ctReviewed[field.id] = this.ctReviewHash(field);
                 this.ctDraftStageFailure=null;this.ctDraftDirty = true; this.ctQueueDraft();
             },
@@ -2265,6 +2269,7 @@
                 if(this.ctHistoryViewer)return 'Close the history viewer before changing Use English.';
                 if(this.ctMtlBusy?.(field))return 'Wait for machine translation to finish or stop it before changing Use English.';
                 if(this.ctMtlCandidate?.(field))return 'Accept or dismiss the machine-translation candidate before changing Use English.';
+                if(this.ctTmPendingCandidate?.(field) || this.ctTmAccepted?.(field))return 'Accept and save, or dismiss, the TM suggestion before changing Use English.';
                 if(revoke)return this.ctEnglishDecision(field) && this.ctEnglishDecision(field).state!=='revoked' ? '' : 'There is no Use English decision to remove.';
                 return this.ctEnglishUnavailableReason(field) || (this.ctEnglishDraftEligible(field) ? '' : 'Use English is available only when the current translation is blank or exactly matches English. A different translation cannot be replaced by Eng.');
             },
@@ -2491,21 +2496,24 @@
             ctQueueDraft() { if(this.ctOfflineTest)this.ctLocalDraftState='pending';clearTimeout(this._ctDraftTimer); this._ctDraftTimer = setTimeout(() => this.ctFlushDraft(), this.ctOfflineTest?0:250); },
             async ctFlushDraft() {
                 clearTimeout(this._ctDraftTimer);
-                if (!this.ctDraftDirty || !this.ctCurrentUnit || !this.ctWorkspace) return true;
+                const reviewFlush=this.ctActive && this.ctWorkspace ? this.ctTmFlushReviews?.(this.ctContext()) : null;
+                reviewFlush?.catch(()=>{});
+                if (!this.ctDraftDirty || !this.ctCurrentUnit || !this.ctWorkspace) return reviewFlush ? await reviewFlush : true;
                 const ctx = this.ctContext(), unitId = this.ctSelection, values = copy(this.ctValues), reviewed = copy(this.ctReviewed);
                 const mtlAcceptances=this.ctMtlCheckpointAcceptances ? this.ctMtlCheckpointAcceptances(unitId,values) : this.ctMtlAcceptances?.(unitId,values) || [];
+                const tmAcceptances=this.ctTmCheckpointAcceptances?.(unitId,values) || [];
                 const store=this.ctStorage(ctx.scope);
                 const localLease=store.captureLease?.(ctx.scope);
                 const id=JSON.stringify([root.ClientTextStore.scopeKey(ctx.scope),unitId]),heads=this._ctDraftHeads ||= new Map();
                 let head=heads.get(id);
                 if(!head){head={revision:this._ctDraftRevision||null,pending:0,queue:Promise.resolve(),signature:null};heads.set(id,head);}
                 else if(!head.pending && head.revision!==(this._ctDraftRevision||null)){head.revision=this._ctDraftRevision||null;head.signature=null;}
-                const signature=JSON.stringify([values,reviewed,...(mtlAcceptances.length?[mtlAcceptances]:[])]);head.pending++;
+                const signature=JSON.stringify([values,reviewed,...(mtlAcceptances.length?[mtlAcceptances]:[]),...(tmAcceptances.length?[tmAcceptances]:[])]);head.pending++;
                 const attempt=head.attempts=(head.attempts || 0)+1;
                 try {
                     const pending = head.queue.catch(()=>{}).then(async()=>{
                         if(head.signature===signature)return;
-                        const saved = await store.putDraft(ctx.scope, unitId, { values, reviewed,...(mtlAcceptances.length?{mtlAcceptances}: {}) }, { expectedRevision: head.revision,...(localLease?{localLease}:{}) });
+                        const saved = await store.putDraft(ctx.scope, unitId, { values, reviewed,...(mtlAcceptances.length?{mtlAcceptances}: {}),...(tmAcceptances.length?{tmAcceptances}: {}) }, { expectedRevision: head.revision,...(localLease?{localLease}:{}) });
                         head.revision=saved.revision;head.signature=signature;
                         if(this.ctCurrent(ctx) && this.ctSelection===unitId){this._ctDraftRevision=saved.revision;this.ctRefreshDraftSummaries(ctx);}
                     });head.queue=pending;
@@ -2519,7 +2527,7 @@
                             this.ctCheckpointWarning=null;
                         }
                     }
-                    this.ctClearDraftStageFailure(ctx,unitId,signature,'checkpoint'); return true;
+                    this.ctClearDraftStageFailure(ctx,unitId,signature,'checkpoint'); return reviewFlush ? await reviewFlush : true;
                 }
                 catch (error) { if (this.ctCurrent(ctx)) {
                     this.ctLocalDraftState='failed';
@@ -2555,6 +2563,7 @@
                         ...(options.englishActions?{englishEligibility:this.ctEnglishWitness(options.englishActions)}:{}),
                         ...(options.pendingResolution?{pendingResolution:{...copy(options.pendingResolution),editorBeforeValues:copy(this.ctValues)}}:{}),
                         ...(this.ctMtlAcceptances?.(unitId)?.length ? {mtlAcceptances:copy(this.ctMtlAcceptances(unitId))} : {}),
+                        ...(this.ctTmAcceptances?.(unitId)?.length ? {tmAcceptances:copy(this.ctTmAcceptances(unitId))} : {}),
                         ...(options.origin ? {origin:options.origin}: {}) };
                     submittedSignature=JSON.stringify([command.values,command.reviewed]);
                     let result = await store.save(ctx.scope, unitId, command),receiptAdvanced=false;
@@ -2565,7 +2574,12 @@
                     if(command.pendingResolution)this.ctChoices=copy(result.saved.conflicts || []);
                     this.ctLocalDraftState=sameEditor?'stored':'pending';this.ctSaved = raw({ ...this.ctSaved, [unitId]: result.saved }); this.ctRevision++; this.ctDraftDirty = !sameEditor;if(!sameEditor)this.ctQueueDraft();this.ctClearDraftStageFailure(ctx,unitId,submittedSignature); if(this._ctSaveJob===job)this._ctSaveJob = null;
                     this._ctEditRevision=result.saved.revision;
-                    try{await this.ctMtlSaved?.(ctx,unitId);}catch(error){if(this.ctCurrent(ctx))this.ctMtlError='Saved, but MTL review state could not be refreshed: '+error.message;}
+                    const refreshReview=async method=>this[method]?.(ctx,unitId);
+                    const refreshed=await Promise.allSettled([refreshReview('ctMtlSaved'),refreshReview('ctTmSaved')]);
+                    if(this.ctCurrent(ctx)){
+                        if(refreshed[0].status==='rejected')this.ctMtlError='Saved, but MTL review state could not be refreshed: '+refreshed[0].reason.message;
+                        if(refreshed[1].status==='rejected')this.ctTmError='Saved, but TM review state could not be refreshed: '+refreshed[1].reason.message;
+                    }
                     if(!this.ctCurrent(ctx))return false;
                     const head=this._ctDraftHeads?.get(JSON.stringify([scopeKey,unitId]));
                     if(this._ctDraftRevision===command.expectedDraftRevision){this._ctDraftRevision=null;if(head&&!head.pending){head.revision=null;head.signature=null;}}
@@ -2602,7 +2616,7 @@
             ctHasEditorChanges() {
                 const unit=this.ctCurrentUnit;if(!unit)return false;
                 const committed=this.ctValuesFor(unit),saved=this.ctSaved[unit.id],status=this.ctStatus(unit);
-                return !!this._ctMtlAcceptanceClaims?.[unit.id]?.length || unit.fields.some(field=>this.ctValues[field.id]!==committed[field.id]
+                return !!this._ctMtlAcceptanceClaims?.[unit.id]?.length || !!this._ctTmClaims?.[unit.id]?.length || unit.fields.some(field=>this.ctValues[field.id]!==committed[field.id]
                     || status.fields[field.id]?.outdated && this.ctReviewed[field.id]===this.ctReviewHash(field) && saved?.reviewed?.[field.id]!==this.ctReviewed[field.id])
                     || !this.ctChoices.length && !!saved?.conflicts?.length;
             },
@@ -3830,7 +3844,7 @@
             field: {flush:'sync',handler() {this.genderMultilineLatched=this.genderMultilineRequired;}},
             genderMultilineRequired: {immediate:true,flush:'sync',handler(value) {if(value)this.genderMultilineLatched=true;}},
         }, template: `
-        <div class="ctTarget" :class="{missing:host.ctFieldStatus(field).missing,outdated:host.ctFieldStatus(field).outdated,mtl:!!host.ctMtlCandidate?.(field)}">
+        <div class="ctTarget" :class="{missing:host.ctFieldStatus(field).missing,outdated:host.ctFieldStatus(field).outdated,mtl:!!host.ctMtlCandidate?.(field),tm:!!host.ctTmCandidate?.(field)}">
             <label :for="'ctfield-'+field.targetCell" :class="{srOnly:field.kind === 'form' || (field.kind === 'gender' ? !compact : compact)}">{{ field.kind === 'gender' ? 'Gender' : field.kind === 'form' ? field.name+' '+host.ctClassVariantLabel(field) : (host.ctWorkspace?.scope.language || host.lang)+' translation' }} <small>{{ field.required ? '' : 'Optional' }}</small></label>
             <p v-if="field.kind !== 'gender' && !String(field.source || '').trim()" class="ctBlankSourceReview" role="note"><strong v-if="compact">{{ field.name }} · </strong>English is blank. Review or clear the translation, then Save. A blank translation is allowed.</p>
             <component :is="host.ctFieldToolbar ? 'editor-field-toolbar' : 'div'" :controller="host.ctFieldToolbar ? host.ctFieldToolbar(field,'translation') : undefined">
@@ -3841,7 +3855,8 @@
             <editor-native-field v-else :controller="host.ctFieldController(field)" kind="translation" :key="host.ctSelection+':'+field.id" :compact="compact"></editor-native-field>
             </component>
             <div v-if="host.ctMtlVisible && host.ctMtlPendingDismissal?.(field)" class="ctMtlReview ctMtlDismissal" data-inline-focus-surface role="status" @click.capture="host.ctMtlReviewFocus(field,$event)"><span>{{ host.ctMtlDismissalText(host.ctMtlPendingDismissal(field)) }}</span><small v-if="String(host.ctWorkspace?.scope?.groupId || '').startsWith('local:')">Keep this tab and workbook session open; closing or reloading loses unsent dismissal requests.</small><button type="button" @click="host.ctMtlRetryDismissals(host.ctMtlPendingDismissal(field))" :disabled="host.ctBusy">Retry dismissal upload</button></div>
-            <div v-if="host.ctMtlVisible && (host.ctMtlPendingCandidate?.(field) || host.ctMtlAccepted?.(field))" class="ctMtlReview" data-inline-focus-surface @click.capture="host.ctMtlReviewFocus(field,$event)"><span class="ctMtlDot" aria-hidden="true"></span><span>MTL · {{ host.ctMtlAccepted?.(field) ? 'Accepted draft · Save to apply' : 'Needs review' }}</span><template v-if="host.ctMtlCandidate?.(field)"><button type="button" @click="host.ctMtlAccept(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)" title="Use as a reviewed draft. Save applies this text.">Accept</button><button type="button" @click="host.ctMtlDismiss(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Dismiss</button><small>Save and export use the underlying translation until you accept this text.</small></template><template v-else-if="host.ctMtlAccepted?.(field)"><button type="button" @click="host.ctMtlUndoAccept(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field)">Undo accept</button></template><template v-else><button type="button" @click="host.ctMtlShow(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Review MTL</button><button type="button" @click="host.ctMtlDismiss(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Dismiss</button></template><button v-if="host.ctMtlRecoveryReviews?.(field)?.length" type="button" @click="host.ctMtlRecoverReview(field)" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || host.ctMtlDismissBusyFor?.(field)">Recover my review</button></div>
+            <editor-candidate-review v-if="host.ctMtlVisible && (host.ctMtlPendingCandidate?.(field) || host.ctMtlAccepted?.(field))" :controller="host.ctMtlReviewController(field)"></editor-candidate-review>
+            <editor-candidate-review v-if="host.ctTmPendingCandidate?.(field) || host.ctTmAccepted?.(field)" :controller="host.ctTmReviewController(field)"></editor-candidate-review>
             <div v-if="host.ctFieldStatus(field).missing || host.ctFieldStatus(field).outdated || diagnosticPresentation.warningCount || diagnosticPresentation.errorCount" class="ctFieldFacts fieldMeta"><span v-if="host.ctFieldStatus(field).missing">Missing</span><span v-if="host.ctFieldStatus(field).outdated">Outdated</span><span v-if="host.ctReviewed[field.id] === host.ctReviewHash(field) && host.ctFieldStatus(field).outdated">Reviewed</span><button v-if="host.ctFieldStatus(field).outdated && host.ctReviewed[field.id] !== host.ctReviewHash(field) && host.ctClassFallback(field)?.kind !== 'generic'" :disabled="host.ctBusy || host.ctMtlBusy?.(field) || !!host.ctMtlCandidate?.(field)" @click="host.ctMarkReviewed(field,$event)">Mark reviewed</button><editor-diagnostic-meta :presentation="diagnosticPresentation"></editor-diagnostic-meta></div>
             <div v-for="(issue,index) in diagnosticPresentation.notes" :key="index" :class="issue.kind === 'consistency' ? 'consistencyWarning' : 'terminologyWarning'" role="note">{{ issue.message }}</div>
         </div>` };

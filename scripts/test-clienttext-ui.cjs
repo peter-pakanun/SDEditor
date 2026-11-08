@@ -3659,6 +3659,21 @@ test('history restore preserves text typed while an earlier draft checkpoint is 
     app.ctValues[fieldId]='Newly typed text';held.resolve(true);
     assert.equal(await restoring,false);assert.equal(app.ctValues[fieldId],'Newly typed text');
 });
+test('Save clears both review acceptance claims before newer typing can checkpoint while review refreshes are pending',async()=>{
+    const {app,original}=harness(),entered=deferred(),commit=deferred(),refresh=deferred(),checkpoint=deferred();
+    app.ctValues[fieldId]='Submitted text';app.ctDraftDirty=true;app.ctFlushDraft=async()=>true;
+    app._ctMtlAcceptanceClaims={[original.id]:[{candidateId:'old-mtl'}]};app._ctTmClaims={[original.id]:[{candidateId:'old-tm'}]};
+    app._ctStore={async save(_scope,_id,command){entered.resolve();await commit.promise;return{saved:{unitId:original.id,values:clone(command.values),reviewed:{},saved:true,revision:1}};}};
+    app.ctMtlSaved=async()=>{delete app._ctMtlAcceptanceClaims[original.id];await refresh.promise;};
+    app.ctTmSaved=async()=>{delete app._ctTmClaims[original.id];await refresh.promise;};
+    app.ctQueueDraft=()=>setTimeout(()=>checkpoint.resolve({text:app.ctValues[fieldId],mtl:app._ctMtlAcceptanceClaims[original.id]||[],tm:app._ctTmClaims[original.id]||[]}),0);
+    app.ctSync=()=>{};app.ctLoadMemory=()=>{};app.ctRefreshDraftSummaries=()=>{};
+    const saving=app.ctSave();await entered.promise;app.ctValues[fieldId]='Newer typing';commit.resolve();
+    const captured=await checkpoint.promise;
+    assert.deepEqual(captured,{text:'Newer typing',mtl:[],tm:[]});
+    refresh.resolve();assert.equal(await saving,false);assert.equal(app.ctValues[fieldId],'Newer typing');
+});
+
 test('uncertain saves replay the exact receipt command and retain subsequently typed text',async()=>{
     const f=fixture();await f.store.import(scope,{units:[unit()],assets:[asset]});const {app,original}=harness();
     const commands=[];let fail=true;app._ctStore={...f.store,async save(captured,id,command){commands.push(clone(command));const result=await f.store.save(captured,id,command);if(fail){fail=false;throw new Error('Uncertain completion');}return result;}};

@@ -105,6 +105,14 @@
 .ctTable tr.isMissing > td { background-color:color-mix(in srgb,var(--ui-missing) 8%,transparent); }
 .ctTable tr.isMissing:nth-child(even) > td { background-color:color-mix(in srgb,var(--ui-missing) 12%,transparent); }
 .ctTable .ctRowNumber { width:76px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.ctRowSelect {display:flex;align-items:center;gap:7px;cursor:pointer;}
+.ctRowSelect input[type="checkbox"] {width:15px;height:15px;margin:0;flex:none;accent-color:var(--ui-accent,var(--color-link));}
+.ctTable tr[aria-selected="true"] > td {box-shadow:inset 0 1px color-mix(in srgb,var(--ui-accent,#7d8dcc) 65%,transparent),inset 0 -1px color-mix(in srgb,var(--ui-accent,#7d8dcc) 65%,transparent);}
+.ctBulkTmToolbar {display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;background:var(--color-element-alt);border-block:1px solid var(--ui-border);font-size:12px;}
+.ctBulkTmToolbar button {font:inherit;padding:4px 8px;}
+.ctBulkTmThreshold {color:var(--ui-muted);margin-right:auto;}
+.ctBulkTmProgress {display:flex;align-items:center;gap:8px;flex-basis:100%;}
+.ctBulkTmProgress progress {width:180px;max-width:30%;height:8px;}
 .ctPortraitStack { display:block; position:relative; container-type:inline-size; width:min(100%,480px,calc(160px * var(--ct-portrait-count))); height:180px; margin-top:12px; isolation:isolate; }
 .ctPortraitCards { display:flex; position:relative; align-items:flex-start; width:100%; }
 .ctPortrait { --ct-card-width:min(160px,100cqw); display:block; position:relative; flex:none; box-sizing:border-box; width:var(--ct-card-width); height:180px; overflow:hidden; border:1px solid var(--ui-border); border-radius:5px; background:var(--color-element-alt); }
@@ -224,6 +232,11 @@
 .ctMtlReview {display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;padding:5px 0;}
 .ctMtlReview small {flex-basis:100%;color:var(--ui-muted);}
 .ctMtlReview button {font-size:12px;padding:2px 7px;}
+.ctTmEvidence {flex-basis:100%;min-width:0;padding:8px;border:1px solid var(--ui-border);border-radius:4px;background:var(--color-element-alt);}
+.ctTmEvidence pre {margin:4px 0 8px;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;}
+.ctTmEvidence label {display:flex;gap:7px;align-items:center;flex-wrap:wrap;font-weight:600;}
+.ctTmEvidence select {max-width:100%;min-width:200px;background:var(--color-element);color:var(--color-font);font:inherit;border:1px solid var(--ui-border);padding:4px;}
+.ctTmEvidence small {display:block;}
 .ctToneButton {margin:5px 0 0 6px;padding:2px 7px;font-size:12px;}
 .ctToneWarning {color:var(--ui-warning);}
 .ctToneBackdrop {display:flex;align-items:center;justify-content:center;position:fixed;inset:0;padding:20px;background:#10182e80;z-index:10050;}

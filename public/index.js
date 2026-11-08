@@ -167,7 +167,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
   const config = Vue.defineComponent({
-  mixins: [window.PrivateMediaUI?.mixin || {}, window.PreviewFonts?.mixin || {}, window.ClientTextSkillCardUI?.mixin || {}, window.KeywordPopups?.mixin || {}, window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.ClientTextResourceSync?.mixin || {}, window.ClientTextMtlUI?.mixin || {}, window.ClientTextMtlSettingsUI?.mixin || {}, window.ClientTextToneNotesUI?.mixin || {}, window.ClientTextMtlDebug?.mixin || {}, window.MtlConnectionUI?.mixin || {}, window.MtlLimitsUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}, window.SDEditorTools?.mixin || {}],
+  mixins: [window.PrivateMediaUI?.mixin || {}, window.PreviewFonts?.mixin || {}, window.ClientTextSkillCardUI?.mixin || {}, window.KeywordPopups?.mixin || {}, window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.ClientTextResourceSync?.mixin || {}, window.ClientTextTmUI?.mixin || {}, window.ClientTextMtlUI?.mixin || {}, window.ClientTextMtlSettingsUI?.mixin || {}, window.ClientTextToneNotesUI?.mixin || {}, window.ClientTextMtlDebug?.mixin || {}, window.MtlConnectionUI?.mixin || {}, window.MtlLimitsUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}, window.SDEditorTools?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -8376,6 +8376,7 @@ if (window.EditorComponents?.Notice) app.component('app-notice', window.EditorCo
 if (window.EditorComponents?.NoticeStack) app.component('app-notice-stack', window.EditorComponents.NoticeStack);
 if (window.EditorComponents?.FullEditorShell) app.component('editor-full-shell', window.EditorComponents.FullEditorShell);
 if (window.EditorComponents?.DiagnosticMeta) app.component('editor-diagnostic-meta', window.EditorComponents.DiagnosticMeta);
+if (window.EditorComponents?.CandidateReview) app.component('editor-candidate-review', window.EditorComponents.CandidateReview);
 if (window.EditorComponents?.DiagnosticScan) app.component('editor-diagnostic-scan', window.EditorComponents.DiagnosticScan);
 if (window.EditorComponents?.AttentionNavigation) app.component('editor-attention-navigation', window.EditorComponents.AttentionNavigation);
 if (window.EntryAlignmentUI?.component) app.component('entry-alignment', window.EntryAlignmentUI.component);

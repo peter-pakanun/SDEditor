@@ -330,3 +330,66 @@ test('ClientText diagnostics and source diffs run only for the returned top matc
         assert.equal(diagnoses,20);assert.equal(diffs,20);
     }finally{S.diagnose=diagnose;TM.sourceDiff=diff;}
 });
+
+const batchView=match=>({id:match.id,source:match.source,target:match.target,score:match.score,kind:match.kind,
+    sameContext:match.sameContext,warnings:match.warnings,diff:match.diff});
+function referenceBest(rows,original,field,options,limit=20){
+    const matches=referenceMemory(rows,original,field,{...options,limit:100}),top=matches[0]?.score,seen=new Set(),result=[];
+    for(const match of matches)if(match.score===top&&!seen.has(match.target)){seen.add(match.target);result.push(match);}
+    return {matches:result.slice(0,limit).map(batchView),ambiguous:result.length>1,overflow:result.length>limit,score:top??null};
+}
+test('cooperative TM batches preserve exact, fuzzy, Unicode, game and form ranking with distinct-target ties',async()=>{
+    const original=unit('Sword {0}',''),base=A.clienttext.contextFor(original,original.fields[0]);
+    const contexts=[base,{...base,recordId:'another'}, {...base,fieldKind:'form',form:'MS'},
+        {...base,fieldKind:'form',form:'Normal Translation'}, {contentMode:'statdescription'}];
+    const sources=['Sword {0}','Swords {0}','Sword {1}','Shield','😀 sword','é','e\u0301','a\\nb','a\nb','a@b','[NOAUDIO] Sword {0}'];
+    let seed=8157;const random=count=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed%count;};
+    const rows=Array.from({length:84},(_,index)=>memoryRow(sources[random(sources.length)],index,{
+        context:contexts[random(contexts.length)],gameScope:['all','poe1','poe2'][random(3)],
+        target:['Literal@raw\\n\n','Translated {0}','NONEXISTENT',' '][random(4)],deleted:random(13)===0,
+        suppressed:random(17)===0,enabled:random(19)!==0}));
+    for(const game of ['poe1','poe2',undefined])for(const threshold of [0,60,75,99,100]){
+        const options={game,threshold},session=await A.clienttext.prepareMemoryBatch(rows,options);
+        for(const source of sources)for(const form of ['', 'MS','Normal Translation']){
+            const field={...original.fields[0],source,kind:form?'form':'text',name:form==='Normal Translation'?'Display Name':'Text',...(form?{form}:{})};
+            const result=await session.find(original,field,{limit:7});
+            assert.deepEqual({...result,matches:result.matches.map(batchView)},referenceBest(rows,original,field,options,7),JSON.stringify({game,threshold,source,form}));
+        }
+        session.dispose();
+    }
+});
+test('batch exact context lookup detects all tied translations beyond the visible result limit',async()=>{
+    const original=unit('Same English',''),field=original.fields[0],context=A.clienttext.contextFor(original,field);
+    const rows=Array.from({length:180},(_,index)=>memoryRow(field.source,index,{target:'Alternative '+index,context:{...context,recordId:'other-'+index}}));
+    const session=await A.clienttext.prepareMemoryBatch(rows,{game:'poe2',threshold:60}),result=await session.find(original,field,{limit:20});
+    assert.equal(result.matches.length,20);assert.equal(result.score,100);assert.equal(result.ambiguous,true);assert.equal(result.overflow,true);
+    assert.deepEqual(result.matches.map(batchView),referenceMemory(rows,original,field,{game:'poe2',threshold:60,limit:20}).map(batchView));
+    session.dispose();
+    rows.push(memoryRow(field.source,'context',{target:'Unambiguous contextual translation',context}));
+    const contextual=await A.clienttext.prepareMemoryBatch(rows,{game:'poe2',threshold:60}),best=await contextual.find(original,field);
+    assert.equal(best.matches.length,1);assert.equal(best.score,101);assert.equal(best.ambiguous,false);assert.equal(best.overflow,false);
+    assert.equal(best.matches[0].target,'Unambiguous contextual translation');contextual.dispose();
+});
+test('batch evidence is detached and frozen while replacement libraries require a new preparation',async()=>{
+    const original=unit('Sword',''),field=original.fields[0],rows=[memoryRow('Sword',0,{target:'Captured target'})];
+    const session=await A.clienttext.prepareMemoryBatch(rows,{game:'poe2',threshold:100});
+    rows[0].target='Later correction';rows[0].source='Shield';rows[0].context.recordId='Changed context';rows[0].deleted=true;rows.length=0;
+    const result=await session.find(original,field);assert.equal(result.matches[0].target,'Captured target');
+    assert.equal(result.matches[0].source,'Sword');assert.equal(result.matches[0].unit.context.recordId,'record-0');
+    assert.equal(Object.isFrozen(result.matches[0].unit),true);assert.equal(Object.isFrozen(result.matches[0].unit.context),true);
+    const replacement=await A.clienttext.prepareMemoryBatch(rows,{game:'poe2',threshold:100});assert.equal((await replacement.find(original,field)).matches.length,0);
+    session.dispose();replacement.dispose();
+});
+test('batch preparation and long fuzzy queries yield and cancel without returning late matches',async()=>{
+    const original=unit('a'.repeat(1800)+'b',''),field=original.fields[0],controller=new AbortController();let pauses=0,clock=0;
+    await assert.rejects(A.clienttext.prepareMemoryBatch(Array.from({length:100},(_,index)=>memoryRow('Source '+index,index)),{
+        signal:controller.signal,sliceMs:1,now:()=>++clock,yield:async()=>{pauses++;controller.abort();}}),{name:'AbortError'});
+    assert.equal(pauses,1);
+    let allowed=true,querying=false;pauses=0;clock=0;
+    const session=await A.clienttext.prepareMemoryBatch([memoryRow('b'+'a'.repeat(1800),0)],{
+        game:'poe2',threshold:0,sliceMs:1,now:()=>++clock,guard:()=>allowed,
+        yield:async()=>{pauses++;if(querying)allowed=false;}});
+    querying=true;const before=pauses;
+    await assert.rejects(session.find(original,field),{name:'AbortError'});assert.ok(pauses>before);
+    session.dispose();await assert.rejects(session.find(original,field),{name:'AbortError'});
+});

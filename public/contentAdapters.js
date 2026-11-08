@@ -230,12 +230,140 @@
             score,kind,sameContext,warnings:state.diagnose(field,candidate.target),
             ...(Memory?.sourceDiff?{diff:Memory.sourceDiff(candidate.source,field.source)}:{})}));
     }
+    // Bulk preparation owns a detached immutable library. Its exact/context
+    // maps are built once; each query visits only distinct compatible sources.
+    const memoryContext=context=>JSON.stringify([context?.sheet,context?.recordId,context?.fieldId]);
+    const memoryRowOrder=(left,right)=>String(left.unit.id).localeCompare(String(right.unit.id))||left.position-right.position;
+    function freezeMemory(value){
+        if(value&&typeof value==='object'&&!Object.isFrozen(value)){
+            for(const item of Object.values(value))freezeMemory(item);
+            Object.freeze(value);
+        }
+        return value;
+    }
+    function* memoryDistanceSteps(left,right,maximum){
+        if(Math.abs(left.length-right.length)>maximum)return maximum+1;
+        let previous=Array.from({length:right.length+1},(_,index)=>index),operations=0;
+        for(let row=1;row<=left.length;row++){
+            const next=Array(right.length+1).fill(maximum+1);next[0]=row;
+            let smallest=maximum+1;
+            for(let column=Math.max(1,row-maximum);column<=Math.min(right.length,row+maximum);column++){
+                next[column]=Math.min(previous[column]+1,next[column-1]+1,previous[column-1]+(left[row-1]===right[column-1]?0:1));
+                smallest=Math.min(smallest,next[column]);
+                if(++operations%2048===0)yield;
+            }
+            if(smallest>maximum)return maximum+1;
+            previous=next;yield;
+        }
+        return previous[right.length];
+    }
+    async function prepareMemoryBatch(input,options={}){
+        const state=runtime(),game=options.game,threshold=Math.max(0,Math.min(100,Number.isFinite(options.threshold)?options.threshold:75));
+        const originals=Array.isArray(input)?input.slice():Array.from(input||[]),kinds=new Map(),sources=new Map();
+        const pause=options.yield||(()=>new Promise(resolve=>setTimeout(resolve,0)));
+        const now=options.now||(()=>root.performance?.now?.()??Date.now()),sliceMs=Math.max(1,Math.min(16,Number(options.sliceMs)||4));
+        let disposed=false,sliceStarted=now();
+        const check=()=>{
+            if(disposed||options.signal?.aborted||options.guard&&!options.guard())
+                throw Object.assign(new Error('TM batch preparation was cancelled or its context changed.'),{name:'AbortError',stale:true});
+        };
+        async function consume(iterator){
+            check();
+            while(true){
+                const step=iterator.next();if(step.done){check();return step.value;}
+                if(now()-sliceStarted>=sliceMs){check();await pause();check();sliceStarted=now();}
+            }
+        }
+        function putBest(map,row){
+            const before=map.get(row.unit.target);
+            if(!before||memoryRowOrder(row,before)<0)map.set(row.unit.target,row);
+        }
+        function* prepare(){
+            for(let position=0;position<originals.length;position++){
+                const original=originals[position];
+                if(normalizeMode(original?.context?.contentMode)==='clienttext'&&!original.deleted&&!original.suppressed&&original.enabled!==false
+                    &&typeof original.target==='string'&&original.target.trim()&&(!game||original.gameScope===game||original.gameScope==='all')){
+                    const unit=freezeMemory(copy(original)),source=state.canonicalSource(unit.source);
+                    let data=sources.get(source);
+                    if(!data){const points=Array.from(fold(source));data={source,points,grams:memoryGrams(points)};sources.set(source,data);}
+                    const kind=memoryKind(unit.context);
+                    if(!kinds.has(kind))kinds.set(kind,new Map());
+                    const groups=kinds.get(kind);
+                    if(!groups.has(source))groups.set(source,{...data,targets:new Map(),contexts:new Map()});
+                    const group=groups.get(source),row={unit,position},context=memoryContext(unit.context);
+                    putBest(group.targets,row);
+                    if(!group.contexts.has(context))group.contexts.set(context,new Map());
+                    putBest(group.contexts.get(context),row);
+                }
+                if(position%256===255)options.onProgress?.({phase:'indexing',processed:position+1,total:originals.length});
+                yield;
+            }
+            options.onProgress?.({phase:'indexing',processed:originals.length,total:originals.length});
+        }
+        await consume(prepare());
+        // The caller's mutable array is no longer needed after detachment.
+        originals.length=0;
+        function* query(unit,field,queryOptions){
+            if(!field||field.kind==='gender'||state.audioOnly(field.source))return {matches:[],ambiguous:false,overflow:false,score:null};
+            const context=contextFor(unit,field),source=state.canonicalSource(field.source),groups=kinds.get(memoryKind(context));
+            if(!source.trim()||!groups)return {matches:[],ambiguous:false,overflow:false,score:null};
+            const limit=Math.max(1,Math.min(100,Math.floor(Number(queryOptions.limit)||20))),named=state.isNamedForm(field);
+            const left=Array.from(fold(source)),grams=memoryGrams(left),best=new Map(),seen=new Set();
+            let ranked=[],score=-1,overflow=false;
+            const eligible=row=>named||row.unit.target.trim()!=='NONEXISTENT';
+            const remember=(row,nextScore,exact)=>{
+                if(!eligible(row)||nextScore<score)return;
+                if(nextScore>score){score=nextScore;ranked=[];best.clear();seen.clear();overflow=false;}
+                if(seen.size<=limit){seen.add(row.unit.target);if(seen.size>limit)overflow=true;}
+                const previous=best.get(row.unit.target);
+                if(previous&&memoryRowOrder(previous,row)<=0)return;
+                if(previous){ranked.splice(ranked.indexOf(previous),1);best.delete(row.unit.target);}
+                if(ranked.length>=limit&&memoryRowOrder(row,ranked[ranked.length-1])>=0)return;
+                const value={...row,exact};let start=0,end=ranked.length;
+                while(start<end){const middle=(start+end)>>>1;if(memoryRowOrder(value,ranked[middle])<0)end=middle;else start=middle+1;}
+                ranked.splice(start,0,value);best.set(row.unit.target,value);
+                if(ranked.length>limit){const removed=ranked.pop();best.delete(removed.unit.target);}
+            };
+            const exact=groups.get(source);
+            if(exact){
+                const same=exact.contexts.get(memoryContext(context));
+                if(same)for(const row of same.values()){remember(row,101,true);yield;}
+                if(score<101)for(const row of exact.targets.values()){remember(row,100,true);yield;}
+            }
+            if(score<100&&threshold<100)for(const group of groups.values()){
+                if(group===exact)continue;
+                const cutoff=Math.max(threshold,score),maximum=Math.max(left.length,group.points.length),radius=Math.floor(maximum*(100-cutoff)/100);
+                if(Math.abs(left.length-group.points.length)>radius){yield;continue;}
+                let overlap=0,processed=0;
+                for(const [gram,value]of grams){overlap+=Math.min(value,group.grams.get(gram)||0);if(++processed%256===0)yield;}
+                if(Math.ceil((Math.max(left.length-1,group.points.length-1,0)-overlap)/2)>radius){yield;continue;}
+                const edits=yield* memoryDistanceSteps(left,group.points,radius);
+                const nextScore=Math.min(99,maximum?Math.floor(100*(maximum-edits)/maximum):0);
+                if(nextScore>=cutoff)for(const row of group.targets.values()){remember(row,nextScore,false);yield;}
+                yield;
+            }
+            const matches=[];
+            for(const row of ranked){
+                const candidate=row.unit,sameContext=['sheet','recordId','fieldId'].every(name=>candidate.context[name]===context[name]);
+                matches.push({id:candidate.id,unit:candidate,source:candidate.source,target:candidate.target,score,
+                    kind:row.exact?(sameContext?'context':'exact'):'fuzzy',sameContext,warnings:state.diagnose(field,candidate.target),
+                    ...(Memory?.sourceDiff?{diff:Memory.sourceDiff(candidate.source,field.source)}:{})});yield;
+            }
+            return {matches,ambiguous:overflow||seen.size>1,overflow,score:score<0?null:score};
+        }
+        return Object.freeze({
+            find(unit,field,queryOptions={}){
+                return consume(query({id:unit?.id,role:unit?.role,sheet:unit?.sheet,recordId:unit?.recordId},copy(field),queryOptions));
+            },
+            dispose(){disposed=true;kinds.clear();sources.clear();}
+        });
+    }
     const clienttext=Object.freeze({id:'clienttext',unitIdentity:unit=>unit.id,fields:unit=>unit.fields,
         values:(unit,saved)=>runtime().valuesFor(unit,saved),serialize:(unit,values)=>runtime().normalizeValues(unit,values),
         status:(unit,saved,options={})=>runtime().statusFor(unit,saved,options),
         history:(unit,saved)=>({unitId:unit.id,values:copy(runtime().valuesFor(unit,saved)),reviewed:copy(saved?.reviewed||{})}),
         diagnose:(unit,values,options={})=>unit.fields.flatMap(field=>runtime().englishIntentFor(field,options.saved,{game:options.game}) && !String(values[field.id] ?? '').trim()?[]:runtime().diagnose(field,values[field.id]).map(issue=>({...issue,fieldId:field.id}))),
-        contextFor,contextReferenceIndex,cachedContextReferenceIndex,referenceMetadata,memoryUnits,findMemory,compatibleContext,
+        contextFor,contextReferenceIndex,cachedContextReferenceIndex,referenceMetadata,memoryUnits,findMemory,prepareMemoryBatch,compatibleContext,
     });
     const statdescription=Object.freeze({id:'statdescription',unitIdentity:unit=>unit.filepath,
         fields:(unit,language)=> (unit.translations?.English||[]).map((source,index)=>({id:String(index),name:String(index+1),kind:'text',source,target:unit.translations?.[language]?.[index]||'',entryIndex:index})),

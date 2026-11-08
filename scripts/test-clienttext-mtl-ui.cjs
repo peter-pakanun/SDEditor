@@ -8,6 +8,21 @@ const {scope:baseScope,unit:makeUnit}=require('./clienttext-storage-fixture.cjs'
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};};
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
 const descriptor={role:'normal',assetHash:'a'.repeat(64),parserVersion:S.PARSER_VERSION};
+test('TM review shares the native input proxy without changing the underlying draft or starting MTL',()=>{
+    let review='TM suggestion {0}';
+    const {app,field}=harness({ctTmCandidate:()=>({id:'private-tm'}),ctTmFieldValue:()=>review,
+        ctTmEdited(_field,value){review=value;return true;},ctTmPendingCandidate:()=>({id:'private-tm'})});
+    const committed=app.ctValues[field.id];
+    assert.equal(app.ctInputValues[field.id],review);
+    app.ctInputValues[field.id]='Edited TM review {0}';
+    assert.equal(review,'Edited TM review {0}');assert.equal(app.ctValues[field.id],committed);assert.equal(app.ctDraftDirty,false);
+    assert.equal(app.ctMtlCanGenerate(field),false);assert.match(app.ctMtlHint(field),/TM suggestion/);
+    app.ctTmCandidate=()=>null;app.ctTmPendingCandidate=()=>null;
+    assert.equal(app.ctInputValues[field.id],committed);assert.equal(app.ctMtlCanGenerate(field),true);
+    app.ctTmBusy=true;assert.equal(app.ctMtlCanGenerate(field),false);assert.match(app.ctMtlHint(field),/TM preparation/);
+    app.ctTmBusy=false;assert.equal(app.ctMtlCanGenerate(field),true);
+});
+
 function harness(changes={}){
     const scope={...baseScope},original=makeUnit('Hello {0}','Confirmed {0}'),mtl=Memory.create();
     let epoch=0,ordinaryEdits=0;

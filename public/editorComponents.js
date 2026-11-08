@@ -973,5 +973,26 @@
       </section>
     </div>`
   };
-  global.EditorComponents = { Notice, NoticeStack, revealNotice, FieldToolbar, NativeField, TextField, WorkspaceShell, FullEditorShell, Preview: SharedPreview, Assistance, DictionaryEntries, TranslationMemory, Lookup, Comments, History, Tools, Autocomplete, DiagnosticMeta, DiagnosticScan, AttentionNavigation };
+  const CandidateReview = {
+    props: { controller: {type:Object,required:true} },
+    template: `<section class="ctMtlReview ctCandidateReview" :class="{ctTmReview:controller.sourceLabel==='TM'}" data-inline-focus-surface :aria-label="controller.sourceLabel+' suggestion review'" @click.capture="controller.focus?.($event)">
+      <span class="ctMtlDot" aria-hidden="true"></span><strong>{{ controller.sourceLabel }}<template v-if="controller.score != null"> · {{ controller.score }}%</template></strong><span>{{ controller.status }}</span>
+      <template v-if="controller.accepted"><button type="button" @click="controller.undo()" :disabled="controller.busy">Undo accept</button></template>
+      <template v-else-if="controller.opened"><button type="button" @click="controller.accept()" :disabled="controller.busy || controller.needsChoice || controller.stale || controller.validation?.valid===false" title="Use as a reviewed draft. Save applies this text.">Accept</button><button type="button" @click="controller.dismiss()" :disabled="controller.busy">Dismiss</button><small>Save and export use the underlying translation until you accept this text.</small></template>
+      <template v-else><button type="button" @click="controller.show()" :disabled="controller.busy">Review {{ controller.sourceLabel }}</button><button type="button" @click="controller.dismiss()" :disabled="controller.busy">Dismiss</button></template>
+      <button v-if="controller.recover" type="button" @click="controller.recover()" :disabled="controller.busy">Recover my review</button>
+      <div v-if="controller.sourceLabel==='TM' && !controller.accepted" class="ctTmEvidence">
+        <label v-if="controller.matches?.length>1">Choose translation<select :value="controller.selectedMatchId || ''" @change="controller.choose($event.target.value)" :disabled="controller.busy"><option disabled value="">Choose a tied TM translation…</option><option v-for="match in controller.matches" :key="match.id" :value="match.id">{{ match.target }}</option></select></label>
+        <small v-if="controller.needsChoice">Several equally ranked translations match. Choose one before accepting.</small>
+        <small v-if="controller.overflow" role="alert">Too many translations share the top score. Narrow the TM matches or translate this field manually.</small>
+        <template v-if="controller.rememberedSource"><strong>TM English · {{ controller.kind === 'context' ? 'Context match' : controller.kind === 'exact' ? 'Exact match' : 'Fuzzy match' }}</strong><pre lang="en"><template v-if="controller.diff?.oldSource?.length"><span v-for="(part,index) in controller.diff.oldSource" :key="index" :class="{diffInlineDel:part.changed}">{{ part.text }}</span></template><template v-else>{{ controller.rememberedSource }}</template></pre></template>
+        <strong>Current English</strong><pre lang="en"><template v-if="controller.diff?.currentSource?.length"><span v-for="(part,index) in controller.diff.currentSource" :key="index" :class="{diffInlineAdd:part.changed}">{{ part.text }}</span></template><template v-else>{{ controller.currentSource }}</template></pre>
+        <small v-if="controller.contextText">{{ controller.contextText }}</small>
+        <small v-if="controller.stale" role="alert">This suggestion or its field changed. Your review text is retained.<button type="button" v-if="controller.revalidate" @click="controller.revalidate()" :disabled="controller.busy">Review current match</button></small>
+        <small v-if="controller.error" role="alert">{{ controller.error }}</small>
+        <small v-for="(issue,index) in controller.validation?.errors || []" :key="index" role="alert">{{ issue.message || issue }}</small>
+      </div>
+    </section>`
+  };
+  global.EditorComponents = { Notice, NoticeStack, revealNotice, FieldToolbar, NativeField, TextField, WorkspaceShell, FullEditorShell, Preview: SharedPreview, Assistance, DictionaryEntries, TranslationMemory, Lookup, Comments, History, Tools, Autocomplete, DiagnosticMeta, DiagnosticScan, AttentionNavigation, CandidateReview };
 })(typeof window !== 'undefined' ? window : globalThis);

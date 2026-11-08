@@ -43,6 +43,7 @@
         for (const name of names) {
             const store = db.objectStoreNames.contains(name) ? tx.objectStore(name) : db.createObjectStore(name, { keyPath: 'key' });
             if (!store.indexNames.contains('by_scope')) store.createIndex('by_scope', 'scope');
+            if ([stores.candidates,stores.meta].includes(name) && !store.indexNames.contains('by_scope_unit')) store.createIndex('by_scope_unit',['scope','value.unitId']);
         }
     }
     function normalizeReview(unitId, fieldId, input, previous, now = Date.now()) {
@@ -209,8 +210,14 @@
         }
         async function putGeneration(rawScope, input, options) {
             const { id } = capture(rawScope, options), detached = S.copy(input);
-            return transaction([stores.meta], 'readwrite', async tx => {
+            return transaction([stores.meta,'clienttext_tm_candidates'], 'readwrite', async tx => {
                 const previous = await get(tx, stores.meta, id, key('generation', detached?.requestId)), next = normalizeGeneration(detached, previous);
+                if(!previous&&['pending','uncertain'].includes(next.status)){
+                    const proposals=(await request(tx.objectStore('clienttext_tm_candidates').index('by_unit').getAll(key(id,next.unitId)))).map(row=>row.value);
+                    if(proposals.some(candidate=>candidate.status==='pending'&&candidate.fieldId===next.fieldId&&candidate.assetHash===next.assetHash
+                        &&candidate.parserVersion===next.parserVersion&&M.rawSourceHash(candidate.source)===next.rawSourceHash))
+                        throw Object.assign(new Error('Review and save, or dismiss, the pending TM suggestion before requesting MTL.'),{code:'TM_REVIEW_PENDING'});
+                }
                 put(tx, stores.meta, id, key('generation', next.requestId), next); return next;
             }, options);
         }
