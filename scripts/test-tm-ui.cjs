@@ -5,6 +5,9 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { webcrypto } = require('node:crypto');
 const TM = require('../public/translationMemory.js');
+const ClientTextState = require('../public/clientTextState.js');
+const ContentAdapters = require('../public/contentAdapters.js');
+const { unit: clientTextUnit } = require('./clienttext-storage-fixture.cjs');
 
 const copy = value => JSON.parse(JSON.stringify(value));
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
@@ -41,6 +44,7 @@ function harness({ desc = description(), units = [], testMode = true, store = {}
   };
   const window = {
     TranslationMemory: TM, TranslationMemoryWorkerClient: { create: () => worker }, OfflineStore: store,
+    ClientTextState, ContentAdapters,
     WorkspaceState: { workspaceFile(workspace, baseline) { return workspace.states?.[baseline.filepath]
       || { staged: false, candidate: null, translations: baseline.translations.Thai || [] }; } },
   };
@@ -55,6 +59,8 @@ function harness({ desc = description(), units = [], testMode = true, store = {}
     editorCurrentEditingDesc: desc, editorBlocks: desc.translations.English.map((source, index) => editorBlock(source, desc.translations.Thai[index] || '')),
     descs: [desc], localDescs: {}, editorRegexes: [], sideTab: 'tm', _tmLoadEpoch: 0, _tmQueryEpoch: 0,
     tmUnits: units, tmGeneration: 1, _tmWorker: worker,
+    ctActive: false, ctUnits: [], ctSaved: {}, ctRevision: 0, ctBusy: false, ctOfflineTest: false, ctResourceSyncEnabled: false,
+    ctContext() { return { key: 'catalog', epoch: this._ctEpoch || 0, scope: copy(this.ctWorkspace?.scope || {}) }; },
     makeEditorBlock: editorBlock,
     serializeEditorTranslations() {
       return this.editorBlocks.map(block => (block.isTable ? block.tableColumns.map(column => column.translation).join('@') : block.translation).replace(/\r\n?/g, '\n').replace(/\n/g, '\\n'));
@@ -185,6 +191,180 @@ test('workspace seed is a reviewed selection; ZIP translations are opt-in and Dr
   assert.equal(app.tmSeedRows[1].restore, true); assert.ok(app.tmSeedRows.every(item => item.unit.source !== 'Dropped'));
   app.tmSeedIncludeZip = true; await app.previewTMSeed(); assert.equal(app.tmSeedRows.length, 4);
   assert.ok(app.tmSeedRows.some(item => item.unit.source === 'Original')); assert.equal(saved.translations.Thai[0], 'new correction');
+});
+
+function workbookUnit(recordId, source = 'Sword', target = 'ดาบ', fieldChanges = {}) {
+  const unit = clientTextUnit(source, target);
+  unit.recordId = recordId; unit.id = JSON.stringify([unit.role, unit.sheet, recordId]);
+  Object.assign(unit.fields[0], fieldChanges);
+  return unit;
+}
+function workbookHarness(units, options = {}) {
+  const result = harness(options), app = result.app;
+  Object.assign(app, { descs: [], ctActive: true, ctOfflineTest: true, ctResourceSyncEnabled: true,
+    ctUnits: units, ctSaved: {}, ctRevision: 1, gameVersion: 'poe2', editorReady: false,
+    ctWorkspace: { scope: { accountId: 'guest', game: 'poe2', branchId: 'default', versionId: 'private-1',
+      groupId: 'local:test:workbook-1', language: 'Thai' }, metadata: { syncResources: true } } });
+  return result;
+}
+
+test('workbook seeding is available without SD files and original workbook translations require opt-in', async () => {
+  const original = workbookUnit('original', 'Literal @ \\n {0}', 'ข้อความ @ \\n {0}');
+  const { app } = workbookHarness([original]);
+  assert.equal(app.tmCanBuildSeed, true); assert.equal(app.tmSeedIncludeZip, false);
+  await app.previewTMSeed(); assert.equal(app.tmSeedVisible, true); assert.equal(app.tmSeedRows.length, 0);
+  app.tmSeedIncludeZip = true; await app.previewTMSeed();
+  assert.equal(app.tmSeedRows.length, 1);
+  const candidate = app.tmSeedRows[0].unit;
+  assert.equal(candidate.source, original.fields[0].source); assert.equal(candidate.target, original.fields[0].target);
+  assert.equal(candidate.context.contentMode, 'clienttext'); assert.equal(candidate.context.recordId, 'original');
+  assert.equal(candidate.context.fieldId, original.fields[0].id); assert.equal(candidate.gameScope, 'poe2');
+  assert.equal(JSON.stringify(candidate).includes('local:test:'), false, 'private workbook identities never become TM provenance');
+  await app.applyTMSeed(); assert.equal(app.tmUnits.length, 1);
+  assert.deepEqual(app.ctSaved, {}); assert.equal(original.fields[0].target, 'ข้อความ @ \\n {0}');
+});
+
+test('workbook seeding reads committed saves while drafts and unsaved originals stay outside the default preview', async () => {
+  const saved = workbookUnit('saved', 'Sword', 'Original sword'), untouched = workbookUnit('untouched', 'Shield', 'Original shield');
+  const { app } = workbookHarness([saved, untouched]);
+  const fieldId = saved.fields[0].id;
+  app.ctSaved = { [saved.id]: { saved: true, values: { [fieldId]: 'Committed sword' }, reviewed: {}, jobId: 'confirmed-save' } };
+  app.ctValues = { [fieldId]: 'Unsaved draft sword' }; app.ctSelection = saved.id; app.ctDraftDirty = true;
+  const before = copy(app.ctSaved);
+  await app.previewTMSeed();
+  assert.equal(app.tmSeedRows.length, 1); assert.equal(app.tmSeedRows[0].unit.target, 'Committed sword');
+  assert.equal(app.tmSeedRows[0].unit.provenance.origin, 'saved_seed');
+  assert.equal(app.tmSeedRows[0].selected, true); assert.deepEqual(app.ctSaved, before);
+  await app.applyTMSeed();
+  assert.equal(app.ctValues[fieldId], 'Unsaved draft sword'); assert.equal(app.ctDraftDirty, true);
+  assert.deepEqual(app.ctSaved, before); assert.equal(app.tmUnits[0].target, 'Committed sword');
+});
+
+test('workbook seed skips invalid, gender, outdated, unresolved and Use English fields', async () => {
+  const eligible = workbookUnit('good', 'Sword', 'ดาบ');
+  const fixtures = [eligible,
+    workbookUnit('blank-target', 'Blank target', ''), workbookUnit('blank-source', '', 'Target'),
+    workbookUnit('gender', 'M', 'F', { kind: 'gender' }),
+    workbookUnit('audio', '[NOAUDIO]', 'Marker translation'),
+    workbookUnit('invalid', 'Value {0}', 'Value {1}'),
+    workbookUnit('nonexistent', 'Ordinary text', 'NONEXISTENT'),
+    workbookUnit('dnt', 'lowercase dnt text', 'Excluded instruction'),
+    workbookUnit('outdated-original', 'Changed source', 'Old target', { outdated: true }),
+    workbookUnit('outdated-save', 'Changed saved source', 'Old saved target', { outdated: true }),
+    workbookUnit('conflict', 'Conflicting source', 'Target'),
+    workbookUnit('english', 'English decision source', '')];
+  const { app } = workbookHarness(fixtures); app.tmSeedIncludeZip = true;
+  const fieldId = fixtures[0].fields[0].id;
+  for (const unit of fixtures.slice(-3)) app.ctSaved[unit.id] = { saved: true, values: ClientTextState.valuesFor(unit), reviewed: {} };
+  app.ctSaved[fixtures.at(-2).id].conflicts = [{ fieldId, reason: 'unresolved' }];
+  const english = fixtures.at(-1);
+  app.ctSaved[english.id].englishIntent = { [fieldId]: { state: 'active', sourceHash: ClientTextState.sourceHash(english.fields[0].source), decisionId: 'local-decision' } };
+  await app.previewTMSeed();
+  assert.deepEqual(copy(app.tmSeedRows.map(row => row.unit.context.recordId)), ['good']);
+  assert.equal(JSON.stringify(app.tmSeedRows).includes('local-decision'), false);
+});
+
+test('workbook additions are selected while corrections and suppressed entries need explicit review', async () => {
+  const correction = workbookUnit('correction', 'Sword', 'Corrected sword'), restore = workbookUnit('restore', 'Shield', 'Restored shield');
+  const addition = workbookUnit('addition', 'Helmet', 'New helmet');
+  const entry = unit => ContentAdapters.clienttext.memoryUnits(unit, ClientTextState.valuesFor(unit), 'Thai', { game: 'poe2' })[0];
+  const current = { ...entry(correction), id: 'existing', target: 'Previous sword', revision: 3, localRevision: 1 };
+  const deleted = { ...entry(restore), id: 'deleted', target: 'Previous shield', deleted: true, revision: 4, localRevision: 2 };
+  const { app } = workbookHarness([correction, restore, addition], { units: [current] });
+  app.tmTombstones = [deleted]; app.tmSeedIncludeZip = true;
+  await app.previewTMSeed();
+  assert.deepEqual(copy(app.tmSeedRows.map(row => [row.unit.id, row.selected, row.restore])), [
+    ['existing', false, false], ['deleted', false, true], [entry(addition).id, true, false] ]);
+  await app.applyTMSeed();
+  assert.equal(app.tmUnits.find(unit => unit.id === 'existing').target, 'Previous sword');
+  assert.equal(app.tmTombstones[0].id, 'deleted');
+  await app.previewTMSeed(); assert.equal(app.tmSeedRows.length, 2);
+  app.tmSeedRows.forEach(row => { row.selected = true; }); await app.applyTMSeed();
+  assert.equal(app.tmUnits.find(unit => unit.id === 'existing').target, 'Corrected sword');
+  assert.equal(app.tmUnits.find(unit => unit.id === 'deleted').target, 'Restored shield');
+});
+
+test('workbook form pairs retain separate identities beside the existing StatDescription TM', async () => {
+  const forms = workbookUnit('forms', 'Sword', 'ดาบ');
+  forms.role = 'gender'; forms.id = JSON.stringify([forms.role, forms.sheet, forms.recordId]);
+  forms.fields = ['Normal Translation', 'Possessive Translation'].map((form, index) => ({
+    ...forms.fields[0], id: JSON.stringify(['Display Name', form]), name: 'Display Name', kind: 'form', form,
+    target: index ? 'ของดาบ' : 'ดาบ' }));
+  const sd = row('stat-entry', 'Sword', 'Existing stat translation', null, { gameScope: 'poe2' });
+  const { app } = workbookHarness([forms], { units: [sd] }); app.tmSeedIncludeZip = true;
+  await app.previewTMSeed(); assert.equal(app.tmSeedRows.length, 2);
+  assert.equal(new Set(app.tmSeedRows.map(row => TM.identityFor(row.unit))).size, 2);
+  assert.deepEqual(copy(app.tmSeedRows.map(row => row.unit.context.form)), ['Normal Translation', 'Possessive Translation']);
+  assert.ok(app.tmSeedRows.every(row => row.selected && row.unit.context.role === 'gender'));
+  await app.applyTMSeed(); assert.equal(app.tmUnits.length, 3);
+  assert.equal(app.tmUnits.find(unit => unit.id === 'stat-entry').target, sd.target);
+  assert.ok(app.tmUnits.filter(unit => unit.id !== 'stat-entry').every(unit => unit.context.contentMode === 'clienttext'));
+});
+
+test('workbook source marker changes remap a colliding generated ID without replacing active or deleted raw-source entries', async () => {
+  const previous = workbookUnit('same-record', '[NOAUDIO] Hello', 'Previous translation');
+  const incoming = workbookUnit('same-record', 'Hello', 'Current translation');
+  const memory = unit => ContentAdapters.clienttext.memoryUnits(unit, ClientTextState.valuesFor(unit), 'Thai', { game: 'poe2' })[0];
+  const oldEntry = { ...memory(previous), revision: 2, localRevision: 3 }, generated = memory(incoming);
+  assert.equal(oldEntry.id, generated.id, 'canonical audio markers produce the same generated ID');
+  assert.notEqual(TM.identityFor(oldEntry), TM.identityFor(generated), 'raw-source identities remain different');
+  for (const deleted of [false, true]) {
+    const retained = { ...oldEntry, ...(deleted ? { deleted: true } : {}) };
+    const { app } = workbookHarness([incoming], { units: deleted ? [] : [retained] });
+    if (deleted) app.tmTombstones = [retained];
+    app.tmSeedIncludeZip = true; await app.previewTMSeed();
+    assert.equal(app.tmSeedRows.length, 1);
+    const candidate = app.tmSeedRows[0];
+    assert.notEqual(candidate.unit.id, oldEntry.id); assert.equal(candidate.selected, true);
+    assert.equal(candidate.existing, null); assert.equal(candidate.restore, false);
+    await app.applyTMSeed();
+    const added = app.tmUnits.find(unit => unit.source === incoming.fields[0].source);
+    assert.ok(added); assert.equal(added.target, 'Current translation'); assert.equal(added.id, candidate.unit.id);
+    if (deleted) {
+      assert.equal(app.tmUnits.length, 1); assert.deepEqual(copy(app.tmTombstones), [retained]);
+    } else {
+      assert.equal(app.tmUnits.length, 2);
+      assert.deepEqual(copy(app.tmUnits.find(unit => unit.id === oldEntry.id)), retained);
+    }
+  }
+});
+
+test('private workbook builds require resource authorization and a settled save', async () => {
+  for (const change of [app => { app.ctResourceSyncEnabled = false; }, app => { app.ctBusy = true; }, app => { app._ctSaveJob = { jobId: 'pending' }; }]) {
+    const { app } = workbookHarness([workbookUnit('private')]); app.tmSeedIncludeZip = true; change(app);
+    assert.equal(app.tmCanBuildSeed, false); await app.previewTMSeed();
+    assert.equal(app.tmSeedVisible, false); assert.equal(app.tmSeedRows.length, 0); assert.equal(app.tmUnits.length, 0);
+  }
+});
+
+test('workbook preview and reviewed application stop after workspace, save, permission or account changes', async () => {
+  const changes = [app => { app.ctWorkspace.scope.groupId = 'local:test:another'; },
+    app => { app._ctEpoch = 1; }, app => { app.ctRevision++; }, app => { app.ctResourceSyncEnabled = false; },
+    app => { app.cloudProfileId = 'another-account'; }, app => { app.lang = 'German'; }, app => { app.ctActive = false; }];
+  for (const change of changes) {
+    const first = workbookHarness([workbookUnit('source')]), wait = deferred();
+    first.app.tmSeedIncludeZip = true; first.app.waitForPendingSaves = () => wait.promise;
+    const pending = first.app.previewTMSeed(); change(first.app); wait.resolve(true); await pending;
+    assert.equal(first.app.tmSeedVisible, false); assert.equal(first.app.tmSeedRows.length, 0);
+    const second = workbookHarness([workbookUnit('source')]); second.app.tmSeedIncludeZip = true;
+    await second.app.previewTMSeed(); assert.equal(second.app.tmSeedRows.length, 1);
+    change(second.app); await second.app.applyTMSeed(); assert.equal(second.app.tmUnits.length, 0);
+  }
+});
+
+test('durable workbook seed rechecks its captured workspace and permission before storage commit', async () => {
+  const started = deferred(), release = deferred(); let committed = false;
+  const store = { getTranslationMemory: async () => ({ units: [], tombstones: [], conflicts: [] }),
+    async putTranslationMemoryUnits(scope, units, options) {
+      assert.deepEqual(copy(scope), { profile: 'guest', language: 'Thai' });
+      assert.equal(options.guard(), true); started.resolve(); await release.promise;
+      if (!options.guard()) throw Object.assign(new Error('Scope changed'), { stale: true });
+      committed = true;
+    } };
+  const { app } = workbookHarness([workbookUnit('source')], { testMode: false, store }); app.tmSeedIncludeZip = true;
+  await app.previewTMSeed(); const pending = app.applyTMSeed(); await started.promise;
+  app.ctResourceSyncEnabled = false; release.resolve(); await pending;
+  assert.equal(committed, false); assert.equal(app.tmUnits.length, 0);
 });
 
 test('JSON import previews additions/corrections/restores, skips incompatible pairs and rejects duplicate identities', async () => {

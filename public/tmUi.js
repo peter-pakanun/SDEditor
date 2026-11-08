@@ -38,6 +38,9 @@
       tmVisibleDeletedRows() { const page = Math.min(this.tmDeletedPage, this.tmDeletedPageCount); return this.tmDeletedRows.slice((page - 1) * 40, page * 40); },
       tmVisibleSeedRows() { return this.tmSeedRows.slice((this.tmSeedPage - 1) * 40, this.tmSeedPage * 40); },
       tmSeedSelectedCount() { return this.tmSeedRows.reduce((count, row) => count + Number(row.selected), 0); },
+      tmCanBuildSeed() {
+        return this.ctActive ? !!(this.ctUnits?.length && !this.ctBusy && !this._ctSaveJob && (!this.ctOfflineTest || this.ctResourceSyncEnabled)) : !!this.descs?.length;
+      },
       tmCloudAvailable() { return this.cloudSignedIn && (this.cloudCanAccessAllLanguages || this.cloudUser?.language === this.lang); },
     },
     watch: {
@@ -80,6 +83,11 @@
     methods: {
       tmScope() { return { profile: this.cloudProfileId || 'guest', language: this.lang }; },
       tmCurrent(key) { return key === this.tmScopeKey; },
+      tmSeedContextKey() {
+        const scope = [this.tmScopeKey, this.sourceIdentity, this.branchId];
+        if (this.ctActive) scope.push(this.ctContext(), this.ctRevision, !!this.ctResourceSyncEnabled);
+        return JSON.stringify(scope);
+      },
       tmImportId(unit, previous, deleted, usedIds) {
         const id = previous?.id || deleted?.id || unit.id || uuid(), owner = usedIds.get(id);
         const chosen = owner && TM().identityFor(owner) !== TM().identityFor(unit) ? uuid() : id;
@@ -310,6 +318,8 @@
       },
       async tmPut(units, options = {}) {
         const key = this.tmScopeKey, scope = this.tmScope();
+        const guard = () => this.tmCurrent(key) && (!options.guard || options.guard());
+        if (!guard()) return;
         if (this.testMode) {
           const map = new Map([...this.tmUnits, ...this.tmTombstones].map(unit => [unit.id, unit]));
           for (const input of units) {
@@ -325,7 +335,7 @@
           this.acceptTranslationMemory({ units: [...map.values()].filter(unit => !unit.deleted), tombstones: [...map.values()].filter(unit => unit.deleted), conflicts: [] });
           return;
         }
-        await window.OfflineStore.putTranslationMemoryUnits(scope, clone(units), { ...options, guard: () => this.tmCurrent(key) });
+        await window.OfflineStore.putTranslationMemoryUnits(scope, clone(units), { ...options, guard });
         if (this.tmCurrent(key)) { if (options.refresh !== false) await this.loadTranslationMemory(); this._cloud?.schedule(0); }
       },
       async saveTMUnit() {
@@ -360,31 +370,42 @@
         return {valid:!errors.length,errors};
       },
       async previewTMSeed() {
-        if (this.tmBusy) return;
+        if (this.tmBusy || !this.tmCanBuildSeed) return;
         this.tmBusy = true;
-        const scopeKey = this.tmScopeKey, key = JSON.stringify([scopeKey, this.sourceIdentity, this.branchId]);
+        const scopeKey = this.tmScopeKey, key = this.tmSeedContextKey();
         const epoch = this._tmSeedPreviewEpoch = (this._tmSeedPreviewEpoch || 0) + 1;
-        const current = () => epoch === this._tmSeedPreviewEpoch && key === JSON.stringify([this.tmScopeKey, this.sourceIdentity, this.branchId]);
+        const current = () => epoch === this._tmSeedPreviewEpoch && key === this.tmSeedContextKey() && this.tmCanBuildSeed;
         this.setBrowserWork?.('tm-prepare', { active: true, label: 'Preparing translation memory' });
         try {
           if (await this.waitForPendingSaves?.() === false) return;
           if (!current()) return;
           const rows = [], byIdentity = new Map(this.tmUnits.map(unit => [TM().identityFor(unit), unit]));
           const suppressed = new Map(this.tmTombstones.map(unit => [TM().identityFor(unit), unit]));
+          const usedIds = new Map([...this.tmUnits, ...this.tmTombstones].map(unit => [unit.id, unit]));
           const language = this.lang, game = this.gameVersion, sourceHash = this.sourceIdentity, branchId = this.branchId || 'default';
-          const descriptions = this.descs, workspace = this.localDescs, includeZip = this.tmSeedIncludeZip;
+          const workbook = this.ctActive, descriptions = workbook ? this.ctUnits : this.descs;
+          const workspace = workbook ? this.ctSaved : this.localDescs, includeZip = this.tmSeedIncludeZip;
           let skipped = 0, sliceStart = Date.now();
           for (const desc of descriptions || []) {
             if (!current()) return;
-            const baseline = this.workspaceSourceFile?.(desc.filepath) || desc;
-            const state = window.WorkspaceState.workspaceFile(workspace, baseline, language);
-            const candidates = state.candidate || (!state.staged && !includeZip) ? [] : TM().unitsFromDescription(baseline, state.translations, language,
-              { game, filepath: desc.filepath, sourceHash, branchId, origin: state.staged ? 'saved_seed' : 'zip_seed' });
-            if (!state.candidate && (state.staged || includeZip)) skipped += Math.max(0, baseline.translations.English.length - candidates.length);
+            let candidates;
+            if (workbook) {
+              const saved = workspace[desc.id], values = window.ClientTextState.valuesFor(desc, saved);
+              candidates = !saved && !includeZip ? [] : window.ContentAdapters.clienttext.memoryUnits(desc, values, language,
+                { game, branchId, origin: saved ? 'saved_seed' : 'workbook_seed', saved: saved || { values, reviewed: {} } })
+                .filter(unit => !/\bDNT\b/i.test(unit.source));
+              if (saved || includeZip) skipped += Math.max(0, desc.fields.length - candidates.length);
+            } else {
+              const baseline = this.workspaceSourceFile?.(desc.filepath) || desc;
+              const state = window.WorkspaceState.workspaceFile(workspace, baseline, language);
+              candidates = state.candidate || (!state.staged && !includeZip) ? [] : TM().unitsFromDescription(baseline, state.translations, language,
+                { game, filepath: desc.filepath, sourceHash, branchId, origin: state.staged ? 'saved_seed' : 'zip_seed' });
+              if (!state.candidate && (state.staged || includeZip)) skipped += Math.max(0, baseline.translations.English.length - candidates.length);
+            }
             for (const unit of candidates) {
               const identity = TM().identityFor(unit), existing = byIdentity.get(identity), deleted = suppressed.get(identity);
               if (existing?.target === unit.target && existing?.note === unit.note) continue;
-              rows.push({ unit: { ...unit, id: existing?.id || deleted?.id || unit.id || uuid() }, existing: clone(existing || deleted || null),
+              rows.push({ unit: { ...unit, id: this.tmImportId(unit, existing, deleted, usedIds) }, existing: clone(existing || deleted || null),
               selected: !deleted && !existing, restore: !!deleted, action: deleted ? 'Restore deleted entry' : existing ? 'Replace remembered translation' : 'Add entry' });
             }
             if (Date.now() - sliceStart >= 4) { await new Promise(resolve => setTimeout(resolve, 0)); sliceStart = Date.now(); }
@@ -395,15 +416,16 @@
         finally { if (epoch === this._tmSeedPreviewEpoch) { this.setBrowserWork?.('tm-prepare', { active: false }); await this.tmFinishWork(scopeKey); } }
       },
       async applyTMSeed() {
-        if (this.tmBusy || this.tmSeedKey !== JSON.stringify([this.tmScopeKey, this.sourceIdentity, this.branchId])) return;
+        if (this.tmBusy || this.tmSeedKey !== this.tmSeedContextKey() || this.ctActive && (this.ctBusy || this._ctSaveJob || this.ctOfflineTest && !this.ctResourceSyncEnabled)) return;
         this.tmBusy = true;
         const selected = this.tmSeedRows.filter(row => row.selected && !row.imported), key = this.tmSeedKey, scopeKey = this.tmScopeKey;
         try {
           for (let offset = 0; offset < selected.length; offset += 100) {
-            if (key !== JSON.stringify([this.tmScopeKey, this.sourceIdentity, this.branchId])) return;
+            if (key !== this.tmSeedContextKey()) return;
             const rows = selected.slice(offset, offset + 100);
             await this.tmPut(rows.map(row => ({ ...row.unit, restore: !!row.restore, ...(row.deletion ? { deleted: true } : {}) })), { origin: 'seed', refresh: false,
-              expectedUnits: Object.fromEntries(rows.map(row => [row.unit.id, row.existing])) });
+              expectedUnits: Object.fromEntries(rows.map(row => [row.unit.id, row.existing])), guard: () => key === this.tmSeedContextKey() });
+            if (key !== this.tmSeedContextKey()) return;
             for (const row of rows) { row.selected = false; row.imported = true; row.action = 'Imported'; }
           }
           if (key === this.tmSeedKey && this.tmCurrent(scopeKey)) { this.tmSeedVisible = false; this.tmSetIssue('seed'); }
@@ -416,12 +438,12 @@
       },
       exportLegacyRegex() { saveAs(new Blob([JSON.stringify({ format: 'sdeditor-legacy-regex', editorRegexes: clone(this.editorRegexes || []) }, null, 2)], { type: 'application/json' }), 'sdeditor_legacy_regex.json'); },
       async importTMFile(event) {
-        const key = JSON.stringify([this.tmScopeKey, this.sourceIdentity, this.branchId]);
+        const key = this.tmSeedContextKey();
         const scopeKey = this.tmScopeKey;
         if (this.tmBusy || !event.target.files?.[0]) { event.target.value = ''; return; }
         this.tmBusy = true;
         const epoch = this._tmSeedPreviewEpoch = (this._tmSeedPreviewEpoch || 0) + 1;
-        const current = () => epoch === this._tmSeedPreviewEpoch && key === JSON.stringify([this.tmScopeKey, this.sourceIdentity, this.branchId]);
+        const current = () => epoch === this._tmSeedPreviewEpoch && key === this.tmSeedContextKey();
         this.setBrowserWork?.('tm-prepare', { active: true, label: 'Preparing TM import' });
         try {
           const file = event.target.files?.[0]; if (!file) return;

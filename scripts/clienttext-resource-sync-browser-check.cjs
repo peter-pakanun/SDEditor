@@ -38,6 +38,48 @@ module.exports=async function({page,bootstrap,files,failures}){
         await other(async()=>{const vm=window.__clientFixtureApp;await vm._cloud.sync();});
         await peer.waitForFunction(()=>window.__clientFixtureApp.dictionary.some(word=>word._id==='online-sword'&&word.replace==='Online sword'));
         console.log('Shared Dictionary synchronized');
+        const originalPair=await app(()=>{
+            const vm=window.__clientFixtureApp,unit=vm.ctUnits.find(unit=>unit.role==='normal'&&unit.recordId==='complete'),field=unit.fields.find(field=>field.name==='Name');
+            return {descriptions:vm.descs.length,unitId:unit.id,fieldId:field.id,source:field.source,target:field.target,saved:vm.ctSaved[unit.id] || null};
+        });
+        assert.equal(originalPair.descriptions,0,'Workbook TM build does not require SD descriptions');
+        assert.equal(originalPair.source,'Shield');assert.equal(originalPair.target,'Original');assert.equal(originalPair.saved,null);
+        await page.getByRole('button',{name:'TM',exact:true}).click();
+        await page.getByRole('button',{name:'Manage TM',exact:true}).click();
+        const manager=page.getByRole('dialog',{name:'Translation Memory',exact:true}),build=manager.getByRole('button',{name:'Build TM from workspace…',exact:true});
+        await manager.waitFor();assert.equal(await build.isEnabled(),true);
+        const includeOriginals=manager.getByRole('checkbox',{name:'Include original workbook translations when building TM',exact:true});
+        assert.equal(await includeOriginals.isChecked(),false);
+        await build.click();
+        const review=page.getByRole('dialog',{name:'Review TM import',exact:true});await review.waitFor();
+        assert.equal(await review.getByText(originalPair.source,{exact:true}).count(),0,'Untouched imported translations require the original-workbook choice');
+        await review.getByRole('button',{name:'Close TM import',exact:true}).click();
+        await includeOriginals.check();await build.click();await review.waitFor();
+        const incoming=review.locator('.tmSeedRow').filter({has:page.getByText(originalPair.source,{exact:true})});
+        assert.equal(await incoming.count(),1);assert.equal(await incoming.getByText(originalPair.target,{exact:true}).isVisible(),true);
+        await review.getByRole('button',{name:'Clear selection',exact:true}).click();await incoming.getByRole('checkbox').check();
+        const reviewed=await app(()=>{
+            const vm=window.__clientFixtureApp,row=vm.tmSeedRows.find(row=>row.selected);
+            return {selected:vm.tmSeedSelectedCount,unit:JSON.parse(JSON.stringify(row.unit))};
+        });
+        assert.equal(reviewed.selected,1);assert.equal(reviewed.unit.context.contentMode,'clienttext');assert.equal(reviewed.unit.context.fieldName,'Name');
+        assert.equal(reviewed.unit.context.recordId,'complete');assert.equal(reviewed.unit.context.fieldId,originalPair.fieldId);
+        assert.equal(JSON.stringify(reviewed.unit).includes('local:test:'),false,'Reviewed resource payload excludes the private workbook identity');
+        await review.getByRole('button',{name:'Import selected entries',exact:true}).click();
+        await page.waitForFunction(()=>!window.__clientFixtureApp.tmSeedVisible&&!window.__clientFixtureApp.tmBusy);
+        await manager.getByRole('button',{name:'Close TM manager',exact:true}).click();
+        await app(async()=>{await window.__clientFixtureApp._cloud.sync();});
+        await other(async()=>{const vm=window.__clientFixtureApp;await vm._cloud.sync();await vm.loadTranslationMemory();});
+        await peer.waitForFunction(id=>window.__clientFixtureApp.tmUnits.some(unit=>unit.id===id),reviewed.unit.id);
+        const onlinePair=await peer.evaluate(id=>window.__clientFixtureApp.tmUnits.find(unit=>unit.id===id),reviewed.unit.id);
+        assert.equal(onlinePair.source,originalPair.source);assert.equal(onlinePair.target,originalPair.target);assert.deepEqual(onlinePair.context,reviewed.unit.context);
+        assert.equal(JSON.stringify(onlinePair).includes('local:test:'),false);
+        assert.deepEqual(await page.evaluate(({unitId,fieldId})=>{
+            const vm=window.__clientFixtureApp,unit=vm.ctUnits.find(unit=>unit.id===unitId),field=unit.fields.find(field=>field.id===fieldId);
+            return {source:field.source,target:field.target,saved:vm.ctSaved[unitId] || null};
+        },originalPair),{source:originalPair.source,target:originalPair.target,saved:null},'Reviewed TM import preserves original and unsaved workbook work');
+        await app(()=>{window.__clientFixtureApp.ctTool='dictionary';});
+        console.log('Reviewed original workbook pair built and synchronized through the real TM API');
         const target=page.locator('.ctFullEditor [data-ct-target][aria-label="Name"]');
         await target.fill('Private unsaved workbook draft');
         await other(async()=>{const vm=window.__clientFixtureApp,word=vm.dictionary.find(word=>word._id==='online-sword');word.replace='Peer dictionary';vm.dictionaryEntryInput(word);await vm.saveSettings();await vm._cloud.sync();});
@@ -110,7 +152,7 @@ module.exports=async function({page,bootstrap,files,failures}){
         assert.equal(await app(()=>window.__clientFixtureApp.ctWorkspace),null);
         assert.equal(await page.evaluate(async pending=>(await window.__clientFixtureApp._ctStore.getSaved(pending.scope))[pending.unitId].values[pending.fieldId],pending),'Queued offline TM');
         assert.deepEqual(inference,[]);assert.deepEqual(failures,[]);
-        console.log(JSON.stringify({ok:true,checks:['explicit authorized resource sync with two real API clients','incoming Dictionary preserves unsaved workbook draft',
+        console.log(JSON.stringify({ok:true,checks:['explicit authorized resource sync with two real API clients','reviewed original-workbook TM build works without SD descriptions and synchronizes eligible context only','incoming Dictionary preserves unsaved workbook draft',
             'live context JSON refresh and immutable submitted snapshot','shared TM pairs/corrections retain ClientText field identity','SD suggestions exclude ClientText pairs',
             'offline Dictionary/TM queues survive workbook exit and retry on reconnect','private workbook writes remain separate from resource transport; no content-group uploads','reload retains durable workbook; no inference']},null,2));
     }finally{await peerContext.close();}
