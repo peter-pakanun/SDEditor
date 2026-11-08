@@ -517,3 +517,106 @@ test('TM scripts load after tag diagnostics and before storage consumers; diff r
   const panel = components.slice(components.indexOf('id="tmResultsPanel"'), components.indexOf('id="editorLookupPanel"'));
   assert.match(panel, /part\.changed/); assert.doesNotMatch(panel, /v-html/);
 });
+
+function clientTextMemory(id, target = 'Remembered translation') {
+  const original = clientTextUnit('Remembered source', target);
+  return { ...ContentAdapters.clienttext.memoryUnits(original, ClientTextState.valuesFor(original), 'Thai', { game: 'poe2' })[0], id,
+    revision: 2, localRevision: 3 };
+}
+function memoryPatch(app, entries, previousVersion = 7, localVersion = previousVersion + 1) {
+  return { profile: app.cloudProfileId, language: app.lang, previousVersion, localVersion, entries };
+}
+
+test('an acknowledged ClientText patch preserves unrelated units, deletion lifecycle and the compiled SD worker', () => {
+  const sd = row('stat'), previous = clientTextMemory('corrected'), removed = clientTextMemory('removed');
+  const unrelated = clientTextMemory('unrelated'), deleted = { ...clientTextMemory('restored'), deleted: true, suppressed: true };
+  const { app, calls } = harness({ units: [sd, previous, removed, unrelated] });
+  app.tmTombstones = [deleted]; app.tmConflicts = [{ id: 'corrected', local: previous }, { id: 'unrelated', local: unrelated }];
+  app._tmAcceptedScope = app.tmScopeKey; app._tmSnapshotVersion = 7;
+  const generation = app.tmGeneration, updated = { ...previous, target: 'Committed correction', localRevision: 4 };
+  const restored = { ...deleted, target: 'Explicitly restored', deleted: false, suppressed: false };
+  const tombstone = { ...removed, deleted: true, suppressed: true };
+  const conflict = { id: 'removed', local: { ...removed, target: 'Retained alternative' }, shared: tombstone };
+  assert.equal(app.applyClientTextMemoryPatch(memoryPatch(app, [
+    { unit: updated, conflict: null }, { unit: restored, conflict: null }, { unit: tombstone, conflict } ])), true);
+  assert.equal(app.tmUnits.find(unit => unit.id === sd.id), sd); assert.equal(app.tmUnits.find(unit => unit.id === unrelated.id), unrelated);
+  assert.equal(app.tmUnits.find(unit => unit.id === updated.id), updated); assert.equal(app.tmUnits.find(unit => unit.id === restored.id), restored);
+  assert.equal(app.tmUnits.some(unit => unit.id === removed.id), false); assert.equal(app.tmTombstones.length, 1); assert.equal(app.tmTombstones[0], tombstone);
+  assert.deepEqual(copy(app.tmConflicts.map(row => row.id)), ['unrelated', 'removed']); assert.equal(app.tmConflicts[1], conflict);
+  assert.equal(app._tmSnapshotVersion, 8); assert.equal(app.tmGeneration, generation); assert.deepEqual(calls.publications, []);
+});
+
+test('ClientText patches reject another account, language, version or SD identity without replacing the visible snapshot', () => {
+  for (const change of [patch => { patch.profile = 'another-account'; }, patch => { patch.language = 'German'; },
+    patch => { patch.previousVersion = 6; }, patch => { patch.localVersion = 6; }, patch => { patch.entries[0].unit.context = null; }]) {
+    const old = clientTextMemory('old'), { app } = harness({ units: [old] });
+    app._tmAcceptedScope = app.tmScopeKey; app._tmSnapshotVersion = 7;
+    const visible = app.tmUnits, patch = memoryPatch(app, [{ unit: { ...old, target: 'Wrong snapshot' }, conflict: null }]); change(patch);
+    assert.equal(app.applyClientTextMemoryPatch(patch), false); assert.equal(app.tmUnits, visible); assert.equal(app._tmSnapshotVersion, 7);
+  }
+  const sd = row('same-id'), { app } = harness({ units: [sd] }); app._tmAcceptedScope = app.tmScopeKey; app._tmSnapshotVersion = 7;
+  assert.equal(app.applyClientTextMemoryPatch(memoryPatch(app, [{ unit: clientTextMemory(sd.id), conflict: null }])), false);
+  assert.equal(app.tmUnits[0], sd);
+  app._tmAcceptedScope = 'previous-scope';
+  assert.equal(app.applyClientTextMemoryPatch(memoryPatch(app, [{ unit: clientTextMemory('new'), conflict: null }])), false);
+});
+
+test('a queued notification waits when cloud acknowledgement starts before its reload timer fires', async () => {
+  let notify, reloads = 0;
+  const { app, mixin } = harness({ store: { onTranslationMemoryChange(listener) { notify = listener; return () => {}; } } });
+  app.loadTranslationMemory = async () => { reloads++; };
+  mixin.mounted.call(app);
+  notify({ profile: 'guest', language: 'Thai' });
+  app._tmSync = { running: Promise.resolve(), destroy() {} };
+  await new Promise(resolve => setTimeout(resolve, 70));
+  assert.equal(reloads, 1, 'only the initial library load runs while acknowledgement is in progress');
+  assert.equal(app._tmReloadNeeded, true);
+  mixin.beforeUnmount.call(app);
+});
+
+test('unchanged notification reloads read only TM metadata and a changed version still reloads the durable corpus', async () => {
+  let version = 7, snapshots = 0, summaries = 0;
+  const old = clientTextMemory('old'), updated = { ...old, target: 'Shared correction', localRevision: 4 };
+  const { app } = harness({ testMode: false, units: [old], store: {
+    async getTranslationMemoryState() { summaries++; return { localVersion: version }; },
+    async getTranslationMemory() { snapshots++; return { localVersion: version, units: [updated], tombstones: [], conflicts: [] }; },
+  } });
+  app._tmAcceptedScope = app.tmScopeKey; app._tmSnapshotVersion = 7;
+  await app.loadTranslationMemory(); assert.equal(summaries, 1); assert.equal(snapshots, 0); assert.equal(app.tmUnits[0], old);
+  version = 8; await app.loadTranslationMemory(); assert.equal(snapshots, 1); assert.equal(app.tmUnits[0], updated); assert.equal(app._tmSnapshotVersion, 8);
+});
+
+test('a successful saved-pair patch prevents an older in-flight snapshot or its failure from replacing current results', async () => {
+  for (const reject of [false, true]) {
+    const loading = deferred(), started = deferred(), old = clientTextMemory('old'), updated = { ...old, target: 'Durable saved pair', localRevision: 4 };
+    const { app } = harness({ testMode: false, units: [old], store: {
+      getTranslationMemory() { started.resolve(); return loading.promise; },
+    } });
+    app._tmAcceptedScope = app.tmScopeKey; app._tmSnapshotVersion = 7;
+    const pending = app.loadTranslationMemory(); await started.promise;
+    assert.equal(app.applyClientTextMemoryPatch(memoryPatch(app, [{ unit: updated, conflict: null }])), true);
+    if (reject) loading.reject(new Error('Previous snapshot failed'));
+    else loading.resolve({ localVersion: 7, units: [old], tombstones: [], conflicts: [] });
+    await pending; assert.equal(app.tmUnits[0], updated); assert.equal(app._tmSnapshotVersion, 8); assert.equal(app.tmLocalIssue, '');
+  }
+});
+
+test('a late cloud snapshot cannot roll back a newer saved-pair patch while new scopes retain independent versions', () => {
+  const old = clientTextMemory('old'), updated = { ...old, target: 'Durable saved pair', localRevision: 4 };
+  const { app, calls } = harness({ units: [old] }); app.editorReady = false;
+  app._tmAcceptedScope = app.tmScopeKey; app._tmSnapshotVersion = 7;
+  assert.equal(app.applyClientTextMemoryPatch(memoryPatch(app, [{ unit: updated, conflict: null }])), true);
+  const visible = app.tmUnits, generation = app.tmGeneration;
+  app.acceptTranslationMemory({ localVersion: 7, units: [old], tombstones: [], conflicts: [] });
+  assert.equal(app.tmUnits, visible); assert.equal(app.tmUnits[0], updated); assert.equal(app._tmSnapshotVersion, 8);
+  assert.equal(app.tmGeneration, generation); assert.deepEqual(calls.publications, []);
+  app.acceptTranslationMemory({ localVersion: 8, units: [updated], tombstones: [], conflicts: [] });
+  assert.equal(app.tmUnits[0], updated); assert.equal(app._tmSnapshotVersion, 8);
+  const newest = { ...updated, target: 'Newer shared correction', localRevision: 5 };
+  app.acceptTranslationMemory({ localVersion: 9, units: [newest], tombstones: [], conflicts: [] });
+  assert.equal(app.tmUnits[0], newest); assert.equal(app._tmSnapshotVersion, 9);
+  app.cloudProfileId = 'another-account'; app.lang = 'German';
+  const otherScope = { ...old, target: 'Independent language library', localRevision: 1 };
+  app.acceptTranslationMemory({ localVersion: 1, units: [otherScope], tombstones: [], conflicts: [] });
+  assert.equal(app.tmUnits[0], otherScope); assert.equal(app._tmSnapshotVersion, 1); assert.equal(app._tmAcceptedScope, app.tmScopeKey);
+});

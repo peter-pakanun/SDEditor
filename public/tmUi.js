@@ -71,7 +71,10 @@
         if (scope?.language && scope.language !== this.lang) return;
         if (this.tmBusy || this._tmSync?.running) { this._tmReloadNeeded = true; return; }
         clearTimeout(this._tmReloadTimer);
-        this._tmReloadTimer = setTimeout(() => { this.loadTranslationMemory(); this._cloud?.schedule(0); }, 40);
+        this._tmReloadTimer = setTimeout(() => {
+          if (this.tmBusy || this._tmSync?.running) { this._tmReloadNeeded = true; return; }
+          this.loadTranslationMemory(); this._cloud?.schedule(0);
+        }, 40);
       });
       this.loadTranslationMemory();
     },
@@ -137,13 +140,48 @@
         if (!this.lang || !TM()) return;
         const key = this.tmScopeKey, epoch = ++this._tmLoadEpoch;
         try {
+          if (!this.testMode && this._tmAcceptedScope === key && window.OfflineStore.getTranslationMemoryState) {
+            const state = await window.OfflineStore.getTranslationMemoryState(this.tmScope());
+            if (!this.tmCurrent(key) || epoch !== this._tmLoadEpoch) return;
+            if (state.localVersion === this._tmSnapshotVersion) { this.tmSetIssue('load'); return; }
+          }
           const state = this.testMode ? { units: this.tmUnits, tombstones: this.tmTombstones, conflicts: this.tmConflicts }
             : await window.OfflineStore.getTranslationMemory(this.tmScope());
           if (!this.tmCurrent(key) || epoch !== this._tmLoadEpoch) return;
           this.acceptTranslationMemory(state); this.tmSetIssue('load');
-        } catch (error) { if (this.tmCurrent(key)) this.tmSetIssue('load', 'Could not load local TM: ' + error.message); }
+        } catch (error) { if (this.tmCurrent(key) && epoch === this._tmLoadEpoch) this.tmSetIssue('load', 'Could not load local TM: ' + error.message); }
+      },
+      applyClientTextMemoryPatch(patch) {
+        if (!patch || patch.profile !== (this.cloudProfileId || 'guest') || patch.language !== this.lang
+          || this._tmAcceptedScope !== this.tmScopeKey || patch.previousVersion !== this._tmSnapshotVersion
+          || !Number.isSafeInteger(patch.localVersion) || patch.localVersion < patch.previousVersion || !Array.isArray(patch.entries)
+          || patch.entries.some(entry => !entry.unit?.id || entry.unit.context?.contentMode !== 'clienttext')) return false;
+        const updates = new Map(patch.entries.map(entry => [entry.unit.id, entry]));
+        if ([...this.tmUnits, ...this.tmTombstones].some(unit => updates.has(unit.id) && unit.context?.contentMode !== 'clienttext')) return false;
+        // A single saved workbook ID changes only its acknowledged TM units.
+        // Keep the SD worker's compiled generation and all other unit objects.
+        const replace = (units, deleted) => {
+          const seen = new Set(), next = [];
+          for (const unit of units) {
+            const update = updates.get(unit.id);
+            if (!update) next.push(unit);
+            else { seen.add(unit.id); if (!!update.unit.deleted === deleted) next.push(update.unit); }
+          }
+          for (const [id, update] of updates) if (!seen.has(id) && !!update.unit.deleted === deleted) next.push(update.unit);
+          return next;
+        };
+        ++this._tmLoadEpoch;
+        this._tmSnapshotVersion = patch.localVersion;
+        if (!updates.size) return true;
+        this.tmUnits = mark(replace(this.tmUnits, false));
+        this.tmTombstones = mark(replace(this.tmTombstones, true));
+        this.tmConflicts = mark([...this.tmConflicts.filter(conflict => !updates.has(conflict.id)),
+          ...patch.entries.map(entry => entry.conflict).filter(Boolean)]);
+        return true;
       },
       acceptTranslationMemory(state) {
+        if (this._tmAcceptedScope === this.tmScopeKey && Number.isSafeInteger(state.localVersion)
+          && Number.isSafeInteger(this._tmSnapshotVersion) && state.localVersion < this._tmSnapshotVersion) return;
         this._tmSnapshotVersion = state.localVersion;
         const sameRows = (left, right) => left.length === right.length && left.every((unit, index) => unit.id === right[index]?.id
           && unit.revision === right[index]?.revision && unit.localRevision === right[index]?.localRevision);
@@ -165,6 +203,10 @@
         if (!this._tmSync || this._tmSync.cloud !== this._cloud) {
           this._tmSync?.destroy();
           this._tmSync = new window.TMCloudSync.Client({ cloud: this._cloud, store: window.OfflineStore,
+            onPatch: (scope, patch) => {
+              if (scope.profile !== (this.cloudProfileId || 'guest') || scope.language !== this.lang || this.tmBusy) return false;
+              return this.applyClientTextMemoryPatch(patch);
+            },
             onChange: (scope, state) => {
               if (scope.profile !== (this.cloudProfileId || 'guest') || scope.language !== this.lang) return;
               if (this.tmBusy) { this._tmReloadNeeded = true; return; }

@@ -5,9 +5,9 @@ const { Client } = require('../public/tmCloudSync.js');
 const copy = value => structuredClone(value);
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 const unit = (id, revision = 1, target = id) => ({ id, source: id, target, gameScope: 'poe1', context: {}, note: '', revision });
-function fixture() {
+function fixture(options = {}) {
   const context = { epoch: 1, profile: 'alice', token: 'fixture-token', language: 'Thai' };
-  const calls = [], changes = [], issues = [], work = [], scheduled = [], resets = [], notifications = [], remote = new Map(), pending = [];
+  const calls = [], changes = [], issues = [], work = [], scheduled = [], resets = [], notifications = [], patches = [], remote = new Map(), pending = [];
   let bootstrapped = false, revision = 0, localVersion = 0, fullReads = 0, stateReads = 0;
   const cloud = {
     state: { profiles: { alice: { settings: { lang: 'Thai' } } } },
@@ -22,22 +22,31 @@ function fixture() {
   const store = {
     async getTranslationMemory() { fullReads++; return { revision, bootstrapped, localVersion, units: [...remote.values()], conflicts: this.conflicts || [] }; },
     async getTranslationMemoryState() { stateReads++; return { revision, bootstrapped, localVersion, pending: pending.length, conflicts: (this.conflicts || []).length }; },
-    async applyTranslationMemoryRemote(scope, payload, options) {
-      if (!options.guard()) throw Object.assign(new Error('stale'), { stale: true });
-      for (const row of payload.units || []) remote.set(row.id, copy(row));
-      for (const row of payload.tombstones || []) remote.delete(row.id);
-      if ((payload.units || []).length || (payload.tombstones || []).length || options.complete && !bootstrapped) localVersion++;
+    async applyTranslationMemoryRemote(scope, payload, applyOptions) {
+      if (!applyOptions.guard()) throw Object.assign(new Error('stale'), { stale: true });
+      const previousVersion = localVersion; let contentChanged = false;
+      for (const row of payload.units || []) {
+        if (JSON.stringify(remote.get(row.id)) !== JSON.stringify(row)) contentChanged = true;
+        remote.set(row.id, copy(row));
+      }
+      for (const row of payload.tombstones || []) { contentChanged = remote.has(row.id) || contentChanged; remote.delete(row.id); }
+      if (contentChanged || payload.revision !== revision || applyOptions.complete && !bootstrapped) localVersion++;
       revision = payload.revision;
-      if (options.complete) bootstrapped = true;
-      changes.push({ scope, payload, options });
+      if (applyOptions.complete) bootstrapped = true;
+      changes.push({ scope, payload, options: applyOptions });
+      return { changed: previousVersion !== localVersion, ...(options.patchResults && applyOptions.returnChanges && !applyOptions.bootstrap && !contentChanged
+        ? { patch: { ...scope, previousVersion, localVersion, entries: [] } } : {}) };
     },
     async getTranslationMemoryPending() { return copy(pending); },
-    async acknowledgeTranslationMemoryWrite(scope, id, value, options) {
-      if (!options.guard()) throw Object.assign(new Error('stale'), { stale: true });
-      assert.equal(options.notify, false, 'the coordinator publishes the completed run once');
+    async acknowledgeTranslationMemoryWrite(scope, id, value, writeOptions) {
+      if (!writeOptions.guard()) throw Object.assign(new Error('stale'), { stale: true });
+      assert.equal(writeOptions.notify, false, 'the coordinator publishes the completed run once');
       assert.equal(id, value.mutationId); pending.shift();
+      const previousVersion = localVersion;
       for (const row of value.accepted || []) remote.set(row.id, copy(row));
       localVersion++;
+      return { changed: true, ...(options.patchResults && writeOptions.returnChanges ? { patch: { ...scope, previousVersion, localVersion,
+        entries: (value.accepted || []).map(row => ({ unit: copy(row), conflict: null })) } } : {}) };
     },
     async rejectTranslationMemoryWrite(scope, id, conflicts, options) {
       if (!options.guard()) throw Object.assign(new Error('stale'), { stale: true });
@@ -54,8 +63,9 @@ function fixture() {
     notifyTranslationMemoryChange(scope) { notifications.push(copy(scope)); },
   };
   const client = new Client({ cloud, store, onChange: (scope, state) => changes.push({ notification: true, scope, state }),
+    onPatch: (scope, patch) => { patches.push({ scope: copy(scope), patch: copy(patch) }); return options.acceptPatches === true; },
     onIssue: issue => issues.push(issue), onWork: item => work.push(item) });
-  return { client, cloud, store, context, calls, changes, issues, work, scheduled, resets, notifications, remote, pending,
+  return { client, cloud, store, context, calls, changes, issues, work, scheduled, resets, notifications, patches, remote, pending,
     setResponse(fn) { response = fn; }, setBootstrapped(value, cursor = 0) { bootstrapped = value; revision = cursor; },
     reads() { return { fullReads, stateReads }; } };
 }
@@ -93,6 +103,55 @@ test('TM uploads retain durable mutation IDs and exact returned per-unit revisio
   assert.equal(f.pending.length, 0); assert.equal(f.remote.get('new').revision, 1);
   assert.equal(f.notifications.length, 1);
   assert.deepEqual(f.work.map(item => item.active), [true, false]);
+});
+
+test('consumed upload acknowledgements and their later cursor replay avoid full TM snapshot reads', async () => {
+  const f = fixture({ patchResults: true, acceptPatches: true }); f.setBootstrapped(true, 5);
+  const scopeKey = JSON.stringify(['alice', 'Thai']); f.client.publishedVersions.set(scopeKey, 0);
+  const accepted = unit('saved-pair', 1, 'Committed target');
+  f.pending.push({ mutationId: 'bounded-ack', upserts: [{ ...accepted, revision: 0, baseRevision: 0 }], deletions: [] });
+  f.setResponse(async (_path, options) => ({ mutationId: options.body.mutationId, revision: 6, appliedRevision: 6, accepted: [accepted] }));
+  await f.client.sync(f.cloud.context(), { tmRevision: 5 });
+  assert.equal(f.patches.length, 1); assert.equal(f.patches[0].patch.entries[0].unit.target, accepted.target);
+  assert.equal(f.client.publishedVersions.get(scopeKey), 1); assert.equal(f.reads().fullReads, 0);
+  assert.equal(f.changes.filter(change => change.notification).length, 0); assert.equal(f.notifications.length, 1);
+  f.setResponse(async () => ({ revision: 6, changes: [{ revision: 6, units: [accepted], tombstones: [] }], nextAfter: 6, hasMore: false }));
+  await f.client.sync(f.cloud.context(), { tmRevision: 6 });
+  assert.equal(f.patches.length, 2); assert.deepEqual(f.patches[1].patch.entries, []);
+  assert.equal(f.patches[1].patch.previousVersion, 1); assert.equal(f.patches[1].patch.localVersion, 2);
+  assert.equal(f.client.publishedVersions.get(scopeKey), 2); assert.equal(f.reads().fullReads, 0);
+  assert.equal(f.changes.at(-1).options.returnChanges, true); assert.equal(f.notifications.length, 2);
+});
+
+test('an unconsumed acknowledgement patch falls back to one settled durable snapshot', async () => {
+  const f = fixture({ patchResults: true, acceptPatches: false }); f.setBootstrapped(true, 5);
+  f.client.publishedVersions.set(JSON.stringify(['alice', 'Thai']), 0);
+  f.pending.push({ mutationId: 'needs-snapshot', upserts: [{ ...unit('pair', 0), baseRevision: 0 }], deletions: [] });
+  f.setResponse(async () => ({ mutationId: 'needs-snapshot', revision: 6, appliedRevision: 6, accepted: [unit('pair', 1)] }));
+  await f.client.sync(f.cloud.context(), { tmRevision: 5 });
+  assert.equal(f.patches.length, 1); assert.equal(f.reads().fullReads, 1);
+  const snapshots = f.changes.filter(change => change.notification); assert.equal(snapshots.length, 1); assert.equal(snapshots[0].state.units[0].id, 'pair');
+  assert.equal(f.notifications.length, 1);
+});
+
+test('actual remote TM changes still publish a full snapshot when only cursor patches are supported', async () => {
+  const f = fixture({ patchResults: true, acceptPatches: true }); f.setBootstrapped(true, 5);
+  f.client.publishedVersions.set(JSON.stringify(['alice', 'Thai']), 0);
+  f.setResponse(async () => ({ revision: 6, changes: [{ revision: 6, units: [unit('peer', 2, 'Remote correction')], tombstones: [] }], nextAfter: 6, hasMore: false }));
+  await f.client.sync(f.cloud.context(), { tmRevision: 6 });
+  assert.equal(f.patches.length, 0); assert.equal(f.reads().fullReads, 1);
+  assert.equal(f.changes.find(change => change.notification).state.units[0].target, 'Remote correction');
+});
+
+test('a late durable upload acknowledgement cannot deliver its patch after an account or language switch', async () => {
+  const f = fixture({ patchResults: true, acceptPatches: true }), entered = deferred(), release = deferred(); f.setBootstrapped(true, 5);
+  f.pending.push({ mutationId: 'outgoing-ack', upserts: [{ ...unit('old-pair', 0), baseRevision: 0 }], deletions: [] });
+  f.setResponse(async () => ({ mutationId: 'outgoing-ack', revision: 6, appliedRevision: 6, accepted: [unit('old-pair', 1)] }));
+  const acknowledge = f.store.acknowledgeTranslationMemoryWrite.bind(f.store);
+  f.store.acknowledgeTranslationMemoryWrite = async (...args) => { const result = await acknowledge(...args); entered.resolve(); await release.promise; return result; };
+  const running = f.client.sync(f.cloud.context(), { tmRevision: 5 }); await entered.promise;
+  f.context.epoch++; f.context.language = 'German'; f.cloud.state.profiles.alice.settings.lang = 'German'; release.resolve(); await running;
+  assert.equal(f.patches.length, 0); assert.equal(f.reads().fullReads, 0); assert.equal(f.notifications.length, 0); assert.equal(f.issues.length, 0);
 });
 
 test('multiple bootstrap pages and upload acknowledgements publish one settled snapshot and notification', async () => {

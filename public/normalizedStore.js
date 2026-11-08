@@ -144,11 +144,13 @@
       tx.objectStore(stores.tmRecords).put(tmRecord(scope, 'history:' + eventId, { kind: 'history', id: eventId, unitId: (after || before).id,
         before: copy(before), after: copy(after), origin, createdAt: Date.now() }));
     }
-    async function tmCapture(tx, rawScope, rawUnits, options = {}) {
+    async function tmCapture(tx, rawScope, rawUnits, options = {}, changes) {
       const scope = tmScope(rawScope); tmGuard(options);
       const mutationId = options.mutationId || tmUuid(), marker = 'capture:' + mutationId;
-      if (await get(tx, stores.tmRecords, key(scope.key, marker))) return false;
       const meta = await get(tx, stores.tmMeta, scope.key) || { revision: 0, bootstrapped: false, localVersion: 0 };
+      if (changes) Object.assign(changes, { profile: scope.profile, language: scope.language,
+        previousVersion: Number(meta.localVersion || 0), localVersion: Number(meta.localVersion || 0) });
+      if (await get(tx, stores.tmRecords, key(scope.key, marker))) return false;
       let changed = false;
       for (const raw of rawUnits || []) {
         const normalized = tmCore().normalizeUnit({ ...raw, language: scope.language });
@@ -188,6 +190,7 @@
           tmHistory(tx,scope,conflict.local,unit,'learn_conflict',mutationId+':'+currentId);
           conflict.local = unit;
           tx.objectStore(stores.tmRecords).put(tmRecord(scope, 'conflict:' + currentId, conflict));
+          changes?.entries.set(currentId, { unit: tmView(current), conflict: copy(conflict) });
           changed = true; continue;
         }
         if (current && (explicitDelete ? current.deleted : !current.deleted && sameTm(current.unit, unit))) continue;
@@ -199,11 +202,13 @@
           origin: options.origin || 'edit', restore, createdAt: Date.now() }));
         tx.objectStore(stores.tmRecords).delete(key(scope.key, 'conflict:' + currentId));
         tmHistory(tx, scope, current ? tmView(current) : null, tmView(next), options.origin || 'edit', mutationId + ':' + currentId);
+        changes?.entries.set(currentId, { unit: tmView(next), conflict: null });
         changed = true;
       }
       tmGuard(options);
       tx.objectStore(stores.tmRecords).put(tmRecord(scope, marker, { kind: 'capture', mutationId }));
       if (changed) tx.objectStore(stores.tmMeta).put({ key: scope.key, scope: scope.key, value: { ...meta, localVersion: Number(meta.localVersion || 0) + 1 } });
+      if (changes && changed) changes.localVersion++;
       return changed;
     }
     async function getTranslationMemory(rawScope) {
@@ -232,8 +237,11 @@
     }
     async function putTranslationMemoryUnits(scope, units, options = {}) {
       tmGuard(options);
-      const changed = await transaction(tmStores, 'readwrite', tx => tmCapture(tx, scope, units, options));
-      return { changed };
+      return transaction(tmStores, 'readwrite', async tx => {
+        const changes = options.returnChanges ? { entries: new Map() } : null;
+        const changed = await tmCapture(tx, scope, units, options, changes);
+        return { changed, ...(changes ? { patch: { ...changes, entries: [...changes.entries.values()] } } : {}) };
+      });
     }
     async function deleteTranslationMemoryUnit(rawScope, id, options = {}) {
       const scope = tmScope(rawScope); tmGuard(options);
@@ -323,7 +331,9 @@
       let local = current && tmView(current), dirty = !!current?.dirty;
       const pending = current && await get(tx, stores.tmOutbox, key(scope.key, tmPendingKey(current.unit.id)));
       const previousConflict = current && await get(tx, stores.tmRecords, key(scope.key, 'conflict:' + current.unit.id));
-      if (!current?.dirty && !previousConflict && same(current?.base,unit)) return false;
+      // Replaying the already accepted base cannot change a newer local edit
+      // or its pending operation, even while that edit is being uploaded.
+      if (!previousConflict && same(current?.base,unit)) return false;
       if (previousConflict) { local = copy(previousConflict.local); dirty = true; }
       if (current && current.unit.id !== unit.id) {
         tx.objectStore(stores.tmUnits).delete(key(scope.key, current.unit.id));
@@ -352,6 +362,7 @@
     async function applyTranslationMemoryRemote(rawScope, payload, options = {}) {
       const scope = tmScope(rawScope); tmGuard(options);
       let changed = false;
+      let patch;
       await transaction(tmStores, 'readwrite', async tx => {
         const meta = await get(tx, stores.tmMeta, scope.key) || { revision: 0, localVersion: 0, bootstrapped: false };
         const beforeMeta = copy(meta);
@@ -389,13 +400,16 @@
           if (!options.noCursor) meta.revision = Math.max(Number(meta.revision || 0), Number(payload.nextAfter ?? payload.revision ?? 0));
         }
         tmGuard(options);
+        const contentChanged = changed;
         changed = changed || !same(beforeMeta,meta);
         if (changed) {
           meta.localVersion = Number(meta.localVersion || 0) + 1;
           tx.objectStore(stores.tmMeta).put({ key: scope.key, scope: scope.key, value: meta });
         }
+        if (options.returnChanges && !options.bootstrap && !contentChanged) patch = { profile: scope.profile, language: scope.language,
+          previousVersion: Number(beforeMeta.localVersion || 0), localVersion: Number(meta.localVersion || 0), entries: [] };
       });
-      return { changed };
+      return { changed, ...(patch ? { patch } : {}) };
     }
     async function resetTranslationMemoryBootstrap(rawScope,options={}) {
       const scope=tmScope(rawScope);tmGuard(options);
@@ -411,9 +425,12 @@
     }
     async function acknowledgeTranslationMemoryWrite(rawScope, mutationId, response, options = {}) {
       const scope = tmScope(rawScope); tmGuard(options);
-      await transaction(tmStores, 'readwrite', async tx => {
+      return transaction(tmStores, 'readwrite', async tx => {
+        const meta = options.returnChanges ? await get(tx, stores.tmMeta, scope.key) : null;
+        const changes = options.returnChanges ? { profile: scope.profile, language: scope.language,
+          previousVersion: Number(meta?.localVersion || 0), localVersion: Number(meta?.localVersion || 0), entries: [] } : null;
         const wire = await get(tx, stores.tmOutbox, key(scope.key, 'wire:' + mutationId));
-        if (!wire) return;
+        if (!wire) return { changed: false, ...(changes ? { patch: changes } : {}) };
         if (response.mutationId !== mutationId || !Number.isSafeInteger(response.appliedRevision)) throw new Error('Invalid Translation Memory acknowledgement.');
         const returnedUnits = response.accepted || [...(response.units || []), ...(response.tombstones || []).map(unit => ({ ...unit, deleted: true }))];
         const later = [];
@@ -431,13 +448,17 @@
           const next = { ...current, base: accepted, unit: unchanged ? accepted : current.unit, dirty: !unchanged, deleted: unchanged ? !!accepted.deleted : current.deleted };
           tx.objectStore(stores.tmUnits).put(tmRow(scope, next));
           if (unchanged) tx.objectStore(stores.tmOutbox).delete(key(scope.key, tmPendingKey(desired.id)));
+          if (changes) changes.entries.push({ unit: tmView(next), conflict: await get(tx, stores.tmRecords, key(scope.key, 'conflict:' + desired.id)) || null });
         }
         for (const remote of later) await tmMergeRemote(tx, scope, remote, options);
         tmGuard(options);
         tx.objectStore(stores.tmOutbox).delete(key(scope.key, 'wire:' + mutationId));
         await tmTouch(tx,scope);
+        if (changes) changes.localVersion++;
+        // Advanced receipt replays can reconcile other contextual identities.
+        // Keep their established full-snapshot publication path.
+        return { changed: true, ...(changes && !later.length ? { patch: changes } : {}) };
       });
-      return { changed: true };
     }
     async function rejectTranslationMemoryWrite(rawScope, mutationId, conflicts = [], options = {}) {
       const scope = tmScope(rawScope); tmGuard(options);

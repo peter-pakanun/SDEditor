@@ -234,3 +234,99 @@ test('Turkish Normal and Possessive memory stays independent and preserves liter
     assert.equal(A.clienttext.memoryUnits(ordinary,S.valuesFor(ordinary),'Turkish').length,0);
     assert.deepEqual(A.clienttext.findMemory([{...rows[0],context:A.clienttext.contextFor(ordinary,ordinary.fields[0])}],ordinary,ordinary.fields[0]),[]);
 });
+
+// Independent exhaustive reference for the previous whole-corpus matcher.
+function referenceMemory(rows,original,field,options={}){
+    if(!field||field.kind==='gender'||S.audioOnly(field.source))return[];
+    const context=A.clienttext.contextFor(original,field),source=S.canonicalSource(field.source);
+    if(!source.trim())return[];
+    const fold=value=>Array.from(String(value).normalize('NFC').toLocaleLowerCase()),left=fold(source);
+    const threshold=Math.max(0,Math.min(100,Number.isFinite(options.threshold)?options.threshold:75)),limit=Math.max(1,Math.min(100,options.limit||20));
+    function distance(right,maximum){
+        if(Math.abs(left.length-right.length)>maximum)return maximum+1;
+        let previous=Array.from({length:right.length+1},(_,index)=>index);
+        for(let row=1;row<=left.length;row++){
+            const next=Array(right.length+1).fill(maximum+1);next[0]=row;let smallest=maximum+1;
+            for(let column=Math.max(1,row-maximum);column<=Math.min(right.length,row+maximum);column++){
+                next[column]=Math.min(previous[column]+1,next[column-1]+1,previous[column-1]+(left[row-1]===right[column-1]?0:1));
+                smallest=Math.min(smallest,next[column]);
+            }
+            if(smallest>maximum)return maximum+1;previous=next;
+        }
+        return previous[right.length];
+    }
+    const result=[];
+    for(const candidate of rows){
+        if(candidate.deleted||candidate.suppressed||candidate.enabled===false||!candidate.target?.trim()
+            ||candidate.target.trim()==='NONEXISTENT'&&!S.isNamedForm(field)||!A.clienttext.compatibleContext(candidate.context,context)
+            ||options.game&&candidate.gameScope!==options.game&&candidate.gameScope!=='all')continue;
+        const before=S.canonicalSource(candidate.source),exact=before===source,right=fold(before),maximum=Math.max(left.length,right.length);
+        if(!exact&&threshold===100)continue;
+        const edits=exact?0:distance(right,Math.floor(maximum*(100-threshold)/100));
+        const score=exact?100:Math.min(99,maximum?Math.floor(100*(maximum-edits)/maximum):0);
+        if(score<threshold)continue;
+        const sameContext=['sheet','recordId','fieldId'].every(name=>candidate.context[name]===context[name]);
+        result.push({id:candidate.id,unit:candidate,source:candidate.source,target:candidate.target,score:exact&&sameContext?101:score,
+            kind:exact?(sameContext?'context':'exact'):'fuzzy',sameContext,warnings:S.diagnose(field,candidate.target),diff:TM.sourceDiff(candidate.source,field.source)});
+    }
+    return result.sort((a,b)=>b.score-a.score||String(a.id).localeCompare(String(b.id))).slice(0,limit);
+}
+const memoryRow=(source,index,changes={})=>({id:'memory-'+index,source,target:'Translation '+index,gameScope:'poe2',
+    context:{contentMode:'clienttext',fieldKind:'text',role:'normal',sheet:'ClientStrings',recordId:'record-'+index,fieldId},...changes});
+
+test('indexed ClientText lookup equals exhaustive matching across short Unicode strings and edit-radius boundaries',()=>{
+    const words=[''];let layer=[''];
+    for(let length=1;length<=3;length++){layer=layer.flatMap(prefix=>['a','b','😀'].map(letter=>prefix+letter));words.push(...layer);}
+    words.push('A','a\u0301','á','a@b','a\\nb','a\nb',' a','a ','[NOAUDIO] a','[NO AUDIO] a','[OLD AUDIO] a','[AUDIOTEST] a','{0} a','{1} a');
+    const original=unit(),rows=words.flatMap((source,index)=>[
+        memoryRow(source,index),memoryRow(source,index,{id:'duplicate',context:{...A.clienttext.contextFor(original,original.fields[0]),recordId:index%3?original.recordId:'other'}})
+    ]);
+    for(const source of words)for(const threshold of [0,25,50,60,75,99,99.5,100]){
+        const field={...original.fields[0],source},options={game:'poe2',threshold,limit:7};
+        assert.deepEqual(A.clienttext.findMemory(rows,original,field,options),referenceMemory(rows,original,field,options),JSON.stringify({source,threshold}));
+    }
+});
+
+test('indexed ClientText lookup preserves exhaustive ordering and eligibility with randomized forms, flags and games',()=>{
+    let seed=49721;const random=maximum=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed%maximum;};
+    const original=unit(),alphabet=['a','b','c','😀','@','\\n','\n','{0}','é'];
+    const sources=Array.from({length:90},()=>Array.from({length:1+random(8)},()=>alphabet[random(alphabet.length)]).join(''));
+    const contexts=[A.clienttext.contextFor(original,original.fields[0]),
+        {...A.clienttext.contextFor(original,original.fields[0]),recordId:'other'},
+        {...A.clienttext.contextFor(original,original.fields[0]),fieldKind:'form',form:'MS'},
+        {...A.clienttext.contextFor(original,original.fields[0]),fieldKind:'form',form:'Normal Translation'},
+        {contentMode:'statdescription'},null];
+    const rows=Array.from({length:450},(_,index)=>memoryRow(sources[random(sources.length)],index,{
+        id:'duplicate-'+random(60),gameScope:['poe1','poe2','all'][random(3)],target:['Translated {0}','NONEXISTENT','  ','Text@raw\\n\n'][random(4)],
+        context:contexts[random(contexts.length)],deleted:random(13)===0,suppressed:random(17)===0,enabled:random(19)!==0}));
+    for(let query=0;query<120;query++){
+        const form=['','MS','Normal Translation'][random(3)],field={...original.fields[0],source:sources[random(sources.length)],kind:form?'form':'text',...(form?{form}:{})};
+        const options={game:['poe1','poe2',undefined][random(3)],threshold:[0,20,60,75,99,100][random(6)],limit:[1,7,20,100][random(4)]};
+        assert.deepEqual(A.clienttext.findMemory(rows,original,field,options),referenceMemory(rows,original,field,options));
+    }
+});
+
+test('ClientText snapshot caches observe replacement libraries and in-place source, context, target and eligibility changes',()=>{
+    const original=unit('Sword','Target'),field=original.fields[0],rows=[memoryRow('Sword',0),memoryRow('Swords',1)];
+    const check=()=>assert.deepEqual(A.clienttext.findMemory(rows,original,field,{threshold:0}),referenceMemory(rows,original,field,{threshold:0}));
+    check();rows[0].target='Corrected target';check();rows[0].deleted=true;check();rows[0].deleted=false;check();
+    rows[0].source='Shield';check();rows[0].context.contentMode='statdescription';check();rows[0].context.contentMode='clienttext';check();
+    rows[0].context.fieldKind='form';check();rows[0].context.fieldKind='text';rows[0].context.form='MS';check();delete rows[0].context.form;check();
+    rows[0].gameScope='poe1';check();rows[0].enabled=false;check();rows[0].enabled=true;rows[0].gameScope='poe2';check();
+    rows[0].context={...A.clienttext.contextFor(original,field)};check();rows.push(memoryRow('Sword',2));check();rows.reverse();check();
+    rows[0]={...rows[0],target:'Replacement record'};check();rows.pop();check();
+    const replacement=rows.map(row=>({...row,target:'Another account target'}));
+    const matches=A.clienttext.findMemory(replacement,original,field,{threshold:0});
+    assert.deepEqual(matches,referenceMemory(replacement,original,field,{threshold:0}));
+    assert.ok(matches.every(match=>replacement.includes(match.unit) && match.target==='Another account target'));
+});
+
+test('ClientText diagnostics and source diffs run only for the returned top matches',()=>{
+    const original=unit('Shared dialogue line','Target'),rows=Array.from({length:2000},(_,index)=>memoryRow(original.fields[0].source,index));
+    const diagnose=S.diagnose,diff=TM.sourceDiff;let diagnoses=0,diffs=0;
+    try{
+        S.diagnose=(...args)=>{diagnoses++;return diagnose(...args);};TM.sourceDiff=(...args)=>{diffs++;return diff(...args);};
+        assert.equal(A.clienttext.findMemory(rows,original,original.fields[0],{limit:20}).length,20);
+        assert.equal(diagnoses,20);assert.equal(diffs,20);
+    }finally{S.diagnose=diagnose;TM.sourceDiff=diff;}
+});

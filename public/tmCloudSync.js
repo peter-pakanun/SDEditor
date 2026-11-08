@@ -7,8 +7,8 @@
   'use strict';
   const stale = () => Object.assign(new Error('TM account or language changed.'), { stale: true });
   class Client {
-    constructor({ cloud, store, onChange = () => {}, onIssue = () => {}, onWork = () => {} }) {
-      this.cloud = cloud; this.store = store; this.onChange = onChange; this.onIssue = onIssue; this.onWork = onWork;
+    constructor({ cloud, store, onChange = () => {}, onPatch = () => false, onIssue = () => {}, onWork = () => {} }) {
+      this.cloud = cloud; this.store = store; this.onChange = onChange; this.onPatch = onPatch; this.onIssue = onIssue; this.onWork = onWork;
       this.running = null; this.destroyed = false;
       this.publishedVersions = new Map();
       this.backoff = 1000;
@@ -26,8 +26,12 @@
     }
     async apply(ctx, value, options = {}) {
       this.check(ctx);
-      await this.store.applyTranslationMemoryRemote(this.scope(ctx), value, { ...options, notify: false, guard: () => this.current(ctx) });
+      const scope = this.scope(ctx);
+      const accepted = await this.store.applyTranslationMemoryRemote(scope, value,
+        { ...options, notify: false, returnChanges: true, guard: () => this.current(ctx) });
       this.check(ctx);
+      if (accepted?.patch && this.onPatch(scope, accepted.patch))
+        this.publishedVersions.set(JSON.stringify([scope.profile, scope.language]), accepted.patch.localVersion);
     }
     async state(scope) { return this.store.getTranslationMemoryState(scope); }
     async publish(ctx, state, notify = false) {
@@ -95,7 +99,11 @@
           try {
             const response = await this.request(ctx, '', { method: 'PATCH', body });
             if (response.mutationId !== body.mutationId || !Number.isSafeInteger(response.appliedRevision)) throw new Error('Invalid TM save acknowledgement.');
-            await this.store.acknowledgeTranslationMemoryWrite(scope, body.mutationId, response, { notify: false, guard: () => this.current(ctx) });
+            const accepted = await this.store.acknowledgeTranslationMemoryWrite(scope, body.mutationId, response,
+              { notify: false, returnChanges: true, guard: () => this.current(ctx) });
+            this.check(ctx);
+            if (accepted?.patch && this.onPatch(scope, accepted.patch))
+              this.publishedVersions.set(JSON.stringify([scope.profile, scope.language]), accepted.patch.localVersion);
           } catch (error) {
             if (error.status !== 409) throw error;
             const conflicts = error.details?.conflicts || [];

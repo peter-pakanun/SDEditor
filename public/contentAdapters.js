@@ -138,6 +138,43 @@
     // No StatDescription decoding: literal backslash-n, real newlines and @
     // remain different characters through exact and fuzzy memory comparisons.
     const fold=value=>String(value).normalize('NFC').toLocaleLowerCase();
+    const memorySnapshots=new WeakMap(),memorySources=new WeakMap();
+    const memoryKind=context=>JSON.stringify([normalizeMode(context?.contentMode),String(context?.fieldKind||''),String(context?.form||'')]);
+    function memoryGrams(points){
+        const grams=new Map();
+        for(let index=1;index<points.length;index++){
+            const gram=points[index-1]+points[index];grams.set(gram,(grams.get(gram)||0)+1);
+        }
+        return grams;
+    }
+    function memorySnapshot(input){
+        const rows=Array.isArray(input)?input:Array.from(input||[]),previous=memorySnapshots.get(rows);
+        // Published libraries are immutable arrays. Recheck their source/type
+        // fields so direct consumers that edit an array or unit stay correct.
+        if(previous && previous.rows.length===rows.length && previous.rows.every((row,index)=>{
+            const unit=rows[index];return row.unit===unit && row.source===unit.source && row.mode===unit.context?.contentMode
+                && row.kind===unit.context?.fieldKind && row.form===unit.context?.form;
+        }))return previous;
+        const snapshot={rows:[],kinds:new Map()},sources=new Map();
+        rows.forEach((unit,position)=>{
+            snapshot.rows.push({unit,source:unit.source,mode:unit.context?.contentMode,kind:unit.context?.fieldKind,form:unit.context?.form});
+            if(normalizeMode(unit.context?.contentMode)!=='clienttext')return;
+            let prepared=memorySources.get(unit);
+            if(!prepared || prepared.source!==unit.source){
+                const source=runtime().canonicalSource(unit.source);
+                let data=sources.get(source);
+                if(!data){const points=Array.from(fold(source));data={source,points,grams:memoryGrams(points)};}
+                prepared={source:unit.source,data};memorySources.set(unit,prepared);
+            }
+            const data=prepared.data;sources.set(data.source,data);
+            const kind=memoryKind(unit.context);
+            if(!snapshot.kinds.has(kind))snapshot.kinds.set(kind,new Map());
+            const groups=snapshot.kinds.get(kind);
+            if(!groups.has(data.source))groups.set(data.source,{...data,rows:[]});
+            groups.get(data.source).rows.push({unit,position});
+        });
+        memorySnapshots.set(rows,snapshot);return snapshot;
+    }
     function distance(left,right,maximum){
         if(Math.abs(left.length-right.length)>maximum)return maximum+1;
         let previous=Array.from({length:right.length+1},(_,index)=>index);
@@ -157,22 +194,41 @@
         const state=runtime(),context=contextFor(unit,field),source=state.canonicalSource(field.source),left=Array.from(fold(source));
         if(!source.trim())return[];
         const threshold=Math.max(0,Math.min(100,Number.isFinite(options.threshold)?options.threshold:75)),limit=Math.max(1,Math.min(100,options.limit||20));
-        const result=[];
-        for(const candidate of units||[]){
-            if(candidate.deleted||candidate.suppressed||candidate.enabled===false||!candidate.target?.trim()||candidate.target.trim()==='NONEXISTENT'&&!state.isNamedForm(field)
-                ||!compatibleContext(candidate.context,context)||options.game&&candidate.gameScope!==options.game&&candidate.gameScope!=='all')continue;
-            const before=state.canonicalSource(candidate.source),exact=before===source,right=Array.from(fold(before)),maximum=Math.max(left.length,right.length);
-            if(!exact&&threshold===100)continue;
-            const edits=exact?0:distance(left,right,Math.floor(maximum*(100-threshold)/100));
-            const score=exact?100:Math.min(99,maximum?Math.floor(100*(maximum-edits)/maximum):0);
-            if(score<threshold)continue;
-            const sameContext=['sheet','recordId','fieldId'].every(name=>candidate.context[name]===context[name]);
-            const warnings=state.diagnose(field,candidate.target);
-            result.push({id:candidate.id,unit:candidate,source:candidate.source,target:candidate.target,score:exact&&sameContext?101:score,
-                kind:exact?(sameContext?'context':'exact'):'fuzzy',sameContext,warnings,
-                ...(Memory?.sourceDiff?{diff:Memory.sourceDiff(candidate.source,field.source)}:{})});
+        const groups=memorySnapshot(units).kinds.get(memoryKind(context));if(!groups)return[];
+        const result=[],count=Math.floor(limit),named=state.isNamedForm(field),grams=memoryGrams(left);
+        if(!count)return[];
+        const compare=(a,b)=>b.score-a.score||String(a.unit.id).localeCompare(String(b.unit.id))||a.position-b.position;
+        const eligible=candidate=>!candidate.deleted&&!candidate.suppressed&&candidate.enabled!==false&&candidate.target?.trim()
+            && (candidate.target.trim()!=='NONEXISTENT'||named) && (!options.game||candidate.gameScope===options.game||candidate.gameScope==='all');
+        const remember=(row,score,exact)=>{
+            if(!eligible(row.unit))return;
+            const sameContext=['sheet','recordId','fieldId'].every(name=>row.unit.context[name]===context[name]);
+            const candidate={...row,score:exact&&sameContext?101:score,kind:exact?(sameContext?'context':'exact'):'fuzzy',sameContext};
+            if(result.length>=count && compare(candidate,result[result.length-1])>=0)return;
+            let start=0,end=result.length;
+            while(start<end){const middle=(start+end)>>>1;if(compare(candidate,result[middle])<0)end=middle;else start=middle+1;}
+            result.splice(start,0,candidate);if(result.length>count)result.pop();
+        };
+        const exact=groups.get(source);
+        if(exact)for(const row of exact.rows)remember(row,100,true);
+        for(const group of groups.values()){
+            if(group===exact)continue;
+            const cutoff=result.length>=count?Math.max(threshold,result[result.length-1].score):threshold;
+            if(cutoff>99)break;
+            const maximum=Math.max(left.length,group.points.length),radius=Math.floor(maximum*(100-cutoff)/100);
+            if(Math.abs(left.length-group.points.length)>radius || !group.rows.some(row=>eligible(row.unit)))continue;
+            let overlap=0;
+            for(const [gram,value]of grams)overlap+=Math.min(value,group.grams.get(gram)||0);
+            // One edit changes at most two adjacent character pairs. This is
+            // an admissible bound, including sources with no shared bigram.
+            if(Math.ceil((Math.max(left.length-1,group.points.length-1,0)-overlap)/2)>radius)continue;
+            const edits=distance(left,group.points,radius),score=Math.min(99,maximum?Math.floor(100*(maximum-edits)/maximum):0);
+            if(score<cutoff)continue;
+            for(const row of group.rows)remember(row,score,false);
         }
-        return result.sort((a,b)=>b.score-a.score||String(a.id).localeCompare(String(b.id))).slice(0,limit);
+        return result.map(({unit:candidate,score,kind,sameContext})=>({id:candidate.id,unit:candidate,source:candidate.source,target:candidate.target,
+            score,kind,sameContext,warnings:state.diagnose(field,candidate.target),
+            ...(Memory?.sourceDiff?{diff:Memory.sourceDiff(candidate.source,field.source)}:{})}));
     }
     const clienttext=Object.freeze({id:'clienttext',unitIdentity:unit=>unit.id,fields:unit=>unit.fields,
         values:(unit,saved)=>runtime().valuesFor(unit,saved),serialize:(unit,values)=>runtime().normalizeValues(unit,values),

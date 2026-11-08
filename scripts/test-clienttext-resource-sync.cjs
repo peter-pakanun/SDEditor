@@ -4,6 +4,7 @@ const Resource=require('../public/clientTextResourceSync.js'),A=require('../publ
 const S=require('../public/clientTextState.js'),TM=require('../public/translationMemory.js');
 const {scope:originalScope,unit:makeUnit}=require('./clienttext-storage-fixture.cjs');
 const fs=require('node:fs'),vm=require('node:vm');
+const deferred=()=>{let resolve;const promise=new Promise(yes=>{resolve=yes;});return{promise,resolve};};
 function harness(changes={}){
     const scope={...originalScope,groupId:'local:test:sync'},unit=makeUnit('Hello {0}','Target {0}');
     const host={...Resource.mixin.data(),cloudSignedIn:true,cloudProfileId:scope.accountId,cloudUser:{id:scope.accountId,role:'translator',language:scope.language},
@@ -55,6 +56,49 @@ test('closed or changed scopes cannot retry failed shared memory jobs into anoth
         host.ctWorkspace.scope={...host.ctWorkspace.scope,accountId:'other'};await host.ctFlushResourceMemory();assert.equal(calls,1);assert.equal(host._ctResourceJobs.size,0);
         host.ctClearResourceSync();assert.equal(host.ctResourceIssue,'');
     }finally{global.OfflineStore=previous;}
+});
+
+test('a workbook save publishes only acknowledged TM changes and does not reread the full language corpus',async()=>{
+    const written=deferred(),started=deferred(),previous=global.OfflineStore,events=[];
+    const {host,unit,scope}=harness({
+        applyClientTextMemoryPatch(patch){events.push('patch');assert.equal(patch.profile,scope.accountId);return true;},
+        loadTranslationMemory(){assert.fail('A bounded acknowledged save must not reload the entire language TM.');},
+        _cloud:{schedule(){events.push('schedule');}},
+    });
+    global.OfflineStore={
+        async putTranslationMemoryUnits(captured,units,options){
+            assert.deepEqual(captured,{profile:scope.accountId,language:scope.language});assert.equal(options.returnChanges,true);assert.equal(options.notify,false);
+            assert.equal(options.guard(),true);started.resolve();await written.promise;events.push('commit');
+            return{changed:true,patch:{profile:scope.accountId,language:scope.language,previousVersion:7,localVersion:8,entries:[{unit:units[0],conflict:null}]}};
+        },
+        notifyTranslationMemoryChange(captured){assert.deepEqual(captured,{profile:scope.accountId,language:scope.language});events.push('notify');},
+    };
+    try{
+        const saving=host.ctQueueResourceMemory(host.ctContext(),unit,{jobId:'bounded-save',saved:true,values:S.valuesFor(unit),reviewed:{}});
+        await started.promise;assert.deepEqual(events,[],'No suggestion or peer notification may precede the durable acknowledgement.');
+        written.resolve();assert.equal(await saving,true);assert.deepEqual(events,['commit','patch','notify','schedule']);assert.equal(host._ctResourceJobs.size,0);
+    }finally{written.resolve();global.OfflineStore=previous;}
+});
+
+test('a stale snapshot falls back to a background TM reload without delaying the acknowledged workbook save',{timeout:1000},async()=>{
+    const pendingReload=deferred(),previous=global.OfflineStore;let refreshes=0,notifications=0;
+    const {host,unit}=harness({applyClientTextMemoryPatch:()=>false,loadTranslationMemory(){refreshes++;return pendingReload.promise;}});
+    global.OfflineStore={async putTranslationMemoryUnits(){return{changed:true,patch:{}};},notifyTranslationMemoryChange(){notifications++;}};
+    try{
+        assert.equal(await host.ctQueueResourceMemory(host.ctContext(),unit,{jobId:'concurrent-save',saved:true,values:S.valuesFor(unit),reviewed:{}}),true);
+        assert.equal(refreshes,1);assert.equal(notifications,1);assert.equal(host._ctResourceJobs.size,0);
+    }finally{pendingReload.resolve();global.OfflineStore=previous;}
+});
+
+test('a late TM acknowledgement cannot publish a patch or notification in a replacement workbook/account',async()=>{
+    const written=deferred(),started=deferred(),previous=global.OfflineStore;let published=0;
+    const {host,unit}=harness({applyClientTextMemoryPatch(){published++;return true;},loadTranslationMemory(){published++;}});
+    global.OfflineStore={async putTranslationMemoryUnits(){started.resolve();await written.promise;return{changed:true,patch:{}};},notifyTranslationMemoryChange(){published++;}};
+    try{
+        const saving=host.ctQueueResourceMemory(host.ctContext(),unit,{jobId:'outgoing-save',saved:true,values:S.valuesFor(unit),reviewed:{}});
+        await started.promise;host.ctWorkspace.scope={...host.ctWorkspace.scope,accountId:'replacement-account'};written.resolve();await saving;
+        assert.equal(published,0);assert.equal(host._ctResourceJobs.size,0);
+    }finally{written.resolve();global.OfflineStore=previous;}
 });
 
 test('shared TM management validates ClientText literals and protected tokens with ClientText rules',()=>{

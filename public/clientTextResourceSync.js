@@ -20,11 +20,23 @@
             },
             ctEditorMemory() {
                 if (!this.ctResourceSyncEnabled) return this.ctMemory;
-                const TM = memory(), identity = unit => TM.identityFor(unit), deleted = new Set((this.tmTombstones || []).map(identity)), units = new Map();
-                for (const unit of [...(this.ctMemory || []), ...(this.tmUnits || [])]) {
-                    if (unit.context?.contentMode !== 'clienttext' || deleted.has(identity(unit))
+                const TM = memory(), cache = this._ctMemoryIdentities ||= new WeakMap();
+                // Stored TM snapshots keep each unit/context immutable. Reuse
+                // identities when a one-ID save replaces the surrounding array.
+                const identity = unit => {
+                    let entry = cache.get(unit);
+                    if (!entry || entry.source !== unit.source || entry.gameScope !== unit.gameScope || entry.context !== unit.context) {
+                        entry = { source: unit.source, gameScope: unit.gameScope, context: unit.context, key: TM.identityFor(unit) };
+                        cache.set(unit, entry);
+                    }
+                    return entry.key;
+                };
+                const deleted = new Set((this.tmTombstones || []).map(identity)), units = new Map();
+                for (const rows of [this.ctMemory || [], this.tmUnits || []]) for (const unit of rows) {
+                    if (unit.context?.contentMode !== 'clienttext'
                         || ![this.gameVersion, 'all'].includes(unit.gameScope)) continue;
-                    units.set(identity(unit), unit);
+                    const key = identity(unit);
+                    if (!deleted.has(key)) units.set(key, unit);
                 }
                 return [...units.values()];
             },
@@ -53,12 +65,14 @@
                         const current = () => this.ctCurrent(job.ctx) && this.ctResourceSyncEnabled && this.tmScopeKey === job.key;
                         if (!current()) { this._ctResourceJobs.delete(id); continue; }
                         try {
-                            await root.OfflineStore.putTranslationMemoryUnits({ profile: job.ctx.scope.accountId, language: job.ctx.scope.language },
-                                copy(job.units), { origin: 'learn', mutationId: job.mutationId, guard: current });
+                            const scope = { profile: job.ctx.scope.accountId, language: job.ctx.scope.language };
+                            const result = await root.OfflineStore.putTranslationMemoryUnits(scope,
+                                copy(job.units), { origin: 'learn', mutationId: job.mutationId, guard: current, returnChanges: true, notify: false });
                             this._ctResourceJobs.delete(id);
                             if (!current()) continue;
                             this.ctResourceIssue = '';
-                            await this.loadTranslationMemory?.();
+                            if (!this.applyClientTextMemoryPatch?.(result?.patch)) this.loadTranslationMemory?.();
+                            if (result?.changed !== false) root.OfflineStore.notifyTranslationMemoryChange?.(scope);
                             this._cloud?.schedule(0);
                         } catch (error) {
                             if (current()) this.ctResourceIssue = 'Workbook saved locally, but TM could not be queued. Keep this session open and use Sync now: ' + error.message;

@@ -35,7 +35,7 @@ function fixture(options={}) {
       const select = (field, value) => [...rows.values()].filter(row => value == null || row[field] === value).sort((a,b) => a.key.localeCompare(b.key));
       return {
         get: key => run(() => rows.get(key)),
-        getAll: () => run(() => [...rows.values()]),
+        getAll: () => run(() => { operations.push({ name, index: null }); return [...rows.values()]; }),
         put: value => run(() => {
           assert.equal(mode, 'readwrite'); if (failStore === name) throw new Error('Simulated ' + name + ' failure');
           rows.set(value.key, copy(value)); return value.key;
@@ -107,6 +107,52 @@ test('reviewed edits reject changed local revisions even before a cloud revision
   assert.equal((await snapshot(f)).units[0].target,'ใหม่ {0}');
 });
 
+test('an acknowledged TM capture returns only its committed changes without reading the language corpus',async()=>{
+  const f=fixture();await f.store.putTranslationMemoryUnits(scope,Array.from({length:130},(_,index)=>({...unit('แปล {0}',index),id:'unit-'+index})),{origin:'seed'});
+  const previous=await f.store.getTranslationMemoryState(scope);f.operations.length=0;
+  const result=copy(await f.store.putTranslationMemoryUnits(scope,[{...unit('แก้ {0}',17),id:'unit-17'}],
+    {origin:'learn',mutationId:'bounded-save',returnChanges:true}));
+  assert.equal(result.changed,true);assert.equal(result.patch.profile,scope.profile);assert.equal(result.patch.language,scope.language);
+  assert.equal(result.patch.previousVersion,previous.localVersion);assert.equal(result.patch.localVersion,previous.localVersion+1);
+  assert.equal(result.patch.entries.length,1);assert.equal(result.patch.entries[0].unit.id,'unit-17');
+  assert.equal(result.patch.entries[0].unit.target,'แก้ {0}');assert.equal(result.patch.entries[0].unit.localRevision,2);
+  assert.equal(result.patch.entries[0].conflict,null);
+  assert.ok(!f.operations.some(operation=>operation.name==='tm_units'),'Capture results must use affected records rather than a full language read.');
+  const state=await snapshot(f);assert.deepEqual(result.patch.entries[0].unit,state.units.find(entry=>entry.id==='unit-17'));
+  assert.equal(state.units.length,130);assert.equal((await f.store.listTranslationMemoryHistory(scope,'unit-17')).length,2);
+});
+
+test('TM capture patches retain deletion suppression and exact-receipt retries without inventing changes',async()=>{
+  const f=fixture(),raw={...unit(),id:'suppressed'};
+  const removed=copy(await f.store.putTranslationMemoryUnits(scope,[{...raw,deleted:true}],{origin:'seed',mutationId:'delete',returnChanges:true}));
+  assert.equal(removed.patch.entries.length,1);assert.equal(removed.patch.entries[0].unit.deleted,true);
+  const version=removed.patch.localVersion;
+  for(const options of [{origin:'learn',mutationId:'save'},{origin:'seed',mutationId:'delete'}]){
+    const result=copy(await f.store.putTranslationMemoryUnits(scope,[{...raw,target:'ใหม่ {0}'}],{...options,returnChanges:true}));
+    assert.equal(result.changed,false);assert.equal(result.patch.previousVersion,version);assert.equal(result.patch.localVersion,version);
+    assert.deepEqual(result.patch.entries,[]);
+  }
+  const state=await snapshot(f);assert.equal(state.units.length,0);assert.equal(state.tombstones.length,1);
+});
+
+test('a learned conflict patch retains the accepted shared entry and the updated local alternative',async()=>{
+  const f=fixture();await f.store.putTranslationMemoryUnits(scope,[{...unit(),id:'conflicted'}],{origin:'learn'});
+  const local=(await snapshot(f)).units[0];await bootstrap(f,[{...local,target:'ส่วนกลาง {0}',revision:2}],3);
+  const before=await f.store.getTranslationMemoryState(scope);
+  const result=copy(await f.store.putTranslationMemoryUnits(scope,[{...local,target:'แก้ล่าสุด {0}'}],{origin:'learn',mutationId:'conflict-save',returnChanges:true}));
+  assert.equal(result.patch.previousVersion,before.localVersion);assert.equal(result.patch.localVersion,before.localVersion+1);
+  assert.equal(result.patch.entries.length,1);assert.equal(result.patch.entries[0].unit.target,'ส่วนกลาง {0}');
+  assert.equal(result.patch.entries[0].conflict.local.target,'แก้ล่าสุด {0}');
+  const state=await snapshot(f);assert.deepEqual(result.patch.entries[0].unit,state.units[0]);assert.deepEqual(result.patch.entries[0].conflict,state.conflicts[0]);
+});
+
+test('a failed bounded capture leaves no acknowledged patch or partial unit/history/outbox state',async()=>{
+  const f=fixture();await f.store.putTranslationMemoryUnits(scope,[{...unit(),id:'protected'}]);
+  const before=await snapshot(f);f.fail('tm_outbox');
+  await assert.rejects(f.store.putTranslationMemoryUnits(scope,[{...unit('失敗 {0}'),id:'protected'}],{origin:'learn',returnChanges:true}),/Simulated/);
+  f.fail('');assert.deepEqual(await snapshot(f),before);assert.equal((await f.store.listTranslationMemoryHistory(scope,'protected')).length,1);
+});
+
 test('frozen uploads retry unchanged and acknowledgements keep newer local corrections',async()=>{
   const f=fixture();await bootstrap(f);await f.store.putTranslationMemoryUnits(scope,[unit()]);
   const first=copy((await f.store.getTranslationMemoryPending(scope))[0]);
@@ -118,6 +164,72 @@ test('frozen uploads retry unchanged and acknowledgements keep newer local corre
   assert.equal(state.revision,0,'A mutation acknowledgement cannot skip remote replay events.');
   const next=copy((await f.store.getTranslationMemoryPending(scope))[0]);
   assert.equal(next.upserts[0].baseRevision,1);assert.equal(next.upserts[0].target,'ใหม่ {0}');
+});
+
+test('bounded upload acknowledgements publish committed current targets and keep newer local corrections queued',async()=>{
+  const f=fixture();await bootstrap(f);await f.store.putTranslationMemoryUnits(scope,[{...unit(),id:'ack-pair'}]);
+  const wire=copy((await f.store.getTranslationMemoryPending(scope))[0]);
+  await f.store.putTranslationMemoryUnits(scope,[{...unit('ใหม่กว่า {0}'),id:'ack-pair'}]);
+  const previous=await f.store.getTranslationMemoryState(scope),accepted={...wire.upserts[0],revision:1};delete accepted.baseRevision;
+  f.operations.length=0;
+  const result=copy(await f.store.acknowledgeTranslationMemoryWrite(scope,wire.mutationId,
+    {mutationId:wire.mutationId,revision:1,appliedRevision:1,accepted:[accepted]},{returnChanges:true}));
+  assert.equal(result.changed,true);assert.equal(result.patch.previousVersion,previous.localVersion);assert.equal(result.patch.localVersion,previous.localVersion+1);
+  assert.equal(result.patch.entries.length,1);assert.equal(result.patch.entries[0].unit.target,'ใหม่กว่า {0}');assert.equal(result.patch.entries[0].unit.revision,1);
+  assert.equal(result.patch.entries[0].conflict,null);assert.ok(!f.operations.some(operation=>operation.name==='tm_units'));
+  const state=await snapshot(f);assert.deepEqual(result.patch.entries[0].unit,state.units[0]);assert.equal(state.revision,0);
+  const retry=copy((await f.store.getTranslationMemoryPending(scope))[0]);assert.equal(retry.upserts[0].target,'ใหม่กว่า {0}');assert.equal(retry.upserts[0].baseRevision,1);
+  const replay=copy(await f.store.acknowledgeTranslationMemoryWrite(scope,wire.mutationId,
+    {mutationId:wire.mutationId,revision:1,appliedRevision:1,accepted:[accepted]},{returnChanges:true}));
+  assert.equal(replay.changed,false);assert.deepEqual(replay.patch.entries,[]);assert.equal(replay.patch.previousVersion,result.patch.localVersion);
+  assert.equal(replay.patch.localVersion,result.patch.localVersion);
+});
+
+test('advanced receipt acknowledgements preserve reconciliation and request full-snapshot publication',async()=>{
+  const f=fixture();await bootstrap(f);await f.store.putTranslationMemoryUnits(scope,[{...unit(),id:'advanced'}]);
+  const wire=copy((await f.store.getTranslationMemoryPending(scope))[0]);
+  await f.store.putTranslationMemoryUnits(scope,[{...unit('ยังใหม่กว่า {0}'),id:'advanced'}]);
+  const latest={...wire.upserts[0],target:'ส่วนกลางล่าสุด {0}',revision:2};delete latest.baseRevision;
+  const result=copy(await f.store.acknowledgeTranslationMemoryWrite(scope,wire.mutationId,
+    {mutationId:wire.mutationId,revision:2,appliedRevision:1,replayed:true,accepted:[latest]},{returnChanges:true}));
+  assert.equal(result.changed,true);assert.equal(Object.hasOwn(result,'patch'),false);
+  const state=await snapshot(f);assert.equal(state.units[0].target,latest.target);assert.equal(state.units[0].revision,2);
+  assert.equal(state.conflicts[0].local.target,'ยังใหม่กว่า {0}');assert.equal(state.revision,0);
+});
+
+test('failed upload acknowledgements roll back their unit, wire and local version before returning a patch',async()=>{
+  const f=fixture();await bootstrap(f);await f.store.putTranslationMemoryUnits(scope,[{...unit(),id:'atomic-ack'}]);
+  const wire=copy((await f.store.getTranslationMemoryPending(scope))[0]),before=await snapshot(f),accepted={...wire.upserts[0],revision:1};delete accepted.baseRevision;
+  f.fail('tm_meta');await assert.rejects(f.store.acknowledgeTranslationMemoryWrite(scope,wire.mutationId,
+    {mutationId:wire.mutationId,revision:1,appliedRevision:1,accepted:[accepted]},{returnChanges:true}),/Simulated/);
+  f.fail('');assert.deepEqual(await snapshot(f),before);assert.deepEqual(copy((await f.store.getTranslationMemoryPending(scope))[0]),wire);
+});
+
+test('cursor replay of an already acknowledged pair returns an empty version patch while real changes keep full snapshots',async()=>{
+  const f=fixture();await bootstrap(f);await f.store.putTranslationMemoryUnits(scope,[{...unit(),id:'cursor-pair'}]);
+  const wire=copy((await f.store.getTranslationMemoryPending(scope))[0]);await accept(f,wire,1);
+  const accepted={...wire.upserts[0],revision:1};delete accepted.baseRevision;
+  const previous=await f.store.getTranslationMemoryState(scope);f.operations.length=0;
+  const replay=copy(await f.store.applyTranslationMemoryRemote(scope,{revision:1,units:[accepted],tombstones:[]},{returnChanges:true}));
+  assert.equal(replay.changed,true);assert.deepEqual(replay.patch.entries,[]);assert.equal(replay.patch.previousVersion,previous.localVersion);
+  assert.equal(replay.patch.localVersion,previous.localVersion+1);assert.ok(!f.operations.some(operation=>operation.name==='tm_units'));
+  const changed=copy(await f.store.applyTranslationMemoryRemote(scope,{revision:2,units:[{...accepted,revision:2,target:'ส่วนกลางใหม่ {0}'}],tombstones:[]},{returnChanges:true}));
+  assert.equal(changed.changed,true);assert.equal(Object.hasOwn(changed,'patch'),false);assert.equal((await snapshot(f)).units[0].target,'ส่วนกลางใหม่ {0}');
+  const bootstrapping=copy(await f.store.applyTranslationMemoryRemote(scope,{revision:3,units:[{...accepted,revision:3}],tombstones:[]},{bootstrap:true,returnChanges:true}));
+  assert.equal(Object.hasOwn(bootstrapping,'patch'),false);
+});
+
+test('cursor replay of an identical accepted base preserves newer dirty work and its exact frozen upload',async()=>{
+  const f=fixture(),base={...unit(),id:'dirty-base',revision:1};await bootstrap(f,[base],1);
+  await f.store.putTranslationMemoryUnits(scope,[{...base,target:'ใหม่ที่ยังรอ {0}'}],{origin:'learn',mutationId:'newer-local-save'});
+  const pending=copy((await f.store.getTranslationMemoryPending(scope))[0]),before=await snapshot(f);
+  const result=copy(await f.store.applyTranslationMemoryRemote(scope,{revision:2,units:[base],tombstones:[]},{returnChanges:true}));
+  assert.equal(result.changed,true);assert.deepEqual(result.patch.entries,[]);
+  assert.equal(result.patch.previousVersion,before.localVersion);assert.equal(result.patch.localVersion,before.localVersion+1);
+  const after=await snapshot(f);assert.equal(after.revision,2);assert.equal(after.localVersion,before.localVersion+1);
+  assert.deepEqual(after.units,before.units);assert.equal(after.units[0].target,'ใหม่ที่ยังรอ {0}');
+  assert.equal(after.units[0].localRevision,before.units[0].localRevision);assert.deepEqual(after.conflicts,[]);
+  assert.deepEqual(copy((await f.store.getTranslationMemoryPending(scope))[0]),pending,'Cursor catch-up must retain the frozen request ID and body exactly.');
 });
 
 test('first synchronization unions identities and preserves conflicting corrections for a choice',async()=>{
