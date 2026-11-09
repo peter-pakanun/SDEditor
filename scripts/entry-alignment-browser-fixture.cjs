@@ -384,6 +384,94 @@ async function run() {
       placements: true, selected: 2, sameScroll: true, current: true,
       warnings: ['Fixture failed save remains actionable'], failedSave: true, draftReads: 0, clearedForNewVersion: true });
     results.push('Three same-group background metadata replacements retained the exact alignment panel, placements, unused decision, selection, scroll, draft session and failed-save warning without reloading drafts. A real version switch cleared scoped state.');
+    await page.evaluate(() => window.__alignmentApp.editorExit());
+    const exportedAlignment = await page.evaluate(async filepath => {
+      const vm = window.__alignmentApp, originalSaveAs = window.saveAs;
+      let download;
+      window.saveAs = (blob, filename) => { download = { blob, filename }; };
+      try {
+        if (!await vm.exportZip(false) || !download) throw new Error('Could not export aligned fixture work.');
+        const zip = await JSZip.loadAsync(await download.blob.arrayBuffer());
+        const entry = zip.file(filepath);
+        if (!entry) throw new Error('Aligned file was absent from the translated ZIP.');
+        const bytes = await entry.async('uint8array');
+        const desc = StatDescCodec.parseText(filepath, StatDescCodec.decodeUTF16(bytes), 'Thai', { strict: true });
+        return { filename: download.filename, english: desc.translations.English, translation: desc.translations.Thai };
+      } finally { window.saveAs = originalSaveAs; vm.ctCloseExport(); }
+    }, overflow);
+    assert.equal(exportedAlignment.filename, 'StatDescriptions_Translated.zip');
+    assert.deepEqual(exportedAlignment.english, ['English A', 'English C']);
+    assert.deepEqual(exportedAlignment.translation, ['Thai A', 'Thai C'], 'Translated ZIP preserves the saved whole-entry alignment');
+    const importNextSource = date => page.evaluate(async date => {
+      const vm = window.__alignmentApp, clone = value => JSON.parse(JSON.stringify(value));
+      const source = clone(vm.workspaceSource()), zip = new JSZip();
+      // A later ZIP has a new identity while retaining the same upstream excess
+      // target block. The previous complete authored alignment must survive as
+      // a reviewable Dropped copy, rather than being inferred from raw blocks.
+      for (const desc of source) zip.file(desc.filepath, descEncode(desc), { date: new Date(date), createFolders: false });
+      const file = new File([await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' })], 'AlignmentFixtureNext.zip', { type: 'application/zip' });
+      const identity = await vm.readImportZipIdentity(file, zip);
+      await vm.importUpdateZipFile(file, clone(source), { identity, rawSource: clone(source) });
+      vm.inlineEditor = true; vm.inlineSidebarVisible = false;
+      vm.selectAllFileFilters(); vm.applyFileSearch(); await vm.$nextTick();
+      return vm.sourceIdentity;
+    }, date);
+    const nextSourceHash = await importNextSource('2026-10-17T00:00:00Z');
+    assert.notEqual(nextSourceHash, sourceHash, 'Weekly import establishes a distinct source scope');
+    const weeklyRow = page.locator('tr[data-filepath="' + overflow + '"]');
+    await weeklyRow.locator('.fileDroppedLabel').click();
+    await page.waitForFunction(filepath => {
+      const vm = window.__alignmentApp;
+      return vm.inlineActive && vm.editorCurrentEditingDesc?.filepath === filepath && !vm.editorLoading
+        && !vm.inlineTransitionBusy && !vm.navigationBusy;
+    }, overflow);
+    const nextInline = await inspect(overflow);
+    assert.deepEqual(nextInline.currentText, initial.committed, 'Inline initially displays the new immutable excess-block original');
+    assert.deepEqual(nextInline.candidate.snapshot.translations, ['Thai A', 'Thai C']);
+    assert.equal(nextInline.saved, false); assert.equal(nextInline.staged, null); assert.equal(nextInline.dropped, true);
+    await weeklyRow.locator('.fileDroppedLabel').dblclick();
+    await page.waitForFunction(filepath => {
+      const vm = window.__alignmentApp;
+      return vm.editorVisible && !vm.inlineActive && !vm.editorLoading && vm.editorCurrentEditingDesc?.filepath === filepath
+        && vm.editorBlocks.length === 2;
+    }, overflow);
+    const nextFull = await inspect(overflow);
+    assert.deepEqual(nextFull.currentText, ['Thai A', 'Thai C'], 'Double-click reuses the exact saved alignment from the previous version');
+    assert.equal(await panel().count(), 0, 'Unchanged English does not require aligning the original excess blocks again');
+    assert.equal(nextFull.staged, null); assert.equal(nextFull.saved, false); assert.equal(nextFull.dropped, true);
+    assert.deepEqual(nextFull.baseline, initial.committed, 'Recovery review keeps the new ZIP immutable');
+    await save().click();
+    await page.waitForFunction(() => !window.__alignmentApp.editorVisible && !window.__alignmentApp.pendingLocalSaves
+      && !window.__alignmentApp._pendingSaves.snapshot().jobs.length);
+    const nextSaved = await inspect(overflow);
+    assert.deepEqual(nextSaved.committed, ['Thai A', 'Thai C']); assert.equal(nextSaved.saved, true);
+    assert.equal(nextSaved.missing, false); assert.equal(nextSaved.dropped, false); assert.equal(nextSaved.candidate, null);
+    await page.reload(); await ready();
+    await page.evaluate(() => window.__alignmentApp.activateGameVersion('poe1', { checkMigration: false }));
+    assert.equal(await page.evaluate(hash => window.__alignmentApp.managedActivateWorkspace(hash, 'Thai'), nextSourceHash), true);
+    await page.waitForFunction(() => window.__alignmentApp.descs?.length === 3 && !window.__alignmentApp.versionStorageLoading);
+    await open(overflow);
+    const nextReloaded = await inspect(overflow);
+    assert.deepEqual(nextReloaded.currentText, ['Thai A', 'Thai C']); assert.equal(nextReloaded.saved, true);
+    assert.equal(nextReloaded.dropped, false); assert.equal(await panel().count(), 0);
+    await page.evaluate(() => window.__alignmentApp.editorExit());
+    assert.notEqual(await importNextSource('2026-10-24T00:00:00Z'), nextSourceHash);
+    await weeklyRow.locator('.fileDroppedLabel').dblclick();
+    await page.waitForFunction(filepath => {
+      const vm = window.__alignmentApp;
+      return vm.editorVisible && !vm.inlineActive && !vm.editorLoading && vm.editorCurrentEditingDesc?.filepath === filepath
+        && vm.editorBlocks.length === 2;
+    }, overflow);
+    const immediateHandoff = await inspect(overflow);
+    assert.deepEqual(immediateHandoff.currentText, ['Thai A', 'Thai C']);
+    assert.equal(immediateHandoff.staged, null); assert.equal(immediateHandoff.dropped, true);
+    assert.equal(await panel().count(), 0, 'Immediate double-click during inline activation also restores the saved alignment');
+    if (process.env.ALIGNMENT_WEEKLY_SCREENSHOT_PATH) {
+      const screenshot = resolve(process.env.ALIGNMENT_WEEKLY_SCREENSHOT_PATH);
+      await page.screenshot({ path: screenshot, fullPage: true }); screenshots.push(screenshot);
+    }
+    results.push('The translated ZIP retained the saved alignment. A later source ZIP preserved that exact target as Dropped; inline activation followed by a native double-click restored the aligned copy without reopening alignment. Explicit Save promoted it, and reload retained the complete Saved result.');
+    results.push('An immediate native double-click on an inactive row in the following weekly source also restored its aligned Dropped copy while inline activation was still pending.');
     assert.deepEqual(pageErrors, [], 'No uncaught browser errors'); results.push('No uncaught browser errors.');
     console.log(JSON.stringify({ origin, results, screenshots, longGeometry }, null, 2)); await context.close();
   } catch (error) {

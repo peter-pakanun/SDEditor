@@ -336,6 +336,178 @@ test('Save submits aligned text together with original-block recovery revisions'
   assert.equal(submitted.options.revisions[0].note, 'Before entry alignment');
 });
 
+async function savedAlignmentInNextVersion(t) {
+  const h = await fixture(t), { editor, desc, window } = h;
+  const previous = copy(editor._workspaceSourceBaseline);
+  resolveMiddleRemoval(editor);
+  assert.equal(await editor.applyEntryAlignment(), true);
+  assert.equal(await editor.editorSave({ close: false, defer: false }), true);
+  assert.deepEqual(copy(editor.localDescs.staged.Thai[desc.filepath].translations), ['one', 'three']);
+  const incoming = copy(previous);
+  window.WorkspaceState.upgradeSource(editor.localDescs, { previousSource: previous, source: incoming,
+    previousSourceHash: editor.sourceIdentity, sourceHash: 'source-next', game: editor.gameVersion });
+  editor.sourceIdentity = 'source-next';
+  editor._workspaceSourceBaseline = incoming;
+  editor.descs = copy(incoming); editor.filteredDescs = editor.descs;
+  editor.applyWorkspaceOverlay();
+  editor._draftSession = null; editor.editorVisible = false; editor.editorBlocks = [];
+  editor.clearEntryAlignment();
+  const next = editor.getDescByFilepath(desc.filepath);
+  assert.equal(next.needsReview, true);
+  assert.deepEqual(copy(window.WorkspaceState.droppedForFile(editor.localDescs, next.filepath, editor.lang).snapshot.translations), ['one', 'three']);
+  return { ...h, desc: next };
+}
+
+test('opening the next source version directly restores the saved aligned copy for review', async t => {
+  const { editor, desc } = await savedAlignmentInNextVersion(t);
+  assert.equal(await editor.editFile(desc.filepath), true);
+  assert.deepEqual(copy(editor.serializeEditorTranslations()), ['one', 'three']);
+  assert.equal(editor.entryAlignment, null);
+  assert.equal(editor.editorDroppedCandidate.snapshot.translations.length, 2);
+});
+
+test('double-click handoff in the next version restores the saved aligned copy before repeating raw ZIP alignment', async t => {
+  const { editor, desc } = await savedAlignmentInNextVersion(t);
+  editor.inlineEditor = true; editor._nextEditorSurface = 'inline';
+  assert.equal(await editor.editFile(desc.filepath, true, { inline: true }), true);
+  editor._nextEditorSurface = null;
+  assert.equal(editor.inlineActive, true);
+  assert.deepEqual(copy(editor.serializeEditorTranslations()), ['one', 'obsolete', 'three']);
+  assert.equal(await editor.openInlineFullEditor(desc.filepath), true);
+  assert.equal(editor.entryAlignment, null, 'The complete preserved alignment must remain available for review before raw ZIP alignment starts.');
+  assert.deepEqual(copy(editor.serializeEditorTranslations()), ['one', 'three']);
+  assert.deepEqual(copy(editor.editorDroppedCandidate.snapshot.translations), ['one', 'three']);
+  assert.equal(desc.hasChanges, false, 'Opening recovery text does not stage it.');
+  assert.equal(desc.isDropped, true, 'The preserved copy still requires explicit Save or confirmation.');
+});
+
+test('double-click recovery handoff preserves an authored inline draft instead of replacing it with the saved copy', async t => {
+  const { editor, desc, records } = await savedAlignmentInNextVersion(t);
+  editor.inlineEditor = true; editor._nextEditorSurface = 'inline';
+  assert.equal(await editor.editFile(desc.filepath, true, { inline: true }), true);
+  editor._nextEditorSurface = null;
+  editor.editorBlocks[0].translation = 'new inline work';
+  assert.equal(await editor.flushEditorDraft({ force: true }), true);
+  const session = editor._draftSession, draft = copy(records.get(session.key));
+  assert.equal(await editor.openInlineFullEditor(desc.filepath), true);
+  assert.equal(editor._draftSession, session);
+  assert.deepEqual(copy(editor.serializeEditorTranslations()), ['new inline work', 'obsolete', 'three']);
+  assert.deepEqual(records.get(session.key), draft);
+  assert.deepEqual(copy(editor.editorDroppedCandidate.snapshot.translations), ['one', 'three']);
+});
+
+test('double-click recovery handoff does not choose a competing dropped copy automatically', async t => {
+  const { editor, desc } = await savedAlignmentInNextVersion(t);
+  editor.inlineEditor = true; editor._nextEditorSurface = 'inline';
+  assert.equal(await editor.editFile(desc.filepath, true, { inline: true }), true);
+  editor._nextEditorSurface = null;
+  editor.localDescs.droppedConflicts.Thai = { [desc.filepath]: { filepath: desc.filepath,
+    language: editor.lang, targetSourceHash: editor.sourceIdentity, kind: 'upload' } };
+  assert.equal(await editor.openInlineFullEditor(desc.filepath), true);
+  assert.deepEqual(copy(editor.serializeEditorTranslations()), ['one', 'obsolete', 'three']);
+  assert.ok(editor.editorDroppedConflict);
+  assert.equal(editor.entryAlignment, null);
+});
+
+test('late recovery preparation cannot overwrite changed context, selected copy or inline text', async t => {
+  const changes = {
+    account: editor => { editor.cloudUser = { id: 'another-account', role: 'translator', language: 'Thai' }; },
+    profile: editor => { editor.cloudProfileId = 'another-profile'; },
+    language: editor => { editor.lang = 'German'; },
+    source: editor => { editor.sourceIdentity = 'another-source'; },
+    branch: editor => { editor.branchId = 'another-branch'; },
+    group: editor => { editor.activeContentGroup = { id: 'another-group', versionId: 'another-version', contentMode: 'statdescription' }; },
+    candidate_revision: editor => { editor.editorDroppedCandidate.revision++; },
+    candidate_text: editor => { editor.editorDroppedCandidate.snapshot.translations[0] = 'new preserved copy'; },
+    source_entries: editor => { editor.editorCurrentEditingDesc.translations.English[0] = 'Changed source'; },
+    typed_text: editor => { editor.editorBlocks[0].translation = 'typing during preparation'; },
+    draft_record: editor => { editor._draftSession.record = { translations: ['new draft'] }; },
+    dropped_conflict: editor => { editor.localDescs.droppedConflicts.Thai = { [editor.editorCurrentEditingDesc.filepath]: { kind: 'upload' } }; },
+    alignment_recovery: editor => { editor._draftSession.alignmentRecovery.push({ translations: ['retained original'] }); },
+  };
+  for (const [name, change] of Object.entries(changes)) await t.test(name, async t => {
+    const { editor, desc, calls } = await savedAlignmentInNextVersion(t), gate = deferred(), preparing = deferred();
+    editor.inlineEditor = true; editor._nextEditorSurface = 'inline';
+    assert.equal(await editor.editFile(desc.filepath, true, { inline: true }), true);
+    editor._nextEditorSurface = null;
+    const blocks = editor.editorBlocks, writes = calls.writes.length, promotions = calls.promotions.length;
+    editor.prepareMatchedEditorBlocks = () => { preparing.resolve(); return gate.promise; };
+    const handoff = editor.openInlineFullEditor(desc.filepath);
+    await preparing.promise;
+    change(editor);
+    const current = copy(editor.editorBlocks);
+    gate.resolve([editor.makeEditorBlock('One', 'one'), editor.makeEditorBlock('Three', 'three')]);
+    assert.equal(await handoff, false);
+    assert.equal(editor.editorBlocks, blocks);
+    assert.deepEqual(copy(editor.editorBlocks), current);
+    assert.equal(calls.writes.length, writes);
+    assert.equal(calls.promotions.length, promotions);
+  });
+});
+
+test('double-click during inline preparation restores recovery only after raw ZIP preparation settles', async t => {
+  const { editor, desc } = await savedAlignmentInNextVersion(t), gate = deferred(), preparing = deferred();
+  const prepare = editor.prepareMatchedEditorBlocks.bind(editor);
+  editor.prepareMatchedEditorBlocks = (english, translations, current) => {
+    if (translations.length === 3) { preparing.resolve(); return gate.promise; }
+    return prepare(english, translations, current);
+  };
+  editor.inlineEditor = true;
+  const opening = editor.activateInlineRow(desc.filepath);
+  await preparing.promise;
+  assert.equal(editor.inlineActive, true);
+  assert.equal(editor.editorLoading, true);
+  const handoff = editor.openInlineFullEditor(desc.filepath);
+  await new Promise(resolve => setImmediate(resolve));
+  gate.resolve([editor.makeEditorBlock('One', 'one'), editor.makeEditorBlock('Three', 'obsolete'), editor.makeEditorBlock('', 'three')]);
+  assert.equal(await opening, true);
+  assert.equal(await handoff, true);
+  assert.equal(editor.editorVisible, true);
+  assert.equal(editor.inlineActive, false);
+  assert.deepEqual(copy(editor.serializeEditorTranslations()), ['one', 'three']);
+  assert.equal(editor.entryAlignment, null);
+});
+
+test('restoring aligned recovery clamps focus from an obsolete inline block and refreshes its preview', async t => {
+  const { editor, desc } = await savedAlignmentInNextVersion(t);
+  editor.inlineEditor = true; editor._nextEditorSurface = 'inline';
+  assert.equal(await editor.editFile(desc.filepath, true, { inline: true }), true);
+  editor._nextEditorSurface = null;
+  editor.editorFocusedIndex = 2; editor.editorFocusedColumnIndex = 8;
+  const focused = [], previews = [];
+  editor.getEditorRef = (kind, index, column) => ({ focus() { focused.push({ kind, index, column }); } });
+  editor.refreshGamePreview = () => { previews.push([editor.editorFocusedIndex, editor.editorFocusedColumnIndex]); };
+  assert.equal(await editor.openInlineFullEditor(desc.filepath, '', { returnInline: true }), true);
+  assert.equal(editor.editorFocusedIndex, 1);
+  assert.equal(editor.editorFocusedColumnIndex, 0);
+  assert.equal(editor._inlineFullEditorReturn.index, 1);
+  assert.equal(editor._inlineFullEditorReturn.column, 0);
+  assert.deepEqual(focused, [{ kind: 'translation', index: 1, column: null }]);
+  assert.deepEqual(previews, [[1, 0]]);
+});
+
+test('recovery preparation failure keeps original fields and the preserved copy available for reopening', async t => {
+  const { editor, desc, calls } = await savedAlignmentInNextVersion(t);
+  editor.inlineEditor = true; editor._nextEditorSurface = 'inline';
+  assert.equal(await editor.editFile(desc.filepath, true, { inline: true }), true);
+  editor._nextEditorSurface = null;
+  const prepare = editor.prepareMatchedEditorBlocks, original = copy(editor.editorBlocks), writes = calls.writes.length;
+  const candidate = copy(editor.editorDroppedCandidate), promotions = calls.promotions.length;
+  editor.prepareMatchedEditorBlocks = async () => { throw new Error('Dictionary worker unavailable'); };
+  assert.equal(await editor.openInlineFullEditor(desc.filepath), false);
+  assert.match(editor.editorLoadError, /Could not prepare this file.*Dictionary worker unavailable/);
+  assert.deepEqual(copy(editor.editorBlocks), original);
+  assert.deepEqual(copy(editor.editorDroppedCandidate), candidate);
+  assert.equal(calls.writes.length, writes);
+  assert.equal(calls.promotions.length, promotions);
+  assert.equal(desc.isDropped, true);
+  editor.prepareMatchedEditorBlocks = prepare;
+  assert.equal(await editor.editFile(desc.filepath), true);
+  assert.equal(editor.editorLoadError, '');
+  assert.deepEqual(copy(editor.serializeEditorTranslations()), ['one', 'three']);
+  assert.deepEqual(copy(editor.editorDroppedCandidate), candidate);
+});
+
 test('an aligned editor cannot close on a success response that did not stage its translation', async t => {
   const { editor, desc, records } = await fixture(t);
   resolveMiddleRemoval(editor); assert.equal(await editor.applyEntryAlignment(), true);

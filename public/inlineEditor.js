@@ -724,13 +724,12 @@
         const cancelRevision = this._editorOpenCancelRevision || 0;
         const current = () => this.draftScopeCurrent(scope) && (!context || this.collaborationContextCurrent(context))
           && cancelRevision === (this._editorOpenCancelRevision || 0);
-        const handoff = this.inlineActive && this.editorCurrentEditingDesc?.filepath === filepath && !this.editorLoadError;
-        const desc = this.editorCurrentEditingDesc, blocks = this.editorBlocks, session = this._draftSession, run = this._editorOpenRun;
-        const focus = { index: this.editorFocusedIndex || 0, column: this.editorFocusedColumnIndex || 0 };
-        const sameSession = () => this.editorCurrentEditingDesc === desc && this.editorBlocks === blocks
-          && this._draftSession === session && this._editorOpenRun === run;
-        if (this.inlineTransitionBusy && this.editorCurrentEditingDesc?.filepath !== filepath) {
+        const pendingRecovery = this.editorLoading && this.editorCurrentEditingDesc?.needsReview
+          && !this.editorDroppedConflict && root.StatDescCodec.translationIssues(this.editorDroppedCandidate?.snapshot?.translations,
+            this.editorCurrentEditingDesc.translations.English.length).valid;
+        if (this.inlineTransitionBusy && (this.editorCurrentEditingDesc?.filepath !== filepath || pendingRecovery)) {
           // Preserve the full-surface intent while serialized row claims finish.
+          // Recovery must also wait for same-file hydration to find any draft.
           this._inlineRequestedPath = filepath;
           let pending;
           while (this.inlineTransitionBusy && (pending = this._inlineActivationPromise || this._inlineFinishing)) {
@@ -738,6 +737,11 @@
             if (!current() || this._inlineRequestedPath !== filepath) return false;
           }
         }
+        const handoff = this.inlineActive && this.editorCurrentEditingDesc?.filepath === filepath && !this.editorLoadError;
+        const desc = this.editorCurrentEditingDesc, blocks = this.editorBlocks, session = this._draftSession, run = this._editorOpenRun;
+        const focus = { index: this.editorFocusedIndex || 0, column: this.editorFocusedColumnIndex || 0 };
+        const sameSession = () => this.editorCurrentEditingDesc === desc && this.editorBlocks === blocks
+          && this._draftSession === session && this._editorOpenRun === run;
         if (!await this.flushEditorDraft()) return false;
         if (!current() || (handoff && (!this.inlineActive || !sameSession()))) return false;
         if (this.inlineActive && this.editorCurrentEditingDesc?.filepath === filepath && !this.editorLoadError) {
@@ -751,6 +755,40 @@
           if (this.sideTab === 'preview') this.sideTab = 'dictionary';
           const candidate = root.WorkspaceState.droppedForFile(this.localDescs, filepath, this.lang);
           this.editorDroppedCandidate = candidate ? copy(candidate) : null;
+          // A double-click first opens the inline ZIP text. Match a direct full
+          // open by restoring a complete preserved copy when nothing was edited.
+          // Keep authored drafts and their recovery evidence in this session.
+          const translations = candidate?.snapshot?.translations;
+          if (activeDesc.needsReview && !this.editorDroppedConflict && activeSession
+            && !activeSession.record && !activeSession.pendingRecord && !activeSession.conflict && !activeSession.writeError
+            && !activeSession.alignmentRecovery?.length && !this.editorHaveChanges()
+            && root.StatDescCodec.translationIssues(translations, activeDesc.translations.English.length).valid) {
+            const candidateKey = JSON.stringify(this.editorDroppedCandidate), englishKey = JSON.stringify(activeDesc.translations.English);
+            const draftKey = JSON.stringify(this.serializeEditorTranslations());
+            const recoveryCurrent = () => current() && this.editorVisible && !this.inlineActive
+              && this.editorCurrentEditingDesc === activeDesc && this.editorBlocks === activeBlocks
+              && this._draftSession === activeSession && this._editorOpenRun === activeRun
+              && !this.editorDroppedConflict && !activeSession.record && !activeSession.pendingRecord
+              && !activeSession.conflict && !activeSession.writeError && !activeSession.alignmentRecovery?.length
+              && JSON.stringify(this.editorDroppedCandidate) === candidateKey
+              && JSON.stringify(activeDesc.translations.English) === englishKey
+              && JSON.stringify(this.serializeEditorTranslations()) === draftKey;
+            try {
+              const prepared = await this.prepareMatchedEditorBlocks(activeDesc.translations.English, translations, recoveryCurrent);
+              if (!prepared || !recoveryCurrent()) return false;
+              this.applyPreparedEditorBlocks(prepared);
+              this.editorOriginalTranslations = prepared.map(block => block.translation);
+              targetFocus.index = Math.min(targetFocus.index, Math.max(0, prepared.length - 1));
+              targetFocus.column = Math.min(targetFocus.column, Math.max(0, (prepared[targetFocus.index]?.tableColumns?.length || 1) - 1));
+              if (this._inlineFullEditorReturn) Object.assign(this._inlineFullEditorReturn, targetFocus);
+              this.setEditorFocus(targetFocus.index, targetFocus.column);
+              this.editorShowEnglishDiff = true;
+              this.prepareEditorEnglishDiff?.();
+            } catch (error) {
+              if (recoveryCurrent()) this.editorLoadError = 'Could not prepare this file. Close it and try again. ' + error.message;
+              return false;
+            }
+          }
           await this.$nextTick();
           if (!current() || !this.editorVisible || this.inlineActive || this.editorCurrentEditingDesc !== activeDesc
             || this.editorBlocks !== activeBlocks || this._draftSession !== activeSession || this._editorOpenRun !== activeRun) return false;
