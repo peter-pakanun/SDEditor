@@ -8,7 +8,7 @@ const S=require('../public/clientTextState.js');
 const {unit,fieldId,asset}=require('./clienttext-storage-fixture.cjs');
 const AUDIO_MARKERS=['[NOAUDIO]','[NO AUDIO]','[OLD AUDIO]','[AUDIOTEST]'];
 
-test('sheet colours distinguish completed Missing grey from unmarked complete content and no-op saves',()=>{
+test('sheet colours distinguish completed Missing blue from unmarked complete content and no-op saves',()=>{
     const plain=unit('English','Original'),missing=unit('English',''),id=plain.fields[0].id;
     missing.fields[0].required=true;missing.fields[0].originalMissing=true;missing.fields[0].originalFill=S.FILLS.missing;
     assert.equal(S.unitColorFor(plain),'');assert.equal(S.unitColorFor(plain,{values:S.valuesFor(plain)}),'');
@@ -21,14 +21,14 @@ test('sheet colours distinguish completed Missing grey from unmarked complete co
     assert.equal(S.unitColorFor(outdated,{values:S.valuesFor(outdated),reviewed:{[id]:S.sourceHash('English')}}),'reviewed');
     const optional={...plain,fields:[{...plain.fields[0],kind:'form',required:false,target:'',originalMissing:false}]};
     assert.equal(S.unitColorFor(optional),'');assert.equal(S.unitColorFor(optional,{values:S.valuesFor(optional)}),'');
-    assert.equal(S.unitColorFor({...optional,fields:[{...optional.fields[0],originalFill:S.FILLS.filled}]}),'','Grey formatting on an unused optional blank is not completed workload');
+    assert.equal(S.unitColorFor({...optional,fields:[{...optional.fields[0],originalFill:S.FILLS.filled}]}),'','Completion formatting on an unused optional blank is not completed workload');
     for(const fill of [null,'FFFFFF','989898','B4A7D7'])assert.equal(S.unitColorFor({...plain,fields:[{...plain.fields[0],originalFill:fill}]}),'','Other original formatting never implies completion');
     for(const color of ['filled','reviewed','revised'])assert.equal(S.unitColorFor({...plain,fields:[{...plain.fields[0],originalFill:S.FILLS[color]}]}),color,'Recognised completion fill survives original replay');
     const audio={...missing,fields:[{...missing.fields[0],source:'[NOAUDIO]',originalFill:S.FILLS.filled}]};
     assert.equal(S.unitColorFor(audio),'');
 });
 
-test('sheet colour aggregation follows every level of red, orange, purple, green, grey, no colour',()=>{
+test('sheet colour aggregation follows every level of red, orange, purple, green, blue, no colour',()=>{
     const keys=S.SHEET_COLORS.filter(Boolean),counts=S.emptyColorCounts();
     assert.equal(S.sheetColorFor(counts),'');
     for(const key of [...keys].reverse()){counts[key]++;assert.equal(S.sheetColorFor(counts),key);}

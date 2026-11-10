@@ -8,9 +8,10 @@
     const FORMAT = 'clienttext-v1', TRUSTED_FORMAT = 'clienttext-trusted-v1', STORAGE_PROTOCOL = TRUSTED_FORMAT, PARSER_VERSION = 'clienttext-v4';
     const PARSER_VERSIONS = Object.freeze(['clienttext-v1', 'clienttext-v2', 'clienttext-v3', PARSER_VERSION]);
     const GENERIC_COVERAGE_PROTOCOL = 'clienttext-generic-coverage-v1';
-    const FILLS = Object.freeze({ missing: 'FA8072', outdated: 'FF9966', filled: 'D9D9D9', reviewed: 'C6EFCE', revised: 'D9D2E9' });
+    const FILLS = Object.freeze({ missing: 'FA8072', outdated: 'FF9966', filled: 'BDD7EE', reviewed: 'C6EFCE', revised: 'D9D2E9' });
     const SHEET_COLORS = Object.freeze(['missing', 'outdated', 'revised', 'reviewed', 'filled', '']);
-    const COLOR_BY_FILL = Object.freeze(Object.fromEntries(Object.entries(FILLS).map(([color, fill]) => [fill, color])));
+    // Retain the original RGB for source identity and exact no-op exports.
+    const COLOR_BY_FILL = Object.freeze({ ...Object.fromEntries(Object.entries(FILLS).map(([color, fill]) => [fill, color])), D9D9D9: 'filled' });
     const CLASS_FORMS = Object.freeze(['StrFour', 'IntFour', 'DexFour', 'StrDexFour', 'DexIntFour', 'StrIntFour',
         'StrFourb', 'IntFourb', 'DexFourb', 'StrDexFourb', 'DexIntFourb', 'StrIntFourb']);
     const isClassForm = field => CLASS_FORMS.includes(typeof field === 'string' ? field : field?.kind === 'form' ? field.form : null);

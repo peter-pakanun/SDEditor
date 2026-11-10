@@ -12,7 +12,7 @@
     const PARSER_VERSION = 'clienttext-v4', PARSER_VERSIONS = Object.freeze(['clienttext-v1', 'clienttext-v2', 'clienttext-v3', PARSER_VERSION]);
     const FILLS = State.FILLS;
     // Stronger worksheet tabs are display-only; cell fills remain the status contract.
-    const TAB_COLORS = Object.freeze({ ...FILLS, revised: '793BB6', filled: '626B7A' });
+    const TAB_COLORS = Object.freeze({ ...FILLS, revised: '793BB6', filled: '2F75B5' });
     const FORMS = ['MS', 'FS', 'NS', 'MP', 'FP', 'NP'];
     const CLASS_FORMS = Object.freeze(['StrFour', 'IntFour', 'DexFour', 'StrDexFour', 'DexIntFour', 'StrIntFour',
         'StrFourb', 'IntFourb', 'DexFourb', 'StrDexFourb', 'DexIntFourb', 'StrIntFourb']);
@@ -480,7 +480,7 @@
         if (tab) {
             const opening = /^<[^>]+>/.exec(tab[0])[0], attrs = startTagAttrs(opening);
             if (color && String(attrs.rgb || '').toUpperCase() === 'FF' + color && !['theme','indexed','auto','tint'].some(key => own(attrs, key))) return original;
-            if (!color && ![...Object.values(FILLS), ...Object.values(TAB_COLORS)].includes(String(attrs.rgb || '').slice(-6).toUpperCase())) return original;
+            if (!color && ![...Object.values(FILLS), ...Object.values(TAB_COLORS), 'D9D9D9', '626B7A'].includes(String(attrs.rgb || '').slice(-6).toUpperCase())) return original;
             let replacement = '';
             if (color) {
                 let updated = opening;

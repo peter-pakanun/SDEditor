@@ -53,7 +53,7 @@ test('darker tab RGB round trips independently of cell fills for every status, w
         {color:'outdated',source:'New English',target:'Old',style:3,value:'Still needs review',tab:'FF9966',fill:'FF9966'},
         {color:'revised',source:'English',target:'Original',style:1,value:'Correction',tab:'793BB6',fill:'D9D2E9'},
         {color:'reviewed',source:'New English',target:'Old',style:3,value:'Old',review:true,tab:'C6EFCE',fill:'C6EFCE'},
-        {color:'filled',source:'English',target:'',style:2,value:'Completed',tab:'626B7A',fill:'D9D9D9'},
+        {color:'filled',source:'English',target:'',style:2,value:'Completed',tab:'2F75B5',fill:'BDD7EE'},
         {color:'',source:'[NOAUDIO]',target:'Metadata',style:1,value:'Changed metadata',tab:null,fill:'FFFFFF'}
     ];
     for(const macro of [false,true])for(const role of ['normal','gender'])for(const item of cases)await t.test(`${macro?'xlsm':'xlsx'}/${role}/${item.color || 'no colour'}`,async()=>{
@@ -65,7 +65,7 @@ test('darker tab RGB round trips independently of cell fills for every status, w
         const saved={[unit.id]:{values:{[current.id]:item.value},reviewed:item.review?{[current.id]:State.sourceHash(current.source)}:{}}};
         const output=await Codec.exportWorkbook(bytes,{...parsed,units:[unit]},saved),reopened=await Codec.parseWorkbook(output,{filename,role});
         const exportedField=field(get(reopened,'palette'),'Name');
-        assert.equal(await tabColor(output),item.tab,'Only the purple and grey tab RGB differs from the established palette');
+        assert.equal(await tabColor(output),item.tab,'Purple and blue tabs use stronger RGB than their cell fills');
         assert.equal(exportedField.originalFill,item.fill,'The standard cell fill is independent of the tab RGB');
         assert.equal(exportedField.target,item.value);assert.equal(State.unitColorFor(get(reopened,'palette')),item.color);
         const importedStatus=State.statusFor(get(reopened,'palette'),null,{importedCompletion:true});
@@ -82,6 +82,28 @@ test('darker tab RGB round trips independently of cell fills for every status, w
         assert.equal((raw.match(/<tabColor\b/g) || []).length,item.tab?1:0);
         if(item.tab)assert.match(raw,new RegExp('<tabColor rgb="FF'+item.tab+'"/>'),'Explicit opaque ARGB without theme/indexed/tint alternatives');
     });
+});
+
+test('legacy grey Filled imports retain state, original RGB and exact no-op exports', async () => {
+    for (const macro of [false,true]) for (const role of ['normal','gender']) {
+        const filename='French'+(macro?'.xlsm':'.xlsx');
+        const completionStyles=styles.replace('FFFFFFFF','FFD9D9D9');
+        const normal=withTab(sheet([row(1,[cell('A1','ID'),cell('B1','Name'),cell('C1','Translation')]),
+            row(2,[cell('A2','legacy'),cell('B2','English'),cell('C2','Completed',1)]),
+            row(3,[cell('A3','missing'),cell('B3','New English'),empty('C3',2)])]),'626B7A');
+        const bytes=await workbook({macro,normal,replace:{'xl/styles.xml':completionStyles}});
+        const parsed=await Codec.parseWorkbook(bytes,{filename,role}),legacy=get(parsed,'legacy'),missing=get(parsed,'missing');
+        assert.equal(field(legacy,'Name').originalFill,'D9D9D9');
+        assert.equal(State.unitColorFor(legacy),'filled');
+        assert.equal(State.statusFor(legacy,null,{importedCompletion:true}).saved,true);
+        assert.deepEqual(await Codec.exportWorkbook(bytes,parsed,{}),bytes);
+        const output=await Codec.exportWorkbook(bytes,parsed,{[missing.id]:{values:{[field(missing,'Name').id]:'New completion'}}});
+        const reopened=await Codec.parseWorkbook(output,{filename,role});
+        assert.equal(await tabColor(output),'2F75B5');
+        assert.equal(field(get(reopened,'missing'),'Name').originalFill,'BDD7EE');
+        assert.deepEqual(get(reopened,'legacy'),legacy);
+        assert.equal(State.unitColorFor(get(reopened,'legacy')),'filled');
+    }
 });
 
 test('workbook game detection uses internal identities and corroborated tables, never filenames or translated names', () => {
@@ -179,7 +201,7 @@ test('legacy affected-only headers rederive whole-sheet workload with their acce
     }
 });
 
-test('exported grey completion is distinct from no colour, with retained higher completion colours across untouched fields', async () => {
+test('exported blue completion is distinct from no colour, with retained higher completion colours across untouched fields', async () => {
     const plain = sheet([row(1, [cell('A1', 'ID'), cell('B1', 'Name'), cell('C1', 'Translation')]),
         row(2, [cell('A2', 'plain'), cell('B2', 'English'), cell('C2', 'Original', 1)])]);
     const bytes = await workbook({ macro: true, normal: plain }), parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsm' });
@@ -206,13 +228,13 @@ test('exported grey completion is distinct from no colour, with retained higher 
         assert.equal(await tabColor(exported), Codec.TAB_COLORS[expected], 'Untouched completion fills participate in whole-sheet priority');
         const reopened = await Codec.parseWorkbook(exported, { filename: 'French.xlsm' });
         assert.equal(field(get(reopened, 'missing'), 'Name').originalFill, Codec.FILLS.filled);
-        assert.equal(State.unitColorFor(get(reopened, 'missing')), 'filled', 'Reimported completion-grey remains distinct');
+        assert.equal(State.unitColorFor(get(reopened, 'missing')), 'filled', 'Reimported completion-blue remains distinct');
         assert.deepEqual(get(reopened, 'untouched'), get(baseline, 'untouched'), 'Unmodified fields keep their exact source styling');
     }
 });
 
 test('an affected uncoloured sheet removes obsolete status tabs, including grey, while retaining unrelated tab formatting', async () => {
-    for (const color of [...new Set([...Object.values(Codec.FILLS), ...Object.values(Codec.TAB_COLORS)]), '123456']) {
+    for (const color of [...new Set([...Object.values(Codec.FILLS), ...Object.values(Codec.TAB_COLORS)]), 'D9D9D9', '626B7A', '123456']) {
         const normal = withTab(sheet([row(1, [cell('A1', 'ID'), cell('B1', 'Name'), cell('C1', 'Translation')]),
             row(2, [cell('A2', 'audio'), cell('B2', '[NOAUDIO]'), cell('C2', 'Original metadata', 1)])]), color);
         const bytes = await workbook({ macro: true, normal }), parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsm' });
@@ -496,7 +518,7 @@ test('class workload fills distinguish optional blank, missing and reviewed outd
     const records = { [unit.id]: { values: { [missing.id]: 'Filled class field', [outdated.id]: '', [optional.id]: 'NONEXISTENT' }, reviewed: { [outdated.id]: State.sourceHash(outdated.source) } } };
     const exported = await Codec.exportWorkbook(bytes, parsed, records);
     const result = get(await Codec.parseWorkbook(exported, { filename: 'German.xlsx' }), 'dialogue');
-    assert.equal(field(result, 'Text', 'IntFour').originalFill, 'D9D9D9'); assert.equal(field(result, 'Text', 'DexFour').originalFill, 'C6EFCE');
+    assert.equal(field(result, 'Text', 'IntFour').originalFill, 'BDD7EE'); assert.equal(field(result, 'Text', 'DexFour').originalFill, 'C6EFCE');
     assert.equal(field(result, 'Text', 'StrFour').target, 'NONEXISTENT'); assert.equal(field(result, 'Text', 'StrFour').originalFill, 'D9D2E9');
     assert.deepEqual(field(result, 'Text', 'StrDexFour'), field(unit, 'Text', 'StrDexFour'), 'Filling adjacent self-closing cells never consumes the next populated target');
     const unresolved = get(await Codec.parseWorkbook(await Codec.exportWorkbook(bytes, parsed, { [unit.id]: { values: { [outdated.id]: 'Authored but unreviewed' } } }), { filename: 'German.xlsx' }), 'dialogue');
@@ -734,7 +756,7 @@ test('complete XLSM exports patch only targets and cloned status styles', async 
     };
     const progress = [], output = await Codec.exportWorkbook(bytes, parsed, saved, { onProgress: value => progress.push(value) });
     const result = await Codec.parseWorkbook(output, { filename: 'French.xlsm', role: 'normal' });
-    assert.equal(field(get(result, 'record'), 'Name').originalFill, 'D9D9D9');
+    assert.equal(field(get(result, 'record'), 'Name').originalFill, 'BDD7EE');
     assert.equal(field(get(result, 'record'), 'Description').originalFill, 'C6EFCE');
     assert.equal(field(get(result, 'complete'), 'Name').originalFill, 'D9D2E9');
     assert.equal(field(get(result, 'complete'), 'Name').target, '=Literal _x0020_ & <angle>\r\nnext');
@@ -802,7 +824,7 @@ test('source advancement paints unresolved review orange, then green, without Re
     const stillMissing = await Codec.parseWorkbook(await Codec.exportWorkbook(bytes, parsed, { [missing.id]: { values: { [required.id]: '' }, outdated: [required.id], reviewed: { [required.id]: State.sourceHash(required.source) } } }), { filename: 'French.xlsx' });
     assert.equal(field(get(stillMissing, 'record'), 'Name').originalFill, 'FA8072');
     const filled = await Codec.parseWorkbook(await Codec.exportWorkbook(bytes, parsed, { [missing.id]: { values: { [required.id]: 'Filled' }, outdated: [required.id], reviewed: { [required.id]: State.sourceHash(required.source) } } }), { filename: 'French.xlsx' });
-    assert.equal(field(get(filled, 'record'), 'Name').originalFill, 'D9D9D9');
+    assert.equal(field(get(filled, 'record'), 'Name').originalFill, 'BDD7EE');
 });
 test('no-change and reverted complete saves preserve the original package exactly', async () => {
     const bytes = await workbook(), parsed = await Codec.parseWorkbook(bytes, { filename: 'French.xlsx' }), unit = get(parsed, 'complete'), f = field(unit, 'Name');

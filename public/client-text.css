@@ -1,6 +1,6 @@
 /* Display colours only; workbook fills and status priority live in ClientTextState. */
-:root { --ct-revised-surface:#ceb2e4; --ct-revised-ink:#481b70; --ct-filled-surface:#b5bbc5; --ct-filled-border:#626b7a; --ct-english-placeholder-ink:var(--ui-muted); }
-[data-theme="dark"],[data-theme="modern-dark"] { --ct-revised-surface:#301d42; --ct-revised-ink:#ddc2f4; --ct-filled-surface:#171b22; --ct-filled-border:#818b9c; }
+:root { --ct-revised-surface:#ceb2e4; --ct-revised-ink:#481b70; --ct-filled-surface:#d6e8fb; --ct-filled-border:#2563b4; --ct-english-placeholder-ink:var(--ui-muted); }
+[data-theme="dark"],[data-theme="modern-dark"] { --ct-revised-surface:#301d42; --ct-revised-ink:#ddc2f4; --ct-filled-surface:#172d47; --ct-filled-border:#7bb5f0; }
 .ctWorkspaceBody { display:grid; grid-template-columns:190px minmax(0,1fr); align-items:start; gap:18px; min-width:0; }
 .ctWorkspaceBody.ctToolsOpen { grid-template-columns:190px minmax(0,1fr) clamp(360px,29vw,460px); }
 .ctListWorkspace { padding-bottom:var(--workspace-footer-height,110px); }
@@ -60,7 +60,7 @@
 .ctNavigationSeverity-filled { --ct-navigation-color:var(--ct-filled-border); }
 .ctNavigation button:is(.ctNavigationSeverity-error,.ctNavigationSeverity-warning,.ctNavigationSeverity-revised,.ctNavigationSeverity-reviewed,.ctNavigationSeverity-filled) { color:var(--ct-navigation-color); border-color:var(--ct-navigation-color); background:color-mix(in srgb,var(--ct-navigation-color) 10%,var(--color-element)); }
 .ctNavigation button.ctNavigationSeverity-revised { background:var(--ct-revised-surface); }
-.ctNavigation button.ctNavigationSeverity-filled { color:var(--color-font); background:var(--ct-filled-surface); }
+.ctNavigation button.ctNavigationSeverity-filled { color:var(--ct-filled-border); background:var(--ct-filled-surface); }
 .ctNavigation button:is(.ctNavigationSeverity-revised,.ctNavigationSeverity-filled):hover { box-shadow:inset 0 0 0 1px var(--ct-navigation-color); }
 .ctNavigation button:is(.ctNavigationSeverity-error,.ctNavigationSeverity-warning,.ctNavigationSeverity-revised,.ctNavigationSeverity-reviewed,.ctNavigationSeverity-filled).active { box-shadow:inset 0 0 0 1px var(--ui-accent); }
 .ctNavigation button:is(.ctNavigationSeverity-error,.ctNavigationSeverity-warning) .ctNpcCount { color:inherit; }
