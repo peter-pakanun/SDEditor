@@ -33,7 +33,7 @@ async function run(){
 const defaults=${JSON.stringify(config.data())},seed=${JSON.stringify(quota())};
 const navigation={${methods}},settingsWatch={${watch}},mtlVisible=${require('../public/clientTextMtlUi.js').visible.toString()};
 const app=Vue.createApp({mixins:[MtlConnectionUI.mixin,MtlLimitsUI.mixin],
- data(){return{...defaults,gameVersionSelected:true,needsInitialSettings:false,showSetting:false,lang:'Thai',gameVersion:'poe2',
+ data(){return{...defaults,mtlUiEnabled:true,gameVersionSelected:true,needsInitialSettings:false,showSetting:false,lang:'Thai',gameVersion:'poe2',
   cloudLanguageSwitching:false,privateMediaEpoch:1,cloudSignedIn:true,cloudProfileId:'synthetic-admin',cloudUser:{id:'synthetic-admin',role:'admin',isAdmin:true,assignmentVersion:1},ctMtlCapabilities:null};},
  computed:{${config.computed.settingsDialogVisible.toString()},${config.computed.settingsVisibleTabs.toString()},ctMtlVisible(){return mtlVisible(this);}},watch:settingsWatch,
  methods:{...navigation,handleFileListKeydown(){return false;},normalizeGameVersion(value){return value==='poe2'?'poe2':'poe1';},

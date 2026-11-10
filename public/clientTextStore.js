@@ -876,9 +876,9 @@
                 throw new TypeError('Select up to 100 distinct workbook cells for this translation.');
             const captured=capture(rawScope),scope=captured.id,metadata=await requireReady(scope,options);
             const units=new Map((await getUnitsByIds(rawScope,selected.map(row=>row.unitId),options)).map(unit=>[unit.id,unit]));
-            const signature=S.hash([captured.scope,body]),mtl=mtlStorage()?.stores;
+            const signature=S.hash([captured.scope,body]),mtl=mtlStorage();
             const protectedError=message=>Object.assign(new Error(message),{code:'CLIENTTEXT_FIELD_SELECTION_CHANGED'});
-            return transaction([...saveStores,stores.tmCandidates,...(mtl?[mtl.candidates,mtl.meta]:[])],'readwrite',async tx=>{
+            return transaction([...saveStores,stores.tmCandidates,...(mtl?[mtl.stores.candidates]:[])],'readwrite',async tx=>{
                 const results=[],firstReceipt=await get(tx,stores.receipts,key(scope,jobId+':0'));
                 if(firstReceipt && firstReceipt.batchSignature!==signature)throw protectedError('This bulk Save receipt belongs to a different selection.');
                 let changed=0;
@@ -906,12 +906,22 @@
                     if(before?.conflicts?.length || before?.syncRecovery)
                         throw protectedError('Resolve the conflict on row '+unit.recordId+' before filling these cells.');
                     const candidates=(await request(tx.objectStore(stores.tmCandidates).index('by_unit').getAll(recordKey))).map(r=>r.value);
-                    if(mtl)for(const name of [mtl.candidates,mtl.meta])candidates.push(...(await request(tx.objectStore(name).index('by_scope_unit').getAll([scope,id]))).map(r=>r.value));
                     if(candidates.some(c=>c.fieldId===fieldId && ['pending','uncertain'].includes(c.status)))
                         throw protectedError('Finish the suggestion for '+field.name+' on row '+unit.recordId+' first.');
                     const sourceHash=S.sourceHash(field.source);
                     const command={jobId:childId,intentProtocol:S.ENGLISH_INTENT_PROTOCOL,expectedRevision:row.revision,
                         values:{...values,[fieldId]:value},reviewed:{...reviewed,[fieldId]:sourceHash},baseRevision:before?.serverRevision || 0};
+                    const claim=draft?.mtlAcceptances?.find(c=>c.fieldId===fieldId && c.reviewedTextHash===S.hash(value));
+                    if(claim && mtl){
+                        const descriptor=metadata.descriptors.find(asset=>asset.role===role);
+                        try {
+                            await mtl.validateAcceptancesTx(tx,captured.scope,unit,[claim],command.values,descriptor);
+                            command.mtlAcceptances=[claim];
+                        } catch(error) {
+                            // A superseded acceptance no longer attributes this human Save.
+                            if(error.code!=='MTL_CANDIDATE_CHANGED')throw error;
+                        }
+                    }
                     const result=await prepareSave(rawScope,id,command,options,metadata,unit,signature).commit(tx);
                     let retained=null;
                     if(draft){

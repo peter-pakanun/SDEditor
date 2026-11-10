@@ -1,5 +1,7 @@
 # ClientText MTL
 
+MTL is retired as of 2026-11-10. Its editor, review, settings and shortcut controls are hidden. Existing requests, candidates, history and recovery data are retained. The workflow below is a record of the retained implementation, not an available editor feature.
+
 StatDescription uses the same toolbar and visibility policy with its own syntax,
 private review storage and transient server source handling. See [SD toolbar and
 MTL](sd_mtl.md). SD has no Use English action.

@@ -152,6 +152,7 @@ test('Eng draft eligibility cannot bypass unsupported fields, source scope or op
         [(app)=>{app.ctBusy=true;},/operation/],[(app)=>{app.ctBrowseBusy=true;},/operation/],[(app)=>{app._ctSaveJob={};},/pending save/],
         [(app)=>{app.ctRecoveryBusy=true;},/recovery/],[(app)=>{app.ctHistoryViewer=true;},/history viewer/],
         [(app)=>{app.ctMtlBusy=()=>true;},/machine translation/],[(app)=>{app.ctMtlCandidate=()=>({});},/candidate/],
+        [(app)=>{app.mtlUiEnabled=false;app._ctMtlAcceptanceClaims={[app.ctSelection]:[{fieldId:'sibling'}]};},/Save this ID’s reviewed draft/],
         [(app)=>{app.ctChoices=[{}];},/alternatives/],[(app)=>{app.ctPendingSharedRecovery=()=>({});},/shared conflict/]
     ]){
         const {app,original}=englishDraftHarness(),field=original.fields[0];app.ctValues[field.id]='';change(app,field);let calls=0;app.ctSave=async()=>{calls++;};

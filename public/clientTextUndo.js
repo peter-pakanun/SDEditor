@@ -50,7 +50,24 @@
             if (!canRedo(current)) return null;
             return detach(entries[position++].after);
         }
-        return { record, undo, redo, canUndo, canRedo, reset };
+        // Once a subgroup has a durable receipt, undo may only touch the uncommitted cells.
+        function project(transform) {
+            const kept = [];
+            let cursor = 0;
+            bytes = 0;
+            for (let i = 0; i < entries.length; i++) {
+                const entry = entries[i], before = transform(detach(entry.before)), after = transform(detach(entry.after));
+                const beforeKey = key(before), afterKey = key(after);
+                if (beforeKey === afterKey) continue;
+                const size = 2 * (JSON.stringify(before).length + JSON.stringify(after).length);
+                kept.push({ before, after, beforeKey, afterKey, group: entry.group, bytes: size });
+                if (i < position) cursor++;
+                bytes += size;
+            }
+            entries = kept;
+            position = cursor;
+        }
+        return { record, undo, redo, canUndo, canRedo, reset, project };
     }
 
     return { create };

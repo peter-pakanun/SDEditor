@@ -1577,7 +1577,7 @@
             },
             ctPreviewValue(field) {
                 if(this.ctBulkToolUnit?.fields.includes(field))return this.ctBulkToolValues[field.id] ?? '';
-                const value=String(this.ctValues[field.id] ?? '');
+                const value=String(this.ctDirectValue?.(this.ctSelection,field.id) ?? this.ctValues[field.id] ?? '');
                 const fallback=this.ctClassFallback(field);
                 if(fallback?.kind!=='english' && fallback?.defaults.length===1)return fallback.defaults[0].value;
                 if(fallback?.kind!=='english' && fallback?.defaults.length>1)return '';
@@ -2174,6 +2174,7 @@
                 const scrollTop=field.scrollTop;field.style.height='auto';field.style.height=field.scrollHeight+2+'px';field.scrollTop=scrollTop;
             },
             ctEdited(field) {
+                if(this.ctDirectValue?.(this.ctSelection,field.id)!==undefined)return;
                 if(this.ctMtlCandidate?.(field) || this.ctTmCandidate?.(field))return;
                 this.ctMtlUnderlyingEdited?.(field);
                 this.ctTmUnderlyingEdited?.(field);
@@ -2286,6 +2287,7 @@
                 if(this.ctHistoryViewer)return 'Close the history viewer before changing Use English.';
                 if(this.ctMtlBusy?.(field))return 'Wait for machine translation to finish or stop it before changing Use English.';
                 if(this.ctMtlCandidate?.(field))return 'Accept or dismiss the machine-translation candidate before changing Use English.';
+                if(!this.mtlUiEnabled && this._ctMtlAcceptanceClaims?.[this.ctSelection]?.length)return 'Save this ID’s reviewed draft before changing Use English.';
                 if(this.ctTmPendingCandidate?.(field) || this.ctTmAccepted?.(field))return 'Accept and save, or dismiss, the TM suggestion before changing Use English.';
                 if(revoke)return this.ctEnglishDecision(field) && this.ctEnglishDecision(field).state!=='revoked' ? '' : 'There is no Use English decision to remove.';
                 return this.ctEnglishUnavailableReason(field) || (this.ctEnglishDraftEligible(field) ? '' : 'Use English is available only when the current translation is blank or exactly matches English. A different translation cannot be replaced by Eng.');
@@ -2555,6 +2557,11 @@
             },
             async ctSave(close = false, options = {}) {
                 if(options.bulk)return this.ctBulkSave();
+                if(this.ctDirectPending && !Object.keys(options).length){
+                    if(!await this.ctDirectSave())return false;
+                    if(close && this.ctEditor)return this.ctCloseEditor();
+                    return true;
+                }
                 if(this.ctRecoveryBusy && !options.pendingResolution)return false;
                 if (this.ctBusy || this.ctBrowseBusy || !this.ctCurrentUnit) return false;
                 const receiptRetry=this._ctSaveJob?.unitId===this.ctSelection && !!this._ctSaveJob.command && this._ctSaveJob.scopeKey===root.ClientTextStore.scopeKey(this.ctWorkspace.scope);
@@ -2576,11 +2583,21 @@
                 this._ctSaveJob=job;this.ctBusy = true;let submittedSignature;
                 try {
                     job.editorSignature ||= JSON.stringify([this.ctValues,this.ctReviewed]);
+                    let mtlAcceptances=[];
+                    if(!job.command){
+                        if(!this.mtlUiEnabled && this.ctMtlAcceptancesForSave && this._ctMtlAcceptanceClaims?.[unitId]?.length){
+                            mtlAcceptances=await this.ctMtlAcceptancesForSave(unitId,copy(this.ctValues),ctx);
+                            if(!this.ctCurrent(ctx) || this.ctSelection!==unitId)return false;
+                            if(job.editorSignature!==JSON.stringify([this.ctValues,this.ctReviewed])){
+                                this._ctSaveJob=null;throw new Error('The draft changed before Save. Save its current translation again.');
+                            }
+                        }else mtlAcceptances=this.ctMtlAcceptances?.(unitId) || [];
+                    }
                     const command=job.command ||= { jobId:job.id, intentProtocol:root.ClientTextState.ENGLISH_INTENT_PROTOCOL, values: copy(options.englishValues || this.ctValues), reviewed: copy(options.englishReviewed || this.ctReviewed), baseRevision: this.ctSaved[unitId]?.serverRevision || 0, expectedRevision: (options.pendingResolution?this.ctSaved[unitId]?.revision:this._ctEditRevision) || 0, expectedDraftRevision:this._ctDraftRevision || null,
                         ...(options.englishActions?{englishActions:copy(options.englishActions)}:{}),
                         ...(options.englishActions?{englishEligibility:this.ctEnglishWitness(options.englishActions)}:{}),
                         ...(options.pendingResolution?{pendingResolution:{...copy(options.pendingResolution),editorBeforeValues:copy(this.ctValues)}}:{}),
-                        ...(this.ctMtlAcceptances?.(unitId)?.length ? {mtlAcceptances:copy(this.ctMtlAcceptances(unitId))} : {}),
+                        ...(mtlAcceptances.length ? {mtlAcceptances:copy(mtlAcceptances)} : {}),
                         ...(this.ctTmAcceptances?.(unitId)?.length ? {tmAcceptances:copy(this.ctTmAcceptances(unitId))} : {}),
                         ...(options.origin ? {origin:options.origin}: {}) };
                     submittedSignature=JSON.stringify([command.values,command.reviewed]);
@@ -2614,7 +2631,7 @@
                     this.ctRememberDraftStageFailure(ctx,unitId,submittedSignature,'save');
                     if (this.ctCurrent(ctx)) {
                         postNotice(this, 'ctError', error.message);
-                        if(['DRAFT_CHANGED','CLIENTTEXT_PENDING_RESOLUTION_REQUIRED'].includes(error.code))this._ctSaveJob=null;
+                        if(['DRAFT_CHANGED','CLIENTTEXT_PENDING_RESOLUTION_REQUIRED'].includes(error.code) || !this.mtlUiEnabled && error.code==='MTL_CANDIDATE_CHANGED')this._ctSaveJob=null;
                         if(error.code==='UNIT_CHANGED'){
                             this._ctSaveJob=null; const latest=await store.getSaved(ctx.scope);
                             if(this.ctCurrent(ctx)){
@@ -2633,6 +2650,7 @@
             },
             ctHasEditorChanges() {
                 const unit=this.ctCurrentUnit;if(!unit)return false;
+                if(this.ctDirectPending && unit.fields.some(field=>this.ctDirectValue(unit.id,field.id)!==undefined))return true;
                 const committed=this.ctValuesFor(unit),saved=this.ctSaved[unit.id],status=this.ctStatus(unit);
                 return !!this._ctMtlAcceptanceClaims?.[unit.id]?.length || !!this._ctTmClaims?.[unit.id]?.length || unit.fields.some(field=>this.ctValues[field.id]!==committed[field.id]
                     || status.fields[field.id]?.outdated && this.ctReviewed[field.id]===this.ctReviewHash(field) && saved?.reviewed?.[field.id]!==this.ctReviewed[field.id])
@@ -3823,9 +3841,9 @@
                 <div v-if="side !== 'translation'" class="editorSourceField ctFieldSource">
                     <template v-if="group.fields.some(field=>field.kind !== 'gender' || field.source)">
                     <div v-for="source in host.ctGroupSources(group)" :key="source.key" :data-source-field="source.key" class="ctSourceBlock inputField">
-                        <button v-if="side==='source' && host.ctBulkFieldAllowed(host.ctBulkSourceField(host.ctCurrentUnit,source))" type="button" class="ctBulkFieldLabel" data-inline-focus-surface data-ct-source-selection :data-ct-bulk-field="host.ctBulkSourceField(host.ctCurrentUnit,source).id" :aria-label="host.ctCurrentUnit.recordId+', English '+source.label" :aria-pressed="host.ctBulkMarked(host.ctCurrentUnit.id,host.ctBulkSourceField(host.ctCurrentUnit,source).id,'source')" :data-ct-copied="host.ctBulkCopiedCell(host.ctCurrentUnit,host.ctBulkSourceField(host.ctCurrentUnit,source).id,'source') || null" @pointerdown="host.ctBulkPointerDown(host.ctCurrentUnit,host.ctBulkSourceField(host.ctCurrentUnit,source),$event,'source')" @click.stop="host.ctBulkClick(host.ctCurrentUnit,host.ctBulkSourceField(host.ctCurrentUnit,source),$event,'source')" @dblclick.stop>{{ source.label }}</button>
-                        <label v-if="side === 'both' || host.ctGroupSources(group).length > 1" class="ctSourceLabel"><template v-if="side === 'both'">English<span v-if="host.ctGroupSources(group).length > 1"> · </span></template><span v-if="host.ctGroupSources(group).length > 1">{{ source.label }}</span></label>
+                        <label v-if="side === 'both'" class="ctSourceLabel"><template v-if="side === 'both'">English<span v-if="host.ctGroupSources(group).length > 1"> · </span></template><span v-if="host.ctGroupSources(group).length > 1">{{ source.label }}</span></label>
                         <component :is="host.ctFieldToolbar ? 'editor-field-toolbar' : 'div'" :controller="host.ctFieldToolbar ? host.ctFieldToolbar(host.ctSourceComparisonField(source),'source',source.fieldIds) : undefined">
+                        <template #leading><ct-field-grip v-if="side==='source' && host.ctBulkSourceField" :host="host" :unit="host.ctCurrentUnit" :field="host.ctBulkSourceField(host.ctCurrentUnit,source)" side="source"></ct-field-grip></template>
                         <pre v-if="host.ctFieldToolbar && host.ctComparisonState(host.ctSourceComparisonField(source),'source').open && host.ctComparisonParts(host.ctSourceComparisonField(source),'source')" class="ctInlineDiff ctSourceDiff" aria-label="English source differences"><span v-for="(part,index) in host.ctComparisonParts(host.ctSourceComparisonField(source),'source')" :key="index" :class="{diffInlineAdd:part.added,diffInlineDel:part.removed}">{{ host.ctHistoryDisplay(part.value) }}</span></pre>
                         <editor-native-field v-else :controller="host.ctSourceFieldController(group,source)" kind="english" :compact="side !== 'both'"></editor-native-field>
                         </component>
@@ -3872,10 +3890,10 @@
             genderMultilineRequired: {immediate:true,flush:'sync',handler(value) {if(value)this.genderMultilineLatched=true;}},
         }, template: `
         <div class="ctTarget" :class="{missing:host.ctFieldStatus(field).missing,outdated:host.ctFieldStatus(field).outdated,mtl:!!host.ctMtlCandidate?.(field),tm:!!host.ctTmCandidate?.(field)}">
-            <button v-if="compact && host.ctBulkFieldAllowed(field)" type="button" class="ctBulkFieldLabel" data-inline-focus-surface :data-ct-bulk-field="field.id" :aria-pressed="host.ctBulkMarked(host.ctCurrentUnit.id,field.id)" :data-ct-copied="host.ctBulkCopiedCell(host.ctCurrentUnit,field.id) || null" :title="host.ctBulkHint" @pointerdown="host.ctBulkPointerDown(host.ctCurrentUnit,field,$event)" @click.stop="host.ctBulkClick(host.ctCurrentUnit,field,$event)" @dblclick.stop>{{ host.ctHistoryFieldLabel(field) }}</button>
             <label :for="'ctfield-'+field.targetCell" :class="{srOnly:field.kind === 'form' || (field.kind === 'gender' ? !compact : compact)}">{{ field.kind === 'gender' ? 'Gender' : field.kind === 'form' ? field.name+' '+host.ctClassVariantLabel(field) : (host.ctWorkspace?.scope.language || host.lang)+' translation' }} <small>{{ field.required ? '' : 'Optional' }}</small></label>
             <p v-if="field.kind !== 'gender' && !String(field.source || '').trim()" class="ctBlankSourceReview" role="note"><strong v-if="compact">{{ field.name }} · </strong>English is blank. Review or clear the translation, then Save. A blank translation is allowed.</p>
             <component :is="host.ctFieldToolbar ? 'editor-field-toolbar' : 'div'" :controller="host.ctFieldToolbar ? host.ctFieldToolbar(field,'translation') : undefined">
+            <template #leading><ct-field-grip v-if="compact && host.ctBulkFieldAllowed" :host="host" :unit="host.ctCurrentUnit" :field="field" side="target"></ct-field-grip></template>
             <template v-if="field.kind === 'gender'">
                 <div v-if="genderMultiline" class="textHL editorTextField multiline"><textarea :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" :value="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @input="host.ctGenderEdited(field,$event)" @compositionend="host.ctGenderEdited(field,$event)" @paste="host.ctGenderPaste(field,$event)" @keydown="host.ctGenderKeydown(field,$event)" aria-label="Gender" spellcheck="false" rows="1"></textarea></div>
                 <template v-else><input type="text" :id="'ctfield-'+field.targetCell" :data-ct-target="field.id" :list="'ctgender-'+field.targetCell" :value="host.ctValues[field.id]" @focus="host.ctFocusedField=field.id" @input="host.ctGenderEdited(field,$event)" @compositionend="host.ctGenderEdited(field,$event)" @paste="host.ctGenderPaste(field,$event)" @keydown="host.ctGenderKeydown(field,$event)" aria-label="Gender" placeholder="Blank" spellcheck="false" autocomplete="off"><datalist :id="'ctgender-'+field.targetCell"><option v-for="gender in host.ctGenderSuggestions(field)" :key="gender" :value="gender" :label="host.ctGenderSuggestionLabel(gender,field)"></option></datalist></template>

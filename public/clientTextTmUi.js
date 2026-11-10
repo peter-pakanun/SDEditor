@@ -16,12 +16,14 @@
     const access=host=>JSON.stringify([host.cloudProfileId || 'guest',host.lang,host.gameVersion,host.cloudSignedIn,
         host.cloudUser?.id,host.cloudUser?.role,host.cloudUser?.language,host.cloudUser?.assignmentVersion,host.cloudCanAccessAllLanguages]);
     const mixin={
-        data(){return{ctTmSelectedIds:raw([]),ctTmCandidates:raw([]),ctTmReviews:{},ctTmRevision:0,
+        data(){return{ctTmSelectionOpen:false,ctTmSelectedIds:raw([]),ctTmCandidates:raw([]),ctTmReviews:{},ctTmRevision:0,
             ctTmBusy:false,ctTmProgress:null,ctTmError:'',ctTmReviewBusy:{},ctTmRecoveries:raw([]),ctTmLoadedScopeKey:''};},
         computed:{
             ctTmWorkspaceScopeKey(){return JSON.stringify([this.ctContext?.(),access(this)]);},
             ctTmSelectedSet(){return new Set(this.ctTmSelectedIds);},
             ctTmSelectedCount(){return this.ctTmSelectedIds.length;},
+            ctTmPanelActive(){return !!(this.ctActive && !this.ctEditor && this.ctTool==='tm' && this.sharedEditorToolsVisible);},
+            ctTmSelectionVisible(){return this.ctTmPanelActive && this.ctTmSelectionOpen;},
             ctTmPageSelection(){const rows=this.ctPageRows || [],count=rows.filter(unit=>this.ctTmSelectedSet.has(unit.id)).length;
                 return !count?'none':count===rows.length?'all':'some';},
             ctTmCanPrepare(){return !!(this.ctActive&&this.ctWorkspace&&this.ctTmLoadedScopeKey===this.ctTmWorkspaceScopeKey&&this.ctTmSelectedCount&&!this.ctTmBusy&&!this.ctBusy&&!this.ctBrowseBusy&&!this.ctRecoveryBusy&&!this._ctSaveJob);},
@@ -36,7 +38,15 @@
                 for(const candidate of this.ctTmCandidates)if(candidate.status==='pending'&&this._ctUnitIndex?.has(candidate.unitId))ids.add(candidate.unitId);return ids;},
             ctTmCount(){return this.ctTmUnitIds.size;},
         },
-        watch:{ctTmSelectionScopeKey(){this.ctTmClearSelection();this.ctTmStop();},ctTmWorkspaceScopeKey(){
+        watch:{ctTmPanelActive(active){
+            if(active)return;
+            this.ctTmSelectionOpen=false;this.ctTmClearSelection();
+            if(this.ctFilter==='tm')this.ctFilter='';
+            if(this.ctSelectedFilters.includes('tm')){
+                const kept=this.ctSelectedFilters.filter(key=>key!=='tm');
+                this.ctSelectedFilters=kept.length ? kept : this.ctStatusFilterOptions.map(item=>item.key).filter(key=>key!=='tm');
+            }
+        },ctTmSelectionScopeKey(){this.ctTmClearSelection();this.ctTmStop();},ctTmWorkspaceScopeKey(){
             this.ctTmReset();const ctx=this.ctContext();if(this.ctTmCurrent(ctx))Promise.resolve().then(()=>{if(this.ctTmCurrent(ctx))this.ctTmActivate(ctx);});
         }},
         beforeUnmount(){this.ctTmReset();},
@@ -65,6 +75,7 @@
             ctTmClearSelection(){this.ctTmSelectedIds=raw([]);this._ctTmSelectionAnchor=null;},
             ctTmStop(){const run=this._ctTmBatch;if(run){run.stopped=true;run.controller.abort();run.session?.dispose();}},
             ctTmReset(){this.ctTmStop();this._ctTmBatch=null;this._ctTmActivation=null;this._ctTmReviewLoad=null;
+                this.ctTmSelectionOpen=false;
                 this._ctTmDescriptors=raw([]);this._ctTmClaims={};this._ctTmReviewQueues=new Map();this._ctTmEditVersions=new Map();
                 this.ctTmSelectedIds=raw([]);this.ctTmCandidates=raw([]);this.ctTmReviews={};this.ctTmReviewBusy={};
                 this.ctTmRecoveries=raw([]);this.ctTmLoadedScopeKey='';this.ctTmBusy=false;this.ctTmProgress=null;this.ctTmError='';this.ctTmRevision++;},

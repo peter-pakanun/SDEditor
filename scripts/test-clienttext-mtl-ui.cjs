@@ -27,7 +27,7 @@ function harness(changes={}){
     const scope={...baseScope},original=makeUnit('Hello {0}','Confirmed {0}'),mtl=Memory.create();
     let epoch=0,ordinaryEdits=0;
     const normal={mtl,getMetadata:async()=>({descriptors:[descriptor]})};
-    const app={...UI.mixin.data(),ctActive:true,ctBusy:false,ctHistoryViewer:false,ctWorkspace:{scope},ctSelection:original.id,
+    const app={...UI.mixin.data(),mtlUiEnabled:true,ctActive:true,ctBusy:false,ctHistoryViewer:false,ctWorkspace:{scope},ctSelection:original.id,
         ctValues:S.valuesFor(original),ctReviewed:{},ctDraftDirty:false,ctSaved:{},ctUnits:[original],_ctUnitIndex:new Map([[original.id,original]]),
         cloudSignedIn:true,cloudProfileId:scope.accountId,cloudUser:{id:scope.accountId,role:'translator',language:scope.language,assignmentVersion:1},
         cloudCanAccessAllLanguages:false,mtlConsentVersion:'mtl-v2',mtlShortcut:'disabled',ctMtlCapabilities:{enabled:true,reviewArchive:true,consentVersion:'mtl-v2'},
@@ -790,6 +790,20 @@ test('reload requires a matching ordinary draft acceptance rather than only pers
     h.app.ctValues[h.field.id]='Generated {0}';h.app.ctMtlRestoreAcceptances({mtlAcceptances:claims});assert.equal(h.app.ctMtlCandidate(h.field),null);
     h.app.ctValues[h.field.id]='Human changed {0}';h.app.ctEdited(h.field);
     assert.equal(h.app.ctMtlAcceptances()[0].reviewedTextHash,S.hash('Human changed {0}'));
+});
+test('retired controls preserve a prior human acceptance on Save and exclude stale candidates without blocking typing',async()=>{
+    const h=harness(),c=await h.put();
+    await h.app.ctMtlAccept(h.field);
+    h.app.mtlUiEnabled=false;
+    h.app.ctValues[h.field.id]='Human edit {0}';
+    h.app.ctMtlCandidates=[];h.app._ctMtlDescriptors=[];
+    const readClaims=()=>h.app.ctMtlAcceptancesForSave(h.original.id,h.app.ctValues,h.app.ctContext());
+    assert.deepEqual(await readClaims(),[M.acceptance(c,h.app.ctValues[h.field.id])]);
+    assert.equal(h.app.ctMtlCandidate(h.field),null);
+    h.mtl.applyRemote(h.scope,{candidates:[{...c,status:'superseded',revision:2}],sequence:2});
+    assert.deepEqual(await readClaims(),[]);
+    assert.equal(h.app.ctMtlCheckpointAcceptances()[0].candidateId,c.id);
+    assert.equal(h.app.ctInputValues[h.field.id],'Human edit {0}');
 });
 test('Undo acceptance restores only the replaced ordinary field and its exact Source review',async()=>{
     const h=harness();h.app.ctValues[h.field.id]='Original draft {0}';h.app.ctReviewed[h.field.id]='old-review';

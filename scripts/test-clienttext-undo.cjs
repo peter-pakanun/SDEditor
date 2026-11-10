@@ -2,6 +2,19 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const Undo = require('../public/clientTextUndo.js');
 
+test('a confirmed column is removed from undo and redo without grouping other paste actions', () => {
+    const history = Undo.create();
+    history.record({}, { a: 'saved' });
+    history.record({ a: 'saved' }, { a: 'saved', b: 'pending' });
+    history.record({ a: 'saved', b: 'pending' }, { a: 'saved', b: 'pending', c: 'pending' });
+    history.undo({ a: 'saved', b: 'pending', c: 'pending' });
+    history.project(({ a, ...pending }) => pending);
+    assert.deepEqual(history.redo({ b: 'pending' }), { b: 'pending', c: 'pending' });
+    assert.deepEqual(history.undo({ b: 'pending', c: 'pending' }), { b: 'pending' });
+    assert.deepEqual(history.undo({ b: 'pending' }), {});
+    assert.equal(history.undo({}), null);
+});
+
 test('one paste restores every previous draft, blank position and raw newline together', () => {
     const history = Undo.create();
     const before = { values: { a: 'authored draft\r\nsecond line', b: '', c: 'untouched' } };

@@ -6,6 +6,7 @@
 })(typeof window==='object'?window:globalThis,function(root){
     'use strict';
     const raw=value=>root.Vue?.markRaw ? root.Vue.markRaw(value) : value;
+    const cellKey=(unitId,fieldId)=>JSON.stringify([unitId,fieldId]);
     const sameColumn=(session,unit,field,side)=>session.role===unit.role && session.sheet===unit.sheet && session.fieldId===field.id && session.side===side;
     function range(page,start,end){
         const first=page.findIndex(unit=>unit.id===start),last=page.findIndex(unit=>unit.id===end);
@@ -28,8 +29,9 @@
         return first<0?[]:page.slice(first,last+1).map(unit=>ids.has(unit.id)?unit.id:null);
     }
     const mixin={
-        data(){return {ctBulkDraftVersion:0,ctBulkCopiedRange:null,ctBulkSession:null,ctBulkSources:null,ctBulkPreview:null,ctBulkText:'',ctBulkTouched:false,ctBulkError:'',ctBulkSaving:false,ctBulkRetry:null,ctBulkFull:false,ctBulkPasted:null};},
+        data(){return {ctBulkDraftVersion:0,ctBulkCopiedRange:null,ctBulkSession:null,ctBulkSources:null,ctBulkPreview:null,ctBulkText:'',ctBulkTouched:false,ctBulkError:'',ctBulkSaving:false,ctBulkRetry:null,ctBulkFull:false,ctDirectValues:raw({}),ctDirectSelection:null,ctDirectRetry:null};},
         computed:{
+            ctDirectPending(){return Object.keys(this.ctDirectValues).length>0;},
             ctBulkScopeKey(){return JSON.stringify([this.ctTmSelectionScopeKey,this.ctActive,this.ctEditor,this.ctPage,this.ctEffectivePageSize,this.ctSort,this.ctSortDir]);},
             ctBulkOwner(){return this.ctActive && this.ctWorkspace && JSON.stringify([this.ctWorkspace.scope,this.cloudProfileId,this.cloudUser?.id,this.cloudUser?.role,this.lang,this.gameVersion]);},
             ctBulkView(){return JSON.stringify([this.ctPage,this.ctEffectivePageSize,this.ctSort,this.ctSortDir,this.ctEditor,this.hideDNT,this.inlineEditor,
@@ -42,7 +44,7 @@
             ctBulkHint(){return 'Click to edit. Drag across records to fill this field. Ctrl/⌘ + click toggles cells; Shift + click selects a range.';},
             ctBulkMarks(){
                 const marks={};
-                for(const state of [this.ctBulkSources,this.ctBulkSession,this.ctBulkPreview]){
+                for(const state of [this.ctBulkSources,this.ctDirectSelection,this.ctBulkSession,this.ctBulkPreview]){
                     if(state)marks[state.side]={fieldId:state.fieldId,ids:new Set(state.rows.map(row=>row.unitId))};
                 }
                 return marks;
@@ -50,17 +52,6 @@
             ctBulkImpact(){
                 if(!this.ctBulkSession)return '';
                 this.ctBulkDraftVersion;
-                if(this.ctBulkPasted){
-                    const counts={fill:0,replace:0,same:0,skip:0};
-                    for(const row of this.ctBulkSession.rows){
-                        const prior=row.expectedDraftValue ?? row.expectedValue;
-                        if(!Object.hasOwn(this.ctBulkPasted,row.unitId))counts.skip++;
-                        else if(this.ctBulkPasted[row.unitId]===prior)counts.same++;
-                        else if(!prior)counts.fill++;else counts.replace++;
-                    }
-                    return [counts.fill && counts.fill+' to fill',counts.replace && counts.replace+' to replace',
-                        counts.same && counts.same+' already match',counts.skip && counts.skip+' skipped'].filter(Boolean).join(' · ');
-                }
                 const {blank,replace,same}=impact(this.ctBulkSession.rows,this.ctBulkText);
                 if(this.ctBulkTouched && !this.ctBulkText)return [replace && replace+' to clear',blank && blank+' already blank'].filter(Boolean).join(' · ');
                 return [blank && blank+(this.ctBulkText?' to fill':' empty'),replace && replace+(this.ctBulkText?' to replace':' populated'),
@@ -69,15 +60,15 @@
             ctBulkCanSave(){
                 this.ctBulkDraftVersion;
                 return !!(this.ctBulkSession && this.ctBulkTouched && this.ctBulkSession.rows.some(r=>{
-                    if(this.ctBulkPasted && !Object.hasOwn(this.ctBulkPasted,r.unitId))return false;
                     const next=this.ctBulkEffective(r);
-                    return next!==r.expectedValue || next!==(r.expectedDraftValue ?? r.expectedValue);
+                    const direct=this.ctDirectValue(r.unitId,this.ctBulkSession.fieldId);
+                    return next!==r.expectedValue || next!==(r.expectedDraftValue ?? r.expectedValue) || direct!==undefined && next!==direct;
                 }) && !this.ctBulkStale && !this.ctBusy && !this.ctBrowseBusy && !this.ctBulkSaving);
             },
         },
-        watch:{ctBulkScopeKey:'ctBulkViewChanged',ctBulkView:'ctBulkViewChanged',ctBulkOwner(){this.ctBulkResetCopy();this.ctBulkViewChanged();}},
+        watch:{ctBulkScopeKey:'ctBulkViewChanged',ctBulkView:'ctBulkViewChanged',ctBulkOwner(next,previous){this.ctDirectSwitch(next,previous);this.ctBulkResetCopy();this.ctBulkViewChanged();}},
         mounted(){
-            this._ctFillUnload=event=>{if(this.ctBulkTouched || this.ctBulkRetry || this._ctParkedFills?.size){event.preventDefault();event.returnValue='';}};
+            this._ctFillUnload=event=>{if(this.ctBulkTouched || this.ctBulkRetry || this.ctDirectPending || this._ctParkedFills?.size || this._ctParkedPastes?.size){event.preventDefault();event.returnValue='';}};
             this._ctFillBlur=()=>this.ctBulkEndPointer();
             root.addEventListener('beforeunload',this._ctFillUnload);root.addEventListener('blur',this._ctFillBlur);
             root.document.addEventListener('copy',this.ctBulkCopySource);
@@ -85,8 +76,8 @@
         beforeUnmount(){root.removeEventListener('beforeunload',this._ctFillUnload);root.removeEventListener('blur',this._ctFillBlur);root.document.removeEventListener('copy',this.ctBulkCopySource);this.ctBulkEndPointer();},
         methods:{
             ctBulkFieldAllowed(field){return !!field && ['text','form'].includes(field.kind);},
-            ctBulkRowName(id){return this._ctUnitIndex?.get(id)?.recordId || '';},
-            ctBulkShownText(unit,part){return !this.ctBulkStale && this.ctBulkSession?.fieldId===part.id ? this.ctBulkPasted?.[unit.id] ?? part.text : part.text;},
+            ctDirectValue(unitId,fieldId){return this.ctDirectPending ? this.ctDirectValues[cellKey(unitId,fieldId)] : undefined;},
+            ctBulkShownText(unit,part){return this.ctDirectValue(unit.id,part.id) ?? part.text;},
             ctBulkSourceFields(unit){
                 const seen=new Set();
                 return this.ctFieldsFor(unit).filter(field=>{
@@ -100,20 +91,12 @@
                 return first && this.ctBulkSourceFields(unit).find(f=>f.id===first.id || first.sourceCell && first.sourceCell===f.sourceCell);
             },
             ctBulkMarked(unitId,fieldId,side='target'){const marks=this.ctBulkMarks[side];return !!marks && marks.fieldId===fieldId && marks.ids.has(unitId);},
-            ctBulkEffective(row){
-                const prior=row.expectedDraftValue ?? row.expectedValue;
-                if(!this.ctBulkTouched)return prior;
-                if(this.ctBulkPasted)return this.ctBulkPasted[row.unitId] ?? prior;
-                return this.ctBulkText;
-            },
-            ctBulkSetPastedRow(id){
-                const session=this.ctBulkSession,row=session?.rows.find(r=>r.unitId===id);
-                if(!row || this.ctBulkStale || this.ctBulkSaving || this.ctBulkRetry || !this.ctBulkPasted)return;
-                this.ctBulkSession=raw({...session,sourceId:id});this.ctBulkText=this.ctBulkEffective(row);
+            ctBulkEffective(row,fieldId=this.ctBulkSession?.fieldId){
+                return this.ctBulkTouched ? this.ctBulkText : this.ctDirectValue(row.unitId,fieldId) ?? row.expectedDraftValue ?? row.expectedValue;
             },
             ctBulkSnapshot(){
                 const input=this.$refs.ctBulkEditor?.ctDictionaryTarget();
-                return {text:this.ctBulkText,pasted:this.ctBulkPasted?{...this.ctBulkPasted}:null,touched:this.ctBulkTouched,
+                return {text:this.ctBulkText,touched:this.ctBulkTouched,
                     sourceId:this.ctBulkSession?.sourceId,selection:input?{start:input.selectionStart,end:input.selectionEnd,direction:input.selectionDirection}:null};
             },
             ctBulkHistory(){
@@ -122,9 +105,7 @@
                 const signature=JSON.stringify([session.owner,session.view,session.fieldId,session.rows.map(row=>row.unitId)]);
                 if(this._ctBulkUndoKey!==signature){
                     this._ctBulkUndoKey=signature;
-                    // A pristine plan reads each captured visible draft. Picker/caret moves do not change text history.
-                    this._ctBulkUndo=root.ClientTextUndo.create({key:state=>JSON.stringify(!state.touched?{touched:false}:
-                        {touched:true,...(state.pasted?{pasted:Object.entries(state.pasted).sort(([a],[b])=>a.localeCompare(b))}:{text:state.text})})});
+                    this._ctBulkUndo=root.ClientTextUndo.create({key:state=>JSON.stringify([state.touched,state.text])});
                 }
                 return this._ctBulkUndo;
             },
@@ -144,7 +125,6 @@
                 const before=this._ctBulkBeforeEdit || this.ctBulkSnapshot(),inputType=this._ctBulkInputType;
                 this._ctBulkBeforeEdit=null;this._ctBulkInputType=null;
                 this.ctBulkText=value;this.ctBulkTouched=true;this.ctBulkError='';
-                if(this.ctBulkPasted)this.ctBulkPasted=raw({...(before.touched?this.ctBulkPasted:{}),[this.ctBulkSession.sourceId]:value});
                 const after=this.ctBulkSnapshot(),previous=this._ctBulkTyping,now=Date.now();
                 const typing=['insertText','deleteContentBackward','deleteContentForward'].includes(inputType)
                     && before.selection?.start===before.selection?.end && Math.abs(value.length-before.text.length)<=2;
@@ -161,8 +141,7 @@
                 if(!state)return false;
                 const session=this.ctBulkSession,id=session.rows.some(row=>row.unitId===state.sourceId)?state.sourceId:session.sourceId;
                 this.ctBulkSession=raw({...session,sourceId:id});this.ctBulkTouched=state.touched;
-                this.ctBulkPasted=raw(state.touched?state.pasted:Object.fromEntries(session.rows.map(row=>[row.unitId,row.expectedDraftValue??row.expectedValue])));
-                this.ctBulkText=this.ctBulkPasted?this.ctBulkEffective(session.rows.find(row=>row.unitId===id)):state.text;
+                this.ctBulkText=state.text;
                 this.ctBulkError='';this._ctBulkBeforeEdit=null;this._ctBulkTyping=null;
                 const owner=this.$refs.ctBulkEditor;owner?.ctCloseCompletion();
                 // The regular formatter records its original caret before temporarily selecting
@@ -196,10 +175,11 @@
                     || !(event.ctrlKey || event.metaKey) || event.altKey || event.isComposing)return false;
                 const code=event.code,key=event.key.toLowerCase(),z=code==='KeyZ' || key==='z',y=code==='KeyY' || key==='y';
                 if(!z && (!y || event.shiftKey))return false;
-                event.preventDefault();event.stopPropagation();this.ctBulkUndoStep(y || event.shiftKey);return true;
+                if(!this.ctBulkUndoStep(y || event.shiftKey))return false;
+                event.preventDefault();event.stopPropagation();return true;
             },
             ctBulkCopyValues(session){
-                const values=new Map(session.rows.map(row=>[row.unitId,session.side==='source'?row.expectedValue:this.ctBulkEffective(row)]));
+                const values=new Map(session.rows.map(row=>[row.unitId,session.side==='source'?row.expectedValue:this.ctBulkEffective(row,session.fieldId)]));
                 return session.slots.map(id=>id===null?null:values.get(id));
             },
             ctBulkResetCopy(){this._ctBulkCopyEpoch={};this.ctBulkCopiedRange=null;},
@@ -264,14 +244,14 @@
                         if(row.role!==unit.role || row.sheet!==unit.sheet)break;
                         rows.push(row);
                     }
-                    const next=this.ctBulkMakeSession(unit,field,rows,false,unit.id,'target',rows);
+                    const next=this.ctBulkMakeSession(unit,field,rows,false,unit.id,'target',rows,true);
                     const assigned=root.ClientTextClipboard.assign(slots(rows,next.rows,[unit.id,rows.at(-1).id]),clip.rows);
                     if(!assigned.length)return;
                     if(this.ctBulkSession)this.ctBulkCancel();
-                    this.ctBulkApplySelection(next,inline,false,[unit.id,rows.at(-1).id],rows);
-                    this.ctBulkAcceptPaste(assigned);return;
+                    next.slots=slots(rows,next.rows,[unit.id,rows.at(-1).id]);
+                    this.ctDirectPaste(next,assigned,inline);return;
                 }
-                const session=this.ctBulkSession;if(!session)return;
+                const session=this.ctBulkSession || this.ctDirectSelection;if(!session)return;
                 const target=event.target?.closest?.('#ctBulkTranslation,[data-ct-bulk-field]:not([data-ct-source-selection])');
                 if(!target || target.id!=='ctBulkTranslation' && !this.ctBulkMarked(target.closest('tr[data-unit-id]')?.dataset.unitId,target.dataset.ctBulkField))return;
                 const clip=root.ClientTextClipboard.decode(data.getData('text/plain'),data.getData('text/html'));
@@ -280,37 +260,173 @@
                     const text=data.getData('text/plain');
                     if(!text)return;
                     event.preventDefault();event.stopPropagation();
-                    const before=this.ctBulkSnapshot();this.ctBulkText=text;this.ctBulkPasted=null;this.ctBulkTouched=true;this.ctBulkError='';
+                    if(!this.ctBulkSession){this.ctDirectPaste(session,session.rows.map(row=>({unitId:row.unitId,value:text})),target);return;}
+                    const before=this.ctBulkSnapshot();this.ctBulkText=text;this.ctBulkTouched=true;this.ctBulkError='';
                     this.ctBulkHistory().record(before,this.ctBulkSnapshot());this.$refs.ctBulkEditor?.focus();return;
                 }
                 event.preventDefault();event.stopPropagation();
                 const assigned=root.ClientTextClipboard.assign(session.slots,clip.rows);
                 if(!assigned.length){this.ctBulkError='The pasted cells have no values for this selection.';return;}
-                this.ctBulkAcceptPaste(assigned);
+                this.ctDirectPaste(session,assigned,this._ctBulkFocus || target);
             },
-            ctBulkAcceptPaste(assigned){
-                const session=this.ctBulkSession;
-                const before=this.ctBulkSnapshot();
-                this._ctBulkTyping=null;
-                const pending=this.ctBulkTouched ? this.ctBulkPasted || Object.fromEntries(session.rows.map(r=>[r.unitId,this.ctBulkText])) : {};
-                this.ctBulkError='';this.ctBulkTouched=true;
-                this.ctBulkPasted=raw({...pending,...Object.fromEntries(assigned.map(({unitId,value})=>[unitId,value]))});
-                const id=Object.hasOwn(this.ctBulkPasted,session.sourceId)?session.sourceId:assigned[0]?.unitId ?? session.sourceId;
-                this.ctBulkSetPastedRow(id);
-                this.ctBulkHistory().record(before,this.ctBulkSnapshot());
-                this.$nextTick(()=>{if(this.ctBulkSession?.sourceId===id && !this.ctBulkStale)this.$refs.ctBulkEditor?.focus();});
+            ctDirectSwitch(next,previous){
+                const parked=this._ctParkedPastes ||= new Map();
+                if(previous && this.ctDirectPending)parked.set(previous,{values:this.ctDirectValues,cells:this._ctDirectCells,history:this._ctDirectHistory,retry:this.ctDirectRetry});
+                const work=parked.get(next);parked.delete(next);
+                this.ctDirectValues=work?.values || raw({});this._ctDirectCells=work?.cells || new Map();
+                this._ctDirectHistory=work?.history || null;this.ctDirectRetry=work?.retry || null;this.ctDirectSelection=null;
+            },
+            ctDirectHistory(){return this._ctDirectHistory ||= root.ClientTextUndo.create({key:state=>JSON.stringify(state.values)});},
+            ctDirectChange(next,group=null,before=null,after=null){
+                if(this.ctDirectHistory().record({values:this.ctDirectValues,selection:before},{values:next,selection:after},group))this.ctDirectValues=raw(next);
+            },
+            ctDirectBeforeInput(event){
+                const input=event.target,fieldId=input?.dataset?.ctTarget;
+                if(!fieldId || this.ctDirectValue(this.ctSelection,fieldId)===undefined || event.isComposing)return;
+                const before=this._ctDirectInput={id:cellKey(this.ctSelection,fieldId),input,type:event.inputType,start:input.selectionStart,end:input.selectionEnd,direction:input.selectionDirection};
+                root.setTimeout(()=>{if(this._ctDirectInput===before)this._ctDirectInput=null;},0);
+            },
+            ctDirectEdit(unitId,fieldId,value){
+                const id=cellKey(unitId,fieldId);
+                if(!Object.hasOwn(this.ctDirectValues,id)){
+                    // A native edit after undo starts a new branch; redoing the old paste
+                    // must never replace that later ordinary edit.
+                    if(this._ctDirectCells?.has(id) && this._ctDirectHistory?.canRedo({values:this.ctDirectValues})){
+                        this._ctDirectHistory=null;
+                        if(this.ctDirectPending)this.ctDirectHistory().record({values:{}},{values:this.ctDirectValues});
+                    }
+                    return false;
+                }
+                if(!this.ctDirectRetry && !this.ctBusy && this.ctDirectValues[id]!==value){
+                    const old=this.ctDirectValues[id],input=this._ctDirectInput,prev=this._ctDirectTyping,now=Date.now();
+                    const typing=input?.id===id && ['insertText','deleteContentBackward','deleteContentForward'].includes(input.type)
+                        && input.start===input.end && Math.abs(value.length-old.length)<=2;
+                    const group=typing && prev?.id===id && prev.type===input.type && prev.caret===input.start && prev.text===old && now-prev.at<750
+                        ? prev.group : typing ? root.crypto.randomUUID() : null;
+                    const before=input?.id===id ? {id,start:input.start,end:input.end,direction:input.direction} : null;
+                    const after=before && {id,start:input.input.selectionStart,end:input.input.selectionEnd,direction:input.input.selectionDirection};
+                    this._ctDirectTyping=typing?{id,type:input.type,caret:after.start,text:value,at:now,group}:null;
+                    this._ctDirectInput=null;this.ctDirectChange({...this.ctDirectValues,[id]:value},group,before,after);
+                }
+                return true;
+            },
+            ctDirectPaste(session,assigned,focus){
+                if(this.ctDirectRetry){this.ctError='Retry the pending Save before changing these cells.';return;}
+                const cells=this._ctDirectCells ||= new Map(),entries=new Map(assigned.map(item=>[item.unitId,item.value]));
+                const shared=this.ctBulkTouched && this.ctBulkSession===session;
+                const base={...this.ctDirectValues},next={...base},fresh=[];
+                for(const row of session.rows){
+                    if(!shared && !entries.has(row.unitId))continue;
+                    const id=cellKey(row.unitId,session.fieldId);
+                    if(!Object.hasOwn(base,id)){
+                        cells.set(id,{row,fieldId:session.fieldId,role:session.role,sheet:session.sheet});fresh.push(row);
+                    }
+                    if(shared)base[id]=this.ctBulkText;
+                    next[id]=entries.get(row.unitId) ?? base[id];
+                }
+                if(fresh.length)this.ctBulkCaptureDraftValues({...session,rows:fresh});
+                this._ctDirectTyping=null;
+                if(shared)this.ctDirectChange(base);
+                this.ctDirectChange(next);this.ctBulkCancel();this.ctCloseCompletion();this.ctDirectSelection=raw(session);
+                if(focus?.isConnected)focus.focus({preventScroll:true});
+            },
+            ctDirectKey(event){
+                const key=event.key?.toLowerCase(),mod=event.ctrlKey || event.metaKey;
+                if(event.defaultPrevented || !mod || event.altKey || event.isComposing || this.ctKeyboardOverlayOpen() || this.ctHistoryViewer)return false;
+                const target=event.target,inline=target?.closest?.('textarea[data-ct-target]'),input=target?.closest?.('input,textarea,select,[contenteditable=true]');
+                const handle=target?.closest?.('[data-ct-bulk-field]:not([data-ct-source-selection])'),selection=this.ctDirectSelection;
+                if(key==='c' && !event.shiftKey && handle && selection && this.ctBulkMarked(handle.closest('tr[data-unit-id]')?.dataset.unitId,handle.dataset.ctBulkField)){
+                    event.preventDefault();event.stopPropagation();void this.ctBulkWriteCopy(selection);return true;
+                }
+                if(key==='s' && !event.shiftKey && this.ctDirectPending && !this.ctBulkTouched && (!input || inline || target.id==='ctBulkTranslation')){
+                    event.preventDefault();event.stopPropagation();void this.ctSave();return true;
+                }
+                if(!['z','y'].includes(key) || key==='y' && event.shiftKey || !this._ctDirectHistory || this.ctBusy || this.ctDirectRetry)return false;
+                if(input && !(inline && this._ctDirectCells?.has(cellKey(this.ctSelection,inline.dataset.ctTarget))))return false;
+                if(!input && target!==root.document.body && !target?.closest?.('.fileTableScroll,#ctPendingPasteSave'))return false;
+                const redo=key==='y' || event.shiftKey,current={values:this.ctDirectValues},state=redo?this._ctDirectHistory.redo(current):this._ctDirectHistory.undo(current);
+                if(!state)return false;
+                event.preventDefault();event.stopPropagation();this.ctDirectValues=raw(state.values);this.ctCloseCompletion();this._ctDirectTyping=null;
+                if(inline){
+                    const fieldId=inline.dataset.ctTarget,id=cellKey(this.ctSelection,fieldId),previous=current.values[id],next=state.values[id] ?? this.ctValues[fieldId];
+                    const record=this._ctRawEditHistory?.fields.get(fieldId);
+                    let selection=state.selection?.id===id && state.selection;
+                    if(record && record.values[record.at]===previous){
+                        const from=record.at,step=redo?1:-1;
+                        for(let i=from+step;i>=0 && i<record.values.length;i+=step){
+                            if(record.values[i]!==next)continue;
+                            if(record.formatEdits.slice(Math.min(from,i)+1,Math.max(from,i)+1).some(Boolean))selection=record.selections[i] || selection;
+                            record.at=i;break;
+                        }
+                    }
+                    if(selection)this.$nextTick(()=>{if(inline===root.document.activeElement && this.ctSelection && this.ctDirectValues===state.values)inline.setSelectionRange(selection.start,selection.end,selection.direction || 'none');});
+                }
+                return true;
+            },
+            async ctDirectSave(){
+                if(!this.ctDirectPending || this.ctBusy || this.ctBulkSaving || this._ctSaveJob)return false;
+                const ctx=this.ctContext(),owner=this.ctBulkOwner,current=()=>this.ctBulkOwner===owner && this.ctTmCurrent(ctx);
+                this.ctBusy=true;this.ctBulkSaving=true;
+                try{
+                    if(!await this.ctFlushDraft() || !current())return false;
+                    while(this.ctDirectPending){
+                        const ids=Object.keys(this.ctDirectValues),cells=this._ctDirectCells,first=cells.get(ids[0]);
+                        const group=ids.filter(id=>{const c=cells.get(id);return c.fieldId===first.fieldId && c.role===first.role && c.sheet===first.sheet;}).slice(0,100);
+                        const rows=group.map(id=>cells.get(id).row);
+                        const error=(await Promise.all(this.ctBulkCaptureDraftValues({rows,fieldId:first.fieldId}))).find(Boolean);
+                        if(error)throw error;
+                        const job=this.ctDirectRetry || raw({jobId:root.crypto.randomUUID(),role:first.role,sheet:first.sheet,fieldId:first.fieldId,mode:'rows',
+                            rows:rows.map((row,i)=>({...row,value:this.ctDirectValues[group[i]]}))});
+                        this.ctDirectRetry=job;
+                        const results=await this.ctStorage(ctx.scope).saveFieldBatch(ctx.scope,job,{guard:current});
+                        if(!current())return false;
+                        this.ctPublishFieldResults(results,ctx);this.ctDirectRetry=null;
+                        const next={...this.ctDirectValues};
+                        for(const id of group){delete next[id];cells.delete(id);}
+                        // An acknowledged edit to a sibling increments the record revision, although
+                        // its independent field witnesses still need to pass the storage transaction.
+                        for(const result of results){
+                            const saved=result.saved;
+                            if(result.current && result.current.revision!==saved.revision)continue;
+                            for(const row of this.ctDirectSelection?.rows || [])if(row.unitId===result.unitId && row.revision===saved.revision-1){
+                                row.revision=saved.revision;
+                                if(this.ctDirectSelection.fieldId===first.fieldId){
+                                    row.expectedValue=saved.values[first.fieldId];
+                                    row.expectedDraftValue=result.draft?.values[first.fieldId] ?? row.expectedValue;
+                                }
+                            }
+                            for(const {row} of cells.values())if(row.unitId===result.unitId && row.revision===saved.revision-1)row.revision=saved.revision;
+                        }
+                        this.ctDirectValues=raw(next);
+                        if(this.ctDirectPending){
+                            const confirmed=new Set(group);
+                            this._ctDirectHistory?.project(state=>({
+                                values:Object.fromEntries(Object.entries(state.values).filter(([id])=>!confirmed.has(id))),
+                                selection:confirmed.has(state.selection?.id)?null:state.selection,
+                            }));
+                        }else this._ctDirectHistory=null;
+                    }
+                    if(this.ctError===this._ctDirectSaveError)this.ctError='';
+                    this._ctDirectSaveError=null;this._ctDirectCells=new Map();this.ctDirectSelection=null;void this.ctSync(ctx);return true;
+                }catch(error){
+                    if(current()){
+                        this._ctDirectSaveError=this.ctError=error.message;
+                        if(['CLIENTTEXT_FIELD_SELECTION_CHANGED','CLIENTTEXT_PENDING_RESOLUTION_REQUIRED','DRAFT_CHANGED','UNIT_CHANGED'].includes(error.code))this.ctDirectRetry=null;
+                    }
+                    return false;
+                }finally{if(current())this.ctBusy=false;this.ctBulkSaving=false;}
             },
             ctBulkViewChanged(){
                 this.ctBulkEndPointer();
-                this.ctBulkSources=null;
+                this.ctBulkSources=null;this.ctDirectSelection=null;
                 const session=this.ctBulkSession,owner=this.ctBulkOwner;
                 if(session && session.owner!==owner){
-                    if(this.ctBulkTouched || this.ctBulkRetry)(this._ctParkedFills ||= new Map()).set(session.owner,{session,text:this.ctBulkText,retry:this.ctBulkRetry,pasted:this.ctBulkPasted,undo:this._ctBulkUndo,undoKey:this._ctBulkUndoKey});
+                    if(this.ctBulkTouched || this.ctBulkRetry)(this._ctParkedFills ||= new Map()).set(session.owner,{session,text:this.ctBulkText,retry:this.ctBulkRetry,undo:this._ctBulkUndo,undoKey:this._ctBulkUndoKey});
                     this.ctBulkCancel();
                 }
                 if(!this.ctBulkSession && owner && this._ctParkedFills?.has(owner)){
                     const p=this._ctParkedFills.get(owner);this._ctParkedFills.delete(owner);
-                    this.ctBulkSession=p.session;this.ctBulkText=p.text;this.ctBulkTouched=true;this.ctBulkRetry=p.retry;this.ctBulkPasted=p.pasted;
+                    this.ctBulkSession=p.session;this.ctBulkText=p.text;this.ctBulkTouched=true;this.ctBulkRetry=p.retry;
                     this._ctBulkUndo=p.undo;this._ctBulkUndoKey=p.undoKey;
                 }
                 if(this.ctBulkSession && this.ctBulkStale){
@@ -330,7 +446,7 @@
                 if(restore && this.ctBulkSaving)return;
                 this.ctBulkEndPointer();
                 const origin=this._ctBulkFocus;
-                this.ctBulkSession=null;this.ctBulkPreview=null;this.ctBulkRetry=null;this.ctBulkError='';this.ctBulkText='';this.ctBulkTouched=false;this.ctBulkFull=false;this.ctBulkPasted=null;this._ctBulkFocus=null;
+                this.ctBulkSession=null;this.ctBulkPreview=null;this.ctBulkRetry=null;this.ctBulkError='';this.ctBulkText='';this.ctBulkTouched=false;this.ctBulkFull=false;this._ctBulkFocus=null;
                 this._ctBulkUndo=null;this._ctBulkUndoKey=null;this._ctBulkBeforeEdit=null;this._ctBulkTyping=null;
                 if(restore && origin?.isConnected)origin.focus({preventScroll:true});
             },
@@ -343,8 +459,8 @@
                     add:event.ctrlKey || event.metaKey,extend:event.shiftKey,dragging:false,last:null});
                 target.setPointerCapture(event.pointerId);
             },
-            ctBulkMakeSession(unit,field,units,keep,anchor,side,order=this.ctPageRows){
-                const base=side==='source'?this.ctBulkSources:this.ctBulkSession,previous=base && sameColumn(base,unit,field,side) ? new Map(base.rows.map(row=>[row.unitId,row])) : new Map();
+            ctBulkMakeSession(unit,field,units,keep,anchor,side,order=this.ctPageRows,fresh=false){
+                const base=side==='source'?this.ctBulkSources:this.ctBulkSession || this.ctDirectSelection,previous=!fresh && base && sameColumn(base,unit,field,side) ? new Map(base.rows.map(row=>[row.unitId,row])) : new Map();
                 const selected=new Map(keep?previous:[]);
                 for(const target of units){
                     if(target.role!==unit.role || target.sheet!==unit.sheet || selected.has(target.id))continue;
@@ -379,7 +495,7 @@
                     };
                     g.frame=root.requestAnimationFrame(scroll);
                 }
-                const base=g.side==='source'?this.ctBulkSources:this.ctBulkSession;
+                const base=g.side==='source'?this.ctBulkSources:this.ctBulkSession || this.ctDirectSelection;
                 if(g.add && base && !sameColumn(base,g.unit,g.field,g.side))return;
                 this.ctBulkPreview=raw(this.ctBulkMakeSession(g.unit,g.field,range(this.ctPageRows,g.unit.id,g.last),g.add,g.unit.id,g.side));
             },
@@ -411,13 +527,6 @@
                         .then(values=>{
                             for(const row of fresh)row.expectedDraftValue=row===active?live:values[row.unitId] ?? row.expectedValue;
                             this.ctBulkDraftVersion++;
-                            // Undo may have restored the original values before this scoped read finished.
-                            // Its preview can refresh, but these cells are still absent from any pending Save.
-                            const selected=this.ctBulkSession;
-                            if(!this.ctBulkTouched && this.ctBulkPasted && selected?.rows.some(r=>fresh.includes(r))){
-                                this.ctBulkPasted=raw(Object.fromEntries(selected.rows.map(r=>[r.unitId,this.ctBulkEffective(r)])));
-                                this.ctBulkText=this.ctBulkPasted[selected.sourceId];
-                            }
                         },error=>{
                             for(const row of fresh)reads.delete(row);
                             return error;
@@ -437,24 +546,29 @@
                 if(current && this.ctBulkTouched && (next.side!==current.side || next.fieldId!==current.fieldId || next.role!==current.role || next.sheet!==current.sheet || !next.rows.length)){
                     this.ctBulkError='Save or cancel the current replacement first.';return;
                 }
-                if(!next.rows.length){this.ctBulkCancel(true);return;}
+                if(!next.rows.length){this.ctDirectSelection=null;this.ctBulkCancel(true);return;}
                 if(!next.rows.some(row=>row.unitId===next.sourceId))next.sourceId=next.rows[0].unitId;
                 if(next.side==='target' && next.rows.length>100){this.ctBulkError='Select at most 100 cells for one Save.';this.ctError=this.ctBulkError;return;}
                 this.ctBulkCaptureDraftValues(next);
-                if(this.ctBulkPasted){
-                    this.ctBulkPasted=raw(Object.fromEntries(next.rows.filter(row=>Object.hasOwn(this.ctBulkPasted,row.unitId)).map(row=>[row.unitId,this.ctBulkPasted[row.unitId]])));
-                    this.ctBulkText=this.ctBulkEffective(next.rows.find(row=>row.unitId===next.sourceId));
-                }
+                this.ctDirectSelection=null;
                 this._ctBulkFocus=origin;this.ctCloseCompletion();this.ctBulkSession=raw(next);this.ctBulkError='';
                 if(focus || !current)this.$nextTick(()=>{if(this.ctBulkSession===next)this.$refs.ctBulkEditor?.focus();});
             },
             async ctBulkChoose(unit,field,add,extend,origin,side='target'){
                 if(this.ctKeyboardBlocked() || this.ctBulkSaving)return;
-                const current=side==='source'?this.ctBulkSources:this.ctBulkSession;
+                const current=side==='source'?this.ctBulkSources:this.ctBulkSession || this.ctDirectSelection;
+                // The dedicated handle toggles its cell. Clicking the value itself still opens the ordinary editor.
+                if(origin?.classList?.contains('ctFieldGrip') && !add && !extend){
+                    if(current && !sameColumn(current,unit,field,side)){
+                        this.ctBulkApplySelection(this.ctBulkMakeSession(unit,field,[unit],false,unit.id,side),origin,true);
+                        return;
+                    }
+                    add=true;
+                }
                 if(!add && !extend){
                     if(side==='source'){this.ctBulkApplySelection(this.ctBulkMakeSession(unit,field,[unit],false,unit.id,side),origin,false);return;}
                     if(current && (this.ctBulkTouched || this.ctBulkRetry)){this.ctBulkError='Save or cancel the current replacement first.';return;}
-                    this.ctBulkCancel();
+                    this.ctDirectSelection=null;this.ctBulkCancel();
                     if(this.ctInlineUnitVisible() && this.ctCurrentUnit===unit){this.ctFocusTarget(false,field.id);return;}
                     if(await this.ctSelect(unit,!this.inlineEditor,{saveInline:true,focus:false}) && this.ctCurrentUnit===unit)this.ctFocusTarget(false,field.id);
                     return;
@@ -466,7 +580,10 @@
                 }
                 if(current && current.side===side && !sameColumn(current,unit,field,side)){this.ctBulkError='Select another '+current.label+' cell in the same worksheet.';return;}
                 const next=this.ctBulkMakeSession(unit,field,[unit],true,unit.id,side);
-                if(current?.side===side && current.rows.some(r=>r.unitId===unit.id))next.rows=next.rows.filter(r=>r.unitId!==unit.id);
+                if(current?.side===side && current.rows.some(r=>r.unitId===unit.id)){
+                    next.rows=next.rows.filter(r=>r.unitId!==unit.id);
+                    if(!next.rows.length && side==='target' && origin?.classList?.contains('ctFieldGrip')){this.ctDirectSelection=null;this.ctBulkCancel(true);return;}
+                }
                 this.ctBulkApplySelection(next,origin,false);
             },
             ctBulkKey(event){
@@ -476,13 +593,14 @@
                     if(this.ctHistoryViewer || this.ctCompletion)return false;
                     const editor=this.$refs?.ctBulkEditor;
                     if(editor?.ctCompletion){event.preventDefault();event.stopPropagation();editor.ctCloseCompletion();return true;}
-                    if(this._ctBulkPointer || this.ctBulkSources || this.ctBulkSession || this.ctBulkCopiedRange){
+                    if(this._ctBulkPointer || this.ctBulkSources || this.ctBulkSession || this.ctDirectSelection || this.ctBulkCopiedRange){
                         event.preventDefault();event.stopPropagation();
                         this.ctBulkResetCopy();
-                        if(!this.ctBulkSaving){this.ctBulkSources=null;this.ctBulkCancel(!!this.ctBulkSession);}
+                        if(!this.ctBulkSaving){this.ctBulkSources=null;this.ctDirectSelection=null;this.ctBulkCancel(!!this.ctBulkSession);}
                         return true;
                     }
                 }
+                if(this.ctDirectKey(event))return true;
                 if(this.ctBulkSources && event.target?.closest?.('[data-ct-source-selection]')){
                     if((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && (event.code==='KeyC' || event.key.toLowerCase()==='c')){
                         const session=this.ctBulkSources;
@@ -523,9 +641,32 @@
                 if(!this.ctCurrent(ctx) || this.ctKeyboardOverlayOpen() || !this._ctUnitIndex.has(session.sourceId))return false;
                 return this.ctSaveAndNavigate(reverse,{inline:!full,afterBulk:this._ctUnitIndex.get(session.sourceId)});
             },
+            ctPublishFieldResults(results,ctx){
+                const saved={...this.ctSaved};
+                for(const {unitId,saved:receipt,current:latest,draft} of results){
+                    const row=latest || receipt;
+                    if((saved[unitId]?.revision || 0)>row.revision)continue;
+                    saved[unitId]=row;
+                    if(unitId===this.ctSelection){
+                        this.ctValues={...(draft?.values || row.values)};this.ctReviewed={...(draft?.reviewed || row.reviewed)};
+                        this._ctEditRevision=row.revision;this._ctDraftRevision=draft?.revision || null;this.ctDraftDirty=!!draft;
+                        this.ctTmRestoreAcceptances?.(draft);this.ctMtlRestoreAcceptances?.(draft);
+                        const head=this._ctDraftHeads?.get(JSON.stringify([root.ClientTextStore.scopeKey(ctx.scope),unitId]));
+                        if(head && !head.pending){head.signature=null;head.revision=this._ctDraftRevision;}
+                    }
+                }
+                this.ctSaved=raw(saved);this.ctRevision++;
+                this.ctRefreshDiagnostics(results.map(r=>r.unitId));this.ctRefreshDraftSummaries(ctx);this.ctLoadMemory(ctx);
+                if(results.some(r=>r.unitId===this.ctSelection))this.ctLoadHistory(ctx,this.ctSelection);
+                for(const row of results)void this.ctQueueResourceMemory?.(ctx,this._ctUnitIndex.get(row.unitId),row.saved);
+            },
             async ctBulkSave(){
                 const session=this.ctBulkSession;
                 if(!this.ctBulkCanSave || session.scope!==this.ctBulkScopeKey || this._ctSaveJob)return false;
+                if(this.ctDirectPending && !this.ctBulkRetry){
+                    if(!this.ctDirectRetry)this.ctDirectPaste(session,session.rows.map(r=>({unitId:r.unitId,value:this.ctBulkText})),this._ctBulkFocus);
+                    return this.ctDirectSave();
+                }
                 const ctx=this.ctContext(),store=this.ctStorage(ctx.scope),current=()=>this.ctBulkSession===session && this.ctBulkScopeKey===session.scope && this.ctTmCurrent(ctx);
                 if(!current())return false;
                 this.ctBusy=true;this.ctBulkSaving=true;this.ctBulkError='';
@@ -533,28 +674,11 @@
                     const failed=(await Promise.all(this.ctBulkCaptureDraftValues(session))).find(Boolean);
                     if(failed)throw failed;
                     if(!await this.ctFlushDraft() || !current())return false;
-                    const plan=this.ctBulkPasted ? {mode:'rows',rows:session.rows.filter(r=>Object.hasOwn(this.ctBulkPasted,r.unitId)).map(r=>({...r,value:this.ctBulkPasted[r.unitId]}))} : {value:this.ctBulkText,rows:session.rows};
-                    const job=this.ctBulkRetry || raw({jobId:root.crypto.randomUUID(),role:session.role,sheet:session.sheet,fieldId:session.fieldId,...plan});
+                    const job=this.ctBulkRetry || raw({jobId:root.crypto.randomUUID(),role:session.role,sheet:session.sheet,fieldId:session.fieldId,value:this.ctBulkText,rows:session.rows});
                     this.ctBulkRetry=job;
                     const results=await store.saveFieldBatch(ctx.scope,job,{guard:current});
                     if(!current())return false;
-                    const saved={...this.ctSaved};
-                    for(const {unitId,saved:receipt,current:latest,draft} of results){
-                        const row=latest || receipt;
-                        if((saved[unitId]?.revision || 0)>row.revision)continue;
-                        saved[unitId]=row;
-                        if(unitId===this.ctSelection){
-                            this.ctValues={...(draft?.values || row.values)};this.ctReviewed={...(draft?.reviewed || row.reviewed)};
-                            this._ctEditRevision=row.revision;this._ctDraftRevision=draft?.revision || null;this.ctDraftDirty=!!draft;
-                            this.ctTmRestoreAcceptances?.(draft);this.ctMtlRestoreAcceptances?.(draft);
-                            const head=this._ctDraftHeads?.get(JSON.stringify([root.ClientTextStore.scopeKey(ctx.scope),unitId]));
-                            if(head && !head.pending){head.signature=null;head.revision=this._ctDraftRevision;}
-                        }
-                    }
-                    this.ctSaved=raw(saved);this.ctRevision++;this.ctBulkCancel();
-                    this.ctRefreshDiagnostics(results.map(r=>r.unitId));this.ctRefreshDraftSummaries(ctx);this.ctLoadMemory(ctx);
-                    if(results.some(r=>r.unitId===this.ctSelection))this.ctLoadHistory(ctx,this.ctSelection);
-                    for(const row of results)void this.ctQueueResourceMemory?.(ctx,this._ctUnitIndex.get(row.unitId),row.saved);
+                    this.ctPublishFieldResults(results,ctx);this.ctBulkCancel();
                     void this.ctSync(ctx);return true;
                 }catch(error){
                     if(current()){
@@ -605,6 +729,7 @@
                     return control;
                 },
                 toolbar(){return this.ctFieldToolbar(this.field,'translation');},
+                sourceToolbar(){return Object.assign(this.ctFieldToolbar(this.field,'source'),{sourceDiffBelow:true});},
             },
             mounted(){
                 this._ctUnitIndex=this.host._ctUnitIndex;this._cloud=this.host._cloud;
@@ -659,13 +784,24 @@
                     return typeof value==='string' && root.EditorSession.insert(this,this.field,value,{whole:true});
                 },
             },
-            template:`<div class="ctBulkEditingFields" @beforeinput.capture="host.ctBulkBeforeInput($event)"><div class="ctBulkSource"><editor-native-field :controller="sourceControl" kind="english" compact></editor-native-field></div><div><editor-field-toolbar :controller="toolbar"><editor-native-field :controller="targetControl" kind="translation" compact></editor-native-field></editor-field-toolbar><editor-diagnostic-meta :presentation="targetControl.diagnosticPresentation"></editor-diagnostic-meta></div><editor-autocomplete v-if="ctCompletion" :controller="clientTextPopupController()"></editor-autocomplete></div>`
+            template:`<div class="ctBulkEditingFields" @beforeinput.capture="host.ctBulkBeforeInput($event)"><div class="ctBulkSource"><editor-field-toolbar :controller="sourceToolbar"><editor-native-field :controller="sourceControl" kind="english" compact></editor-native-field></editor-field-toolbar></div><div><editor-field-toolbar :controller="toolbar"><editor-native-field :controller="targetControl" kind="translation" compact></editor-native-field></editor-field-toolbar><editor-diagnostic-meta :presentation="targetControl.diagnosticPresentation"></editor-diagnostic-meta></div><editor-autocomplete v-if="ctCompletion" :controller="clientTextPopupController()"></editor-autocomplete></div>`
         };
     }
     // Workbook page changes frequently rerender the root. Keeping the collapsed field lists in
     // their own row component leaves unaffected rows mounted during editor focus and history updates.
     const browseFields={props:['host','unit','side'],template:`
         <div v-if="side==='source'" class="ctReadPreview ctBulkFieldList" lang="en"><button v-for="field in host.ctBulkSourceFields(unit)" :key="field.id" type="button" class="ctBulkCell" data-inline-focus-surface data-ct-source-selection :data-ct-bulk-field="field.id" :aria-label="unit.recordId+', English '+host.ctHistoryFieldLabel(field)" :aria-pressed="host.ctBulkMarked(unit.id,field.id,'source')" :data-ct-copied="host.ctBulkCopiedCell(unit,field.id,'source') || null" :title="host.ctHistoryFieldLabel(field)" @pointerdown="host.ctBulkPointerDown(unit,field,$event,'source')" @click.stop="host.ctBulkClick(unit,field,$event,'source')" @dblclick.stop><small>{{ host.ctHistoryFieldLabel(field) }}</small><span>{{ field.source || 'Empty' }}</span></button></div>
-        <template v-else><div class="ctReadPreview ctBulkFieldList" :lang="host.translationEditorBcp47"><template v-for="part in host.ctListTargetParts(unit,true)" :key="part.id"><button v-if="part.field" type="button" class="ctBulkCell" data-inline-focus-surface :data-ct-bulk-field="part.id" :aria-label="unit.recordId+', '+host.ctHistoryFieldLabel(part.field)" :aria-pressed="host.ctBulkMarked(unit.id,part.id)" :data-ct-copied="host.ctBulkCopiedCell(unit,part.id) || null" :title="host.ctHistoryFieldLabel(part.field)+' · '+host.ctBulkHint" @pointerdown="host.ctBulkPointerDown(unit,part.field,$event)" @click.stop="host.ctBulkClick(unit,part.field,$event)" @dblclick.stop><small>{{ host.ctHistoryFieldLabel(part.field) }}</small><span :class="{ctEnglishPlaceholder:!host.ctBulkShownText(unit,part) || part.english && !host.ctBulkPasted?.[unit.id]}">{{ host.ctBulkShownText(unit,part) || 'Empty' }}</span></button><span v-else :class="{ctEnglishPlaceholder:part.english}">{{ part.text }}</span></template></div><small v-for="field in host.ctFieldsFor(unit).filter(field=>field.kind==='gender')" :key="field.id" class="ctMetadataValue">Gender: {{ host.ctValuesFor(unit)[field.id] || 'Blank' }}</small></template>`};
-    return {mixin,editor,browseFields,range,impact};
+        <template v-else><div class="ctReadPreview ctBulkFieldList" :lang="host.translationEditorBcp47"><template v-for="part in host.ctListTargetParts(unit,true)" :key="part.id"><button v-if="part.field" type="button" class="ctBulkCell" data-inline-focus-surface :data-ct-bulk-field="part.id" :aria-label="unit.recordId+', '+host.ctHistoryFieldLabel(part.field)" :aria-pressed="host.ctBulkMarked(unit.id,part.id)" :data-ct-copied="host.ctBulkCopiedCell(unit,part.id) || null" :title="host.ctHistoryFieldLabel(part.field)+' · '+host.ctBulkHint" @pointerdown="host.ctBulkPointerDown(unit,part.field,$event)" @click.stop="host.ctBulkClick(unit,part.field,$event)" @dblclick.stop><small>{{ host.ctHistoryFieldLabel(part.field) }}</small><span :class="{ctEnglishPlaceholder:!host.ctBulkShownText(unit,part) || part.english && host.ctDirectValue(unit.id,part.id)===undefined}">{{ host.ctBulkShownText(unit,part) || 'Empty' }}</span></button><span v-else :class="{ctEnglishPlaceholder:part.english}">{{ part.text }}</span></template></div><small v-for="field in host.ctFieldsFor(unit).filter(field=>field.kind==='gender')" :key="field.id" class="ctMetadataValue">Gender: {{ host.ctValuesFor(unit)[field.id] || 'Blank' }}</small></template>`};
+    const grip={
+        props:['host','unit','field','side'],
+        computed:{
+            label(){return this.field && 'Select '+(this.side==='source'?'English ':'translation ')+this.host.ctHistoryFieldLabel(this.field)+', '+this.unit.recordId;},
+        },
+        template:`<button v-if="host.ctBulkFieldAllowed(field)" type="button" class="ctFieldGrip" data-inline-focus-surface
+            :data-ct-source-selection="side==='source' ? '' : null" :data-ct-bulk-field="field.id" :aria-label="label" :title="label+' · Drag to select cells'"
+            :aria-pressed="host.ctBulkMarked(unit.id,field.id,side)" :data-ct-copied="host.ctBulkCopiedCell(unit,field.id,side) || null"
+            @pointerdown="host.ctBulkPointerDown(unit,field,$event,side)" @click.stop="host.ctBulkClick(unit,field,$event,side)" @dblclick.stop>
+            <svg aria-hidden="true" viewBox="0 0 24 24" data-icon="square-dashed-plus"><path d="M5 3a2 2 0 0 0-2 2M19 3a2 2 0 0 1 2 2M21 19a2 2 0 0 1-2 2M5 21a2 2 0 0 1-2-2M9 3h1m4 0h1M9 21h1m4 0h1M3 9v1m0 4v1M21 9v1m0 4v1M8 12h8m-4-4v8"/></svg></button>`,
+    };
+    return {mixin,editor,browseFields,grip,range,impact};
 });

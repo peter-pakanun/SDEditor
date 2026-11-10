@@ -18,6 +18,13 @@ module.exports=async function({page,api,files,Codec,ClientState:S,failures,direc
     const workspace=()=>page.getByRole('region',{name:'ClientText workspace',exact:true});
     const review=()=>page.locator('.ctFullEditor .ctTmReview').first();
     const fieldInput=name=>page.locator('.ctFullEditor').getByRole('textbox',{name,exact:true});
+    async function showSelection(){
+        await app(()=>{const vm=window.__clientFixtureApp;vm.inlineEditor=true;vm.inlineSidebarVisible=true;});
+        await page.getByRole('button',{name:'TM',exact:true}).click();
+        if(!await page.getByRole('checkbox',{name:'Show row selection'}).isVisible())await page.getByText('TM options',{exact:true}).click();
+        await page.getByRole('checkbox',{name:'Show row selection'}).check();
+        await workspace().getByRole('checkbox',{name:'Select rows on this page'}).waitFor();
+    }
     async function select(recordId){
         await app(async()=>{const vm=window.__clientFixtureApp;if(vm.ctEditor)await vm.ctCloseEditor();vm.ctShowAllLoaded();});
         await workspace().getByRole('button',{name:recordId,exact:true}).click();
@@ -25,6 +32,7 @@ module.exports=async function({page,api,files,Codec,ClientState:S,failures,direc
     }
     async function prepare(recordId){
         await app(async()=>{const vm=window.__clientFixtureApp;if(vm.ctEditor)await vm.ctCloseEditor();vm.ctShowAllLoaded();vm.ctTmClearSelection();});
+        await showSelection();
         await workspace().getByRole('checkbox',{name:'Select '+recordId,exact:true}).check();
         await workspace().getByRole('button',{name:'Pre-translate selected with TM',exact:true}).click();
         await page.waitForFunction(()=>{const vm=window.__clientFixtureApp;return !vm.ctTmBusy&&!!vm.ctTmProgress;});
@@ -82,6 +90,17 @@ module.exports=async function({page,api,files,Codec,ClientState:S,failures,direc
     assert.equal(before.saved,null);assert.equal(before.draft,null);assert.equal(before.history.length,0);
     // Checkbox keyboard selection, pagination retention, and filter clearing.
     await app(()=>{const vm=window.__clientFixtureApp;vm.ctShowAllLoaded();vm.pageSize=1;});
+    const selectPage=workspace().getByRole('checkbox',{name:'Select rows on this page',exact:true});
+    const toolbar=workspace().locator('.ctBulkTmToolbar');
+    assert.equal(await selectPage.count(),0);assert.equal(await toolbar.count(),0);
+    await showSelection();
+    await page.getByRole('checkbox',{name:'Show row selection'}).uncheck();assert.equal(await toolbar.count(),0);
+    await page.getByRole('checkbox',{name:'Show row selection'}).check();assert.equal(await toolbar.count(),1);
+    await page.locator('.ctTools').getByRole('button',{name:/Dictionary/}).first().click();
+    assert.equal(await selectPage.count(),0);assert.equal(await toolbar.count(),0);
+    await page.getByRole('button',{name:'TM',exact:true}).click();
+    assert.equal(await toolbar.count(),0);
+    await showSelection();
     await workspace().getByRole('checkbox',{name:'Select rows on this page',exact:true}).focus();
     await workspace().getByRole('checkbox',{name:'Select rows on this page',exact:true}).press('Space');
     assert.ok(await app(()=>window.__clientFixtureApp.ctTmSelectedCount>0));
@@ -117,7 +136,7 @@ module.exports=async function({page,api,files,Codec,ClientState:S,failures,direc
         await page.setViewportSize({width,height:1000});await page.evaluate(theme=>document.documentElement.setAttribute('data-theme',theme),theme);
         const tools=workspace().getByRole('button',{name:width===1024?'Hide file tools':'Show file tools',exact:true});
         await tools.focus();await tools.press('Enter');
-        await inlineRow.locator('td').nth(2).click();
+        if(!await inlineInput.isVisible())await inlineRow.getByRole('button',{name:'record, Name',exact:true}).click();
         await page.waitForFunction(()=>{const vm=window.__clientFixtureApp;return vm.ctInlineUnitVisible()&&!vm._ctSelectRun?.pending;});
         assert.equal(await inlineInput.inputValue(),'Inline reviewed sword','Review text survives the file-tools layout switch');
         const visible=await inlineReview.evaluate(node=>{
@@ -135,6 +154,7 @@ module.exports=async function({page,api,files,Codec,ClientState:S,failures,direc
     await inlineReview.getByRole('button',{name:'Accept',exact:true}).waitFor();
     const inlineUndone=await storeSnapshot('record',true);assert.equal(inlineUndone.saved,null);assert.equal(inlineUndone.history.length,0);
     assert.equal(inlineUndone.draft?.values[sword.fieldId]??'','');assert.equal(inlineUndone.exportHash,before.exportHash);
+    await showSelection();
     const inlineCheckbox=inlineRow.getByRole('checkbox',{name:'Select record',exact:true});await inlineCheckbox.uncheck();await inlineCheckbox.check();
     await inlineReview.getByRole('button',{name:'Dismiss',exact:true}).click();
     await settled(()=>app(()=>!window.__clientFixtureApp.ctTmCandidates.some(candidate=>candidate.status==='pending'&&candidate.unitId===window.__clientFixtureApp.ctSelection)),'Inline dismissal did not settle');

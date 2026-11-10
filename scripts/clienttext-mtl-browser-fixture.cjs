@@ -45,7 +45,7 @@ async function run(){
 const seed=${seed},ct=ClientTextUI.mixin,mtl=ClientTextMtlUI.mixin,debug=ClientTextMtlDebug.mixin,modelSettings=ClientTextMtlSettingsUI.mixin;
 let app;
 const options={
- data(){return{...ct.data(),...mtl.data(),...debug.data(),...modelSettings.data(),fixtureConsent:false,fixtureMode:'memory',lang:'Thai',gameVersion:'poe2',branchId:'default',cloudSignedIn:true,
+ data(){return{...ct.data(),...mtl.data(),mtlUiEnabled:true,...debug.data(),...modelSettings.data(),fixtureConsent:false,fixtureMode:'memory',lang:'Thai',gameVersion:'poe2',branchId:'default',cloudSignedIn:true,
  cloudProfileId:'synthetic-tester',cloudUser:{id:'synthetic-tester',role:'translator',language:'Thai',assignmentVersion:1},cloudCanAccessAllLanguages:false,
  managedCatalogScope:'synthetic-scope',mtlConsentVersion:'mtl-v2',mtlShortcut:'f8',ctMtlCapabilities:{enabled:true,reviewArchive:true,consentVersion:'mtl-v2'},inlineEditor:true,
  translationEditorBcp47:'th',dictionary:[],mapClientTextClassNames:true,autocompleteShortcut:'ctrl-space',ctEditor:false};},

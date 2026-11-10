@@ -15,6 +15,30 @@ function prepared(){const f=fixture();for(const name of Store.names)if(!f.tables
     return {...f,mtl:Store.create({openDb:async()=>f.db})};}
 const review=c=>({candidateId:c.id,candidateRevision:c.revision,rawSourceHash:c.rawSourceHash,text:'Edited MTL draft'});
 const archive={id:'mtl-review_'+'a'.repeat(64),format:'sdeditor-mtl-dismissal-v1',status:'saved'};
+test('manual field fills preserve retired pending requests and only resolve an exact human-accepted draft',async()=>{
+    for(const scenario of ['pending','overwritten','accepted','superseded']){
+        const f=prepared(),original=unit(),c=candidate(original),acceptedText='Reviewed translation';
+        await f.store.import(scope,{units:[original],assets:[asset]});
+        await f.mtl.putCandidate(scope,c);
+        const generation=await f.mtl.putGeneration(scope,{...c,status:'uncertain'});
+        const buffer=await f.mtl.putReview(scope,c.unitId,c.fieldId,{...review(c),text:acceptedText,acceptedDraft:scenario!=='pending'});
+        const expectedDraftValue=scenario==='pending'?original.fields[0].target:acceptedText;
+        if(scenario!=='pending')await f.store.putDraft(scope,c.unitId,{values:{[c.fieldId]:acceptedText},
+            reviewed:{[c.fieldId]:c.sourceHash},mtlAcceptances:[M.acceptance(c,acceptedText)]});
+        if(scenario==='superseded')await f.mtl.applyRemote(scope,{candidates:[{...c,status:'superseded',revision:2}],sequence:1});
+        const value=scenario==='accepted'||scenario==='superseded'?acceptedText:'Human replacement';
+        const command={jobId:'manual',role:original.role,sheet:original.sheet,fieldId:c.fieldId,value,
+            rows:[{unitId:original.id,revision:0,expectedValue:original.fields[0].target,expectedDraftValue}]};
+        const [result]=await f.store.saveFieldBatch(scope,command);
+        assert.equal(result.saved.values[c.fieldId],value);
+        assert.deepEqual(result.saved.mtlAcceptances,scenario==='accepted'?[M.acceptance(c,acceptedText)]:undefined);
+        assert.deepEqual((await f.store.getOutbox(scope))[0].mtlAcceptances,result.saved.mtlAcceptances);
+        assert.equal((await f.mtl.getCandidate(scope,c.id)).status,scenario==='accepted'?'accepted':scenario==='superseded'?'superseded':'pending');
+        assert.deepEqual(await f.mtl.getGeneration(scope,c.requestId),generation);
+        assert.deepEqual(await f.mtl.getReview(scope,c.unitId,c.fieldId),buffer);
+        assert.deepEqual((await f.store.saveFieldBatch(scope,command))[0].saved,result.saved);
+    }
+});
 async function tx(f,names,action){const transaction=f.db.transaction(names,'readwrite'),done=new Promise((resolve,reject)=>{
     transaction.oncomplete=resolve;transaction.onabort=transaction.onerror=()=>reject(transaction.error||new Error('Aborted'));});
     try{const result=await action(transaction);await done;return result;}catch(error){transaction.abort();await done.catch(()=>{});throw error;}}

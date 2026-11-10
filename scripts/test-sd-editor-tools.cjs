@@ -5,6 +5,21 @@ const fs=require('node:fs');
 const root={SDText:require('../public/sdText.js'),ClientTextState:require('../public/clientTextState.js'),ClientTextMtlState:require('../public/clientTextMtlState.js'),ClientTextMtlUI:require('../public/clientTextMtlUi.js')};
 vm.runInNewContext(fs.readFileSync(require.resolve('../public/sdEditorTools.js'),'utf8'),{window:root});
 const methods=root.SDEditorTools.mixin.methods;
+test('retired SD controls keep pending text separate and include only a human-accepted current source on Save',async()=>{
+  const blocks=['acceptedDraft','pending','review','acceptedDraft'].map((status,index)=>({english:'English '+index,translation:'Translation '+index,status}));
+  const host={...methods,editorBlocks:blocks,sdMtlScopeKey:'scope',sdToolContext:'session',sdMtlVisible:false,mtlUiEnabled:false,sdMtlRows:{}};
+  host._sdReviewLoad=Promise.resolve().then(()=>{
+    for(const [index,block] of blocks.entries()){
+      const field=host.sdField(index),key=host.sdKey(field);
+      host.sdMtlRows[key]={key,status:block.status,sourceHash:root.SDText.hash(index===3?'Earlier source':block.english),requestId:'request'+index,revision:3,provenance:{provider:'historical'},reviewText:'Separate candidate'};
+    }
+  });
+  const lines=blocks.map(block=>block.translation);
+  const claims=await host.sdSaveClaims(lines);
+  assert.deepEqual([...claims].map(c=>[c.requestId,c.revision,c.text]),[['request0',3,lines[0]]]);
+  assert.equal(host.sdRow(host.sdField(0)),null);assert.equal(host.sdValue(host.sdField(2)),lines[2]);
+  assert.equal(host.sdMtlRows[host.sdKey(host.sdField(1))].status,'pending');
+});
 test('SD and ClientText use exactly the same MTL button visibility policy',()=>{
   const getter=root.SDEditorTools.mixin.computed.sdMtlVisible;
   for(const role of ['translator','manager','admin'])for(const language of [null,'Thai','all'])for(const cloudSignedIn of [false,true]){

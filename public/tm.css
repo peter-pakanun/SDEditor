@@ -3,6 +3,9 @@
 .tmToolbar { font-size: 12px; }
 .tmToolbar label { display: flex; align-items: center; gap: 5px; }
 .tmToolbar input[type="number"] { width: 56px; min-width: 0; }
+.tmSelectionOptions { margin-bottom:12px; font-size:12px; }
+.tmSelectionOptions summary,.tmSelectionOptions label { cursor:pointer; }
+.tmSelectionOptions label { display:inline-flex; align-items:center; gap:5px; padding:6px 0; }
 .tmEmpty, .tmProvenance { color: var(--ui-muted); line-height: 1.6; }
 .tmIssue:not(.appNotice), .tmWarnings { color: var(--color-font); background: var(--color-diagnostic-warning); border: 1px solid var(--color-diagnostic-warning-border); border-radius: 6px; padding: 10px; line-height: 1.5; }
 .tmWarnings { padding-left: 26px; }

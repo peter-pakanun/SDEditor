@@ -35,7 +35,7 @@
     // Account language is the assignment; the selected editor language is not.
     function visible(host) {
         const user = host.cloudUser;
-        return host.cloudSignedIn === true && !!user && (user.role === 'admin' || !user.role && user.isAdmin === true
+        return host.mtlUiEnabled === true && host.cloudSignedIn === true && !!user && (user.role === 'admin' || !user.role && user.isAdmin === true
             || ['translator', 'manager'].includes(user.role) && typeof user.language === 'string'
                 && !!user.language.trim() && user.language !== 'all');
     }
@@ -49,10 +49,12 @@
                 if (!this._ctMtlInputProxy) this._ctMtlInputProxy = raw(new Proxy({}, {
                     get(_, property) {
                         if (typeof property !== 'string') return host.ctValues?.[property];
+                        const pasted=host.ctDirectValue?.(host.ctSelection,property);if(pasted!==undefined)return pasted;
                         const field = host.ctCurrentUnit?.fields.find(field => field.id === property);
                         return field ? host.ctTmCandidate?.(field) ? host.ctTmFieldValue(field) : host.ctMtlFieldValue(field) : host.ctValues?.[property];
                     },
                     set(_, property, text) {
+                        if(host.ctDirectEdit?.(host.ctSelection,property,text))return true;
                         const field = host.ctCurrentUnit?.fields.find(field => field.id === property);
                         if (field && host.ctMtlBusy(field)) return true;
                         if (field && host.ctTmEdited?.(field, String(text ?? ''))) return true;
@@ -619,7 +621,20 @@
                     return M.acceptance(candidate, values[field.id]);
                 });
             },
-            ctMtlAcceptancesForSave(unitId, values) { return this.ctMtlAcceptances(unitId, values); },
+            async ctMtlAcceptancesForSave(unitId, values, ctx=this.ctContext()) {
+                const claims=this.ctMtlCheckpointAcceptances(unitId,values);
+                if(!claims.length)return [];
+                const unit=this._ctUnitIndex.get(unitId),store=this.ctMtlStorage(ctx);
+                const [metadata,candidates]=await Promise.all([this.ctStorage(ctx.scope).getMetadata(ctx.scope),
+                    Promise.all(claims.map(claim=>store.getCandidate(ctx.scope,claim.candidateId)))]);
+                const descriptor=metadata?.descriptors?.find(asset=>asset.role===unit.role);
+                if(!descriptor)throw new Error('The workbook original is unavailable. Reopen it before saving this draft.');
+                return claims.filter((claim,index)=>{
+                    const candidate=candidates[index],field=unit.fields.find(field=>field.id===claim.fieldId);
+                    return !!candidate && candidate.revision===claim.candidateRevision && candidate.rawSourceHash===claim.rawSourceHash
+                        && M.applicable(candidate,field,{...descriptor,unitId,role:unit.role});
+                });
+            },
             ctMtlCheckpointAcceptances(unitId=this.ctSelection,values=this.ctValues) {
                 return (this._ctMtlAcceptanceClaims?.[unitId]||[]).map(claim=>({...copy(claim),reviewedTextHash:S.hash(String(values[claim.fieldId]??''))}));
             },

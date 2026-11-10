@@ -437,7 +437,7 @@ test('field toolbar hints share the app Tooltip while retaining native actions a
   assert.doesNotMatch(toolbar.template, /(?:\s|:)title=/);
   assert.match(toolbar.template, /v-tooltip="controller.englishHint"/);
   assert.match(toolbar.template, /:tabindex="controller.englishDisabled \? 0 : undefined"/);
-  assert.match(toolbar.template, /aria-label="Use English"[^>]+>Eng<\/button>/);
+  assert.match(toolbar.template, /aria-label="Use English"[^>]+><svg aria-hidden="true"/);
   assert.match(toolbar.template, /class="fieldMtlTarget" v-tooltip=/);
   assert.match(toolbar.template, /:tabindex="controller.mtlBusy \|\| controller.mtlDisabled \? 0 : -1"/);
   assert.match(toolbar.template, /@pointerdown.prevent="controller.capture\(\)" @click="controller.format\(style\)"/);

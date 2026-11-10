@@ -41,7 +41,7 @@ For a local workbook opened through **Offline → ClientText**, select **Sync Di
 
 ## Bulk ClientText suggestions
 
-In either an Offline or published ClientText workbook, mark rows using the checkbox beside the workbook row number. Shift-click marks a range. The header checkbox selects the current page; **Select all filtered rows** explicitly includes other pages. Selection survives page changes and clears when the workbook or filters change.
+Row-selection controls are hidden by default. In the inline **TM** panel, open **TM options → Show row selection** to show the bar and checkboxes beside workbook row numbers. Leaving the TM panel hides them again and clears the checked rows and TM-only filter, while retaining prepared suggestions and review text. In either an Offline or published ClientText workbook, Shift-click marks a range. The header checkbox selects the current page; **Select all filtered rows** explicitly includes other pages. Selection survives page changes and clears when the workbook or filters change.
 
 Choose **Pre-translate selected with TM** to prepare suggestions for eligible Missing text/form fields whose committed translation and draft are blank. The batch uses the current TM panel's minimum percentage and the same language/game/form matching rules. Populated translations, DNT/audio/gender metadata, Use English decisions, resolved fallbacks, and existing TM/MTL review work are preserved. Preparation shows progress and prepared/unmatched/skipped counts. **Stop** retains suggestions already stored for review.
 

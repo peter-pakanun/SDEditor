@@ -267,6 +267,8 @@ function formatPageRange(total, page, pageSize) {
       filterShortcutCtrlD: false,
       autocompleteShortcut: 'ctrl-space',
       mtlShortcut: 'disabled',
+      // Retired in the editor. Existing review, recovery and queued sync records retain their owners.
+      mtlUiEnabled: false,
       mtlConsentVersion: '',
       dictionaryDefaultGameScope: 'all',
       uiDensity: 'compact',
@@ -8349,6 +8351,7 @@ if (window.ClientTextAudio) {
 }
 if (window.ClientTextFieldFill) {
   app.component('ct-browse-fields',window.ClientTextFieldFill.browseFields);
+  app.component('ct-field-grip',window.ClientTextFieldFill.grip);
   app.component('ct-bulk-editor',window.ClientTextFieldFill.editor());
 }
 if (window.ClientTextUI) {

@@ -10,7 +10,7 @@
             sdMtlScopeKey(){return JSON.stringify(this.sdScope());},
             sdToolContext(){return JSON.stringify([this.ctActive,this.editorSessionActive,this.sdMtlScopeKey,this.editorCurrentEditingDesc?.filepath,this._editorOpenCancelRevision,this.cloudSignedIn,this.cloudUser?.role,this.cloudUser?.language,this.cloudUser?.assignmentVersion,this._cloud?.epoch]);}
         },
-        watch:{sdToolContext:{flush:'sync',handler(){this.sdAbort();this._sdWrites=new Map();this._sdKnownRevisions=new Map();this.sdMtlRows={};this.sdComparisons={};this.sdHistoryMenu='';this.sdDetails=null;this.sdMtlError='';this.sdLoadReviews();}}},
+        watch:{sdToolContext:{flush:'sync',handler(){this.sdAbort();this._sdWrites=new Map();this._sdKnownRevisions=new Map();this.sdMtlRows={};this.sdComparisons={};this.sdHistoryMenu='';this.sdDetails=null;this.sdMtlError='';this._sdReviewLoad=this.sdLoadReviews();}}},
         beforeUnmount(){this.sdAbort();},
         methods:{
             sdScope(){const managed=this.managedWorkspaceScope?.()||{},room=this._collaboration?.room?.(),roomId=room?.roomId||room?.id;
@@ -25,7 +25,8 @@
                 try{const rows=await this.sdStore().read(scope);if(scope!==this.sdMtlScopeKey||this.ctActive)return;this.sdMtlRows=Object.fromEntries(rows.map(r=>[r.key,r]));
                     this._sdKnownRevisions=new Map(rows.map(r=>[r.key,r.revision]));this.refreshGamePreview?.();
                 }catch(error){if(scope===this.sdMtlScopeKey)this.sdMtlError=error.message;}},
-            sdRow(field){const row=this.sdMtlRows[this.sdKey(field)];return this.sdMtlVisible&&row?.sourceHash===root.SDText.hash(field.target.english)&&['review','acceptedDraft','pending'].includes(row.status)?row:null;},
+            sdStoredRow(field){const row=this.sdMtlRows[this.sdKey(field)];return row?.sourceHash===root.SDText.hash(field.target.english)&&['review','acceptedDraft','pending'].includes(row.status)?row:null;},
+            sdRow(field){return this.sdMtlVisible?this.sdStoredRow(field):null;},
             sdReview(field){const row=this.sdRow(field);return row?.status==='review'?row:null;},
             sdValue(field){return this.sdReview(field)?.reviewText??field.target.translation;},
             sdSetValue(field,text){const row=this.sdReview(field);if(row)row.reviewText=text;else field.target.translation=text;},
@@ -140,9 +141,10 @@
                 if(!this.sdFieldCurrent(field))return;row.status='review';await this.sdPersist(row);this.refreshGamePreview();});},
             sdDismiss(field){return this.sdReviewAction(field,async()=>{const row=this.sdRow(field);if(!row||this.editorSaving)return;await this.sdFlush();if(!this.sdFieldCurrent(field))return;
                 row.status='dismissed';await this.sdPersist(row);this.refreshGamePreview();this.getEditorRef('translation',field.index,field.column)?.focus({preventScroll:true});});},
-            async sdSaveClaims(lines){await Promise.all(this._sdReviewActions?.values()||[]);await this.sdFlush();const claims=[];
+            async sdSaveClaims(lines){const context=this.sdToolContext;await this._sdReviewLoad;await Promise.all(this._sdReviewActions?.values()||[]);await this.sdFlush();const claims=[];
+                if(context!==this.sdToolContext)return claims;
                 for(const [index,block]of this.editorBlocks.entries())for(const field of block.isTable?block.tableColumns.map((_,column)=>this.sdField(index,column)):[this.sdField(index)]){
-                    const row=this.sdRow(field);if(row?.status!=='acceptedDraft')continue;
+                    const row=this.mtlUiEnabled?this.sdRow(field):this.sdStoredRow(field);if(row?.status!=='acceptedDraft')continue;
                     const text=field.column==null?root.SDText.decode(lines[index]):root.SDText.decode(lines[index]).split('@')[field.column];
                     claims.push({key:row.key,requestId:row.requestId,revision:row.revision,text,sourceHash:row.sourceHash,provenance:plain(row.provenance)});
                 }return claims;},

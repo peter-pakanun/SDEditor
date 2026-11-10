@@ -4,6 +4,36 @@ const S=require('../public/clientTextState.js');
 const CT=require('../public/clientTextStore.js');
 const {fixture,scope,fieldId,unit,asset}=require('./clienttext-storage-fixture.cjs');
 async function prepared(){const f=fixture();await f.store.import(scope,{units:[unit()],assets:[asset]});return f;}
+test('direct paste saves each column with its original field witness and retries only the unacknowledged group',async()=>{
+    const f=fixture(),item=unit('Name',''),other=JSON.stringify(['Description',null]),mtl=require('../public/clientTextMtlStore.js');
+    for(const store of mtl.names)f.tables.set(store,new Map());
+    item.fields.push({...item.fields[0],id:other,name:'Description',source:'Old description',target:'',sourceCell:'D2',targetCell:'E2'});
+    await f.store.import(scope,{units:[item],assets:[asset]});
+    const ui=require('../public/clientTextFieldFill.js').mixin,calls=[];
+    const h={...ui.data(),...ui.methods,ctBulkOwner:'scope',ctContext:()=>({scope}),ctTmCurrent:()=>true,ctFlushDraft:async()=>true,
+        ctCurrent:()=>true,ctCloseCompletion(){},ctPublishFieldResults(){},ctSync(){},
+        ctStorage:()=>({...f.store,async saveFieldBatch(scope,job,options){
+            calls.push(structuredClone(job));
+            const result=await f.store.saveFieldBatch(scope,job,options);
+            if(calls.length===2)throw Error('Receipt not delivered');
+            return result;
+        }})};
+    Object.defineProperty(h,'ctDirectPending',{get:()=>ui.computed.ctDirectPending.call(h)});
+    global.ClientTextUndo=require('../public/clientTextUndo.js');
+    try{
+        for(const [column,value] of [[fieldId,'First new name'],[other,'New description']]){
+            const session={rows:[{unitId:item.id,expectedValue:'',revision:0}],role:item.role,sheet:item.sheet,fieldId:column};
+            h.ctDirectPaste(session,[{unitId:item.id,value}],null);
+        }
+        assert.deepEqual(await f.store.getSaved(scope),{},'the direct overlay has published nothing');
+        assert.equal(await h.ctDirectSave(),false);assert.match(h.ctError,/not delivered/);
+        assert.equal(h.ctDirectValue(item.id,fieldId),undefined);assert.equal(h.ctDirectValue(item.id,other),'New description');
+        assert.equal(calls[1].rows[0].revision,1);assert.equal(calls[1].rows[0].expectedDraftValue,'');
+        assert.equal(await h.ctDirectSave(),true);assert.deepEqual(calls[1],calls[2]);assert.equal(calls.length,3);
+        assert.equal((await f.store.listHistory(scope,item.id)).length,2);
+        assert.deepEqual((await f.store.getSaved(scope))[item.id].values,{[fieldId]:'First new name',[other]:'New description'});
+    }finally{delete global.ClientTextUndo;}
+});
 test('field fills commit whole records atomically, retain sibling drafts and replay exact receipts',async()=>{
     const f=fixture(),mtl=require('../public/clientTextMtlStore.js'),description=JSON.stringify(['Description',null]);
     for(const name of mtl.names)f.tables.set(name,new Map());
