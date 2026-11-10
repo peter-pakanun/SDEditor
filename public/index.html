@@ -682,7 +682,7 @@
                 <div v-if="ctTmProgress" class="ctBulkTmProgress" role="status"><progress v-if="ctTmBusy" :value="ctTmProgress.processed" :max="ctTmProgress.total || 1" aria-label="Preparing TM suggestions"></progress><span>{{ ctTmProgress.processed }} / {{ ctTmProgress.total }} rows · {{ ctTmProgress.prepared }} prepared · {{ ctTmProgress.unmatched }} unmatched · {{ ctTmProgress.skipped }} skipped<template v-if="ctTmProgress.stopped"> · Stopped</template></span><button v-if="ctTmBusy" type="button" @click="ctTmStop">Stop</button></div>
               </div>
               <p id="ctFileTableKeyboardHelp" class="srOnly">Arrow keys move between records while the list is focused. Enter or a filename opens the full editor. Row checkboxes select records for TM suggestions; Shift-click selects a range. In inline mode, clicking a row edits its translation in the table. Text fields retain normal arrow keys and newlines.</p>
-              <div ref="ctFileTableRegion" class="fileTableScroll" role="region" aria-label="ClientText IDs" aria-describedby="ctFileTableKeyboardHelp" tabindex="0" @keydown="ctRowKeydown(null,$event)" @paste.capture="ctBulkPaste" @pointermove="ctBulkPointerMove" @pointerup="ctBulkPointerUp" @pointercancel="ctBulkEndPointer" @lostpointercapture="ctBulkEndPointer">
+              <div ref="ctFileTableRegion" class="fileTableScroll" role="region" aria-label="ClientText IDs" aria-describedby="ctFileTableKeyboardHelp" :data-ct-drag-side="ctBulkPreview?.side" :data-ct-copied-side="ctBulkCopiedRange?.side" tabindex="0" @keydown="ctRowKeydown(null,$event)" @paste.capture="ctBulkPaste" @pointermove="ctBulkPointerMove" @pointerup="ctBulkPointerUp" @pointercancel="ctBulkEndPointer" @lostpointercapture="ctBulkEndPointer">
                 <table class="display compact cell-border fileTable ctTable" role="grid" aria-label="ClientText IDs" aria-multiselectable="true">
                   <caption class="srOnly">ClientText records in {{ ctWorkspace.scope.language }}. Open a filename to edit its translations.</caption>
                   <thead><tr>
@@ -1663,6 +1663,7 @@
   <script src="clientTextTmUi.js"></script>
   <script src="clientTextUi.js"></script>
   <script src="clientTextClipboard.js"></script>
+  <script src="clientTextUndo.js"></script>
   <script src="clientTextFieldFill.js"></script>
   <script src="editorSession.js"></script>
   <script src="tmUi.js"></script>

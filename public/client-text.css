@@ -142,7 +142,9 @@
 .ctTable .ctBulkCell > small,.ctTable .ctBulkFieldLabel {font-size:11px;color:var(--ui-muted);}
 .ctTable .ctBulkCell > span {display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere;}
 .ctTable [data-ct-bulk-field]:hover {border-color:var(--ui-border);}
-.ctTable [data-ct-bulk-field][aria-pressed="true"] {border-color:var(--ui-accent);box-shadow:inset 2px 0 var(--ui-accent);background:color-mix(in srgb,var(--ui-accent) 15%,var(--color-element));}
+.fileTableScroll:where([data-ct-drag-side="source"],:not([data-ct-drag-side]):has([data-ct-source-selection][aria-pressed="true"]:focus)) [data-ct-source-selection][aria-pressed="true"],
+.fileTableScroll:where([data-ct-drag-side="target"],:not([data-ct-drag-side]):has(+ .ctCellFill:focus-within),:not([data-ct-drag-side]):has([data-ct-bulk-field]:not([data-ct-source-selection])[aria-pressed="true"]:focus)) [data-ct-bulk-field]:not([data-ct-source-selection])[aria-pressed="true"] {border-color:var(--ui-accent);box-shadow:inset 2px 0 var(--ui-accent);background:color-mix(in srgb,var(--ui-accent) 15%,var(--color-element));}
+.ctTable [data-ct-copied="true"] {border:1px dashed var(--ui-accent);}
 .ctCellFill {position:sticky;bottom:var(--workspace-footer-height,110px);z-index:3;flex:none;min-width:0;max-height:43vh;overflow:auto;padding:8px 12px;border:1px solid var(--ui-border);border-radius:6px;background:var(--color-element);animation:ctFillEnter .15s ease-out;}
 .ctCellFill.ctBulkFullSize {position:fixed;inset:var(--workspace-header-height,68px) 0 var(--workspace-footer-height,110px);max-height:none;z-index:20;padding:16px;}
 .ctBulkFullSize .editorTextField textarea {min-height:30vh;}

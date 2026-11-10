@@ -17,7 +17,7 @@ test('field fills commit whole records atomically, retain sibling drafts and rep
         rows:[a,b].map(unit=>({unitId:unit.id,revision:0,expectedValue:unit.fields[0].target}))};
     const sibling=await f.store.putDraft(scope,a.id,{values:{[fieldId]:'Old',[description]:'Unsaved sibling'},reviewed:{[description]:S.sourceHash('Description')}});
     const conflicting=await f.store.putDraft(scope,b.id,{values:{[fieldId]:'Conflicting draft',[description]:'Original B'}});
-    await assert.rejects(f.store.saveFieldBatch(scope,command),/draft for Text on row B/);
+    await assert.rejects(f.store.saveFieldBatch(scope,command),/draft text for Text on row B changed after selection/);
     assert.deepEqual(await f.store.getSaved(scope),{});assert.equal((await f.store.listHistory(scope,a.id)).length,0);
     assert.equal((await f.store.getDraft(scope,a.id)).revision,sibling.revision);
     await f.store.discardDraft(scope,b.id,{expectedRevision:conflicting.revision});
@@ -53,6 +53,38 @@ test('field fills commit whole records atomically, retain sibling drafts and rep
     assert.deepEqual(distinct.map(r=>r.saved.values[description]),['Original B','Original C']);
     assert.deepEqual((await f.store.saveFieldBatch(scope,pasted)).map(r=>r.saved),distinct.map(r=>r.saved));
     await assert.rejects(f.store.saveFieldBatch(scope,{...pasted,rows:pasted.rows.toReversed()}),/different selection/);
+});
+test('blank Jaw Trap review metadata and deliberate selected draft replacement use text witnesses',async()=>{
+    const f=fixture(),mtl=require('../public/clientTextMtlStore.js');
+    for(const store of mtl.names)f.tables.set(store,new Map());
+    const id='Metadata/Items/Weapons/TwoHandWeapons/Traps/FourTrap3Endgame',item=unit('Jaw Trap','');
+    item.role='gender';item.sheet='BaseItemTypes';item.recordId=id;item.id=JSON.stringify([item.role,item.sheet,id]);
+    const name=JSON.stringify(['Display Name',null]),sibling=JSON.stringify(['Description',null]),currentHash=S.sourceHash('Jaw Trap');
+    item.fields[0]={...item.fields[0],id:name,name:'Display Name'};
+    item.fields.push({...item.fields[0],id:sibling,name:'Description',source:'Description',target:'Original sibling',sourceCell:'D2',targetCell:'E2'});
+    await f.store.import(scope,{units:[item],assets:[{...asset,role:'gender'}]});
+    const values={[name]:'',[sibling]:'Original sibling'};
+    await f.store.save(scope,item.id,{jobId:'before',values,reviewed:{[name]:currentHash}});
+    await f.store.putDraft(scope,item.id,{values,reviewed:{}});
+    const request=async(jobId,revision,expectedValue,value)=>{
+        const snapshot=await f.store.getFieldDraftValues(scope,[item.id],name);
+        return {jobId,role:item.role,sheet:item.sheet,fieldId:name,value,rows:[{unitId:item.id,revision,expectedValue,expectedDraftValue:snapshot[item.id] ?? expectedValue}]};
+    };
+    const [filled]=await f.store.saveFieldBatch(scope,await request('fill-blank',1,'','Jaw Trap'));
+    assert.equal(filled.saved.values[name],'Jaw Trap');assert.equal(filled.draft,null,'matching blank text with a missing review hash is not unrelated work');
+    const draftValue='Uncommitted label';
+    await f.store.putDraft(scope,item.id,{values:{[name]:draftValue,[sibling]:'Earlier draft sibling'}});
+    const same=await request('replace-draft-with-saved',2,'Jaw Trap','Jaw Trap');
+    await f.store.putDraft(scope,item.id,{values:{[name]:draftValue,[sibling]:'Newer unrelated sibling'}});
+    const [replaced]=await f.store.saveFieldBatch(scope,same);
+    assert.equal(replaced.saved.values[name],'Jaw Trap');assert.equal(replaced.saved.values[sibling],'Original sibling');
+    assert.equal(replaced.draft.values[name],'Jaw Trap');assert.equal(replaced.draft.values[sibling],'Newer unrelated sibling');
+    assert.equal((await f.store.saveFieldBatch(scope,same))[0].saved.revision,replaced.saved.revision,'same-committed-value draft replacement has an exact retry');
+    const stale=await request('genuinely-stale',3,'Jaw Trap','Another translation');
+    await f.store.putDraft(scope,item.id,{values:{[name]:'Changed after the selection',[sibling]:'Newer unrelated sibling'}});
+    await assert.rejects(f.store.saveFieldBatch(scope,stale),/draft text.*changed after selection/);
+    assert.equal((await f.store.getDraft(scope,item.id)).values[name],'Changed after the selection');
+    assert.equal((await f.store.listHistory(scope,item.id)).length,3);
 });
 test('export original lookup reads only requested immutable unit keys and rejects absent references',async()=>{
     const f=fixture(),units=Array.from({length:300},(_,index)=>({...unit(),id:JSON.stringify(['normal','ClientStrings','ID/'+index]),recordId:'ID/'+index}));

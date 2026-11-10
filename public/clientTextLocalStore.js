@@ -71,7 +71,7 @@
                 return tm[method](scope,...args);
             };
         }
-        for (const method of ['getMetadata','getUnits','getUnitsByIds','getUnit','getSaved','getAsset','putDraft','getDraft','getDraftSummaries','discardDraft','save','saveFieldBatch','listHistory','seedMemory','getMemory']) {
+        for (const method of ['getMetadata','getUnits','getUnitsByIds','getUnit','getSaved','getAsset','putDraft','getDraft','getFieldDraftValues','getDraftSummaries','discardDraft','save','saveFieldBatch','listHistory','seedMemory','getMemory']) {
             result[method] = (scope, ...args) => {
                 normalizeScope(scope);
                 const writing=['putDraft','discardDraft','save','saveFieldBatch','seedMemory'].includes(method);

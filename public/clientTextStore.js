@@ -752,6 +752,17 @@
             if(isLocal(rawScope) && draft)validateLocalRecord(await getUnit(rawScope,unitId,options),draft,{draft:true});
             return draft;
         }
+        // A fill may replace the ordinary draft the owner selected. Capture only that field
+        // so an independent edit to a sibling between selection and Save remains mergeable.
+        async function getFieldDraftValues(rawScope,unitIds,fieldId,options={}){
+            const scope=capture(rawScope).id,ids=[...new Set(unitIds)];
+            if(!fieldId || !ids.length || ids.length>100)throw new TypeError('Select up to 100 workbook records.');
+            return transaction([stores.drafts],'readonly',async tx=>Object.fromEntries(await Promise.all(ids.map(async id=>{
+                const draft=await get(tx,stores.drafts,key(scope,id));
+                if(draft && (draft.unitId!==id || typeof draft.values?.[fieldId]!=='string'))throw corrupt('draft field identity');
+                return [id,draft?.values[fieldId] ?? null];
+            }))),options);
+        }
         const getDraftSummaries=(rawScope,options)=>readRows(capture(rawScope).id,stores.drafts,row=>{
             if(isLocal(rawScope) && (!row.value || typeof row.value.unitId!=='string' || !Number.isSafeInteger(row.value.revision) || row.value.revision<1))throw corrupt('draft summary');
             return {unitId:row.value.unitId,revision:row.value.revision,updatedAt:row.value.updatedAt};
@@ -860,7 +871,7 @@
             const body=copy(requestBody),{jobId,role,sheet,fieldId,rows:selected}=body,distributed=body.mode==='rows';
             if(typeof jobId!=='string' || !jobId || (distributed?own(body,'value'):typeof body.value!=='string') || typeof fieldId!=='string'
                 || !Array.isArray(selected) || !selected.length || selected.length>100 || new Set(selected.map(row=>row.unitId)).size!==selected.length
-                || selected.some(row=>typeof row.expectedValue!=='string' || !Number.isSafeInteger(row.revision) || row.revision<0
+                || selected.some(row=>typeof row.expectedValue!=='string' || own(row,'expectedDraftValue') && typeof row.expectedDraftValue!=='string' || !Number.isSafeInteger(row.revision) || row.revision<0
                     || (distributed?typeof row.value!=='string':own(row,'value'))))
                 throw new TypeError('Select up to 100 distinct workbook cells for this translation.');
             const captured=capture(rawScope),scope=captured.id,metadata=await requireReady(scope,options);
@@ -876,7 +887,8 @@
                     const id=row.unitId,unit=units.get(id),field=unit?.fields.find(f=>f.id===fieldId);
                     if(!field || unit.role!==role || unit.sheet!==sheet || !['text','form'].includes(field.kind))
                         throw protectedError('The selected translation column changed. Select its cells again.');
-                    const value=distributed?row.value:body.value,changes=row.expectedValue!==value,childId=changes?jobId+':'+changed++:null,recordKey=key(scope,id);
+                    const value=distributed?row.value:body.value,expectedDraftValue=row.expectedDraftValue ?? row.expectedValue;
+                    const changes=row.expectedValue!==value || expectedDraftValue!==value,childId=changes?jobId+':'+changed++:null,recordKey=key(scope,id);
                     if(firstReceipt && !changes)continue;
                     const receipt=firstReceipt && await get(tx,stores.receipts,key(scope,childId));
                     const before=await get(tx,stores.saved,recordKey),draft=await get(tx,stores.drafts,recordKey);
@@ -888,12 +900,11 @@
                     const values=S.valuesFor(unit,before),reviewed=before?.reviewed || {};
                     if((before?.revision || 0)!==row.revision || values[fieldId]!==row.expectedValue)
                         throw protectedError('Row '+unit.recordId+' changed after selection. Select its cells again.');
-                    if(values[fieldId]===value)continue;
+                    if((draft?.values[fieldId] ?? values[fieldId])!==expectedDraftValue)
+                        throw protectedError('The draft text for '+field.name+' on row '+unit.recordId+' changed after selection. Select its cells again.');
+                    if(!changes)continue;
                     if(before?.conflicts?.length || before?.syncRecovery)
                         throw protectedError('Resolve the conflict on row '+unit.recordId+' before filling these cells.');
-                    if(draft && (draft.values[fieldId]!==values[fieldId] || draft.reviewed?.[fieldId]!==reviewed[fieldId]
-                        || [...(draft.mtlAcceptances || []),...(draft.tmAcceptances || [])].some(claim=>claim.fieldId===fieldId)))
-                        throw protectedError('Save or discard the draft for '+field.name+' on row '+unit.recordId+' first.');
                     const candidates=(await request(tx.objectStore(stores.tmCandidates).index('by_unit').getAll(recordKey))).map(r=>r.value);
                     if(mtl)for(const name of [mtl.candidates,mtl.meta])candidates.push(...(await request(tx.objectStore(name).index('by_scope_unit').getAll([scope,id]))).map(r=>r.value));
                     if(candidates.some(c=>c.fieldId===fieldId && ['pending','uncertain'].includes(c.status)))
@@ -904,9 +915,15 @@
                     const result=await prepareSave(rawScope,id,command,options,metadata,unit,signature).commit(tx);
                     let retained=null;
                     if(draft){
-                        retained={...draft,values:{...draft.values,[fieldId]:value},reviewed:{...draft.reviewed,[fieldId]:sourceHash},
-                            revision:draft.revision+1,updatedAt:Date.now()};
-                        put(tx,stores.drafts,scope,id,retained,{unitKey:recordKey});
+                        const claims={};
+                        for(const type of ['mtlAcceptances','tmAcceptances'])if(draft[type])claims[type]=draft[type].filter(c=>c.fieldId!==fieldId);
+                        const otherEdits=unit.fields.some(f=>f.id!==fieldId && (draft.values[f.id]!==values[f.id] ||
+                            own(draft.reviewed,f.id) && draft.reviewed[f.id]!==reviewed[f.id]));
+                        if(otherEdits || Object.values(claims).some(items=>items.length)){
+                            retained={...draft,...claims,values:{...draft.values,[fieldId]:value},reviewed:{...reviewed,...draft.reviewed,[fieldId]:sourceHash},
+                                revision:draft.revision+1,updatedAt:Date.now()};
+                            put(tx,stores.drafts,scope,id,retained,{unitKey:recordKey});
+                        }else del(tx,stores.drafts,scope,id);
                     }
                     results.push({unitId:id,saved:result.saved,draft:retained});
                 }
@@ -1074,7 +1091,7 @@
                 return row;
             },options);
         }
-        return { import:importContent,importContent,save,saveFieldBatch,getMetadata,getUnits,getUnitsByIds,getCompactUnits,getUnit,getSaved,getAsset,getProof,getCachedOriginal,migrateWorkspace,putDraft,getDraft,getDraftSummaries,discardDraft,
+        return { import:importContent,importContent,save,saveFieldBatch,getMetadata,getUnits,getUnitsByIds,getCompactUnits,getUnit,getSaved,getAsset,getProof,getCachedOriginal,migrateWorkspace,putDraft,getDraft,getFieldDraftValues,getDraftSummaries,discardDraft,
             listHistory,listWorkspaces,getOutbox,getPendingRecovery,rejectOperation,acceptPendingPeer,markSending,applyRemote,acknowledge,putRequest,getRequest,listRequests,deleteRequest,seedMemory,seedPreviousVersion,getMemory,getMemoryHistory,normalizeScope,scopeKey };
     }
     return { stores,names,upgrade,normalizeScope,scopeKey,LOCAL_PROTOCOL,validateLocalMetadata,validateLocalRecord,create };
