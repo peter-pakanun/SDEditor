@@ -402,7 +402,7 @@
       const unit=this._ctUnitIndex?.get(filepath);if(!unit)return identity;
       return {...identity,filepath,label:[unit.role,unit.sheet,unit.recordId].filter(Boolean).join(' / '),
         sourceHash:this.ctWorkspace?.metadata?.descriptors?.find(asset=>asset.role===unit.role)?.baselineId || this.ctWorkspace?.metadata?.assets?.find(asset=>asset.role===unit.role)?.compact?.hash || ''};},
-    editorLookupSession(){const ctx=context(this);return {mode:ctx.mode,scope:ctx,language:ctx.language,unitId:ctx.unitId,
+    editorLookupSession(){const ctx=context(this);if(this.ctBulkToolUnit){ctx.unitId=this.ctBulkToolUnit.id;ctx.fieldId=this.ctBulkToolField.id;}return {mode:ctx.mode,scope:ctx,language:ctx.language,unitId:ctx.unitId,
       toolsVisible:this.sharedEditorToolsMounted && (this.ctEditor || this.editorVisible || this.inlineSidebarVisible),tool:this.ctActive?this.ctTool:this.sideTab,
       version:this.ctActive ? this.ctWorkspace?.metadata?.version || this.ctWorkspace?.version : this.managedActiveVersion,group:this.activeContentGroup};},
   }};

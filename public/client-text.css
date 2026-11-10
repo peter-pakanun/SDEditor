@@ -137,6 +137,24 @@
 .inlineEditorMode :is(#table,.fileTable).ctTable .ctFields .inlineBlockPrelude .inlineBlockNatural { padding:0; }
 .inlineEditorMode :is(#table,.fileTable).ctTable .ctFields .editorTextField > textarea { min-height:calc(40px * var(--density)); }
 .ctTable .ctReadPreview { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden; }
+.ctTable .ctBulkFieldList {display:flex;flex-direction:column;gap:3px;}
+.ctTable .ctBulkCell,.ctTable .ctBulkFieldLabel {display:block;width:100%;min-width:0;border:1px solid transparent;border-radius:4px;background:transparent;color:inherit;text-align:start;font:inherit;padding:2px 5px;user-select:none;cursor:cell;}
+.ctTable .ctBulkCell > small,.ctTable .ctBulkFieldLabel {font-size:11px;color:var(--ui-muted);}
+.ctTable .ctBulkCell > span {display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere;}
+.ctTable [data-ct-bulk-field]:hover {border-color:var(--ui-border);}
+.ctTable [data-ct-bulk-field][aria-pressed="true"] {border-color:var(--ui-accent);box-shadow:inset 2px 0 var(--ui-accent);background:color-mix(in srgb,var(--ui-accent) 15%,var(--color-element));}
+.ctCellFill {position:sticky;bottom:var(--workspace-footer-height,110px);z-index:3;flex:none;min-width:0;max-height:43vh;overflow:auto;padding:8px 12px;border:1px solid var(--ui-border);border-radius:6px;background:var(--color-element);animation:ctFillEnter .15s ease-out;}
+.ctCellFill.ctBulkFullSize {position:fixed;inset:var(--workspace-header-height,68px) 0 var(--workspace-footer-height,110px);max-height:none;z-index:20;padding:16px;}
+.ctBulkFullSize .editorTextField textarea {min-height:30vh;}
+.ctCellFillSummary,.ctCellFillCommands {display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
+.ctCellFillSummary span {color:var(--ui-muted);}
+.ctCellFillCommands {justify-content:flex-end;margin-top:4px;}
+.ctCellFillCommands [role=alert] {color:var(--ui-missing);margin-right:auto;}
+.ctBulkEditingFields {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;align-items:start;margin-top:5px;}
+.ctBulkEditingFields .editorFieldTools {min-width:0;}
+.ctCellFill .editorTextField textarea {width:100%;min-height:38px;}
+@keyframes ctFillEnter {from{transform:translateY(7px);opacity:.6;}to{transform:none;opacity:1;}}
+@media(prefers-reduced-motion:reduce){.ctCellFill{animation:none;}}
 .ctFieldPair > * { min-width:0; }
 .ctFullFieldPair { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; align-items:start; }
 .ctFields .ctSourceBlock { display:block; }

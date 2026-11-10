@@ -4,6 +4,48 @@ const S=require('../public/clientTextState.js');
 const CT=require('../public/clientTextStore.js');
 const {fixture,scope,fieldId,unit,asset}=require('./clienttext-storage-fixture.cjs');
 async function prepared(){const f=fixture();await f.store.import(scope,{units:[unit()],assets:[asset]});return f;}
+test('field fills commit whole records atomically, retain sibling drafts and replay exact receipts',async()=>{
+    const f=fixture(),mtl=require('../public/clientTextMtlStore.js'),description=JSON.stringify(['Description',null]);
+    for(const name of mtl.names)f.tables.set(name,new Map());
+    const records=['A','B','C'].map((recordId,i)=>{
+        const item=unit('Display text',i===0?'Old':'');item.id=JSON.stringify([item.role,item.sheet,recordId]);item.recordId=recordId;
+        item.fields.push({...item.fields[0],id:description,name:'Description',source:'Description',target:'Original '+recordId,sourceCell:'D2',targetCell:'E2'});
+        return item;
+    }),[a,b,c]=records;
+    await f.store.import(scope,{units:records,assets:[asset]});
+    const command={jobId:'bulk-save',role:a.role,sheet:a.sheet,fieldId,value:'New',
+        rows:[a,b].map(unit=>({unitId:unit.id,revision:0,expectedValue:unit.fields[0].target}))};
+    const sibling=await f.store.putDraft(scope,a.id,{values:{[fieldId]:'Old',[description]:'Unsaved sibling'},reviewed:{[description]:S.sourceHash('Description')}});
+    const conflicting=await f.store.putDraft(scope,b.id,{values:{[fieldId]:'Conflicting draft',[description]:'Original B'}});
+    await assert.rejects(f.store.saveFieldBatch(scope,command),/draft for Text on row B/);
+    assert.deepEqual(await f.store.getSaved(scope),{});assert.equal((await f.store.listHistory(scope,a.id)).length,0);
+    assert.equal((await f.store.getDraft(scope,a.id)).revision,sibling.revision);
+    await f.store.discardDraft(scope,b.id,{expectedRevision:conflicting.revision});
+    await assert.rejects(f.store.saveFieldBatch(scope,{...command,rows:[command.rows[0],{...command.rows[1],expectedValue:'Stale'}]}),/changed after selection/);
+    const result=await f.store.saveFieldBatch(scope,command);
+    assert.deepEqual(result.map(row=>row.saved.values),[{[fieldId]:'New',[description]:'Original A'},{[fieldId]:'New',[description]:'Original B'}]);
+    assert.equal(result[0].saved.reviewed[fieldId],S.sourceHash('Display text'));
+    assert.deepEqual(result[0].draft.values,{[fieldId]:'New',[description]:'Unsaved sibling'});
+    assert.equal(result[0].draft.revision,sibling.revision+1);assert.equal(result[1].draft,null);
+    assert.equal((await f.store.getSaved(scope))[c.id],undefined);assert.equal((await f.store.listHistory(scope,b.id)).length,1);
+    assert.equal(f.tables.get(CT.stores.outbox).size,2);
+    const later=await f.store.save(scope,b.id,{jobId:'later',values:{[fieldId]:'Latest',[description]:'Original B'},expectedRevision:1});
+    const replay=await f.store.saveFieldBatch(scope,command);
+    assert.deepEqual(replay[1].saved,result[1].saved);assert.deepEqual(replay[1].current,later.saved);assert.equal((await f.store.listHistory(scope,b.id)).length,2);
+    await assert.rejects(f.store.saveFieldBatch(scope,{...command,value:'Retargeted'}),/different selection/);
+    await assert.rejects(f.store.saveFieldBatch(scope,{...command,jobId:'wrong-sheet',sheet:'Other'}),/column changed/);
+    assert.deepEqual(await f.store.saveFieldBatch(scope,{...command,jobId:'no-op',rows:[{unitId:a.id,revision:1,expectedValue:'New'}]}),[]);
+    assert.equal((await f.store.listHistory(scope,a.id)).length,1);
+    const mixed={...command,jobId:'mixed',rows:[{unitId:a.id,revision:1,expectedValue:'New'},{unitId:c.id,revision:0,expectedValue:''}]};
+    await assert.rejects(f.store.saveFieldBatch(scope,{...mixed,rows:[{...mixed.rows[0],revision:0},mixed.rows[1]]}),/changed after selection/);
+    assert.equal((await f.store.getSaved(scope))[c.id],undefined);
+    assert.deepEqual((await f.store.saveFieldBatch(scope,mixed)).map(row=>row.unitId),[c.id]);
+    await f.store.save(scope,a.id,{jobId:'change-noop',values:{[fieldId]:'Latest A',[description]:'Original A'}});
+    assert.deepEqual((await f.store.saveFieldBatch(scope,mixed)).map(row=>row.unitId),[c.id],'an exact retry finds its already atomic commit');
+    assert.equal((await f.store.listHistory(scope,c.id)).length,1);
+    await f.store.saveFieldBatch(scope,{...command,jobId:'intentional-clear',value:'',rows:[{unitId:c.id,revision:1,expectedValue:'New'}]});
+    assert.equal((await f.store.getSaved(scope))[c.id].values[fieldId],'');
+});
 test('export original lookup reads only requested immutable unit keys and rejects absent references',async()=>{
     const f=fixture(),units=Array.from({length:300},(_,index)=>({...unit(),id:JSON.stringify(['normal','ClientStrings','ID/'+index]),recordId:'ID/'+index}));
     await f.store.import(scope,{units,assets:[asset]});f.operations.length=0;

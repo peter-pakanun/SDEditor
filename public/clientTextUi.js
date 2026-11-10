@@ -235,8 +235,9 @@
                 });
             },
             ctCurrentUnit() { this.ctUnits;const id=this.ctSelection;return this._ctUnitIndex?.get(id) || null; },
-            ctPreviewMounted() { return this.ctActive && !this.versionChooserVisible && !!this.ctCurrentUnit && (this.ctEditor || this.inlineEditor); },
+            ctPreviewMounted() { return this.ctActive && !this.versionChooserVisible && !!(this.ctBulkToolUnit || this.ctCurrentUnit) && (this.ctEditor || this.inlineEditor || !!this.ctBulkToolUnit); },
             ctPreviewField() {
+                if(this.ctBulkToolField)return this.ctBulkToolField;
                 const fields=this.ctFieldsFor();
                 return fields.find(field=>field.id===this.ctFocusedField && field.kind!=='gender') || fields.find(field=>field.kind!=='gender') || null;
             },
@@ -245,7 +246,7 @@
                 const field=this.ctPreviewField;
                 if(!field)return null;
                 if(root.ClientTextState.isNamedForm(field)){
-                    const fields=this.ctFieldsFor().filter(candidate=>root.ClientTextState.isNamedForm(candidate)
+                    const fields=this.ctFieldsFor(this.ctBulkToolUnit || this.ctCurrentUnit).filter(candidate=>root.ClientTextState.isNamedForm(candidate)
                         && (candidate.group || candidate.name)===(field.group || field.name));
                     const normal=fields.find(candidate=>candidate.form==='Normal Translation');
                     if(normal)return {normal,possessive:fields.find(candidate=>candidate.form==='Possessive Translation')};
@@ -263,7 +264,7 @@
                         ...(this.ctPossessivePreviewForms ? {possessive:false} : {})})};
             },
             ctGamePreviewVariants() {
-                const fallback=this.ctClassFallback(this.ctPreviewField);
+                const fallback=this.ctBulkToolUnit ? this.ctClassFallback(this.ctPreviewField,this.ctBulkToolUnit,this.ctBulkToolValues) : this.ctClassFallback(this.ctPreviewField);
                 if(fallback?.defaults.length>1 && fallback.kind!=='english')return fallback.defaults.map(item=>({key:item.field.id,
                     label:(item.field.form || 'Generic')+(item.english?' · English':' · Generic'),
                     ...this.buildGamePreviewSegments(item.value,{contentMode:'clienttext'})}));
@@ -520,7 +521,7 @@
                 return { total, resolved, percent: total ? Math.floor(100 * resolved / total) : 100 };
             },
             ctLookupResults() {
-                const current=this.ctCurrentUnit,fields=this.ctFieldsFor(current),focused=fields.find(field=>field.id===this.ctFocusedField && field.kind!=='gender') || fields.find(field=>field.kind!=='gender');
+                const current=this.ctBulkToolUnit || this.ctCurrentUnit,fields=this.ctFieldsFor(current),focused=this.ctBulkToolField || fields.find(field=>field.id===this.ctFocusedField && field.kind!=='gender') || fields.find(field=>field.kind!=='gender');
                 const query=(this.ctLookup || focused?.source || '').toLocaleLowerCase();
                 if (!query) return [];
                 const output = [];
@@ -537,7 +538,7 @@
                 }
                 return output;
             },
-            ctMemoryResults() {const unit=this.ctCurrentUnit,field=this.ctPreviewField;return field ? root.ContentAdapters.clienttext.findMemory(this.ctEditorMemory || this.ctMemory,unit,field,{game:this.gameVersion,limit:20,threshold:this.tmThreshold || 75}) : [];},
+            ctMemoryResults() {const unit=this.ctBulkToolUnit || this.ctCurrentUnit,field=this.ctPreviewField;return field ? root.ContentAdapters.clienttext.findMemory(this.ctEditorMemory || this.ctMemory,unit,field,{game:this.gameVersion,limit:20,threshold:this.tmThreshold || 75}) : [];},
             ctDictionaryMatches() {
                 return (this.dictionary || []).filter(entry=>this.ctDictionaryMatchedDefinitions.has(String(entry?._id || '')));
             },
@@ -599,7 +600,7 @@
                 return first.toLocaleString('en-US')+'–'+last.toLocaleString('en-US')+' of '+count.toLocaleString('en-US');
             },
             ctDictionaryController() {
-                const host=this,ctx=this.ctContext(),unitId=this.ctSelection,dictionary=this.dictionary,current=()=>host.ctDictionaryContextCurrent(ctx,unitId,dictionary);
+                const host=this,ctx=this.ctContext(),unitId=this.ctSelection,dictionary=this.dictionary,bulk=this.ctBulkSession,current=()=>host.ctDictionaryContextCurrent(ctx,unitId,dictionary) && host.ctBulkSession===bulk;
                 const member=word=>current() && host.ctDictionaryReady && dictionary?.includes(word);
                 const useTranslation=(word,alt,event)=>{
                     if(event){if(event.isComposing || event.keyCode===229)return false;event.preventDefault();event.stopPropagation?.();}
@@ -609,7 +610,7 @@
                     get editorReady(){return current() && host.ctDictionaryReady;},get visibleDictionary(){return current() ? host.ctDictionaryVisible : [];},
                     get dictionaryTemporary(){return host.ctOfflineTest && !host.ctResourceSyncEnabled;},
                     get dictionaryFlashId(){return host.dictionaryFlashId;},get translationEditorBcp47(){return host.translationEditorBcp47;},
-                    get dictionaryCanUse(){return current() && host.ctDictionaryReady && host.ctCurrentUnit?.fields.some(field=>field.id===host.ctFocusedField && field.kind!=='gender');},
+                    get dictionaryCanUse(){return current() && host.ctDictionaryReady && (bulk?!!host.ctBulkToolField:host.ctCurrentUnit?.fields.some(field=>field.id===host.ctFocusedField && field.kind!=='gender'));},
                     get cloudEntryHistoryAvailable(){return current() && host.cloudEntryHistoryAvailable;},get cloudEntryHistoryHint(){return host.cloudEntryHistoryHint;},
                     isDictionaryEntryFound:word=>host.ctDictionaryMatchedDefinitions.has(String(word._id)),
                     isDictionaryEntryFindMatched:word=>host.ctDictionaryMatchedDefinitions.get(String(word._id))?.has(String(word.find || '').trim().toLowerCase()) || false,
@@ -631,6 +632,8 @@
                     dictionaryEntryFocusIn:event=>{if(current())host.ctDictionaryFocusIn(event);},
                     dictionaryEntryFocusOut:event=>{if(current())host.ctDictionaryFocusOut(event,ctx,unitId,dictionary);},
                     onDictionaryReplaceEnter:(event,word,alt)=>{
+                        const active=bulk && current() && host.$refs.ctBulkEditor;
+                        if(active?._ctDictionaryReturn && active.ctDictionaryReturnEnter(event,word,alt))return true;
                         const info=host._ctDictionaryReturn;
                         if(info && String(info.dictId)===String(word?._id) && String(info.altId || '')===String(alt?._id || ''))return current() && host.ctDictionaryReturnEnter(event,word,alt);
                         if(event.ctrlKey || event.metaKey){
@@ -902,6 +905,7 @@
             },
             ctDictionaryUse(word,alt,ctx=this.ctContext(),unitId=this.ctSelection,dictionary=this.dictionary) {
                 if(!this.ctDictionaryContextCurrent(ctx,unitId,dictionary) || !this.ctDictionaryReady || !dictionary.includes(word) || alt && !word.alts?.includes(alt))return false;
+                if(this.ctBulkSession)return !!this.$refs?.ctBulkEditor?.insertText((alt || word).replace);
                 const field=this.ctCurrentUnit?.fields.find(field=>field.id===this.ctFocusedField),input=this.ctDictionaryTarget(field?.id),replacement=(alt || word).replace;
                 if(!field || field.kind==='gender' || this.ctMtlBusy?.(field) || !input || input.isConnected===false || typeof replacement!=='string')return false;
                 if(root.EditorSession)return root.EditorSession.insert(this,field,replacement,{input});
@@ -1548,7 +1552,7 @@
                 return fields.map(field=>values[field.id]).filter(text=>String(text ?? '').trim().length>0).join('\n');
             },
             // Display only: search, saved targets and exports keep ctListText/valuesFor.
-            ctListTargetParts(unit) {
+            ctListTargetParts(unit, selectable=false) {
                 const values=this.ctValuesFor(unit),fallbackGroups=new Map(),parts=[];
                 for(const field of this.ctFieldsFor(unit).filter(field=>field.kind!=='gender')){
                     const fallback=this.ctClassFallback(field,unit,values);
@@ -1558,12 +1562,15 @@
                         continue;
                     }
                     const english=this.ctUsesEnglish(field,unit),text=english?'-- Use English --':String(values[field.id] ?? '');
-                    if(text.trim())parts.push({id:field.id,text,english});
+                    const cell=selectable;
+                    if(text.trim() || cell && (field.kind==='text' || field.required || field.outdated))
+                        parts.push({id:field.id,text,english,...(cell?{field}:{})});
                 }
                 for(const part of fallbackGroups.values())part.text='-- '+part.label+' -- ('+part.count+' class variant'+(part.count===1?'':'s')+')';
                 return parts;
             },
             ctPreviewValue(field) {
+                if(this.ctBulkToolUnit?.fields.includes(field))return this.ctBulkToolValues[field.id] ?? '';
                 const value=String(this.ctValues[field.id] ?? '');
                 const fallback=this.ctClassFallback(field);
                 if(fallback?.kind!=='english' && fallback?.defaults.length===1)return fallback.defaults[0].value;
@@ -1982,6 +1989,10 @@
                 try{return await operation;}finally{if(this._ctSyncRun===run)this._ctSyncRun=null;}
             },
             async ctSelect(unit, full = false, options = {}) {
+                if(this.ctBulkSession && !this.ctBulkSaving){
+                    if(this.ctBulkTouched || this.ctBulkRetry){this.ctBulkError='Save or cancel the selected cells before opening another record.';return false;}
+                    this.ctBulkCancel();
+                }
                 if (!unit || this.ctBusy || this.ctBrowseBusy || this._ctUnitIndex?.get(unit.id)!==unit || this.hideDNT && !this.ctFieldsFor(unit).length) return false;
                 const ctx = this.ctContext(),generation=this._ctBrowseGeneration || 0,run=this._ctSelectRun={unitId:unit.id,ctx,generation,full,pending:true};
                 const current=()=>{
@@ -2537,6 +2548,7 @@
                 finally{head.pending--;}
             },
             async ctSave(close = false, options = {}) {
+                if(options.bulk)return this.ctBulkSave();
                 if(this.ctRecoveryBusy && !options.pendingResolution)return false;
                 if (this.ctBusy || this.ctBrowseBusy || !this.ctCurrentUnit) return false;
                 const receiptRetry=this._ctSaveJob?.unitId===this.ctSelection && !!this._ctSaveJob.command && this._ctSaveJob.scopeKey===root.ClientTextStore.scopeKey(this.ctWorkspace.scope);
@@ -2632,14 +2644,14 @@
             async ctSaveAndNavigate(reverse=false,options={}) {
                 if(this.ctKeyboardBlocked() || this._ctNavigationRun)return false;
                 const ctx=this.ctContext(),unitId=this.ctSelection,original=this.ctCurrentUnit,selectionRun=this._ctSelectRun,generation=this._ctBrowseGeneration || 0,
-                    hadEditor=this.ctEditor || this.ctInlineUnitVisible(),direction=reverse?-1:1;
+                    from=options.afterBulk || original,hadEditor=!!options.afterBulk || this.ctEditor || this.ctInlineUnitVisible(),direction=reverse?-1:1;
                 if(!hadEditor)this.ctApplySearch();
                 let rows=this.ctRows.slice();
-                if(hadEditor && original && !rows.some(unit=>unit.id===unitId)){
+                if(hadEditor && from && !rows.some(unit=>unit.id===from.id)){
                     const visible=new Set(rows.map(unit=>unit.id));
-                    rows=this.ctBrowseOrderedUnits().filter(unit=>unit.id===unitId || visible.has(unit.id));
+                    rows=this.ctBrowseOrderedUnits().filter(unit=>unit.id===from.id || visible.has(unit.id));
                 }
-                const anchor=hadEditor?rows.findIndex(unit=>unit.id===unitId)
+                const anchor=hadEditor?rows.findIndex(unit=>unit.id===from?.id)
                     :(this.ctPage-1)*this.ctEffectivePageSize+(reverse?this.ctPageRows.length-1:0);
                 const candidates=options.attentionOnly ? root.EditorSession.attentionCandidates(this,direction).map(unit=>unit.id) : [];
                 if(!options.attentionOnly)for(let index=hadEditor?anchor+direction:anchor;index>=0&&index<rows.length;index+=direction)candidates.push(rows[index].id);
@@ -2653,7 +2665,7 @@
                 this.ctNavigationBusy=true;
                 try {
                     const pending=this._ctSaveJob,retry=pending?.unitId===unitId && pending.scopeKey===root.ClientTextStore.scopeKey(ctx.scope) && pending.command;
-                    if(hadEditor && (retry || options.saveUnchanged || this.ctHasEditorChanges()) && !await this.ctSave())return false;
+                    if(!options.afterBulk && hadEditor && (retry || options.saveUnchanged || this.ctHasEditorChanges()) && !await this.ctSave())return false;
                     if(!current())return false;
                     for(const id of candidates){
                         const ordered=this.ctRows,index=ordered.findIndex(unit=>unit.id===id);if(index<0)continue;
@@ -2679,6 +2691,7 @@
                 } finally {if(this._ctNavigationRun===run){this._ctNavigationRun=null;this.ctNavigationBusy=false;}}
             },
             async ctKey(event) {
+                if(this.ctBulkKey?.(event))return;
                 if(this.ctMtlKey?.(event))return;
                 if(event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && ['Comma','Period'].includes(event.code)){
                     if(event.defaultPrevented || event.isComposing || event.keyCode===229 || event.target?.composing)return;
@@ -2880,6 +2893,13 @@
             },
             async ctLoadMemory(ctx=this.ctContext()) {if(!this.ctCurrent(ctx) || !this.ctWorkspace)return;try{const memory=await this.ctStorage(ctx.scope).getMemory?.(ctx.scope);if(this.ctCurrent(ctx))this.ctMemory=raw(memory?.units || []);}catch(error){if(this.ctCurrent(ctx))this.ctError=error.message;}},
             async ctApplyMemory(match) {
+                if(this.ctBulkSession){
+                    const editor=this.$refs?.ctBulkEditor,session=this.ctBulkSession,value=this.ctBulkText,target=match?.target;
+                    const valid=()=>editor && editor===this.$refs.ctBulkEditor && session===this.ctBulkSession && editor.ctActive && !editor.ctBusy
+                        && typeof target==='string' && target===match.target && (!match.id || this.ctMemoryResults.some(item=>item.id===match.id && item.target===target));
+                    if(!valid() || value.trim() && value!==target && !await this.appConfirm('Replace the selected cells’ edit with this TM translation?',{title:'Use TM translation?',confirmLabel:'Replace translation'}))return false;
+                    return valid() && value===this.ctBulkText && editor.insertText(target,true);
+                }
                 const field=this.ctPreviewField;if(!field || !match || typeof match.target!=='string' || this.ctBusy || this.ctHistoryViewer || this.ctMtlBusy?.(field))return false;
                 const ctx=this.ctContext(),unit=this.ctCurrentUnit,value=(this.ctInputValues || this.ctValues)[field.id],selection=this._ctSelectRun,target=match.target,
                     current=()=>!match.id || this.ctMemoryResults?.some(candidate=>candidate.id===match.id && candidate.target===target);
@@ -3845,6 +3865,7 @@
             genderMultilineRequired: {immediate:true,flush:'sync',handler(value) {if(value)this.genderMultilineLatched=true;}},
         }, template: `
         <div class="ctTarget" :class="{missing:host.ctFieldStatus(field).missing,outdated:host.ctFieldStatus(field).outdated,mtl:!!host.ctMtlCandidate?.(field),tm:!!host.ctTmCandidate?.(field)}">
+            <button v-if="compact && host.ctBulkFieldAllowed(field)" type="button" class="ctBulkFieldLabel" data-inline-focus-surface :data-ct-bulk-field="field.id" :aria-pressed="host.ctBulkMarked(host.ctCurrentUnit.id,field.id)" :title="host.ctBulkHint" @pointerdown="host.ctBulkPointerDown(host.ctCurrentUnit,field,$event)" @click.stop="host.ctBulkClick(host.ctCurrentUnit,field,$event)" @dblclick.stop>{{ host.ctHistoryFieldLabel(field) }}</button>
             <label :for="'ctfield-'+field.targetCell" :class="{srOnly:field.kind === 'form' || (field.kind === 'gender' ? !compact : compact)}">{{ field.kind === 'gender' ? 'Gender' : field.kind === 'form' ? field.name+' '+host.ctClassVariantLabel(field) : (host.ctWorkspace?.scope.language || host.lang)+' translation' }} <small>{{ field.required ? '' : 'Optional' }}</small></label>
             <p v-if="field.kind !== 'gender' && !String(field.source || '').trim()" class="ctBlankSourceReview" role="note"><strong v-if="compact">{{ field.name }} · </strong>English is blank. Review or clear the translation, then Save. A blank translation is allowed.</p>
             <component :is="host.ctFieldToolbar ? 'editor-field-toolbar' : 'div'" :controller="host.ctFieldToolbar ? host.ctFieldToolbar(field,'translation') : undefined">

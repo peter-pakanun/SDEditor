@@ -765,12 +765,12 @@
                 del(tx,stores.drafts,scope,unitId);return true;
             },options);
         }
-        async function save(rawScope,unitId,input,options={}){
+        const saveStores=[stores.meta,stores.cacheUnits,stores.saved,stores.drafts,stores.history,stores.outbox,stores.receipts,stores.memory,stores.memoryHistory];
+        function prepareSave(rawScope,unitId,input,options,metadata,unit,batchSignature){
             const captured=capture(rawScope),scope=captured.id;
             if(!input?.jobId||typeof input.jobId!=='string')throw new TypeError('ClientText save requires a stable job ID.');
             if(own(input,'origin') && !['save','restore'].includes(input.origin))throw new TypeError('ClientText save origin must be save or restore.');
-            const metadata=await requireReady(scope,options);
-            const unit=await getUnit(rawScope,unitId,options);if(!unit)throw new Error('ClientText save source is unavailable.');
+            if(!unit)throw new Error('ClientText save source is unavailable.');
             const values=S.normalizeValues(unit,input.values), reviewed=S.normalizeReviewed(unit,input.reviewed||{});
             const recoveryEditorValues=input.pendingResolution?.editorBeforeValues?S.normalizeValues(unit,input.pendingResolution.editorBeforeValues):null;
             const command={scope:captured.scope,unitId,values,reviewed,
@@ -788,7 +788,7 @@
             const mtl=input.mtlAcceptances?.length ? mtlStorage() : null;
             const tm=input.tmAcceptances?.length ? tmStorage() : null;
             if(tm&&input.mtlAcceptances?.some(claim=>input.tmAcceptances.some(other=>other.fieldId===claim.fieldId)))throw new TypeError('A field cannot accept TM and MTL suggestions in the same Save.');
-            return transaction([stores.meta,stores.cacheUnits,stores.saved,stores.drafts,stores.history,stores.outbox,stores.receipts,stores.memory,stores.memoryHistory,...(mtl?.names || []),...(tm?.names || [])],'readwrite',async tx=>{
+            return {names:[...saveStores,...(mtl?.names || []),...(tm?.names || [])],commit:async tx=>{
                 await validateLocalWrite(tx,rawScope);
                 const receipt=await get(tx,stores.receipts,key(scope,input.jobId));
                 if(receipt){if(receipt.signature!==signature)throw Object.assign(new Error('ClientText job ID was reused for different content.'),{code:'SAVE_RECEIPT_MISMATCH'});if(isLocal(rawScope))validateLocalRecord(unit,receipt.saved);return {saved:receipt.saved,receipt,replayed:true};}
@@ -845,8 +845,71 @@
                     else if(pending?.predecessor)operation.predecessor=copy(pending.predecessor);
                     put(tx,stores.outbox,scope,unitId,operation,{unitKey:key(scope,unitId)});
                 }
-                const committed={jobId:input.jobId,signature,unitId,saved:after,committedAt:Date.now()};
+                const committed={jobId:input.jobId,signature,unitId,saved:after,committedAt:Date.now(),...(batchSignature?{batchSignature}:{})};
                 put(tx,stores.receipts,scope,input.jobId,committed);return {saved:after,receipt:committed,replayed:false};
+            }};
+        }
+        async function save(rawScope,unitId,input,options={}){
+            const metadata=await requireReady(capture(rawScope).id,options),unit=await getUnit(rawScope,unitId,options);
+            const prepared=prepareSave(rawScope,unitId,input,options,metadata,unit);
+            return transaction(prepared.names,'readwrite',prepared.commit,options);
+        }
+        // Every selected field is checked against its original and the value shown when selected.
+        // Use the same record Save/history/outbox path and one device transaction for all records.
+        async function saveFieldBatch(rawScope,requestBody,options={}){
+            const body=copy(requestBody),{jobId,role,sheet,fieldId,value,rows:selected}=body;
+            if(typeof jobId!=='string' || !jobId || typeof value!=='string' || typeof fieldId!=='string'
+                || !Array.isArray(selected) || !selected.length || selected.length>100 || new Set(selected.map(row=>row.unitId)).size!==selected.length
+                || selected.some(row=>typeof row.expectedValue!=='string' || !Number.isSafeInteger(row.revision) || row.revision<0))
+                throw new TypeError('Select up to 100 distinct workbook cells for this translation.');
+            const captured=capture(rawScope),scope=captured.id,metadata=await requireReady(scope,options);
+            const units=new Map((await getUnitsByIds(rawScope,selected.map(row=>row.unitId),options)).map(unit=>[unit.id,unit]));
+            const signature=S.hash([captured.scope,body]),mtl=mtlStorage()?.stores;
+            const protectedError=message=>Object.assign(new Error(message),{code:'CLIENTTEXT_FIELD_SELECTION_CHANGED'});
+            return transaction([...saveStores,stores.tmCandidates,...(mtl?[mtl.candidates,mtl.meta]:[])],'readwrite',async tx=>{
+                const results=[],firstReceipt=await get(tx,stores.receipts,key(scope,jobId+':0'));
+                if(firstReceipt && firstReceipt.batchSignature!==signature)throw protectedError('This bulk Save receipt belongs to a different selection.');
+                let changed=0;
+                for(const row of selected){
+                    guard(options);
+                    const id=row.unitId,unit=units.get(id),field=unit?.fields.find(f=>f.id===fieldId);
+                    if(!field || unit.role!==role || unit.sheet!==sheet || !['text','form'].includes(field.kind))
+                        throw protectedError('The selected translation column changed. Select its cells again.');
+                    const changes=row.expectedValue!==value,childId=changes?jobId+':'+changed++:null,recordKey=key(scope,id);
+                    if(firstReceipt && !changes)continue;
+                    const receipt=firstReceipt && await get(tx,stores.receipts,key(scope,childId));
+                    const before=await get(tx,stores.saved,recordKey),draft=await get(tx,stores.drafts,recordKey);
+                    if(firstReceipt){
+                        if(!receipt || receipt.batchSignature!==signature || receipt.unitId!==id || !before)
+                            throw protectedError('This bulk Save receipt belongs to a different selection.');
+                        results.push({unitId:id,saved:receipt.saved,current:before,draft:draft || null});continue;
+                    }
+                    const values=S.valuesFor(unit,before),reviewed=before?.reviewed || {};
+                    if((before?.revision || 0)!==row.revision || values[fieldId]!==row.expectedValue)
+                        throw protectedError('Row '+unit.recordId+' changed after selection. Select its cells again.');
+                    if(values[fieldId]===value)continue;
+                    if(before?.conflicts?.length || before?.syncRecovery)
+                        throw protectedError('Resolve the conflict on row '+unit.recordId+' before filling these cells.');
+                    if(draft && (draft.values[fieldId]!==values[fieldId] || draft.reviewed?.[fieldId]!==reviewed[fieldId]
+                        || [...(draft.mtlAcceptances || []),...(draft.tmAcceptances || [])].some(claim=>claim.fieldId===fieldId)))
+                        throw protectedError('Save or discard the draft for '+field.name+' on row '+unit.recordId+' first.');
+                    const candidates=(await request(tx.objectStore(stores.tmCandidates).index('by_unit').getAll(recordKey))).map(r=>r.value);
+                    if(mtl)for(const name of [mtl.candidates,mtl.meta])candidates.push(...(await request(tx.objectStore(name).index('by_scope_unit').getAll([scope,id]))).map(r=>r.value));
+                    if(candidates.some(c=>c.fieldId===fieldId && ['pending','uncertain'].includes(c.status)))
+                        throw protectedError('Finish the suggestion for '+field.name+' on row '+unit.recordId+' first.');
+                    const sourceHash=S.sourceHash(field.source);
+                    const command={jobId:childId,intentProtocol:S.ENGLISH_INTENT_PROTOCOL,expectedRevision:row.revision,
+                        values:{...values,[fieldId]:value},reviewed:{...reviewed,[fieldId]:sourceHash},baseRevision:before?.serverRevision || 0};
+                    const result=await prepareSave(rawScope,id,command,options,metadata,unit,signature).commit(tx);
+                    let retained=null;
+                    if(draft){
+                        retained={...draft,values:{...draft.values,[fieldId]:value},reviewed:{...draft.reviewed,[fieldId]:sourceHash},
+                            revision:draft.revision+1,updatedAt:Date.now()};
+                        put(tx,stores.drafts,scope,id,retained,{unitKey:recordKey});
+                    }
+                    results.push({unitId:id,saved:result.saved,draft:retained});
+                }
+                return results;
             },options);
         }
         async function listHistory(rawScope,unitId,options={}){
@@ -1010,7 +1073,7 @@
                 return row;
             },options);
         }
-        return { import:importContent,importContent,save,getMetadata,getUnits,getUnitsByIds,getCompactUnits,getUnit,getSaved,getAsset,getProof,getCachedOriginal,migrateWorkspace,putDraft,getDraft,getDraftSummaries,discardDraft,
+        return { import:importContent,importContent,save,saveFieldBatch,getMetadata,getUnits,getUnitsByIds,getCompactUnits,getUnit,getSaved,getAsset,getProof,getCachedOriginal,migrateWorkspace,putDraft,getDraft,getDraftSummaries,discardDraft,
             listHistory,listWorkspaces,getOutbox,getPendingRecovery,rejectOperation,acceptPendingPeer,markSending,applyRemote,acknowledge,putRequest,getRequest,listRequests,deleteRequest,seedMemory,seedPreviousVersion,getMemory,getMemoryHistory,normalizeScope,scopeKey };
     }
     return { stores,names,upgrade,normalizeScope,scopeKey,LOCAL_PROTOCOL,validateLocalMetadata,validateLocalRecord,create };

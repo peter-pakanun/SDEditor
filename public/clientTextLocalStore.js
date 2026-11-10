@@ -71,12 +71,12 @@
                 return tm[method](scope,...args);
             };
         }
-        for (const method of ['getMetadata','getUnits','getUnitsByIds','getUnit','getSaved','getAsset','putDraft','getDraft','getDraftSummaries','discardDraft','save','listHistory','seedMemory','getMemory']) {
+        for (const method of ['getMetadata','getUnits','getUnitsByIds','getUnit','getSaved','getAsset','putDraft','getDraft','getDraftSummaries','discardDraft','save','saveFieldBatch','listHistory','seedMemory','getMemory']) {
             result[method] = (scope, ...args) => {
                 normalizeScope(scope);
-                const writing=['putDraft','discardDraft','save','seedMemory'].includes(method);
+                const writing=['putDraft','discardDraft','save','saveFieldBatch','seedMemory'].includes(method);
                 if(writing)owned(scope);
-                const count = { getUnit:1,getUnitsByIds:1,getAsset:1,putDraft:2,getDraft:1,discardDraft:1,save:2,listHistory:1,seedMemory:1 }[method] || 0;
+                const count = { getUnit:1,getUnitsByIds:1,getAsset:1,putDraft:2,getDraft:1,discardDraft:1,save:2,saveFieldBatch:1,listHistory:1,seedMemory:1 }[method] || 0;
                 if(writing)args[count] = optionsFor(scope, args[count]);
                 return base[method](scope, ...args);
             };

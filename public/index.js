@@ -167,7 +167,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
   const config = Vue.defineComponent({
-  mixins: [window.PrivateMediaUI?.mixin || {}, window.PreviewFonts?.mixin || {}, window.ClientTextSkillCardUI?.mixin || {}, window.KeywordPopups?.mixin || {}, window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.ClientTextResourceSync?.mixin || {}, window.ClientTextTmUI?.mixin || {}, window.ClientTextMtlUI?.mixin || {}, window.ClientTextMtlSettingsUI?.mixin || {}, window.ClientTextToneNotesUI?.mixin || {}, window.ClientTextMtlDebug?.mixin || {}, window.MtlConnectionUI?.mixin || {}, window.MtlLimitsUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}, window.SDEditorTools?.mixin || {}],
+  mixins: [window.PrivateMediaUI?.mixin || {}, window.PreviewFonts?.mixin || {}, window.ClientTextSkillCardUI?.mixin || {}, window.KeywordPopups?.mixin || {}, window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.ClientTextFieldFill?.mixin || {}, window.ClientTextResourceSync?.mixin || {}, window.ClientTextTmUI?.mixin || {}, window.ClientTextMtlUI?.mixin || {}, window.ClientTextMtlSettingsUI?.mixin || {}, window.ClientTextToneNotesUI?.mixin || {}, window.ClientTextMtlDebug?.mixin || {}, window.MtlConnectionUI?.mixin || {}, window.MtlLimitsUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}, window.SDEditorTools?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -1045,7 +1045,7 @@ function formatPageRange(total, page, pageSize) {
       return this.getGamePreviewFontFamily("English");
     },
     gamePreviewIsDialogue() {
-      return this.ctActive && /^(?:NPCTalkDialogueTextAudio|NPCTextAudio)(?:_Gender)?$/.test(this.ctCurrentUnit?.sheet || '');
+      return this.ctActive && /^(?:NPCTalkDialogueTextAudio|NPCTextAudio)(?:_Gender)?$/.test((this.ctBulkToolUnit || this.ctCurrentUnit)?.sheet || '');
     },
     gamePreviewDefaultTextColor() { return this.gamePreviewIsDialogue ? '#fffbd6' : undefined; },
     gamePreviewMounted() { return this.ctActive ? this.ctPreviewMounted : this.editorToolsMounted; },
@@ -1601,7 +1601,7 @@ function formatPageRange(total, page, pageSize) {
     },
     gamePreviewAudioSegments(segments) {
       return this.ctActive && window.ClientTextAudio
-        ? window.ClientTextAudio.previewSegments(segments, window.ClientTextAudio.clipsFor(this.ctCurrentUnit, this.ctWorkspace?.scope?.game || this.gameVersion)) : segments;
+        ? window.ClientTextAudio.previewSegments(segments, window.ClientTextAudio.clipsFor(this.ctBulkToolUnit || this.ctCurrentUnit, this.ctWorkspace?.scope?.game || this.gameVersion)) : segments;
     },
     buildGamePreviewSegments(decodedString, options = {}) {
       const s = String(decodedString ?? "");
@@ -8346,6 +8346,9 @@ const app = Vue.createApp(config);
 if (window.ClientTextAudio) {
   app.component('ct-audio-session', window.ClientTextAudio.component);
   app.component('ct-audio-controls', window.ClientTextAudio.controlsComponent);
+}
+if (window.ClientTextFieldFill) {
+  app.component('ct-bulk-editor',window.ClientTextFieldFill.editor());
 }
 if (window.ClientTextUI) {
   app.component('ct-context', window.ClientTextUI.contextComponent);

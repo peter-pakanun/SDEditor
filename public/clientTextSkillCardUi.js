@@ -16,16 +16,16 @@
                     ? raw(root.ClientTextSkillCards.createResolver(this.ctSkillCatalog, this.ctUnits, this.ctSkillScope)) : null;
             },
             ctSkillBaseModel() {
-                return this.ctCurrentUnit && this.ctSkillResolver?.compose({ scope: this.ctSkillScope,
-                    unit: this.ctCurrentUnit, cardId: this.ctSkillSelectedId || undefined });
+                const unit=this.ctBulkToolUnit || this.ctCurrentUnit;
+                return unit && this.ctSkillResolver?.compose({ scope: this.ctSkillScope, unit, cardId: this.ctSkillSelectedId || undefined });
             },
             ctSkillChoices() {
-                const choices = this.ctSkillResolver?.candidates(this.ctCurrentUnit) || [];
+                const choices = this.ctSkillResolver?.candidates(this.ctBulkToolUnit || this.ctCurrentUnit) || [];
                 return choices.map(id => this.ctSkillCatalog.cards.find(card => card.id === id)).filter(Boolean)
                     .sort((a,b) => a.title.source.localeCompare(b.title.source) || a.id.localeCompare(b.id));
             },
             ctSkillSelectedId() {
-                const choices = this.ctSkillResolver?.candidates(this.ctCurrentUnit) || [];
+                const choices = this.ctSkillResolver?.candidates(this.ctBulkToolUnit || this.ctCurrentUnit) || [];
                 return [this.ctSkillRelatedId, this.ctSkillContextId].find(id => choices.includes(id)) || '';
             },
             ctSkillVariableKeys() {
@@ -35,12 +35,13 @@
             ctSkillPreviewModel() {
                 this.ctRevision;
                 if (!this.ctSkillBaseModel || this.ctSkillBaseModel.state === 'unavailable') return null;
-                return this.ctSkillResolver.compose({ scope: this.ctSkillScope, unit: this.ctCurrentUnit,
+                const unit=this.ctBulkToolUnit || this.ctCurrentUnit;
+                return this.ctSkillResolver.compose({ scope: this.ctSkillScope, unit,
                     cardId: this.ctSkillSelectedId || undefined, fieldId: this.ctPreviewField?.id, saved: this.ctSaved,
-                    draft: { scope: this.ctSkillScope, unitId: this.ctCurrentUnit.id, values: this.ctValues }, drafts: this.ctSkillDrafts, variables: this.ctPreviewGggVars });
+                    draft: { scope: this.ctSkillScope, unitId:unit.id, values:this.ctBulkToolValues || this.ctValues }, drafts: this.ctSkillDrafts, variables: this.ctPreviewGggVars });
             },
             ctSkillDraftKey() {
-                return this.ctSkillBaseModel?.skillId ? JSON.stringify([this.ctSkillContextKey,this.ctSkillBaseModel.skillId,this.ctSelection,this.ctRevision]) : '';
+                return this.ctSkillBaseModel?.skillId ? JSON.stringify([this.ctSkillContextKey,this.ctSkillBaseModel.skillId,this.ctBulkToolUnit?.id || this.ctSelection,this.ctRevision]) : '';
             },
             ctSkillAssetKey() {
                 const assets = this.ctSkillBaseModel?.assets;
