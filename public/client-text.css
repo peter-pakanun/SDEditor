@@ -140,6 +140,7 @@
 .ctTable .ctBulkFieldList {display:flex;flex-direction:column;gap:3px;}
 .ctTable .ctBulkCell {display:block;width:100%;min-width:0;border:1px solid transparent;border-radius:4px;background:transparent;color:inherit;text-align:start;font:inherit;padding:2px 5px;user-select:none;cursor:cell;}
 .ctTable .ctBulkCell > small {font-size:11px;color:var(--ui-muted);}
+.fileTableScroll[data-ct-drag-blocked],.fileTableScroll[data-ct-drag-blocked] * {cursor:not-allowed!important;}
 .editorFieldToolbar .ctFieldGrip {color:var(--ui-muted);cursor:grab;user-select:none;}
 .editorFieldToolbar .ctFieldGrip:active {cursor:grabbing;}
 .ctTable .ctBulkCell > span {display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere;}

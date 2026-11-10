@@ -14,11 +14,13 @@ module.exports=async function({page,files,failures}){
     const target=(unit,field)=>page.getByRole('button',{name:unit+', '+field,exact:true});
     const dock=page.locator('.ctCellFill'),input=dock.getByRole('textbox',{name:'Replacement translation',exact:true});
     const point=async locator=>{await locator.scrollIntoViewIfNeeded();const b=await locator.boundingBox();assert.ok(b);return {x:b.x+b.width/2,y:b.y+b.height/2};};
-    const drag=async(first,last)=>{
+    const drag=async(first,last,blocked=false)=>{
         const a=await point(first),b=await point(last);
         await page.mouse.move(a.x,a.y);await page.mouse.down();await page.mouse.move(b.x,b.y,{steps:9});
         assert.equal(await dock.count(),0,'Bulk editor opens only after release');
+        if(blocked)assert.equal(await page.evaluate(({x,y})=>getComputedStyle(document.elementFromPoint(x,y)).cursor,b),'not-allowed','Unmapped rows show the unavailable cursor during selection');
         await page.mouse.up();await dock.waitFor();
+        assert.equal(await page.locator('[data-ct-drag-blocked]').count(),0,'Release restores the ordinary cursor');
     };
     await drag(target('complete','Name'),target('record','Description'));
     assert.equal(await page.locator('.ctBulkCell[aria-pressed=true]').count(),2);
@@ -254,7 +256,7 @@ module.exports=async function({page,files,failures}){
     await english('complete','Description').click({modifiers:['Control']});
     await english('noaudio','Name').click({modifiers:['Shift']});await page.keyboard.press('Control+c');
     assert.deepEqual((await readClipboard(['','{0:+d} <<keybind:open_panel>>'])).rows.map(r=>r[0]),['','{0:+d} <<keybind:open_panel>>']);
-    await drag(target('complete','Description'),target('noaudio','Name'));
+    await drag(target('complete','Description'),target('noaudio','Name'),true);
     await page.evaluate(()=>navigator.clipboard.writeText('Unmapped first row\r\nMapped second row'));
     await input.press('Control+v');await noPasteDock();
     assert.equal(await collapsed('complete','Description'),'Mapped second row');

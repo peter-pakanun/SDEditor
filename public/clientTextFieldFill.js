@@ -447,6 +447,7 @@
                 const g=this._ctBulkPointer;
                 if(!g || event && g.pointerId!==event.pointerId)return;
                 this._ctBulkPointer=null;this.ctBulkPreview=null;
+                this.$refs.ctFileTableRegion?.removeAttribute('data-ct-drag-blocked');
                 root.cancelAnimationFrame?.(g.frame);
                 if(g.target.hasPointerCapture?.(g.pointerId))g.target.releasePointerCapture(g.pointerId);
             },
@@ -486,7 +487,12 @@
                 if(!g || event.pointerId!==g.pointerId || g.scope!==this.ctBulkScopeKey)return;
                 g.lastX=event.clientX;g.lastY=event.clientY;
                 const row=root.document.elementFromPoint(event.clientX,event.clientY)?.closest('tr[data-unit-id]');
-                if(!row || !this.$refs.ctFileTableRegion.contains(row) || g.last===row.dataset.unitId)return;
+                if(!row || !this.$refs.ctFileTableRegion.contains(row)){
+                    this.$refs.ctFileTableRegion.removeAttribute('data-ct-drag-blocked');return;
+                }
+                if(g.last===row.dataset.unitId){
+                    this.$refs.ctFileTableRegion.toggleAttribute('data-ct-drag-blocked',!!this.ctBulkPreview && !this.ctBulkPreview.rows.some(item=>item.unitId===g.last));return;
+                }
                 if(!g.dragging && (row.dataset.unitId===g.unit.id || Math.hypot(event.clientX-g.x,event.clientY-g.y)<4))return;
                 g.dragging=true;g.last=row.dataset.unitId;
                 if(!g.frame){
@@ -506,6 +512,7 @@
                 const base=g.side==='source'?this.ctBulkSources:this.ctBulkSession || this.ctDirectSelection;
                 if(g.add && base && !sameColumn(base,g.unit,g.field,g.side))return;
                 this.ctBulkPreview=raw(this.ctBulkMakeSession(g.unit,g.field,range(this.ctPageRows,g.unit.id,g.last),g.add,g.unit.id,g.side));
+                this.$refs.ctFileTableRegion.toggleAttribute('data-ct-drag-blocked',!this.ctBulkPreview.rows.some(item=>item.unitId===g.last));
             },
             ctBulkPointerUp(event){
                 const g=this._ctBulkPointer;
