@@ -35,6 +35,18 @@ test('short pastes and extra columns leave unaddressed targets untouched', () =>
     assert.deepEqual(clipboard.assign(['one', 'two'], [[' \n\t'], ['kept']]), [{ unitId: 'two', value: 'kept' }]);
 });
 
+test('one clipboard cell fills every selected destination and skips missing fields', () => {
+    for (const value of ['เปิด', '  literal text  ', 'line one\r\nline two', 'one\ttwo', 'say "hello"', '=literal()']) {
+        const { rows } = clipboard.decode(clipboard.encode([value]).text);
+        assert.deepEqual(clipboard.assign(['one', null, 'three'], rows), [
+            { unitId: 'one', value }, { unitId: 'three', value }
+        ]);
+        assert.deepEqual(clipboard.assign(['one'], rows), [{ unitId: 'one', value }]);
+    }
+    assert.deepEqual(clipboard.assign(['one', 'two'], [['']]), []);
+    assert.deepEqual(clipboard.assign(['one', 'two'], [[' \r\n\t']]), []);
+});
+
 test('single quoted multiline or tabbed cells remain one spreadsheet value', () => {
     for (const value of ['line one\nline two', 'one\ttwo', 'say "hello"']) {
         const data = clipboard.decode(clipboard.encode([value]).text);

@@ -121,8 +121,9 @@
 
     function assign(slots, rows) {
         const changes = [];
-        for (let index = 0; index < Math.min(slots.length, rows.length); index++) {
-            const unitId = slots[index], value = rows[index]?.[0];
+        const singleCell = rows.length === 1 && rows[0]?.length === 1;
+        for (let index = 0; index < (singleCell ? slots.length : Math.min(slots.length, rows.length)); index++) {
+            const unitId = slots[index], value = rows[singleCell ? 0 : index]?.[0];
             if (unitId != null && typeof value === 'string' && value.trim() !== '') changes.push({ unitId, value });
         }
         return changes;

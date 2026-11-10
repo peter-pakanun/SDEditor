@@ -132,6 +132,23 @@ module.exports=async function({page,files,failures}){
         }catch(error){if(!['InvalidStateError','NotFoundError'].includes(error.name))throw error;await new Promise(resolve=>setTimeout(resolve,15));}
         throw Error('The expected spreadsheet clipboard write did not settle.');
     },expected);
+    const singleName=inline.getByRole('textbox',{name:'Name',exact:true});
+    const selectedNames=async()=>[await singleName.inputValue(),await target('complete','Name').locator('span').textContent(),await target('noaudio','Name').locator('span').textContent()];
+    const originalNames=await selectedNames();
+    for(const value of ['One shared cell','One\nmultiline\t"cell"']){
+        await drag(nameGrip,target('noaudio','Name'));
+        if(value.includes('\n'))await page.evaluate(value=>window.ClientTextClipboard.write([value]),value);
+        else await page.evaluate(value=>navigator.clipboard.writeText(value),value);
+        await readClipboard([value]);await input.press('Control+v');await dock.waitFor({state:'detached'});
+        assert.deepEqual(await selectedNames(),[value,value,value],'one clipboard cell immediately fills all selected fields');
+        assert.deepEqual(await snapshot(),cleared,'single-cell fill is pending until Save');
+        await page.evaluate(()=>navigator.clipboard.writeText('Second shared cell'));
+        await singleName.press('Control+v');
+        assert.deepEqual(await selectedNames(),Array(3).fill('Second shared cell'),'inline paste keeps the selected range');
+        await singleName.press('Control+z');assert.deepEqual(await selectedNames(),[value,value,value]);
+        await singleName.press('Control+z');assert.deepEqual(await selectedNames(),originalNames,'one Undo restores the whole fill');
+        await singleName.press('Escape');
+    }
     // Select the final source before the first source. The unselected middle worksheet row
     // must still occupy a clipboard position. English gestures never open another record.
     await english('noaudio','Name').click({modifiers:['Control']});

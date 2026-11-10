@@ -224,12 +224,20 @@
             ctBulkPaste(event){
                 const data=event.clipboardData;
                 if(!data || event.defaultPrevented || event.target?.composing || this.ctBulkSaving || this.ctBulkRetry || this.ctBulkStale)return;
+                const session=this.ctBulkSession || this.ctDirectSelection;
                 const inline=event.target?.closest?.('.ctFields[data-side="translation"] textarea[data-ct-target]');
                 if(inline && this.ctInlineUnitVisible() && !this.ctKeyboardBlocked()){
                     const unit=this.ctCurrentUnit,field=unit?.fields.find(f=>f.id===inline.dataset.ctTarget);
                     if(!field || !this.ctBulkFieldAllowed(field) || !this.ctKeyboardTarget(field,inline) || inline.readOnly
                         || this.ctMtlCandidate?.(field) || this.ctTmCandidate?.(field))return;
                     const clip=root.ClientTextClipboard.decode(data.getData('text/plain'),data.getData('text/html'));
+                    if(clip.rows.length===1 && clip.rows[0]?.length===1 && session?.rows.length>1
+                        && session.fieldId===field.id && session.rows.some(row=>row.unitId===unit.id)){
+                        event.preventDefault();event.stopPropagation();
+                        const assigned=root.ClientTextClipboard.assign(session.slots,clip.rows);
+                        if(assigned.length)this.ctDirectPaste(session,assigned,inline);
+                        return;
+                    }
                     if(!clip.tabular)return;
                     event.preventDefault();event.stopPropagation();
                     if(clip.rows.length===1){
@@ -251,11 +259,11 @@
                     next.slots=slots(rows,next.rows,[unit.id,rows.at(-1).id]);
                     this.ctDirectPaste(next,assigned,inline);return;
                 }
-                const session=this.ctBulkSession || this.ctDirectSelection;if(!session)return;
+                if(!session)return;
                 const target=event.target?.closest?.('#ctBulkTranslation,[data-ct-bulk-field]:not([data-ct-source-selection])');
                 if(!target || target.id!=='ctBulkTranslation' && !this.ctBulkMarked(target.closest('tr[data-unit-id]')?.dataset.unitId,target.dataset.ctBulkField))return;
                 const clip=root.ClientTextClipboard.decode(data.getData('text/plain'),data.getData('text/html'));
-                if(!clip.tabular){
+                if(!clip.tabular && session.rows.length<2){
                     if(event.target.id==='ctBulkTranslation')return;
                     const text=data.getData('text/plain');
                     if(!text)return;
