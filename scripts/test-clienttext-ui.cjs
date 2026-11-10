@@ -497,6 +497,32 @@ test('Sheet sidebar severity includes hidden committed work and findings, with e
     assert.deepEqual(app.ctUnits,before);
 });
 
+test('offline imported completion fills drive filters and counters without creating authored records or changing the workload',()=>{
+    const rows=['filled','reviewed','revised','unchanged','missing','outdated'].map(color=>{
+        const original=namedUnit(color,'English',color==='missing'?'':'Imported',color==='outdated');
+        original.fields[0].originalFill=S.FILLS[color] || null;return original;
+    }),snapshot=JSON.stringify(rows),localScope={...scope,groupId:'local:test:colors',versionId:'local:test:colors'};
+    const {app,mixin}=listHarness({ctWorkspace:{scope:localScope},ctUnits:rows,ctSaved:{},pageSize:20,
+        _ctWorkUnits:new Map(rows.slice(4).map(unit=>[unit.id,unit]))});
+    assert.deepEqual(clone(app.ctCounts),{total:6,missing:1,outdated:1,saved:3,revised:1,unchanged:1});
+    for(const [filter,expected] of [['saved',['filled','reviewed','revised']],['revised',['revised']],['unchanged',['unchanged']]]){
+        app.ctSelectedFilters=[filter];assert.deepEqual(Array.from(app.ctRows,unit=>unit.recordId),expected);
+    }
+    const purple=rows[2];app.ctSelection=purple.id;app.ctValues={[fieldId]:'Unsaved edit'};app.ctDraftDirty=true;
+    assert.equal(app.ctStatus(purple).revised,true);assert.equal(app.ctCounts.saved,3,'Drafts do not change imported completion');
+    assert.equal(app.ctRowStatusClasses(purple).isRevised,true);
+    app.ctSaved={[purple.id]:{values:S.valuesFor(purple),reviewed:{}}};
+    assert.equal(app.ctStatus(purple).revised,true,'An unchanged explicit Save retains imported purple');
+    assert.deepEqual(clone(mixin.computed.ctWorkProgress.call(app)),{total:2,resolved:0,percent:0});
+    assert.equal(JSON.stringify(rows),snapshot);
+    app.ctSaved={};app.ctWorkspace={scope:clone(scope)};
+    assert.equal(app.ctStatus(purple).saved,false,'Cached private interpretation cannot leak into an online workspace');
+    assert.equal(app.ctCounts.saved,0);assert.equal(app.ctCounts.revised,0);
+    app.ctWorkspace={scope:localScope};
+    assert.equal(app.ctStatus(purple).saved,true,'Reopening a private workspace re-derives its imported completion');
+    assert.deepEqual(clone(app.ctSaved),{});
+});
+
 test('Sheet sidebar keeps grey distinct from no colour, uses all six priorities, and labels completed work',()=>{
     const neutral=namedUnit('Neutral'),grey=namedUnit('Grey'),green=namedUnit('Green'),purple=namedUnit('Purple'),orange=namedUnit('Orange'),red=namedUnit('Red');
     for(const [index,current] of [neutral,grey,green,purple,orange,red].entries()){

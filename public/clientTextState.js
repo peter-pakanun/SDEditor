@@ -437,6 +437,11 @@
         const ids=new Set([field.id,...generic.map(candidate=>candidate.id)]);
         return generic.length>0 && ![...(saved?.conflicts || []),...(saved?.provenance?.conflicts || [])].some(conflict=>!conflict.fieldId || ids.has(conflict.fieldId));
     }
+    function originalCompletionColor(field, value) {
+        if (audioOnly(field.source)) return '';
+        const color = COLOR_BY_FILL[field.originalFill];
+        return color === 'revised' || color === 'reviewed' || color === 'filled' && String(value ?? '').trim() ? color : '';
+    }
     function statusFor(unit, saved = null, options = {}) {
         const values = valuesFor(unit, saved), reviewed = saved?.reviewed || {}, fields = {}, savedPresent = !!saved && saved.saved !== false;
         for (const field of unit.fields) {
@@ -445,14 +450,18 @@
             const rawMissing = isAbsent(field,values[field.id]), english = englishIntentFor(field,saved,options);
             const generic=inheritsGenericReview(unit,field,saved,options,values);
             const missing = rawMissing && !english && !generic, outdated = assignedOutdated && !generic && reviewed[field.id] !== sourceHash(field.source);
-            fields[field.id] = { missing,rawMissing,english,...(generic?{generic:true}:{}),outdated,saved:savedPresent,
-                revised:savedPresent && !originalMissing && !assignedOutdated && !audioOnly(field.source) && values[field.id] !== field.target,
-                unchanged:!missing && !outdated && !savedPresent };
+            // Private workbook imports can describe completed work in their
+            // immutable fills, without creating authored records or history.
+            const imported = options.importedCompletion && !missing && !outdated && !generic ? originalCompletionColor(field,values[field.id]) : '';
+            const fieldSaved = savedPresent || !!imported;
+            fields[field.id] = { missing,rawMissing,english,...(generic?{generic:true}:{}),outdated,saved:fieldSaved,
+                revised:imported === 'revised' || savedPresent && !originalMissing && !assignedOutdated && !audioOnly(field.source) && values[field.id] !== field.target,
+                unchanged:!missing && !outdated && !fieldSaved };
         }
         const missing = Object.values(fields).some(field => field.missing), outdated = Object.values(fields).some(field => field.outdated);
-        const revised = Object.values(fields).some(field => field.revised);
-        return { missing, outdated, saved: savedPresent, revised, unchanged: !missing && !outdated && !savedPresent,
-            isMissing: missing, isOutdated: outdated, hasChanges: savedPresent, isRevised: revised, isDropped: false, fields };
+        const revised = Object.values(fields).some(field => field.revised), isSaved = savedPresent || Object.values(fields).some(field => field.saved);
+        return { missing, outdated, saved: isSaved, revised, unchanged: !missing && !outdated && !isSaved,
+            isMissing: missing, isOutdated: outdated, hasChanges: isSaved, isRevised: revised, isDropped: false, fields };
     }
     // A fill override is separate from Saved: an unchanged complete save does
     // not acquire a completion colour. Null preserves the original cell fill.
@@ -477,11 +486,9 @@
         const involved = own(saved?.values, field.id) || own(saved?.reviewed, field.id) || (saved?.outdated || []).includes(field.id);
         const fill = involved ? fillFor(field, value, saved, status) : null;
         if (fill) return COLOR_BY_FILL[fill] || '';
-        if (audioOnly(field.source)) return '';
         // Retain recognised completion fills in a previously exported original.
         // White/no fill and other workbook formatting never mean completed work.
-        const color = COLOR_BY_FILL[field.originalFill];
-        return color === 'revised' || color === 'reviewed' || color === 'filled' && value.trim() ? color : '';
+        return originalCompletionColor(field,value);
     }
     const emptyColorCounts = () => ({ missing: 0, outdated: 0, revised: 0, reviewed: 0, filled: 0 });
     const sheetColorFor = counts => SHEET_COLORS.find(color => color && counts[color] > 0) || '';
@@ -502,9 +509,9 @@
         }
         return selected;
     }
-    function counts(units, saved = {}) {
+    function counts(units, saved = {}, options = {}) {
         const value = { missing: 0, outdated: 0, saved: 0, revised: 0, unchanged: 0, total: units.length };
-        for (const unit of units) for (const key of ['missing','outdated','saved','revised','unchanged']) if (statusFor(unit, saved instanceof Map ? saved.get(unit.id) : saved[unit.id])[key]) value[key]++;
+        for (const unit of units) for (const key of ['missing','outdated','saved','revised','unchanged']) if (statusFor(unit, saved instanceof Map ? saved.get(unit.id) : saved[unit.id], options)[key]) value[key]++;
         return value;
     }
     function carryForward(previousUnit, nextUnit, previousSaved) {

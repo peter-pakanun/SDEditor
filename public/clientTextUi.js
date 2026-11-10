@@ -1470,15 +1470,15 @@
             },
             ctStatus(unit = this.ctCurrentUnit) {
                 if(!unit)return {fields:{}};
-                const cache=this._ctStatusCache ||= new WeakMap(),saved=this.ctSaved[unit.id],previous=cache.get(unit);
-                if(previous && previous.saved===saved && previous.game===this.gameVersion)return previous.status;
-                const status=root.ClientTextState.statusFor(unit,saved,{game:this.gameVersion});cache.set(unit,{saved,game:this.gameVersion,status});return status;
+                const cache=this._ctStatusCache ||= new WeakMap(),saved=this.ctSaved[unit.id],importedCompletion=this.ctOfflineTest,previous=cache.get(unit);
+                if(previous && previous.saved===saved && previous.game===this.gameVersion && previous.importedCompletion===importedCompletion)return previous.status;
+                const status=root.ClientTextState.statusFor(unit,saved,{game:this.gameVersion,importedCompletion});cache.set(unit,{saved,game:this.gameVersion,importedCompletion,status});return status;
             },
             ctFieldStatus(field) { return this.ctStatus().fields[field.id] || {}; },
             ctRowStatusClasses(unit) {
                 const status=this.ctStatus(unit);
-                // Saved records can contain intentional blanks or unreviewed
-                // sources. Keep durable Saved separate from row completion.
+                // Saved work can coexist with intentional blanks or unreviewed
+                // sources. Keep Saved separate from row completion.
                 return {isMissing:status.missing,isOutdated:status.outdated,isRevised:status.revised,
                     hasChanges:status.saved && !status.missing && !status.outdated};
             },

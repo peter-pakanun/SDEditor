@@ -235,6 +235,10 @@ async function run() {
             await target.getByRole('region', { name: 'Source versions' }).waitFor();
         };
         await bootstrap(page, managerAccessOnly ? 'manager' : 'admin');
+        if(process.argv.includes('--imported-completion-only')){
+            await require('./clienttext-imported-completion-browser-check.cjs')({page,directory,JSZip,Codec,ClientState,failures,bootstrap});
+            return;
+        }
         if(process.argv.includes('--tm-bulk-only')){
             await require('./clienttext-tm-browser-check.cjs')({page,api,files,Codec,ClientState,JSZip,failures,directory,bootstrap});
             return;

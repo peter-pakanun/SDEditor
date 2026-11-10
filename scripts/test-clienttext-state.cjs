@@ -34,6 +34,51 @@ test('sheet colour aggregation follows every level of red, orange, purple, green
     for(const key of [...keys].reverse()){counts[key]++;assert.equal(S.sheetColorFor(counts),key);}
     for(const key of keys){counts[key]--;assert.equal(S.sheetColorFor(counts),keys[keys.indexOf(key)+1]||'');}
 });
+test('private imported completion fills count as Saved and imported purple remains Revised after unchanged saves',()=>{
+    const options={importedCompletion:true},originals=['filled','reviewed','revised'].map(color=>{
+        const original=unit('English','Imported '+color);original.fields[0].originalFill=S.FILLS[color];return original;
+    }),snapshot=JSON.stringify(originals);
+    for(const [index,original] of originals.entries()){
+        const expectedRevised=index===2;
+        for(const saved of [null,{values:S.valuesFor(original),saved:false},{values:S.valuesFor(original)}]){
+            const status=S.statusFor(original,saved,options),field=status.fields[original.fields[0].id];
+            assert.equal(status.saved,true);assert.equal(status.revised,expectedRevised);assert.equal(status.unchanged,false);
+            assert.equal(field.saved,true);assert.equal(field.revised,expectedRevised);assert.equal(field.unchanged,false);
+            assert.equal(status.missing,false);assert.equal(status.outdated,false);
+        }
+        assert.equal(S.statusFor(original).saved,false,'Shared authored-count contracts retain their existing interpretation');
+    }
+    assert.deepEqual(S.counts(originals,{},options),{missing:0,outdated:0,saved:3,revised:1,unchanged:0,total:3});
+    assert.equal(JSON.stringify(originals),snapshot,'Completion recognition never mutates imported originals');
+});
+test('private imported completion respects Missing, pending source review, optional blanks and audio exemptions',()=>{
+    const options={importedCompletion:true};
+    for(const color of ['filled','reviewed','revised']){
+        const original=unit('English','');original.fields[0].originalFill=S.FILLS[color];
+        const missing=S.statusFor(original,null,options);
+        assert.equal(missing.missing,true);assert.equal(missing.saved,false);assert.equal(missing.revised,false);
+        original.fields[0].target='Imported translation';original.fields[0].originalMissing=false;
+        const pending={values:S.valuesFor(original),saved:false,outdated:[fieldId]};
+        const stale=S.statusFor(original,pending,options);
+        assert.equal(stale.outdated,true);assert.equal(stale.saved,false);assert.equal(stale.revised,false);
+        original.fields[0].source='[NOAUDIO]';
+        assert.equal(S.statusFor(original,null,options).saved,false);
+    }
+    const optional=unit('English','');Object.assign(optional.fields[0],{kind:'form',required:false,originalMissing:false,originalFill:S.FILLS.filled});
+    assert.equal(S.statusFor(optional,null,options).saved,false,'Grey on an unused optional blank is not completion');
+    for(const fill of [null,'FFFFFF','989898','B4A7D7','793BB6','626B7A']){
+        const original=unit();original.fields[0].originalFill=fill;
+        assert.equal(S.statusFor(original,null,options).saved,false,'Unrelated formatting and worksheet-tab RGB never imply completion');
+    }
+    const mixed=unit('English','Imported');mixed.fields[0].originalFill=S.FILLS.revised;
+    mixed.fields.push({...mixed.fields[0],id:'missing',target:'',originalMissing:true,originalFill:S.FILLS.missing});
+    const status=S.statusFor(mixed,null,options);
+    assert.equal(status.saved,true);assert.equal(status.revised,true);assert.equal(status.missing,true);
+    const dialogue=unit('English','Generic translation');dialogue.sheet='NPCTextAudio';dialogue.fields[0].originalFill=null;
+    dialogue.fields.push({...dialogue.fields[0],id:JSON.stringify(['Text','StrFour']),kind:'form',form:'StrFour',group:'Text',target:'',originalMissing:true,originalFill:S.FILLS.revised});
+    const covered=S.statusFor(dialogue,null,{...options,game:'poe2'});
+    assert.equal(covered.fields[dialogue.fields[1].id].generic,true);assert.equal(covered.saved,false);assert.equal(covered.revised,false);
+});
 function sdKeywordDiagnostics(source,target){
     const context=vm.createContext({}),code=fs.readFileSync(path.join(__dirname,'../public/index.js'),'utf8');
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/regexEngine.js'),'utf8'),context);

@@ -68,6 +68,9 @@ test('darker tab RGB round trips independently of cell fills for every status, w
         assert.equal(await tabColor(output),item.tab,'Only the purple and grey tab RGB differs from the established palette');
         assert.equal(exportedField.originalFill,item.fill,'The standard cell fill is independent of the tab RGB');
         assert.equal(exportedField.target,item.value);assert.equal(State.unitColorFor(get(reopened,'palette')),item.color);
+        const importedStatus=State.statusFor(get(reopened,'palette'),null,{importedCompletion:true});
+        assert.equal(importedStatus.saved,['filled','reviewed','revised'].includes(item.color),'Private import statuses follow cell fills rather than worksheet-tab RGB');
+        assert.equal(importedStatus.revised,item.color==='revised');
         assert.deepEqual(await Codec.exportWorkbook(output,reopened,{}),output,'Reimport does not reinterpret darker tabs or change a no-op export');
         const before=await JSZip.loadAsync(bytes),after=await JSZip.loadAsync(output);
         for(const name of Object.keys(before.files))if(!before.files[name].dir && !['xl/worksheets/sheet1.xml','xl/styles.xml'].includes(name))assert.deepEqual(await after.file(name).async('uint8array'),await before.file(name).async('uint8array'),name);
