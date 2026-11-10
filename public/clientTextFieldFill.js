@@ -6,7 +6,7 @@
 })(typeof window==='object'?window:globalThis,function(root){
     'use strict';
     const raw=value=>root.Vue?.markRaw ? root.Vue.markRaw(value) : value;
-    const sameColumn=(session,unit,field)=>session.role===unit.role && session.sheet===unit.sheet && session.fieldId===field.id;
+    const sameColumn=(session,unit,field,side)=>session.role===unit.role && session.sheet===unit.sheet && session.fieldId===field.id && session.side===side;
     function range(page,start,end){
         const first=page.findIndex(unit=>unit.id===start),last=page.findIndex(unit=>unit.id===end);
         return first<0 || last<0 ? [] : page.slice(Math.min(first,last),Math.max(first,last)+1);
@@ -20,8 +20,14 @@
         }
         return result;
     }
+    function slots(page,selected,edges){
+        if(!selected.length)return [];
+        const ids=new Set(selected.map(row=>row.unitId)),bounds=new Set([...ids,...edges]);
+        const first=page.findIndex(unit=>bounds.has(unit.id)),last=page.findLastIndex(unit=>bounds.has(unit.id));
+        return first<0?[]:page.slice(first,last+1).map(unit=>ids.has(unit.id)?unit.id:null);
+    }
     const mixin={
-        data(){return {ctBulkSession:null,ctBulkPreview:null,ctBulkText:'',ctBulkTouched:false,ctBulkError:'',ctBulkSaving:false,ctBulkRetry:null,ctBulkFull:false};},
+        data(){return {ctBulkSession:null,ctBulkSources:null,ctBulkPreview:null,ctBulkText:'',ctBulkTouched:false,ctBulkError:'',ctBulkSaving:false,ctBulkRetry:null,ctBulkFull:false,ctBulkPasted:null};},
         computed:{
             ctBulkScopeKey(){return JSON.stringify([this.ctTmSelectionScopeKey,this.ctActive,this.ctEditor,this.ctPage,this.ctEffectivePageSize,this.ctSort,this.ctSortDir]);},
             ctBulkOwner(){return this.ctActive && this.ctWorkspace && JSON.stringify([this.ctWorkspace.scope,this.cloudProfileId,this.cloudUser?.id,this.cloudUser?.role,this.lang,this.gameVersion]);},
@@ -29,22 +35,35 @@
                 this.ctBrowseMode,this.ctSheet,this.ctSheetFilter,this.ctAppliedSearch,this.ctSearchCaseSensitive,this.ctFilter,this.ctSelectedFilters,
                 this.ctNpcSelection,this.ctNpcKind,this.ctNpcFilter,this.ctConvoSelection,this.ctConvoFilter]);},
             ctBulkStale(){return !!this.ctBulkSession && (this.ctBulkSession.owner!==this.ctBulkOwner || this.ctBulkSession.view!==this.ctBulkView || this.ctBulkSession.scope!==this.ctBulkScopeKey);},
-            ctBulkToolUnit(){return !this.ctBulkStale && this.ctBulkSession ? this._ctUnitIndex?.get(this.ctBulkSession.sourceId) : null;},
+            ctBulkToolUnit(){return !this.ctBulkStale && this.ctBulkSession?.side==='target' ? this._ctUnitIndex?.get(this.ctBulkSession.sourceId) : null;},
             ctBulkToolField(){return this.ctBulkToolUnit?.fields.find(f=>f.id===this.ctBulkSession.fieldId);},
             ctBulkToolValues(){const unit=this.ctBulkToolUnit;return unit ? {...(unit===this.ctCurrentUnit?this.ctValues:this.ctValuesFor(unit)),[this.ctBulkToolField.id]:this.ctBulkText} : null;},
             ctBulkHint(){return 'Click to edit. Drag across records to fill this field. Ctrl/⌘ + click toggles cells; Shift + click selects a range.';},
             ctBulkMarks(){
-                const state=this.ctBulkPreview || this.ctBulkSession;
-                return state ? {fieldId:state.fieldId,ids:new Set(state.rows.map(row=>row.unitId))} : null;
+                const marks={};
+                for(const state of [this.ctBulkSources,this.ctBulkSession,this.ctBulkPreview]){
+                    if(state)marks[state.side]={fieldId:state.fieldId,ids:new Set(state.rows.map(row=>row.unitId))};
+                }
+                return marks;
             },
             ctBulkImpact(){
                 if(!this.ctBulkSession)return '';
+                if(this.ctBulkPasted){
+                    const counts={fill:0,replace:0,same:0,skip:0};
+                    for(const row of this.ctBulkSession.rows){
+                        if(!Object.hasOwn(this.ctBulkPasted,row.unitId))counts.skip++;
+                        else if(this.ctBulkPasted[row.unitId]===row.expectedValue)counts.same++;
+                        else if(!row.expectedValue)counts.fill++;else counts.replace++;
+                    }
+                    return [counts.fill && counts.fill+' to fill',counts.replace && counts.replace+' to replace',
+                        counts.same && counts.same+' already match',counts.skip && counts.skip+' skipped'].filter(Boolean).join(' · ');
+                }
                 const {blank,replace,same}=impact(this.ctBulkSession.rows,this.ctBulkText);
                 if(this.ctBulkTouched && !this.ctBulkText)return [replace && replace+' to clear',blank && blank+' already blank'].filter(Boolean).join(' · ');
                 return [blank && blank+(this.ctBulkText?' to fill':' empty'),replace && replace+(this.ctBulkText?' to replace':' populated'),
                     same && same+' already match'].filter(Boolean).join(' · ');
             },
-            ctBulkCanSave(){return !!(this.ctBulkSession && this.ctBulkTouched && this.ctBulkSession.rows.some(r=>r.expectedValue!==this.ctBulkText)
+            ctBulkCanSave(){return !!(this.ctBulkSession && this.ctBulkTouched && this.ctBulkSession.rows.some(r=>r.expectedValue!==this.ctBulkEffective(r))
                 && !this.ctBulkStale && !this.ctBusy && !this.ctBrowseBusy && !this.ctBulkSaving);},
         },
         watch:{ctBulkScopeKey:'ctBulkViewChanged',ctBulkView:'ctBulkViewChanged',ctBulkOwner:'ctBulkViewChanged'},
@@ -56,17 +75,79 @@
         beforeUnmount(){root.removeEventListener('beforeunload',this._ctFillUnload);root.removeEventListener('blur',this._ctFillBlur);this.ctBulkEndPointer();},
         methods:{
             ctBulkFieldAllowed(field){return !!field && ['text','form'].includes(field.kind);},
-            ctBulkMarked(unitId,fieldId){return this.ctBulkMarks?.fieldId===fieldId && this.ctBulkMarks.ids.has(unitId);},
+            ctBulkRowName(id){return this._ctUnitIndex?.get(id)?.recordId || '';},
+            ctBulkShownText(unit,part){return !this.ctBulkStale && this.ctBulkSession?.fieldId===part.id ? this.ctBulkPasted?.[unit.id] ?? part.text : part.text;},
+            ctBulkSourceFields(unit){
+                const seen=new Set();
+                return this.ctFieldsFor(unit).filter(field=>{
+                    const key=field.sourceCell || field.id;
+                    if(!this.ctBulkFieldAllowed(field) || seen.has(key))return false;
+                    seen.add(key);return true;
+                });
+            },
+            ctBulkSourceField(unit,source){
+                const first=unit.fields.find(f=>f.id===source.key);
+                return first && this.ctBulkSourceFields(unit).find(f=>f.id===first.id || first.sourceCell && first.sourceCell===f.sourceCell);
+            },
+            ctBulkMarked(unitId,fieldId,side='target'){const marks=this.ctBulkMarks[side];return !!marks && marks.fieldId===fieldId && marks.ids.has(unitId);},
+            ctBulkEffective(row){
+                if(this.ctBulkPasted)return this.ctBulkPasted[row.unitId] ?? row.expectedValue;
+                return this.ctBulkTouched ? this.ctBulkText : row.expectedValue;
+            },
+            ctBulkSetPastedRow(id){
+                const session=this.ctBulkSession,row=session?.rows.find(r=>r.unitId===id);
+                if(!row || this.ctBulkStale || this.ctBulkSaving || this.ctBulkRetry || !this.ctBulkPasted)return;
+                this.ctBulkSession=raw({...session,sourceId:id});this.ctBulkText=this.ctBulkEffective(row);
+            },
+            ctBulkCopyValues(session){
+                const values=new Map(session.rows.map(row=>[row.unitId,session.side==='source'?row.expectedValue:this.ctBulkEffective(row)]));
+                return session.slots.map(id=>id===null?null:values.get(id));
+            },
+            ctBulkCopySource(event){
+                const session=this.ctBulkSources,source=event.target?.closest?.('[data-ct-source-selection]');
+                if(!session || session.scope!==this.ctBulkScopeKey || session.view!==this.ctBulkView || !source || !event.clipboardData || this.ctKeyboardOverlayOpen())return;
+                const payload=root.ClientTextClipboard.encode(this.ctBulkCopyValues(session));
+                event.clipboardData.setData('text/plain',payload.text);event.clipboardData.setData('text/html',payload.html);event.preventDefault();
+            },
+            async ctBulkCopyAll(){
+                const session=this.ctBulkSession;if(!session || this.ctBulkStale)return;
+                try{await root.ClientTextClipboard.write(this.ctBulkCopyValues(session));}
+                catch(error){if(this.ctBulkSession===session)this.ctBulkError='Could not copy the cells: '+error.message;}
+            },
+            ctBulkPaste(event){
+                const session=this.ctBulkSession,data=event.clipboardData;
+                if(!session || !data || event.defaultPrevented || event.target?.composing || this.ctBulkSaving || this.ctBulkRetry || this.ctBulkStale)return;
+                const target=event.target?.closest?.('#ctBulkTranslation,[data-ct-bulk-field]:not([data-ct-source-selection])');
+                if(!target || target.id!=='ctBulkTranslation' && !this.ctBulkMarked(target.closest('tr[data-unit-id]')?.dataset.unitId,target.dataset.ctBulkField))return;
+                const clip=root.ClientTextClipboard.decode(data.getData('text/plain'),data.getData('text/html'));
+                if(!clip.tabular){
+                    if(event.target.id==='ctBulkTranslation')return;
+                    const text=data.getData('text/plain');
+                    if(!text)return;
+                    event.preventDefault();event.stopPropagation();
+                    this.ctBulkText=text;this.ctBulkPasted=null;this.ctBulkTouched=true;this.ctBulkError='';this.$refs.ctBulkEditor?.focus();return;
+                }
+                event.preventDefault();event.stopPropagation();
+                const assigned=root.ClientTextClipboard.assign(session.slots,clip.rows);
+                if(!assigned.length){this.ctBulkError='The pasted cells have no values for this selection.';return;}
+                const pending=this.ctBulkPasted || (this.ctBulkTouched?Object.fromEntries(session.rows.map(r=>[r.unitId,this.ctBulkText])):{});
+                this.ctBulkError='';this.ctBulkTouched=true;
+                this.ctBulkPasted=raw({...pending,...Object.fromEntries(assigned.map(({unitId,value})=>[unitId,value]))});
+                const id=Object.hasOwn(this.ctBulkPasted,session.sourceId)?session.sourceId:assigned[0]?.unitId ?? session.sourceId;
+                this.ctBulkSetPastedRow(id);
+                this.$nextTick(()=>{if(this.ctBulkSession?.sourceId===id && !this.ctBulkStale)this.$refs.ctBulkEditor?.focus();});
+            },
             ctBulkViewChanged(){
                 this.ctBulkEndPointer();
+                this.ctBulkSources=null;
                 const session=this.ctBulkSession,owner=this.ctBulkOwner;
                 if(session && session.owner!==owner){
-                    if(this.ctBulkTouched || this.ctBulkRetry)(this._ctParkedFills ||= new Map()).set(session.owner,{session,text:this.ctBulkText,retry:this.ctBulkRetry});
+                    if(this.ctBulkTouched || this.ctBulkRetry)(this._ctParkedFills ||= new Map()).set(session.owner,{session,text:this.ctBulkText,retry:this.ctBulkRetry,pasted:this.ctBulkPasted});
                     this.ctBulkCancel();
                 }
                 if(!this.ctBulkSession && owner && this._ctParkedFills?.has(owner)){
                     const p=this._ctParkedFills.get(owner);this._ctParkedFills.delete(owner);
-                    this.ctBulkSession=p.session;this.ctBulkText=p.text;this.ctBulkTouched=true;this.ctBulkRetry=p.retry;
+                    this.ctBulkSession=p.session;this.ctBulkText=p.text;this.ctBulkTouched=true;this.ctBulkRetry=p.retry;this.ctBulkPasted=p.pasted;
                 }
                 if(this.ctBulkSession && this.ctBulkStale){
                     if(!this.ctBulkTouched && !this.ctBulkRetry)this.ctBulkCancel();
@@ -85,30 +166,31 @@
                 if(restore && this.ctBulkSaving)return;
                 this.ctBulkEndPointer();
                 const origin=this._ctBulkFocus;
-                this.ctBulkSession=null;this.ctBulkPreview=null;this.ctBulkRetry=null;this.ctBulkError='';this.ctBulkText='';this.ctBulkTouched=false;this.ctBulkFull=false;this._ctBulkFocus=null;
+                this.ctBulkSession=null;this.ctBulkPreview=null;this.ctBulkRetry=null;this.ctBulkError='';this.ctBulkText='';this.ctBulkTouched=false;this.ctBulkFull=false;this.ctBulkPasted=null;this._ctBulkFocus=null;
                 if(restore && origin?.isConnected)origin.focus({preventScroll:true});
             },
-            ctBulkPointerDown(unit,field,event){
+            ctBulkPointerDown(unit,field,event,side='target'){
                 if(event.button!==0 || !event.isPrimary || this.ctKeyboardBlocked() || this.ctBulkSaving || !this.ctBulkFieldAllowed(field))return;
                 event.preventDefault();
                 const target=event.currentTarget;
                 this.ctBulkEndPointer();
-                this._ctBulkPointer=raw({unit,field,target,pointerId:event.pointerId,x:event.clientX,y:event.clientY,scope:this.ctBulkScopeKey,
+                this._ctBulkPointer=raw({unit,field,side,target,pointerId:event.pointerId,x:event.clientX,y:event.clientY,scope:this.ctBulkScopeKey,
                     add:event.ctrlKey || event.metaKey,extend:event.shiftKey,dragging:false,last:null});
                 target.setPointerCapture(event.pointerId);
             },
-            ctBulkMakeSession(unit,field,units,keep,anchor,base=this.ctBulkSession){
-                const previous=base && sameColumn(base,unit,field) ? new Map(base.rows.map(row=>[row.unitId,row])) : new Map();
+            ctBulkMakeSession(unit,field,units,keep,anchor,side){
+                const base=side==='source'?this.ctBulkSources:this.ctBulkSession,previous=base && sameColumn(base,unit,field,side) ? new Map(base.rows.map(row=>[row.unitId,row])) : new Map();
                 const selected=new Map(keep?previous:[]);
                 for(const target of units){
                     if(target.role!==unit.role || target.sheet!==unit.sheet || selected.has(target.id))continue;
-                    const visible=target.id===this.ctSelection && this.ctInlineUnitVisible() ?
+                    const original=target.fields.find(f=>f.id===field.id);
+                    const visible=side==='source' ? this.ctBulkSourceFields(target).some(f=>f.id===field.id) : target.id===this.ctSelection && this.ctInlineUnitVisible() ?
                         this.ctDisplayedFields().some(f=>f.id===field.id) : this.ctListTargetParts(target,true).some(part=>part.field?.id===field.id);
                     if(!visible)continue;
-                    selected.set(target.id,previous.get(target.id) || {unitId:target.id,expectedValue:this.ctValuesFor(target)[field.id],revision:this.ctSaved[target.id]?.revision || 0});
+                    selected.set(target.id,previous.get(target.id) || {unitId:target.id,expectedValue:side==='source'?original.source:this.ctValuesFor(target)[field.id],revision:this.ctSaved[target.id]?.revision || 0});
                 }
-                return {role:unit.role,sheet:unit.sheet,fieldId:field.id,label:this.ctHistoryFieldLabel(field),owner:this.ctBulkOwner,view:this.ctBulkView,
-                    sourceId:keep && previous.size ? base.sourceId : unit.id,anchor,scope:this.ctBulkScopeKey,rows:[...selected.values()]};
+                return {role:unit.role,sheet:unit.sheet,fieldId:field.id,side,label:this.ctHistoryFieldLabel(field),owner:this.ctBulkOwner,view:this.ctBulkView,
+                    sourceId:keep && previous.size ? base.sourceId : unit.id,anchor,scope:this.ctBulkScopeKey,rows:this.ctPageRows.filter(r=>selected.has(r.id)).map(r=>selected.get(r.id))};
             },
             ctBulkPointerMove(event){
                 const g=this._ctBulkPointer;
@@ -132,8 +214,9 @@
                     };
                     g.frame=root.requestAnimationFrame(scroll);
                 }
-                if(g.add && this.ctBulkSession && !sameColumn(this.ctBulkSession,g.unit,g.field))return;
-                this.ctBulkPreview=raw(this.ctBulkMakeSession(g.unit,g.field,range(this.ctPageRows,g.unit.id,g.last),g.add,g.unit.id));
+                const base=g.side==='source'?this.ctBulkSources:this.ctBulkSession;
+                if(g.add && base && !sameColumn(base,g.unit,g.field,g.side))return;
+                this.ctBulkPreview=raw(this.ctBulkMakeSession(g.unit,g.field,range(this.ctPageRows,g.unit.id,g.last),g.add,g.unit.id,g.side));
             },
             ctBulkPointerUp(event){
                 const g=this._ctBulkPointer;
@@ -145,48 +228,62 @@
                 // The browser subsequently dispatches its pointer-generated click or dblclick.
                 // A selection does not open a second editor or move focus between pointer events.
                 if(g.dragging){
-                    if(preview)this.ctBulkApplySelection(preview,g.target,true);
-                }else this.ctBulkChoose(g.unit,g.field,g.add,g.extend,g.target);
+                    if(preview)this.ctBulkApplySelection(preview,g.target,true,[g.unit.id,g.last]);
+                }else this.ctBulkChoose(g.unit,g.field,g.add,g.extend,g.target,g.side);
             },
-            ctBulkClick(unit,field,event){
-                if(event.detail===0)this.ctBulkChoose(unit,field,event.ctrlKey || event.metaKey,event.shiftKey,event.currentTarget);
+            ctBulkClick(unit,field,event,side='target'){
+                if(event.detail===0)this.ctBulkChoose(unit,field,event.ctrlKey || event.metaKey,event.shiftKey,event.currentTarget,side);
             },
-            ctBulkApplySelection(next,origin,focus){
+            ctBulkApplySelection(next,origin,focus,edges=[]){
+                next.slots=slots(this.ctPageRows,next.rows,edges);
+                if(next.side==='source'){
+                    this.ctBulkSources=next.rows.length?raw(next):null;origin.focus({preventScroll:true});return;
+                }
                 const current=this.ctBulkSession;
                 if(this.ctBulkStale){this.ctBulkError='Return to the original table view or cancel the retained edit.';return;}
                 if(this.ctBulkRetry){this.ctBulkError='Retry or cancel the previous Save first.';return;}
-                if(current && this.ctBulkTouched && (next.fieldId!==current.fieldId || next.role!==current.role || next.sheet!==current.sheet || !next.rows.length)){
+                if(current && this.ctBulkTouched && (next.side!==current.side || next.fieldId!==current.fieldId || next.role!==current.role || next.sheet!==current.sheet || !next.rows.length)){
                     this.ctBulkError='Save or cancel the current replacement first.';return;
                 }
                 if(!next.rows.length){this.ctBulkCancel(true);return;}
                 if(!next.rows.some(row=>row.unitId===next.sourceId))next.sourceId=next.rows[0].unitId;
-                if(next.rows.length>100){this.ctBulkError='Select at most 100 cells for one Save.';this.ctError=this.ctBulkError;return;}
+                if(next.side==='target' && next.rows.length>100){this.ctBulkError='Select at most 100 cells for one Save.';this.ctError=this.ctBulkError;return;}
+                if(this.ctBulkPasted){
+                    this.ctBulkPasted=raw(Object.fromEntries(next.rows.filter(row=>Object.hasOwn(this.ctBulkPasted,row.unitId)).map(row=>[row.unitId,this.ctBulkPasted[row.unitId]])));
+                    this.ctBulkText=this.ctBulkEffective(next.rows.find(row=>row.unitId===next.sourceId));
+                }
                 this._ctBulkFocus=origin;this.ctCloseCompletion();this.ctBulkSession=raw(next);this.ctBulkError='';
                 if(focus || !current)this.$nextTick(()=>{if(this.ctBulkSession===next)this.$refs.ctBulkEditor?.focus();});
             },
-            async ctBulkChoose(unit,field,add,extend,origin){
+            async ctBulkChoose(unit,field,add,extend,origin,side='target'){
                 if(this.ctKeyboardBlocked() || this.ctBulkSaving)return;
-                const current=this.ctBulkSession;
+                const current=side==='source'?this.ctBulkSources:this.ctBulkSession;
                 if(!add && !extend){
+                    if(side==='source'){this.ctBulkApplySelection(this.ctBulkMakeSession(unit,field,[unit],false,unit.id,side),origin,false);return;}
                     if(current && (this.ctBulkTouched || this.ctBulkRetry)){this.ctBulkError='Save or cancel the current replacement first.';return;}
                     this.ctBulkCancel();
                     if(this.ctInlineUnitVisible() && this.ctCurrentUnit===unit){this.ctFocusTarget(false,field.id);return;}
                     if(await this.ctSelect(unit,!this.inlineEditor,{saveInline:true,focus:false}) && this.ctCurrentUnit===unit)this.ctFocusTarget(false,field.id);
                     return;
                 }
-                if(extend && current){
+                if(extend && current && current.side===side){
                     const start=this._ctUnitIndex.get(current.anchor),locked=start?.fields.find(f=>f.id===current.fieldId);
                     if(!locked)return;
-                    this.ctBulkApplySelection(this.ctBulkMakeSession(start,locked,range(this.ctPageRows,start.id,unit.id),add,start.id),origin,false);return;
+                    this.ctBulkApplySelection(this.ctBulkMakeSession(start,locked,range(this.ctPageRows,start.id,unit.id),add,start.id,side),origin,false,[start.id,unit.id]);return;
                 }
-                if(current && !sameColumn(current,unit,field)){this.ctBulkError='Select another '+current.label+' cell in the same worksheet.';return;}
-                const next=this.ctBulkMakeSession(unit,field,[unit],true,unit.id);
-                if(current?.rows.some(r=>r.unitId===unit.id))next.rows=next.rows.filter(r=>r.unitId!==unit.id);
+                if(current && current.side===side && !sameColumn(current,unit,field,side)){this.ctBulkError='Select another '+current.label+' cell in the same worksheet.';return;}
+                const next=this.ctBulkMakeSession(unit,field,[unit],true,unit.id,side);
+                if(current?.side===side && current.rows.some(r=>r.unitId===unit.id))next.rows=next.rows.filter(r=>r.unitId!==unit.id);
                 this.ctBulkApplySelection(next,origin,false);
             },
             ctBulkKey(event){
                 if(event.defaultPrevented || event.isComposing || event.keyCode===229 || this.ctKeyboardOverlayOpen())return false;
                 if(event.key==='Escape' && this._ctBulkPointer){event.preventDefault();this.ctBulkEndPointer();return true;}
+                if(this.ctBulkSources && event.target?.closest?.('[data-ct-source-selection]')){
+                    if(event.key==='Escape'){event.preventDefault();this.ctBulkSources=null;}
+                    if((event.metaKey || event.ctrlKey) && ['s','v'].includes(event.key.toLowerCase()))event.preventDefault();
+                    return true;
+                }
                 if(!this.ctBulkSession)return false;
                 if(event.key==='Escape' && !event.altKey && !event.ctrlKey && !event.metaKey){
                     event.preventDefault();event.stopPropagation();
@@ -227,8 +324,8 @@
                 this.ctBusy=true;this.ctBulkSaving=true;this.ctBulkError='';
                 try{
                     if(!await this.ctFlushDraft() || !current())return false;
-                    const job=this.ctBulkRetry || raw({jobId:root.crypto.randomUUID(),role:session.role,sheet:session.sheet,fieldId:session.fieldId,
-                        value:this.ctBulkText,rows:session.rows});
+                    const plan=this.ctBulkPasted ? {mode:'rows',rows:session.rows.filter(r=>Object.hasOwn(this.ctBulkPasted,r.unitId)).map(r=>({...r,value:this.ctBulkPasted[r.unitId]}))} : {value:this.ctBulkText,rows:session.rows};
+                    const job=this.ctBulkRetry || raw({jobId:root.crypto.randomUUID(),role:session.role,sheet:session.sheet,fieldId:session.fieldId,...plan});
                     this.ctBulkRetry=job;
                     const results=await store.saveFieldBatch(ctx.scope,job,{guard:current});
                     if(!current())return false;
@@ -314,7 +411,10 @@
                 ctFieldsFor(){return [this.field];},ctHistoryFieldLabel(field){return this.host.ctHistoryFieldLabel(field);},
                 ctStorage(scope){return this.host.ctStorage(scope);},ctClassVariantLabel(field){return this.host.ctClassVariantLabel(field);},
                 ctValuesFor(unit){return this.host.ctValuesFor(unit);},ctReviewHash(field){return this.host.ctReviewHash(field);},
-                ctEdited(){this.host.ctBulkTouched=true;this.host.ctBulkError='';},ctResizeField(input){this.host.ctResizeField(input);},
+                ctEdited(){
+                    this.host.ctBulkTouched=true;this.host.ctBulkError='';
+                    if(this.host.ctBulkPasted)this.host.ctBulkPasted=raw({...this.host.ctBulkPasted,[this.session.sourceId]:this.host.ctBulkText});
+                },ctResizeField(input){this.host.ctResizeField(input);},
                 ctKeyboardOverlayOpen(){return this.host.ctKeyboardOverlayOpen();},ctDiagnosticDialog(){return this.host.ctDiagnosticDialog();},
                 ctCompletionItems(field,marker,prefix){return this.host.ctCompletionItems(field,marker,prefix);},
                 ctDictionaryPairs(word){return this.host.ctDictionaryPairs(word);},

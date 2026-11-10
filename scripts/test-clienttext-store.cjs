@@ -45,6 +45,14 @@ test('field fills commit whole records atomically, retain sibling drafts and rep
     assert.equal((await f.store.listHistory(scope,c.id)).length,1);
     await f.store.saveFieldBatch(scope,{...command,jobId:'intentional-clear',value:'',rows:[{unitId:c.id,revision:1,expectedValue:'New'}]});
     assert.equal((await f.store.getSaved(scope))[c.id].values[fieldId],'');
+    const pasted={jobId:'different-strings',role:a.role,sheet:a.sheet,fieldId,mode:'rows',rows:[
+        {unitId:b.id,revision:2,expectedValue:'Latest',value:'First\nline'},
+        {unitId:c.id,revision:2,expectedValue:'',value:'Second\tcell'}]};
+    const distinct=await f.store.saveFieldBatch(scope,pasted);
+    assert.deepEqual(distinct.map(r=>r.saved.values[fieldId]),['First\nline','Second\tcell']);
+    assert.deepEqual(distinct.map(r=>r.saved.values[description]),['Original B','Original C']);
+    assert.deepEqual((await f.store.saveFieldBatch(scope,pasted)).map(r=>r.saved),distinct.map(r=>r.saved));
+    await assert.rejects(f.store.saveFieldBatch(scope,{...pasted,rows:pasted.rows.toReversed()}),/different selection/);
 });
 test('export original lookup reads only requested immutable unit keys and rejects absent references',async()=>{
     const f=fixture(),units=Array.from({length:300},(_,index)=>({...unit(),id:JSON.stringify(['normal','ClientStrings','ID/'+index]),recordId:'ID/'+index}));

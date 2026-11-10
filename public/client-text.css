@@ -150,6 +150,8 @@
 .ctCellFillSummary span {color:var(--ui-muted);}
 .ctCellFillCommands {justify-content:flex-end;margin-top:4px;}
 .ctCellFillCommands [role=alert] {color:var(--ui-missing);margin-right:auto;}
+.ctBulkPastePreview {display:flex;align-items:center;gap:6px;margin:6px 0;}
+.ctBulkPastePreview select {max-width:100%;}
 .ctBulkEditingFields {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;align-items:start;margin-top:5px;}
 .ctBulkEditingFields .editorFieldTools {min-width:0;}
 .ctCellFill .editorTextField textarea {width:100%;min-height:38px;}

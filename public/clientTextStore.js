@@ -857,10 +857,11 @@
         // Every selected field is checked against its original and the value shown when selected.
         // Use the same record Save/history/outbox path and one device transaction for all records.
         async function saveFieldBatch(rawScope,requestBody,options={}){
-            const body=copy(requestBody),{jobId,role,sheet,fieldId,value,rows:selected}=body;
-            if(typeof jobId!=='string' || !jobId || typeof value!=='string' || typeof fieldId!=='string'
+            const body=copy(requestBody),{jobId,role,sheet,fieldId,rows:selected}=body,distributed=body.mode==='rows';
+            if(typeof jobId!=='string' || !jobId || (distributed?own(body,'value'):typeof body.value!=='string') || typeof fieldId!=='string'
                 || !Array.isArray(selected) || !selected.length || selected.length>100 || new Set(selected.map(row=>row.unitId)).size!==selected.length
-                || selected.some(row=>typeof row.expectedValue!=='string' || !Number.isSafeInteger(row.revision) || row.revision<0))
+                || selected.some(row=>typeof row.expectedValue!=='string' || !Number.isSafeInteger(row.revision) || row.revision<0
+                    || (distributed?typeof row.value!=='string':own(row,'value'))))
                 throw new TypeError('Select up to 100 distinct workbook cells for this translation.');
             const captured=capture(rawScope),scope=captured.id,metadata=await requireReady(scope,options);
             const units=new Map((await getUnitsByIds(rawScope,selected.map(row=>row.unitId),options)).map(unit=>[unit.id,unit]));
@@ -875,7 +876,7 @@
                     const id=row.unitId,unit=units.get(id),field=unit?.fields.find(f=>f.id===fieldId);
                     if(!field || unit.role!==role || unit.sheet!==sheet || !['text','form'].includes(field.kind))
                         throw protectedError('The selected translation column changed. Select its cells again.');
-                    const changes=row.expectedValue!==value,childId=changes?jobId+':'+changed++:null,recordKey=key(scope,id);
+                    const value=distributed?row.value:body.value,changes=row.expectedValue!==value,childId=changes?jobId+':'+changed++:null,recordKey=key(scope,id);
                     if(firstReceipt && !changes)continue;
                     const receipt=firstReceipt && await get(tx,stores.receipts,key(scope,childId));
                     const before=await get(tx,stores.saved,recordKey),draft=await get(tx,stores.drafts,recordKey);

@@ -85,5 +85,74 @@ module.exports=async function({page,files,failures}){
     await page.waitForFunction(()=>{const v=window.__clientFixtureApp;return !v.ctNavigationBusy && v.ctCurrentUnit?.recordId==='record';});
     const cleared=await snapshot();assert.equal(cleared.complete.description,'');assert.equal(cleared.record.description,'Old description');
     assert.equal(cleared.record.draft,'Retained unsaved description');
-    assert.deepEqual(failures,[]);console.log('PASS ClientText field selection, shared native toolbar, history, Ctrl+S, local receipts and preserved inline sibling drafts.');
+    await page.context().grantPermissions(['clipboard-read','clipboard-write'],{origin:new URL(page.url()).origin});
+    const english=(unit,name)=>page.getByRole('button',{name:unit+', English '+name,exact:true});
+    const readClipboard=expected=>page.evaluate(async expected=>{
+        for(let attempt=0;attempt<60;attempt++)try{
+            const [item]=await navigator.clipboard.read(),text=await (await item.getType('text/plain')).text();
+            const html=item.types.includes('text/html')?await(await item.getType('text/html')).text():'',rows=window.ClientTextClipboard.decode(text,html).rows;
+            if(!expected || JSON.stringify(rows.map(r=>r[0]))===JSON.stringify(expected))return {text,html,rows};
+            await new Promise(resolve=>setTimeout(resolve,15));
+        }catch(error){if(error.name!=='InvalidStateError')throw error;await new Promise(resolve=>setTimeout(resolve,15));}
+        throw Error('The expected spreadsheet clipboard write did not settle.');
+    },expected);
+    // Select the final source before the first source. The unselected middle worksheet row
+    // must still occupy a clipboard position. English gestures never open another record.
+    await english('noaudio','Name').click({modifiers:['Control']});
+    await english('record','Name').click({modifiers:['Control']});
+    await page.keyboard.press('Control+c');
+    const copied=await readClipboard();
+    assert.deepEqual(copied.rows.map(r=>r[0]),['Sword','','[NOAUDIO] ']);
+    assert.ok(copied.html.includes('data-sheets-value'));
+    assert.equal(await dock.count(),0);assert.equal(await description.inputValue(),'Retained unsaved description');
+    // Target selection and source selection coexist, including native copy while the shared field has a draft.
+    await drag(inline.locator('.ctBulkFieldLabel').filter({hasText:/^Name$/}),target('noaudio','Name'));
+    await input.fill('Temporary replacement');
+    await english('record','Name').focus();await page.keyboard.press('Control+c');
+    assert.equal(await input.inputValue(),'Temporary replacement');
+    await input.press('Control+v');await dock.locator('.ctBulkPastePreview').waitFor();
+    await dock.getByRole('button',{name:'Copy all',exact:true}).click();
+    assert.ok((await readClipboard(['Sword','Temporary replacement','[NOAUDIO] '])).html.includes('data-sheets-value'));
+    await input.press('Escape');await dock.waitFor({state:'detached'});
+    await english('record','Name').focus();await page.keyboard.press('Control+c');
+    await drag(inline.locator('.ctBulkFieldLabel').filter({hasText:/^Name$/}),target('noaudio','Name'));
+    await input.press('Control+v');await dock.locator('.ctBulkPastePreview').waitFor();
+    assert.match(await dock.textContent(),/1 skipped/);
+    assert.deepEqual(await snapshot(),cleared);
+    await dock.getByRole('button',{name:'Copy all',exact:true}).click();
+    const copiedTargets=await readClipboard(['Sword','Updated name','[NOAUDIO] ']);assert.ok(copiedTargets.html.includes('data-sheets-value'));
+    await page.evaluate(()=>navigator.clipboard.writeText(' \n\t \n'));await input.press('Control+v');
+    assert.match(await dock.getByRole('alert').textContent(),/no values/);
+    const records=dock.getByRole('combobox',{name:'Record to edit'});
+    await records.selectOption({label:'noaudio'});await input.fill('New third value');
+    await dock.getByRole('button',{name:'Copy all',exact:true}).click();
+    assert.ok((await readClipboard(['Sword','Updated name','New third value'])).html.includes('data-sheets-value'));
+    await page.evaluate(()=>navigator.clipboard.writeText('Corrected\tunused column\r\n\r\n\r\nOverflow must be ignored'));
+    await input.press('Control+v');
+    await dock.getByRole('button',{name:'Copy all',exact:true}).click();
+    assert.ok((await readClipboard(['Corrected','Updated name','New third value'])).html.includes('data-sheets-value'));
+    await input.press('Control+s');await dock.waitFor({state:'detached'});
+    const latest=await snapshot();assert.equal(latest.record.name,'Corrected');assert.equal(latest.complete.name,'Updated name');
+    assert.equal(latest.complete.history,cleared.complete.history);assert.equal(latest.record.draft,'Retained unsaved description');
+    const last=await page.evaluate(async()=>{
+        const vm=window.__clientFixtureApp,unit=vm.ctUnits.find(u=>u.recordId==='noaudio');
+        return (await vm.ctStorage(vm.ctWorkspace.scope).getSaved(vm.ctWorkspace.scope))[unit.id].values[unit.fields.find(f=>f.name==='Name').id];
+    });
+    assert.equal(last,'New third value');
+    await description.press('Control+a');await description.press('Control+c');
+    assert.equal((await readClipboard()).text,'Retained unsaved description','native text selection has independent clipboard ownership');
+    // In reverse order the noaudio record is the first displayed row. It has no Description
+    // field, but the released/Shift-clicked endpoint still occupies the first clipboard slot.
+    await page.evaluate(()=>{window.__clientFixtureApp.ctSortDir='desc';});
+    await english('complete','Description').click({modifiers:['Control']});
+    await english('noaudio','Name').click({modifiers:['Shift']});await page.keyboard.press('Control+c');
+    assert.deepEqual((await readClipboard()).rows.map(r=>r[0]),['','{0:+d} <<keybind:open_panel>>']);
+    await drag(target('complete','Description'),target('noaudio','Name'));
+    await page.evaluate(()=>navigator.clipboard.writeText('Unmapped first row\r\nMapped second row'));
+    await input.press('Control+v');await dock.locator('.ctBulkPastePreview').waitFor();
+    assert.equal(await input.inputValue(),'Mapped second row');
+    await dock.getByRole('button',{name:'Copy all',exact:true}).click();
+    assert.ok((await readClipboard(['','Mapped second row'])).html.includes('data-sheets-value'));
+    await input.press('Escape');await dock.waitFor({state:'detached'});
+    assert.deepEqual(failures,[]);console.log('PASS ClientText field selection, source clipboard, ordered target paste, dual-format Copy all, shared toolbar, Ctrl+S and preserved sibling drafts.');
 };
