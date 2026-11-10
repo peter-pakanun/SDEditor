@@ -71,8 +71,9 @@
             this._ctFillUnload=event=>{if(this.ctBulkTouched || this.ctBulkRetry || this._ctParkedFills?.size){event.preventDefault();event.returnValue='';}};
             this._ctFillBlur=()=>this.ctBulkEndPointer();
             root.addEventListener('beforeunload',this._ctFillUnload);root.addEventListener('blur',this._ctFillBlur);
+            root.document.addEventListener('copy',this.ctBulkCopySource);
         },
-        beforeUnmount(){root.removeEventListener('beforeunload',this._ctFillUnload);root.removeEventListener('blur',this._ctFillBlur);this.ctBulkEndPointer();},
+        beforeUnmount(){root.removeEventListener('beforeunload',this._ctFillUnload);root.removeEventListener('blur',this._ctFillBlur);root.document.removeEventListener('copy',this.ctBulkCopySource);this.ctBulkEndPointer();},
         methods:{
             ctBulkFieldAllowed(field){return !!field && ['text','form'].includes(field.kind);},
             ctBulkRowName(id){return this._ctUnitIndex?.get(id)?.recordId || '';},
@@ -104,8 +105,9 @@
                 return session.slots.map(id=>id===null?null:values.get(id));
             },
             ctBulkCopySource(event){
-                const session=this.ctBulkSources,source=event.target?.closest?.('[data-ct-source-selection]');
-                if(!session || session.scope!==this.ctBulkScopeKey || session.view!==this.ctBulkView || !source || !event.clipboardData || this.ctKeyboardOverlayOpen())return;
+                const session=this.ctBulkSources,source=root.document.activeElement?.closest('[data-ct-source-selection]');
+                if(event.defaultPrevented || !session || session.owner!==this.ctBulkOwner || session.scope!==this.ctBulkScopeKey || session.view!==this.ctBulkView
+                    || !source || !this.$refs.ctFileTableRegion?.contains(source) || !event.clipboardData || this.ctKeyboardOverlayOpen())return;
                 const payload=root.ClientTextClipboard.encode(this.ctBulkCopyValues(session));
                 event.clipboardData.setData('text/plain',payload.text);event.clipboardData.setData('text/html',payload.html);event.preventDefault();
             },
@@ -115,8 +117,36 @@
                 catch(error){if(this.ctBulkSession===session)this.ctBulkError='Could not copy the cells: '+error.message;}
             },
             ctBulkPaste(event){
-                const session=this.ctBulkSession,data=event.clipboardData;
-                if(!session || !data || event.defaultPrevented || event.target?.composing || this.ctBulkSaving || this.ctBulkRetry || this.ctBulkStale)return;
+                const data=event.clipboardData;
+                if(!data || event.defaultPrevented || event.target?.composing || this.ctBulkSaving || this.ctBulkRetry || this.ctBulkStale)return;
+                const inline=event.target?.closest?.('.ctFields[data-side="translation"] textarea[data-ct-target]');
+                if(inline && this.ctInlineUnitVisible() && !this.ctKeyboardBlocked()){
+                    const unit=this.ctCurrentUnit,field=unit?.fields.find(f=>f.id===inline.dataset.ctTarget);
+                    if(!field || !this.ctBulkFieldAllowed(field) || !this.ctKeyboardTarget(field,inline) || inline.readOnly
+                        || this.ctMtlCandidate?.(field) || this.ctTmCandidate?.(field))return;
+                    const clip=root.ClientTextClipboard.decode(data.getData('text/plain'),data.getData('text/html'));
+                    if(!clip.tabular)return;
+                    event.preventDefault();event.stopPropagation();
+                    if(clip.rows.length===1){
+                        const text=clip.rows[0]?.[0];if(typeof text==='string' && text.trim())root.EditorSession.insert(this,field,text,{input:inline});
+                        return;
+                    }
+                    if(this.ctBulkTouched){this.ctBulkError='Save or cancel the current replacement first.';return;}
+                    const order=this.ctRows,start=order.findIndex(row=>row.id===unit.id);
+                    if(start<0)return;
+                    const rows=[];
+                    for(const row of order.slice(start,start+Math.min(100,clip.rows.length))){
+                        if(row.role!==unit.role || row.sheet!==unit.sheet)break;
+                        rows.push(row);
+                    }
+                    const next=this.ctBulkMakeSession(unit,field,rows,false,unit.id,'target',rows);
+                    const assigned=root.ClientTextClipboard.assign(slots(rows,next.rows,[unit.id,rows.at(-1).id]),clip.rows);
+                    if(!assigned.length)return;
+                    if(this.ctBulkSession)this.ctBulkCancel();
+                    this.ctBulkApplySelection(next,inline,false,[unit.id,rows.at(-1).id],rows);
+                    this.ctBulkAcceptPaste(assigned);return;
+                }
+                const session=this.ctBulkSession;if(!session)return;
                 const target=event.target?.closest?.('#ctBulkTranslation,[data-ct-bulk-field]:not([data-ct-source-selection])');
                 if(!target || target.id!=='ctBulkTranslation' && !this.ctBulkMarked(target.closest('tr[data-unit-id]')?.dataset.unitId,target.dataset.ctBulkField))return;
                 const clip=root.ClientTextClipboard.decode(data.getData('text/plain'),data.getData('text/html'));
@@ -130,6 +160,10 @@
                 event.preventDefault();event.stopPropagation();
                 const assigned=root.ClientTextClipboard.assign(session.slots,clip.rows);
                 if(!assigned.length){this.ctBulkError='The pasted cells have no values for this selection.';return;}
+                this.ctBulkAcceptPaste(assigned);
+            },
+            ctBulkAcceptPaste(assigned){
+                const session=this.ctBulkSession;
                 const pending=this.ctBulkPasted || (this.ctBulkTouched?Object.fromEntries(session.rows.map(r=>[r.unitId,this.ctBulkText])):{});
                 this.ctBulkError='';this.ctBulkTouched=true;
                 this.ctBulkPasted=raw({...pending,...Object.fromEntries(assigned.map(({unitId,value})=>[unitId,value]))});
@@ -178,7 +212,7 @@
                     add:event.ctrlKey || event.metaKey,extend:event.shiftKey,dragging:false,last:null});
                 target.setPointerCapture(event.pointerId);
             },
-            ctBulkMakeSession(unit,field,units,keep,anchor,side){
+            ctBulkMakeSession(unit,field,units,keep,anchor,side,order=this.ctPageRows){
                 const base=side==='source'?this.ctBulkSources:this.ctBulkSession,previous=base && sameColumn(base,unit,field,side) ? new Map(base.rows.map(row=>[row.unitId,row])) : new Map();
                 const selected=new Map(keep?previous:[]);
                 for(const target of units){
@@ -190,7 +224,7 @@
                     selected.set(target.id,previous.get(target.id) || {unitId:target.id,expectedValue:side==='source'?original.source:this.ctValuesFor(target)[field.id],revision:this.ctSaved[target.id]?.revision || 0});
                 }
                 return {role:unit.role,sheet:unit.sheet,fieldId:field.id,side,label:this.ctHistoryFieldLabel(field),owner:this.ctBulkOwner,view:this.ctBulkView,
-                    sourceId:keep && previous.size ? base.sourceId : unit.id,anchor,scope:this.ctBulkScopeKey,rows:this.ctPageRows.filter(r=>selected.has(r.id)).map(r=>selected.get(r.id))};
+                    sourceId:keep && previous.size ? base.sourceId : unit.id,anchor,scope:this.ctBulkScopeKey,rows:order.filter(r=>selected.has(r.id)).map(r=>selected.get(r.id))};
             },
             ctBulkPointerMove(event){
                 const g=this._ctBulkPointer;
@@ -234,8 +268,8 @@
             ctBulkClick(unit,field,event,side='target'){
                 if(event.detail===0)this.ctBulkChoose(unit,field,event.ctrlKey || event.metaKey,event.shiftKey,event.currentTarget,side);
             },
-            ctBulkApplySelection(next,origin,focus,edges=[]){
-                next.slots=slots(this.ctPageRows,next.rows,edges);
+            ctBulkApplySelection(next,origin,focus,edges=[],order=this.ctPageRows){
+                next.slots=slots(order,next.rows,edges);
                 if(next.side==='source'){
                     this.ctBulkSources=next.rows.length?raw(next):null;origin.focus({preventScroll:true});return;
                 }
@@ -280,6 +314,16 @@
                 if(event.defaultPrevented || event.isComposing || event.keyCode===229 || this.ctKeyboardOverlayOpen())return false;
                 if(event.key==='Escape' && this._ctBulkPointer){event.preventDefault();this.ctBulkEndPointer();return true;}
                 if(this.ctBulkSources && event.target?.closest?.('[data-ct-source-selection]')){
+                    if((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && (event.code==='KeyC' || event.key.toLowerCase()==='c')){
+                        const session=this.ctBulkSources;
+                        if(session.scope===this.ctBulkScopeKey && session.view===this.ctBulkView && session.owner===this.ctBulkOwner){
+                            event.preventDefault();event.stopPropagation();
+                            root.ClientTextClipboard.write(this.ctBulkCopyValues(session)).catch(error=>{
+                                if(this.ctBulkSources===session)this.ctError='Could not copy the English cells: '+error.message;
+                            });
+                        }
+                        return true;
+                    }
                     if(event.key==='Escape'){event.preventDefault();this.ctBulkSources=null;}
                     if((event.metaKey || event.ctrlKey) && ['s','v'].includes(event.key.toLowerCase()))event.preventDefault();
                     return true;
@@ -453,5 +497,10 @@
             template:`<div class="ctBulkEditingFields"><div class="ctBulkSource"><editor-native-field :controller="sourceControl" kind="english" compact></editor-native-field></div><div><editor-field-toolbar :controller="toolbar"><editor-native-field :controller="targetControl" kind="translation" compact></editor-native-field></editor-field-toolbar><editor-diagnostic-meta :presentation="targetControl.diagnosticPresentation"></editor-diagnostic-meta></div><editor-autocomplete v-if="ctCompletion" :controller="clientTextPopupController()"></editor-autocomplete></div>`
         };
     }
-    return {mixin,editor,range,impact};
+    // Workbook page changes frequently rerender the root. Keeping the collapsed field lists in
+    // their own row component leaves unaffected rows mounted during editor focus and history updates.
+    const browseFields={props:['host','unit','side'],template:`
+        <div v-if="side==='source'" class="ctReadPreview ctBulkFieldList" lang="en"><button v-for="field in host.ctBulkSourceFields(unit)" :key="field.id" type="button" class="ctBulkCell" data-inline-focus-surface data-ct-source-selection :data-ct-bulk-field="field.id" :aria-label="unit.recordId+', English '+host.ctHistoryFieldLabel(field)" :aria-pressed="host.ctBulkMarked(unit.id,field.id,'source')" :title="host.ctHistoryFieldLabel(field)" @pointerdown="host.ctBulkPointerDown(unit,field,$event,'source')" @click.stop="host.ctBulkClick(unit,field,$event,'source')" @dblclick.stop><small>{{ host.ctHistoryFieldLabel(field) }}</small><span>{{ field.source || 'Empty' }}</span></button></div>
+        <template v-else><div class="ctReadPreview ctBulkFieldList" :lang="host.translationEditorBcp47"><template v-for="part in host.ctListTargetParts(unit,true)" :key="part.id"><button v-if="part.field" type="button" class="ctBulkCell" data-inline-focus-surface :data-ct-bulk-field="part.id" :aria-label="unit.recordId+', '+host.ctHistoryFieldLabel(part.field)" :aria-pressed="host.ctBulkMarked(unit.id,part.id)" :title="host.ctHistoryFieldLabel(part.field)+' · '+host.ctBulkHint" @pointerdown="host.ctBulkPointerDown(unit,part.field,$event)" @click.stop="host.ctBulkClick(unit,part.field,$event)" @dblclick.stop><small>{{ host.ctHistoryFieldLabel(part.field) }}</small><span :class="{ctEnglishPlaceholder:!host.ctBulkShownText(unit,part) || part.english && !host.ctBulkPasted?.[unit.id]}">{{ host.ctBulkShownText(unit,part) || 'Empty' }}</span></button><span v-else :class="{ctEnglishPlaceholder:part.english}">{{ part.text }}</span></template></div><small v-for="field in host.ctFieldsFor(unit).filter(field=>field.kind==='gender')" :key="field.id" class="ctMetadataValue">Gender: {{ host.ctValuesFor(unit)[field.id] || 'Blank' }}</small></template>`};
+    return {mixin,editor,browseFields,range,impact};
 });

@@ -235,6 +235,10 @@ async function run() {
             await target.getByRole('region', { name: 'Source versions' }).waitFor();
         };
         await bootstrap(page, managerAccessOnly ? 'manager' : 'admin');
+        if(process.argv.includes('--row-click-only')){
+            await require('./clienttext-row-click-browser-check.cjs')({page,files,failures});
+            return;
+        }
         if(process.argv.includes('--field-fill-only')){
             await require('./clienttext-field-fill-browser-check.cjs')({page,files,failures});
             return;

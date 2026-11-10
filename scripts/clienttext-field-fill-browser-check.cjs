@@ -154,5 +154,29 @@ module.exports=async function({page,files,failures}){
     await dock.getByRole('button',{name:'Copy all',exact:true}).click();
     assert.ok((await readClipboard(['','Mapped second row'])).html.includes('data-sheets-value'));
     await input.press('Escape');await dock.waitFor({state:'detached'});
+    // A physical drag then Ctrl+C must replace an OS clipboard sentinel without the test
+    // moving focus to a source handle, even if a native translation field owned focus.
+    assert.equal((await snapshot()).record.draft,'Retained unsaved description','endpoint tests retain the previous draft');
+    await page.evaluate(()=>{window.__clientFixtureApp.ctSortDir='asc';});
+    await description.focus();await description.press('Control+a');
+    await page.evaluate(()=>navigator.clipboard.writeText('Old clipboard sentinel'));
+    const from=await point(english('complete','Name')),to=await point(english('record','Description'));
+    await page.mouse.move(from.x,from.y);await page.mouse.down();await page.mouse.move(to.x,to.y,{steps:8});await page.mouse.up();
+    await page.keyboard.press('Control+c');
+    assert.ok((await readClipboard(['Sword','Shield'])).html.includes('data-sheets-value'));
+    assert.equal((await snapshot()).record.draft,'Retained unsaved description','source dragging retains the prior focused translation draft');
+    // No target selection exists. Paste into a regular row's native field and verify both
+    // spreadsheet cells are proposed in order, even when the second row is on the next page.
+    await page.evaluate(()=>{window.__clientFixtureApp.pageSize=1;window.__clientFixtureApp.ctPage=1;});
+    const normalName=inline.getByRole('textbox',{name:'Name',exact:true});
+    if(!await normalName.isVisible())await target('record','Name').click();
+    assert.equal((await snapshot()).record.draft,'Retained unsaved description','the ordinary paste begins with a sibling draft');
+    await normalName.focus();await normalName.press('Control+v');
+    await dock.locator('.ctBulkPastePreview').waitFor();
+    assert.equal(await dock.getByRole('combobox',{name:'Record to edit'}).locator('option').count(),2);
+    assert.equal((await snapshot()).record.name,'Corrected');
+    await input.press('Control+s');await dock.waitFor({state:'detached'});
+    const ordinary=await snapshot();assert.equal(ordinary.record.name,'Sword');assert.equal(ordinary.complete.name,'Shield');
+    assert.equal(ordinary.record.draft,'Retained unsaved description');
     assert.deepEqual(failures,[]);console.log('PASS ClientText field selection, source clipboard, ordered target paste, dual-format Copy all, shared toolbar, Ctrl+S and preserved sibling drafts.');
 };

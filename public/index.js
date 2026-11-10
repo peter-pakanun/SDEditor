@@ -8348,6 +8348,7 @@ if (window.ClientTextAudio) {
   app.component('ct-audio-controls', window.ClientTextAudio.controlsComponent);
 }
 if (window.ClientTextFieldFill) {
+  app.component('ct-browse-fields',window.ClientTextFieldFill.browseFields);
   app.component('ct-bulk-editor',window.ClientTextFieldFill.editor());
 }
 if (window.ClientTextUI) {

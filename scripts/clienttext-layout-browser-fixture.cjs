@@ -91,11 +91,12 @@ const namedFormUnit=Vue.markRaw({id:'named-form-layout-record',role:'normal',she
     ['Normal Translation','Possessive Translation'].map((form,index)=>({id:JSON.stringify(['Display Name',form]),kind:'form',group:'Display Name',name:'Display Name',form,
         source:'Exalted Orb {0}',target:index?'':'Yüce Küre {0}',sourceCell:'B2',targetCell:(index?'D':'C')+'2',required:!index,originalMissing:false,outdated:false}))});
 const app = Vue.createApp({
+    mixins:[window.ClientTextFieldFill.mixin],
     data() { return {...ct.data(),ctActive:true,ctUnits:initialUnits,ctSelection:unit.id,
         ctWorkspace:{scope:{game:'poe2',branchId:'default',language:'Thai',versionId:'fixture',groupId:'fixture'},metadata:{version:{name:'ClientText layout fixture'}}},
         ctSheet:sheets[0].key,ctSearch:'Main search retained',ctAppliedSearch:'',ctSelectedFilters:['unchanged','missing','saved'],
         ctValues:Object.fromEntries(fields.map(field=>[field.id,field.target])),
-        inlineEditor:true,inlineSidebarVisible:false,mapClientTextClassNames:true,lang:'Thai',translationEditorBcp47:'th',
+        inlineEditor:true,inlineSidebarVisible:false,mapClientTextClassNames:true,lang:'Thai',translationEditorBcp47:'th',ctTmSelectedIds:[],ctTmUnitIds:Vue.markRaw(new Set()),
         gameVersion:'poe2',branchId:'default',dictionary:[],pageSize:20,hideEditorClipboard:true,
         tooltip:{visible:false,text:'',x:0,y:0,maxWidth:360}
     };},
@@ -177,6 +178,7 @@ const app = Vue.createApp({
 });
 app.component('editor-workspace-shell',window.EditorComponents.WorkspaceShell);
 app.component('ct-fields',window.ClientTextUI.fieldsComponent);
+app.component('ct-browse-fields',window.ClientTextFieldFill.browseFields);
 app.component('ct-context',window.ClientTextUI.contextComponent);
 app.component('ct-target',window.ClientTextUI.targetComponent);
 app.component('editor-native-field',window.EditorComponents.NativeField);
@@ -199,7 +201,7 @@ async function run() {
         <div class="ctWorkspaceBody">${navigation}<div class="workspaceMain ctList">${npcHeading}${convoHeading}<div ref="ctFileTableRegion" class="fileTableScroll">${table}</div></div></div>
         </template></editor-workspace-shell>${fullEditor}</section><app-tooltip :state="tooltip"></app-tooltip></div></div>
         <script src="/fixture-vue.js"></script>
-        <script src="/statDescCodec.js"></script><script src="/translationDiagnostics.js"></script><script src="/clientTextState.js"></script><script src="/contentAdapters.js"></script><script src="/clientTextNpcIndex.js"></script><script src="/clientTextConvoIndex.js"></script><script src="/editorSession.js"></script><script src="/editorComponents.js"></script><script src="/inlineEditor.js"></script><script src="/clientTextUi.js"></script><script src="/fixture.js"></script></body></html>`));
+        <script src="/statDescCodec.js"></script><script src="/translationDiagnostics.js"></script><script src="/clientTextState.js"></script><script src="/contentAdapters.js"></script><script src="/clientTextNpcIndex.js"></script><script src="/clientTextConvoIndex.js"></script><script src="/editorSession.js"></script><script src="/editorComponents.js"></script><script src="/inlineEditor.js"></script><script src="/clientTextUi.js"></script><script src="/clientTextFieldFill.js"></script><script src="/fixture.js"></script></body></html>`));
     frontend.get('/fixture.js', (req, res) => res.type('js').send(fixtureJs));
     frontend.get('/fixture-vue.js', (req,res)=>{
         const cached=process.env.FIXTURE_VUE_PATH || join(__dirname,'../temp/clienttext-fixture-vue.min.js');
@@ -890,6 +892,7 @@ async function run() {
         assert.deepEqual(errors,[],'No browser page errors');
         console.log(JSON.stringify({passed:results.length,screenshots,results},null,2));
     } catch(error) {
+        if(errors.length)console.error('Fixture browser errors:',errors.slice(0,5));
         if(page && !page.isClosed()) {
             const path=join(fixtureArtifacts,'sdeditor-clienttext-failure-'+randomUUID()+'.png');
             await page.screenshot({path});console.error('Failure screenshot: '+path);

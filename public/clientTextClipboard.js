@@ -151,7 +151,7 @@
         document.addEventListener('copy', copy, true);
         try {
             document.execCommand('copy');
-            if (!copied) throw new Error('Copy was blocked. Use Ctrl/Cmd+C on the selected cells.');
+            if (!copied) throw new Error('The browser blocked clipboard access. Allow copying and try again.');
         } finally { document.removeEventListener('copy', copy, true); }
     }
 

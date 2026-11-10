@@ -1246,6 +1246,10 @@
                     || !!target?.closest?.('[data-inline-focus-surface], .appDialogOverlay, .appDialog');
             },
             ctInlineFocusOut(event) {
+                // A selected source/cell handle can live in a different collapsed row. Removing
+                // or reordering that row must never promote the open record's unrelated draft.
+                if(event.currentTarget?.dataset?.unitId && event.currentTarget.dataset.unitId!==this.ctSelection)return;
+                if(event.target?.closest?.('[data-ct-source-selection]'))return;
                 if(!this.ctInlineUnitVisible() || this.ctKeyboardBlocked() || this._ctCloseRun || this.ctInlineFocusContains(event.relatedTarget))return;
                 const ctx=this.ctContext(),unit=this.ctCurrentUnit,selection=this._ctSelectRun;
                 setTimeout(async()=>{
@@ -1514,7 +1518,9 @@
                     item={fields:unit.fields,saved,visible};cache.set(unit,item);
                 }
                 let visible=item.visible;
-                if(unit.id===this.ctSelection && this.ctDraftDirty){
+                // A clean row switch cannot change which worksheet fields have content. Reading
+                // ctSelection first would subscribe the entire filtered worklist to every click.
+                if(visible.length<unit.fields.length && this.ctDraftDirty && unit.id===this.ctSelection){
                     // Check visibility/focus before reading live text, or ctRows
                     // subscribes to each keystroke and re-filters the full
                     // Sheets worklist. Focus also keeps cleared drafts visible.
