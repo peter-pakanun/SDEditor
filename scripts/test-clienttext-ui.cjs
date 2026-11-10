@@ -1739,6 +1739,26 @@ for(const overlay of ['settingsDialogVisible','cloudHistoryVisible'])test('defer
     }
 });
 
+for(const full of [false,true])test(`Escape closes the ${full?'full':'inline'} editor before clearing recently pasted cells`,async()=>{
+    const {app,original,event}=keyboardHarness(),field=original.fields[0];
+    const bulk=require('../public/clientTextFieldFill.js').mixin;
+    app.ctBulkKey=bulk.methods.ctBulkKey.bind(app);app.ctBulkUndoKey=()=>false;
+    app.ctBulkSession=null;app.ctEditor=full;
+    app.ctDirectSelection={rows:[{unitId:original.id,fieldId:field.id}]};
+    app.ctBulkCopiedRange={side:'target'};app.ctDirectValues={pasted:'kept'};
+    let cleared=0;
+    app.ctBulkResetCopy=()=>{cleared++;app.ctBulkCopiedRange=null;};
+    app.ctBulkCancel=()=>{};
+    const selection=app.ctDirectSelection,pasted=app.ctDirectValues;
+    const escape=event(field,'Escape');await app.ctKey(escape);
+    assert.equal(escape.defaultPrevented,true);
+    assert.equal(full?app.ctEditor:!app.ctInlineClosed,false);
+    assert.equal(app.ctDirectSelection,selection);assert.equal(app.ctDirectValues,pasted);assert.equal(cleared,0);
+    if(full){await app.ctKey(event(field,'Escape'));assert.equal(app.ctInlineClosed,true);assert.equal(cleared,0);}
+    await app.ctKey(event(field,'Escape'));
+    assert.equal(app.ctDirectSelection,null);assert.equal(cleared,1);assert.equal(app.ctDirectValues,pasted);
+});
+
 test('inline Escape closes completion first then closes only the inline session after its draft is durable',async()=>{
     const {app,original,inputFor,event,focuses}=keyboardHarness(),field=original.fields[0],input=inputFor(original,field);field.source='[First]';
     app.ctValues[field.id]='[';input.focus();input.setSelectionRange(1,1);assert.equal(app.ctSuggest(field,{target:input}),true);

@@ -601,6 +601,8 @@
                     if(this.ctHistoryViewer || this.ctCompletion)return false;
                     const editor=this.$refs?.ctBulkEditor;
                     if(editor?.ctCompletion){event.preventDefault();event.stopPropagation();editor.ctCloseCompletion();return true;}
+                    // Let the ordinary editor close first, retaining pasted values and range marks.
+                    if(!this.ctBulkSession && !this._ctBulkPointer && (this.ctEditor || this.ctInlineUnitVisible()))return false;
                     if(this._ctBulkPointer || this.ctBulkSources || this.ctBulkSession || this.ctDirectSelection || this.ctBulkCopiedRange){
                         event.preventDefault();event.stopPropagation();
                         this.ctBulkResetCopy();

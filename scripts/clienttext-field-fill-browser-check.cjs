@@ -148,6 +148,11 @@ module.exports=async function({page,files,failures}){
         await singleName.press('Control+z');assert.deepEqual(await selectedNames(),[value,value,value]);
         await singleName.press('Control+z');assert.deepEqual(await selectedNames(),originalNames,'one Undo restores the whole fill');
         await singleName.press('Escape');
+        await inline.waitFor({state:'detached'});
+        assert.ok(await page.locator('[data-ct-bulk-field][aria-pressed=true]').count()>0,'first Escape retains the pasted range');
+        await page.keyboard.press('Escape');
+        assert.equal(await page.locator('[data-ct-bulk-field][aria-pressed=true]').count(),0,'second Escape clears the range');
+        await target('record','Name').click();await inline.waitFor();
     }
     // Select the final source before the first source. The unselected middle worksheet row
     // must still occupy a clipboard position. English gestures never open another record.
@@ -215,8 +220,12 @@ module.exports=async function({page,files,failures}){
     await copiedSide('target').waitFor();
     assert.equal(await target('complete','Name').evaluate(node=>getComputedStyle(node).borderTopStyle),'dashed');
     await page.keyboard.press('Escape');await noPasteDock();
+    await inline.waitFor({state:'detached'});
+    assert.ok(await page.locator('[data-ct-bulk-field][aria-pressed=true]').count()>0,'closing inline keeps the pasted range');
+    await page.keyboard.press('Escape');
     assert.equal(await page.locator('[data-ct-bulk-field][aria-pressed=true]').count(),0);
     assert.equal(await page.locator('.fileTableScroll[data-ct-copied-side]').count(),0);
+    await target('record','Name').click();await inline.waitFor();
     assert.equal(await normalName.inputValue(),'Sword','clearing selection retains pasted values');
     await normalName.press('Control+z');
     await normalName.press('Control+y');
@@ -271,7 +280,9 @@ module.exports=async function({page,files,failures}){
     await page.evaluate(()=>navigator.clipboard.writeText('Jaw Trap\nSecond replacement'));
     await normalName.press('Control+v');await noPasteDock();assert.equal(await normalName.inputValue(),'Jaw Trap');
     assert.equal((await snapshot()).record.name,'Sword');
-    await normalName.press('Escape');await normalName.press('Control+z');
+    await normalName.press('Escape');await inline.waitFor({state:'detached'});
+    await page.keyboard.press('Escape');await target('record','Name').click();await inline.waitFor();
+    await normalName.press('Control+z');
     assert.equal(await normalName.inputValue(),'Prior unsaved Name');
     await normalName.press('Control+y');assert.equal(await normalName.inputValue(),'Jaw Trap');
     await normalName.press('End');await normalName.pressSequentially('xyz',{delay:5});assert.equal(await normalName.inputValue(),'Jaw Trapxyz');
