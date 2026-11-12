@@ -151,14 +151,22 @@
           this.acceptTranslationMemory(state); this.tmSetIssue('load');
         } catch (error) { if (this.tmCurrent(key) && epoch === this._tmLoadEpoch) this.tmSetIssue('load', 'Could not load local TM: ' + error.message); }
       },
+      applyStatDescriptionMemoryPatch(patch) {
+        return this.applyMemoryPatch(patch, 'statdescription');
+      },
       applyClientTextMemoryPatch(patch) {
+        return this.applyMemoryPatch(patch, 'clienttext');
+      },
+      applyMemoryPatch(patch, contentMode) {
+        const inMode = unit => contentMode === 'clienttext' ? unit?.context?.contentMode === 'clienttext'
+          : unit?.context?.contentMode !== 'clienttext';
         if (!patch || patch.profile !== (this.cloudProfileId || 'guest') || patch.language !== this.lang
           || this._tmAcceptedScope !== this.tmScopeKey || patch.previousVersion !== this._tmSnapshotVersion
           || !Number.isSafeInteger(patch.localVersion) || patch.localVersion < patch.previousVersion || !Array.isArray(patch.entries)
-          || patch.entries.some(entry => !entry.unit?.id || entry.unit.context?.contentMode !== 'clienttext')) return false;
+          || patch.entries.some(entry => !entry.unit?.id || !inMode(entry.unit))) return false;
         const updates = new Map(patch.entries.map(entry => [entry.unit.id, entry]));
-        if ([...this.tmUnits, ...this.tmTombstones].some(unit => updates.has(unit.id) && unit.context?.contentMode !== 'clienttext')) return false;
-        // A single saved workbook ID changes only its acknowledged TM units.
+        if ([...this.tmUnits, ...this.tmTombstones].some(unit => updates.has(unit.id) && !inMode(unit))) return false;
+        // One acknowledged save changes only its own committed TM units.
         // Keep the SD worker's compiled generation and all other unit objects.
         const replace = (units, deleted) => {
           const seen = new Set(), next = [];

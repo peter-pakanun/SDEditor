@@ -1626,8 +1626,16 @@
         if (batch.tmCapture?.length) {
           if (!normalized || !['save', 'confirm', 'confirm_unchanged', 'restore', 'consistency'].includes(batch.origin || batch.collaboration?.origin || 'save'))
             throw new Error('Translation Memory learning requires a confirmed local save.');
+          // Return only this command's committed TM units/conflicts from the same
+          // transaction. The editor applies that patch instead of reloading the
+          // whole memory library after every save.
+          const tmChanges = { entries: new Map() };
           normalized.tmCapture(tx, { profile: batch.accountId || 'guest', language: batch.language }, batch.tmCapture,
-            { origin: 'learn', mutationId: 'save:' + batch.jobId }).then(changed => { result.tmChanged = changed; writeReceipt(); }, fail);
+            { origin: 'learn', mutationId: 'save:' + batch.jobId }, tmChanges).then(changed => {
+              result.tmChanged = changed;
+              if (changed) result.tmPatch = { ...tmChanges, entries: [...tmChanges.entries.values()] };
+              writeReceipt();
+            }, fail);
         } else writeReceipt();
       } catch (error) { fail(error); }
     };

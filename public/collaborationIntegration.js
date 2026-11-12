@@ -393,7 +393,14 @@
           },
           onChange: state => { this.pendingLocalSaves = state.pending; this.localSaveError = state.error || ''; this.updateLeaveProtection(); },
           onCommit: async (job, ack) => {
-            if (ack.tmChanged) window.OfflineStore.notifyTranslationMemoryChange?.({ profile: job.batch.accountId || 'guest', language: job.batch.language });
+            if (ack.tmChanged) {
+              const tmScope = { profile: job.batch.accountId || 'guest', language: job.batch.language };
+              // The save transaction already returned this command's committed
+              // TM units. Apply them so the change notification's version check
+              // skips reloading and republishing the whole TM library.
+              if (ack.tmPatch) this.applyStatDescriptionMemoryPatch?.(ack.tmPatch);
+              window.OfflineStore.notifyTranslationMemoryChange?.(tmScope);
+            }
             if (this.collaborationContextCurrent(job.context)) {
               if (job.batch.deferDisplay) {
                 const statuses = ack.duplicate ? ack.statuses || {} : job.batch.statuses || {};

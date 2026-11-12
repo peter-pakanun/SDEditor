@@ -561,6 +561,42 @@ test('ClientText patches reject another account, language, version or SD identit
   assert.equal(app.applyClientTextMemoryPatch(memoryPatch(app, [{ unit: clientTextMemory('new'), conflict: null }])), false);
 });
 
+test('an acknowledged StatDescription save patch keeps the compiled worker and applies only its units', () => {
+  const unrelated = row('unrelated'), corrected = row('corrected', 'Damage', 'ความเสียหายเดิม'), removed = row('removed');
+  const deleted = { ...row('restored'), deleted: true, suppressed: true };
+  const { app, calls } = harness({ units: [unrelated, corrected, removed] });
+  app.tmTombstones = [deleted]; app.tmConflicts = [{ id: 'corrected', local: corrected }];
+  app._tmAcceptedScope = app.tmScopeKey; app._tmSnapshotVersion = 7;
+  const generation = app.tmGeneration, updated = { ...corrected, target: 'ความเสียหายที่บันทึกแล้ว', localRevision: 4 };
+  const restored = { ...deleted, target: 'คืนค่าที่บันทึกแล้ว', deleted: false, suppressed: false };
+  const tombstone = { ...removed, deleted: true, suppressed: true };
+  assert.equal(app.applyStatDescriptionMemoryPatch(memoryPatch(app, [
+    { unit: updated, conflict: null }, { unit: restored, conflict: null }, { unit: tombstone, conflict: null }])), true);
+  assert.equal(app.tmUnits.find(unit => unit.id === unrelated.id), unrelated);
+  assert.equal(app.tmUnits.find(unit => unit.id === updated.id), updated);
+  assert.equal(app.tmUnits.find(unit => unit.id === restored.id), restored);
+  assert.equal(app.tmUnits.some(unit => unit.id === removed.id), false);
+  assert.equal(app.tmTombstones.length, 1); assert.equal(app.tmTombstones[0], tombstone);
+  assert.equal(app._tmSnapshotVersion, 8); assert.equal(app.tmGeneration, generation);
+  assert.deepEqual(calls.publications, [], 'the whole TM library is not republished to the worker');
+});
+
+test('StatDescription patches reject another account, language, version or ClientText identity', () => {
+  const old = row('old', 'Damage', 'ความเสียหายเดิม');
+  for (const change of [patch => { patch.profile = 'another-account'; }, patch => { patch.language = 'German'; },
+    patch => { patch.previousVersion = 6; }, patch => { patch.localVersion = 6; },
+    patch => { patch.entries[0].unit.context = { contentMode: 'clienttext', filepath: 'workbook' }; }]) {
+    const { app } = harness({ units: [old] });
+    app._tmAcceptedScope = app.tmScopeKey; app._tmSnapshotVersion = 7;
+    const visible = app.tmUnits, patch = memoryPatch(app, [{ unit: { ...old, target: 'Wrong snapshot' }, conflict: null }]); change(patch);
+    assert.equal(app.applyStatDescriptionMemoryPatch(patch), false);
+    assert.equal(app.tmUnits, visible); assert.equal(app._tmSnapshotVersion, 7);
+  }
+  const ct = clientTextMemory('same-id'), { app } = harness({ units: [row('same-id')] });
+  app._tmAcceptedScope = app.tmScopeKey; app._tmSnapshotVersion = 7;
+  assert.equal(app.applyStatDescriptionMemoryPatch(memoryPatch(app, [{ unit: ct, conflict: null }])), false);
+});
+
 test('a queued notification waits when cloud acknowledgement starts before its reload timer fires', async () => {
   let notify, reloads = 0;
   const { app, mixin } = harness({ store: { onTranslationMemoryChange(listener) { notify = listener; return () => {}; } } });
