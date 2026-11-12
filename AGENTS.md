@@ -88,7 +88,7 @@ Browser modules below are in `public/`; `server.js` and `scripts/` are at the re
 | Managed source versions | `managedVersions.js`, `managed-versions.css` |
 | Comments and lookup | `commentsUi.js`, `editorLookup.js`, `editorDictionaryIndex.js` |
 | Shared UI and fixtures | `appDialog.js`, `interface.css`, `index.css`, `dummyFiles.js`, `scripts/test-*.cjs`, `scripts/*-browser-fixture.cjs` |
-| SD field toolbar and MTL | `sdText.js`, `sdEditorTools.js`, `sdMtlStore.js`; see [SD MTL](docs/sd_mtl.md). IndexedDB v26 accepts candidates atomically with whole-file Save. Server source/prompt/context stay transient. Use English is ClientText-only; MTL visibility is shared. |
+| SD field toolbar and MTL | `sdText.js`, `sdEditorTools.js`, `sdMtlStore.js`; see [SD MTL](docs/sd_mtl.md). Retained MTL candidates accept atomically with whole-file Save. Server source/prompt/context stay transient. [SD Use English](docs/sd_use_english.md) is an explicit whole-file, nonblank target decision (browser v28/API v31); CT's field-level blank fallback stays separate. Verified unchanged-source excess-row Dropped notices may be informational; preserve completeness and owner-specific recovery guards. |
 
 Keep `workspaceState.js` loaded before its helper/storage/protocol consumers and before `offlineStore.js` in `saveWorker.js`. It supports browser, worker and Node consumers. `FileSaver.js` is a vendored client download helper; JSZip handles ZIP archives.
 

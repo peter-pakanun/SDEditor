@@ -689,6 +689,11 @@ function formatPageRange(total, page, pageSize) {
     editorDroppedConflict() {
       return this.localDescs?.droppedConflicts?.[this.lang]?.[this.editorCurrentEditingDesc?.filepath] || null;
     },
+    editorDroppedCountInfo() {
+      if (this.editorDroppedConflict) return null;
+      const current = this.workspaceSourceFile?.(this.editorCurrentEditingDesc?.filepath) || this.editorCurrentEditingDesc;
+      return window.WorkspaceState.upstreamEntryCountInfo(this.editorDroppedCandidate, current, this.lang, this.sdDroppedSource);
+    },
     editorDroppedSourceDiff() {
       const candidate = this.editorDroppedCandidate;
       if (!candidate || candidate.originSourceAvailable === false && !this.sdDroppedSource || this.sdDroppedSourceLoading
@@ -1969,7 +1974,7 @@ function formatPageRange(total, page, pageSize) {
         if (candidate && (candidateErrors || (candidateMatchesDraft && this.collectEditorDiagnostics('error').length))) {
           this.appAlert('The dropped translation has errors against the current source. Correct them and save a replacement.'); return;
         }
-        if (!await this.appConfirm('Use the dropped translation unchanged for the current source version? This stages it for export and sharing.', {
+        if (!this.editorDroppedCountInfo && !await this.appConfirm('Use the dropped translation unchanged for the current source version? This stages it for export and sharing.', {
           title: 'Promote dropped translation?', confirmLabel: 'Confirm unchanged',
         })) return;
         if (this.editorCurrentEditingDesc !== desc || this.editorBlocks !== blocks
@@ -7147,7 +7152,7 @@ function formatPageRange(total, page, pageSize) {
       }
       return confirmations;
     },
-    async editorSave({ close = true, automatic = false, defer = close || automatic } = {}) {
+    async editorSave({ close = true, automatic = false, defer = close || automatic, englishIntent } = {}) {
       if (this.editorLoading || this.editorLoadError || this.editorSaving || this._importingSource || this._resetConfirming || this.versionStorageLoading) return false;
       if (this.editorTranslationReadOnly) return false;
       const desc = this.editorCurrentEditingDesc;
@@ -7265,6 +7270,7 @@ function formatPageRange(total, page, pageSize) {
           || !arrayEquals(draftAtSave,this.editorBlocks.map(block=>block?.translation??'')))return false;
         const alignmentRevisions = this.entryAlignmentSaveRevisions?.(newTranslations);
         const result = await this.persistTranslationBatch([{ desc, lines: newTranslations, needsReview: false }], 'save', {
+          ...(englishIntent !== undefined ? { englishIntentByPath: { [desc.filepath]: englishIntent } } : {}),
           context, close, ...(sdMtl.length?{sdMtl}:{}), bases: { [desc.filepath]: this.toPlainForStorage(baseAtSave || session?.base || this.collaborationFile(desc)) },
           ...(alignmentRevisions ? { revisions: alignmentRevisions } : {}),
           promoteDropped: this.editorDroppedCandidate ? this.capturedDroppedPromotion(desc.filepath) : null,

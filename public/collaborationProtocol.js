@@ -198,6 +198,7 @@
       trackedForExport: !!file.trackedForExport, revision: Number(file.revision) || 0,
       ...(!file.trackedForExport && file.stagingReset ? { stagingReset: true } : {}),
       ...(file.sourceCarry ? { sourceCarry: copy(file.sourceCarry) } : {}),
+      ...(Object.hasOwn(file, 'englishIntent') ? { englishIntent: copy(file.englishIntent) } : {}),
       ...(file.invalidStageRecovery ? { invalidStageRecovery: copy(file.invalidStageRecovery) } : {}),
       ...(file.originalTranslationIssues ? { originalTranslationIssues: copy(file.originalTranslationIssues) } : {}),
       ...(file.baselineRef ? { baselineRef: copy(file.baselineRef) } : {}),
@@ -209,7 +210,7 @@
   function contentEqual(a, b) {
     return !!a && !!b && equal(a.translations, b.translations)
       && !!a.needsReview === !!b.needsReview && !!a.trackedForExport === !!b.trackedForExport
-      && sameCarry(a.sourceCarry, b.sourceCarry);
+      && sameCarry(a.sourceCarry, b.sourceCarry) && sameCarry(a.englishIntent, b.englishIntent);
   }
   function mergeFile(base, yours, shared) {
     if (!shared) throw new Error('Shared file is missing: ' + yours.filepath);
@@ -248,6 +249,13 @@
     else if ((!base || !sameCarry(yours.sourceCarry, base.sourceCarry)) && yours.sourceCarry
       && equal(result.translations, yours.translations)) sourceCarry = yours.sourceCarry;
     if (sourceCarry) result.sourceCarry = copy(sourceCarry); else delete result.sourceCarry;
+    if ([base, yours, shared].some(file => file && Object.hasOwn(file, 'englishIntent'))) {
+      if (sameCarry(yours.englishIntent, shared.englishIntent)) result.englishIntent = copy(yours.englishIntent || null);
+      else if (base && sameCarry(yours.englishIntent, base.englishIntent)) result.englishIntent = copy(shared.englishIntent || null);
+      else if (base && sameCarry(shared.englishIntent, base.englishIntent)) result.englishIntent = copy(yours.englishIntent || null);
+      else { result.englishIntent = copy(yours.englishIntent || null); metadata.push('englishIntent'); }
+      if (result.englishIntent && !equal(result.translations, yours.englishIntent ? yours.translations : shared.translations)) metadata.push('englishIntent');
+    }
     if (result.trackedForExport) { delete result.stagingReset; delete result.valuesUnavailable; }
     return { file: result, indexes, metadata, conflict: indexes.length > 0 || metadata.length > 0 };
   }

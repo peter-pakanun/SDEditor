@@ -289,8 +289,17 @@
   const sameSource = (left, right) => !!left && !!right && equal(snapshot(left, 'English', []), snapshot(right, 'English', []));
   const sourceMetadata = desc => ({ variables: copy(desc?.variables || []), remarks: copy(desc?.remarks || []),
     stats: copy(desc?.stats || []), name: String(desc?.name || '') });
-  function classifySourceCarry(previous, current, language, translations) {
+  function classifySourceCarry(previous, current, language, translations, { englishIntent } = {}) {
     if (!current) return { action: 'remove', reason: 'File removed from source' };
+    if (codec().validEnglishIntent(englishIntent) && !sameSource(previous, current))
+      return { action: 'drop', reason: 'Use English source or entry metadata changed' };
+    if (codec().validEnglishIntent(englishIntent) && sameSource(previous, current)
+      && equal(lines(translations), lines(current.translations?.English))) {
+      const incoming = lines(current.translations?.[language]);
+      if (incoming.some(text => !codec().isBlankTranslation(text)) && !equal(incoming, translations))
+        return { action: 'drop', reason: 'Upstream translation differs from Use English' };
+      return { action: 'carry', reason: 'Use English approved for unchanged source' };
+    }
     if (!previous || !equal(lines(previous.translations?.English), lines(current.translations?.English)))
       return { action: 'drop', reason: 'English source changed' };
     const carried = lines(translations), baseline = lines(current.translations?.[language]);
@@ -300,6 +309,21 @@
     if (!equal(before, after)) return { action: 'carry', reason: 'Source metadata corrected', metadataCorrection: { before, after } };
     return sameBaselineTranslation(current, language, carried) ? { action: 'baseline', reason: 'Translation included in new source' }
       : { action: 'carry', reason: 'Translation carried to new source' };
+  }
+  function upstreamEntryCountInfo(candidate, current, language, origin) {
+    if (!candidate || candidate.reason !== 'Translation missing from new source' || candidate.originSourceAvailable === false && !origin) return null;
+    if (candidate.filepath && candidate.filepath !== current?.filepath || origin?.filepath && origin.filepath !== current?.filepath) return null;
+    if (origin && candidate.snapshot?.english?.length && !equal(candidate.snapshot.english, origin.translations?.English)) return null;
+    const snapshot = origin || candidate.snapshot;
+    const previous = snapshot && { ...snapshot, translations: { ...snapshot.translations,
+      English: snapshot.translations?.English || snapshot.english } };
+    const count = current?.translations?.English?.length || 0, incoming = current?.translations?.[language];
+    if (!count || !Array.isArray(incoming) || incoming.length <= count || !sameSource(previous, current)
+      || !codec().translationIssues(candidate.snapshot?.translations, count).valid) return null;
+    return { expectedCount: count, actualCount: incoming.length,
+      message: 'The incoming ZIP still contains ' + incoming.length + ' translation entries for ' + count
+        + (count === 1 ? ' English entry.' : ' English entries.') + ' English and entry metadata are unchanged, and your complete saved translation is preserved. '
+        + 'Upstream may have retained obsolete variants. Use the preserved translation to save this file, or continue with other work. Saved-file export remains available.' };
   }
   function metadataCorrectionForSource(entry, desc, sourceHash) {
     const carry = entry?.sourceCarry, correction = carry?.metadataCorrection;
@@ -631,6 +655,8 @@
         new Error('The English source is unavailable. Reimport the source archive before saving.'), { code: 'SOURCE_UNAVAILABLE', filepath: file.filepath });
       codec().assertCompleteTranslation(file.translations, source?.translations?.English?.length ?? options.expectedCount, file.filepath);
     }
+    if (file.englishIntent != null && (!codec().validEnglishIntent(file.englishIntent)
+      || !source || !equal(file.translations, source.translations?.English))) throw new Error('Use English must match the verified English source.');
     maps(workspace);
     const current = workspace.staged[language]?.[file.filepath];
     if (options.promoteDropped) resolveDroppedPromotion(workspace, file.filepath, language, options.promoteDropped, options);
@@ -641,6 +667,9 @@
       && equal(current.translations, entry.translations) ? current.saveOrigin : null);
     if (saveOrigin) entry.saveOrigin = saveOrigin;
     if (options.sourceCarry) entry.sourceCarry = copy(options.sourceCarry);
+    if (file.englishIntent != null) {
+      entry.englishIntent = copy(file.englishIntent);
+    }
     (workspace.staged[language] ||= {})[file.filepath] = entry;
     return entry;
   }
@@ -828,7 +857,7 @@
       if (!next.has(filepath)) { delete entries[filepath]; continue; }
       const desc = old.get(filepath) || (workspace.descs || []).find(desc => desc.filepath === filepath);
       if (archiveInvalidTranslation(workspace, entry, language, { filepath, source: desc })) { delete entries[filepath]; continue; }
-      const decision = classifySourceCarry(desc, next.get(filepath), language, entry.translations);
+      const decision = classifySourceCarry(desc, next.get(filepath), language, entry.translations, { englishIntent: entry.englishIntent });
       if (decision.action === 'carry') {
         entry.sourceCarry = { fromSourceHash: entry.sourceHash || options.previousSourceHash || workspace.sourceHash,
           toSourceHash: options.sourceHash, fromSavedAt: entry.savedAt,
@@ -917,7 +946,7 @@
         === String(workspace.accountId || workspace.collaborationAccountId || 'guest');
     for (const [language, entries] of Object.entries(workspace.staged || {})) for (const [filepath, entry] of Object.entries(entries)) {
       const desc = current.get(filepath), carry = entry.sourceCarry;
-      if (!desc || entry.sourceHash !== workspace.sourceHash
+      if (!desc || entry.englishIntent || entry.sourceHash !== workspace.sourceHash
         || protectedHere.has(serialized([language, filepath]))
         || metadataCorrectionForSource(entry, desc, workspace.sourceHash) || carry?.metadataCorrection || carry?.destinationSave
         || droppedForFile(workspace, filepath, language) || wasDroppedInSource(workspace, filepath, language)) continue;
@@ -947,7 +976,7 @@
     return { changed: removed.length > 0 || corrected.length > 0, removed, corrected };
   }
   function carriedBaselineReplay(workspace, desc, language, file) {
-    if (!workspace || !desc || !file?.trackedForExport || file.needsReview || file.sourceCarry?.metadataCorrection || file.sourceCarry?.destinationSave
+    if (!workspace || !desc || !file?.trackedForExport || file.needsReview || file.englishIntent || file.sourceCarry?.metadataCorrection || file.sourceCarry?.destinationSave
       || !sameBaselineTranslation(desc, language, file.translations)
       || droppedForFile(workspace, desc.filepath, language) || wasDroppedInSource(workspace, desc.filepath, language)) return null;
     const current = workspace.staged?.[language]?.[desc.filepath];
@@ -1282,7 +1311,7 @@
   }
   return { descriptionStatus, setDescriptionStatus, fileStatus, setFileStatus, setFileMetadata, pruneWorkspaceStatus, scopeWorkspace,
     initializeWorkspace, workspaceFile, translationBaseMatches, stageTranslation, repairLegacyPlaceholders, classifySourceCarry, repairRedundantCarriedStages,
-    sourceMetadata, metadataCorrectionForSource, carriedBaselineReplay, mergeSourceImportWorkspace,
+    sourceMetadata, metadataCorrectionForSource, carriedBaselineReplay, mergeSourceImportWorkspace, upstreamEntryCountInfo,
     translationIssues, assertCompleteTranslation, archiveInvalidTranslation, quarantineInvalidTranslations, resolveDroppedPromotion,
     droppedTranslationIssues, archiveInvalidDroppedTranslation, quarantineInvalidDroppedTranslations,
     dropTranslation, droppedForFile, droppedCandidatesForFile, droppedOwnership, workspaceDroppedOwnership,

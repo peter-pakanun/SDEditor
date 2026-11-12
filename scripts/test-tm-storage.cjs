@@ -336,6 +336,12 @@ test('ordinary save atomically learns with staged work, history and receipt; fai
   assert.equal((await snapshot(f)).units.length,0);assert.equal(f.tables.get('revisions_poe1').size,0);
   assert.equal(f.tables.get('kv').get('workspace_poe1').value.descs[0].translations.Thai[0],'old');
   f.fail('');const ack=await f.store.saveTranslationBatch(batch);assert.equal(ack.tmChanged,true);
+  assert.deepEqual(ack.tmPatch && { profile: ack.tmPatch.profile, language: ack.tmPatch.language,
+    previousVersion: ack.tmPatch.previousVersion, localVersion: ack.tmPatch.localVersion }, { profile: 'alice', language: 'Thai',
+    previousVersion: 0, localVersion: 1 });
+  assert.equal(ack.tmPatch.entries.length,1);
+  assert.equal(ack.tmPatch.entries[0].unit.target,'ใหม่ {0}');
+  assert.equal(ack.tmPatch.entries[0].unit.context.contentMode, undefined,'StatDescription units keep the default identity');
   assert.equal((await snapshot(f)).units[0].target,'ใหม่ {0}');assert.equal(f.tables.get('revisions_poe1').size,1);
   const replay=await f.store.saveTranslationBatch(batch);assert.equal(replay.duplicate,true);
   assert.equal((await f.store.listTranslationMemoryHistory(scope)).length,1);assert.equal(f.tables.get('revisions_poe1').size,1);

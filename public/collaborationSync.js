@@ -1618,10 +1618,13 @@
         this.contentPolicyLoad = Promise.resolve().then(() => this.contentPolicy()).then(policy => {
           this.sdBaselineReferences = policy?.sdBaselineReferences === 1;
           this.sdSourceStorage = policy?.sdSourceStorage;
+          this.sdEnglishIntent = policy?.statDescriptionEnglishIntent === 'sd-use-english-v1';
         }).catch(error => { this.contentPolicyLoad = null; if (error.stale) throw error; });
       }
       if (!observed.wire && this.contentPolicyLoad) await this.contentPolicyLoad;
       if (!this.current(epoch)) throw staleError();
+      if (!observed.wire && !this.sdEnglishIntent && observed.files.some(entry => entry.yours.englishIntent || entry.base?.englishIntent))
+        throw Object.assign(new Error('The server needs the SD Use English update before this saved choice can be shared.'), { code: 'SD_ENGLISH_INTENT_REQUIRED' });
       const paths = observed.files.map(entry => entry.yours.filepath);
       const workspace = observed.promoteDropped ? await this.readWorkspace(this.room()?.identity, paths) : null;
       if (!this.current(epoch)) throw staleError();
@@ -1664,6 +1667,7 @@
           const wireCarry = copy(merged.file.sourceCarry);
           if (wireCarry) { delete wireCarry.baselineEquality; delete wireCarry.destinationSave; }
           files.push({ filepath: shared.filepath, baseRevision: shared.revision, translations: merged.file.translations,
+            ...(this.sdEnglishIntent ? { englishIntent: copy(merged.file.englishIntent || null) } : {}),
             needsReview: merged.file.needsReview, trackedForExport: merged.file.trackedForExport,
             ...(room.mode !== 'sparse' && this.sdSourceStorage === 'zip-only-v1' && Array.isArray(shared.baselineTranslations)
               ? { baselineTranslations: copy(shared.baselineTranslations) } : {}),
@@ -1722,6 +1726,7 @@
             ...(file.proof ? { proof: copy(file.proof) } : {}) } : {}) })) } }, epoch);
       if (op.restore) return this.api(path + '/history/' + encodeURIComponent(op.restore.eventId) + '/restore', {
         method: 'POST', body: { mutationId: op.id, baseRevision: op.wire.files[0].baseRevision, version: op.restore.version,
+          ...(Object.hasOwn(op.wire.files[0], 'englishIntent') ? { englishIntent: copy(op.wire.files[0].englishIntent) } : {}),
           ...(op.wire.promoteDropped ? { promoteDropped: copy(op.wire.promoteDropped) } : {}) },
       }, epoch);
       const bytes = new TextEncoder().encode(JSON.stringify(op.wire)).length;

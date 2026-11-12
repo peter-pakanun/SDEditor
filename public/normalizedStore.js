@@ -1035,6 +1035,7 @@
                 }
                 if (!record || record.scope !== id || record.value.field !== 'staged') continue;
                 const { language, entry: filepath, data: stage } = record.value;
+                if (stage.englishIntent) continue;
                 const roomKey = roomIdentityKey(captured, language);
                 const [operations, submissions] = await Promise.all([
                   request(tx.objectStore(stores.operations).index('by_path').getAll(key(roomKey, filepath))),

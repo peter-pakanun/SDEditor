@@ -1124,6 +1124,7 @@
           <button v-if="editorHasStagedTranslation" class="deleteStagedTranslation" @click="deleteEditorStagedTranslation" :disabled="editorSaving || navigationBusy || editorTranslationReadOnly" v-tooltip="'Delete the staged save and restore the original ZIP translation'">Delete staged translation</button>
           <button type="button" @click="openRawFileDialog" :disabled="editorLoading || !!editorLoadError || editorSaving || navigationBusy" v-tooltip="'View and download this file as text'">Show raw file</button>
           <button v-if="!entryAlignment" type="button" @click="startEntryAlignment()" :disabled="!editorReady || editorSaving || editorCompareActive || !!editorDroppedConflict">Align entries</button>
+          <button type="button" class="sdUseEnglish" @click="sdToggleUseEnglish" :aria-pressed="sdEnglishIntentActive" :disabled="!!sdEnglishIntentDisabledReason || sdEnglishBusy" v-tooltip="sdEnglishIntentDisabledReason || (sdEnglishIntentActive ? 'Stop carrying the English choice and save this draft.' : 'Save English for this whole file and carry that choice when upstream omits it while the source stays unchanged.')">Use English</button>
           <button @click="editorExit" v-tooltip="'Close the file (Esc); keep unsaved edits'">Close</button>
         </div>
         <div>
@@ -1173,15 +1174,16 @@
             </app-notice>
           </div>
           <div v-if="editorDroppedCandidate" class="droppedTranslationPanel">
-            <app-notice tone="warning" class="droppedTranslationBanner">
-              <span><strong>{{ droppedOwnershipLabel(editorDroppedCandidate) }}</strong> · {{ editorDroppedCandidate.reason || 'Source changed' }}</span>
+            <app-notice :tone="editorDroppedCountInfo ? 'info' : 'warning'" class="droppedTranslationBanner">
+              <span><strong>{{ droppedOwnershipLabel(editorDroppedCandidate) }}</strong> · {{ editorDroppedCountInfo ? 'Extra translation variants in the incoming ZIP' : (editorDroppedCandidate.reason || 'Source changed') }}</span>
               <template #actions><button @click="useEditorDroppedCandidate" :disabled="!editorReady || editorSaving || editorCompareActive || !!entryAlignment">Use for editing</button>
               <button @click="toggleEditorEnglishDiff" :disabled="!editorReady">Toggle inline diff</button>
-              <button @click="confirmTranslationUnchanged" :disabled="!editorDroppedCanPromote">Confirm unchanged</button>
+              <button @click="confirmTranslationUnchanged" :disabled="!editorDroppedCanPromote">{{ editorDroppedCountInfo ? 'Use preserved translation' : 'Confirm unchanged' }}</button>
               <button @click="startEntryAlignment('dropped')" :disabled="!editorReady || editorSaving || !!editorDroppedConflict || !!entryAlignment">Align dropped entries</button>
               <button @click="discardDroppedTranslation" :disabled="!editorReady || editorSaving || !!editorDroppedConflict || !!entryAlignment">Discard dropped copy</button></template>
             </app-notice>
-            <details open>
+            <p v-if="editorDroppedCountInfo" role="status">{{ editorDroppedCountInfo.message }}</p>
+            <details :open="!editorDroppedCountInfo">
               <summary :title="editorDroppedCandidate.originSourceHash">Compare dropped version → current version</summary>
               <p>Save, confirm, and discard affect only this selected recovery copy. Other copies remain available.</p>
               <div class="droppedComparison">

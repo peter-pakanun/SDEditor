@@ -8,7 +8,7 @@ module.exports=async({page,directory})=>{
     const h=window.__sharedFixtureApp;h.editorBlocks[1]=h.makeEditorBlock('<bold>{{Damage {0}%}}','ความเสียหาย {0}%',true);h.editorFocusedIndex=1;h.refreshGamePreview();await h.$nextTick();
   });
   const input=page.locator('.editor [data-editor-ref="translation_1"]'),tools=input.locator('xpath=ancestor::*[contains(@class,"editorFieldTools")][1]');
-  assert.equal(await page.getByRole('button',{name:'Use English',exact:true}).count(),0);
+  assert.equal(await page.getByRole('button',{name:'Use English',exact:true}).count(),1,'SD offers one explicit whole-file choice.');
   await input.focus();await input.evaluate(e=>e.setSelectionRange(0,e.value.length));await tools.getByRole('button',{name:'Bold',exact:true}).click();
   assert.equal(await input.inputValue(),'<bold>{{ความเสียหาย {0}%}}');
   assert.equal(await page.evaluate(()=>window.__sharedFixtureApp.editorBlocks[1].translationDiagnostics.filter(x=>x.code==='text-decoration-tag-name-mismatch').length),0);
@@ -27,16 +27,18 @@ module.exports=async({page,directory})=>{
       return {};
     }});await h.$nextTick();
   });
+  const retired=await page.evaluate(()=>!ClientTextMtlUI.visible({cloudSignedIn:true,cloudUser:{role:'admin',language:'Thai',isAdmin:true}}));
   for(const inline of [false,true]){
     await page.evaluate(async inline=>{const h=window.__sharedFixtureApp;h.inlineEditor=inline;await h.$nextTick();},inline);
     for(const [role,language,visible] of [['translator','Thai',true],['translator',null,false],['manager','Thai',true],['manager',null,false],['admin',null,true]]){
       await page.evaluate(async({role,language})=>{const h=window.__sharedFixtureApp;h.cloudUser={...h.cloudUser,role,language,isAdmin:role==='admin',assignmentVersion:h.cloudUser.assignmentVersion+1};await h.$nextTick();},{role,language});
       await page.evaluate(async inline=>{const h=window.__sharedFixtureApp;await new Promise(r=>setTimeout(r,0));h.inlineEditor=inline;await h.$nextTick();if(inline){h.editorVisible=false;h.inlineActive=false;await h.activateInlineRow(h.descs[0].filepath);}else await h.editFile(h.descs[0].filepath);await h.$nextTick();},inline);
-      assert.equal(await page.locator('.ctMtlButton').count()>0,visible,(inline?'inline':'full')+' '+role+'/'+language);
-      assert.equal(await page.getByRole('button',{name:'Use English',exact:true}).count(),0);
+      assert.equal(await page.locator('.ctMtlButton').count()>0,!retired&&visible,(inline?'inline':'full')+' '+role+'/'+language);
+      assert.equal(await page.getByRole('button',{name:'Use English',exact:true}).count(),inline?0:1);
     }
     await page.screenshot({path:join(directory,inline?'inline.png':'full.png')});
   }
+  if(!retired){
   await page.evaluate(async()=>{const h=window.__sharedFixtureApp;h.inlineEditor=false;await h.$nextTick();h.cloudUser={id:'sd-fixture',role:'translator',language:'Thai',assignmentVersion:50};await h.$nextTick();await new Promise(r=>setTimeout(r,0));await h.editFile(h.descs[0].filepath);h.editorBlocks[1]=h.makeEditorBlock('<bold>{{Damage {0}%}}','<bold>{{ความเสียหาย {0}%}}',true);await h.$nextTick();await h.sdLoadReviews();});
   const before=await input.inputValue();
   await tools.locator('.ctMtlButton').click();await page.getByText('MTL suggestion · review before Save',{exact:true}).waitFor();
@@ -48,6 +50,7 @@ module.exports=async({page,directory})=>{
   assert.equal(await page.evaluate(()=>window.__sharedFixtureApp.editorBlocks[1].translation),'<bold>{{ข้อความตรวจแล้ว {0}%}}');
   const counts=await page.evaluate(async()=>{const h=window.__sharedFixtureApp,lines=h.serializeEditorTranslations(),claims=await h.sdSaveClaims(lines);const bad=[...lines];bad[1]='';return {claims:claims.length,blankRejected:h.editorSaveFindings(bad).errors.some(e=>e.code==='blank-translation')};});
   assert.equal(counts.claims,1);assert.equal(counts.blankRejected,true);
+  }
   const atomic=await page.evaluate(async()=>{
     const scope={accountId:'sd-atomic',game:'poe2',branchId:'default',sourceHash:'b'.repeat(64)},language='Thai';
     const desc={filepath:'atomic.txt',filename:'atomic.txt',filedir:'',name:'atomic',stats:['damage'],variables:['#'],remarks:[''],translations:{English:['Damage {0}%'],Thai:['เก่า {0}%']}};
@@ -64,6 +67,6 @@ module.exports=async({page,directory})=>{
     const final=(await store.read('sd-atomic'))[0];return {accepted:accepted.status,replay:replay.duplicate,nextRetained:afterReplay.requestId===replacement.requestId,conflict,blank,finalStatus:final.status,finalRevision:final.revision,replacementRevision:replacement.revision};
   });
   assert.equal(atomic.accepted,'accepted');assert.equal(atomic.replay,true);assert.equal(atomic.nextRetained,true);assert.equal(atomic.conflict,true);assert.equal(atomic.blank,true);assert.equal(atomic.finalStatus,'acceptedDraft');assert.equal(atomic.finalRevision,atomic.replacementRevision);
-  console.log('PASS SD inline/full toolbar, exact role visibility, no Eng, native undo/redo, double-brace preview in four themes, review/draft separation and whole-file blank validation.');
+  console.log('PASS SD inline/full toolbar, whole-file Use English, retired MTL visibility, native undo/redo and double-brace preview in four themes.');
   console.log('PASS native IndexedDB atomic MTL acceptance, exact-receipt replay, newer-review protection and complete-file rollback.');
 };

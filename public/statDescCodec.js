@@ -25,6 +25,27 @@
     return { ...translationIssues(translations[language], translations.English?.length || 0),
       languageBlockPresent: Object.hasOwn(translations, language) };
   }
+  const ENGLISH_INTENT_PROTOCOL = 'sd-use-english-v1';
+  function validEnglishIntent(value) {
+    return !!value && value.protocol === ENGLISH_INTENT_PROTOCOL && value.state === 'active'
+      && typeof value.actionId === 'string' && value.actionId.length > 0 && value.actionId.length <= 200
+      && /^[a-f0-9]{64}$/.test(value.englishHash || '') && /^[a-f0-9]{64}$/.test(value.metadataHash || '')
+      && Object.keys(value).every(key => ['protocol', 'state', 'actionId', 'englishHash', 'metadataHash'].includes(key));
+  }
+  async function englishIntentFor(desc, actionId) {
+    if (!desc?.translations?.English?.length) throw new Error('Use English requires complete English source text.');
+    assertCompleteTranslation(desc?.translations?.English, desc?.translations?.English?.length || 0, desc?.filepath);
+    const provider = globalThis.crypto || (typeof require === 'function' ? require('node:crypto').webcrypto : null);
+    const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+    const fingerprint = async value => Array.from(new Uint8Array(await provider.subtle.digest('SHA-256',
+      new TextEncoder().encode(JSON.stringify(canonical(value))))), byte => byte.toString(16).padStart(2, '0')).join('');
+    const intent = { protocol: ENGLISH_INTENT_PROTOCOL, state: 'active', actionId,
+      englishHash: await fingerprint(desc.translations.English),
+      metadataHash: await fingerprint({ name: desc.name || '', stats: desc.stats, variables: desc.variables, remarks: desc.remarks }) };
+    if (!validEnglishIntent(intent)) throw new Error('Invalid Use English decision.');
+    return intent;
+  }
   function assertCompleteTranslation(lines, expectedCount, filepath = '') {
     const issues = translationIssues(lines, expectedCount);
     if (issues.valid) return;
@@ -469,6 +490,6 @@ function strEncodeUTF16(str) {
     }
     return source.filter(Boolean);
   }
-  return { parserVersion: 1, isBlankTranslation, translationIssues, baselineTranslationIssues, assertCompleteTranslation, detectGameVersionFromFilepaths, computeIsDNT, parseDesc, parseText, descEncode, generateTranslationBlock, strEncodeUTF16,
+  return { parserVersion: 1, ENGLISH_INTENT_PROTOCOL, validEnglishIntent, englishIntentFor, isBlankTranslation, translationIssues, baselineTranslationIssues, assertCompleteTranslation, detectGameVersionFromFilepaths, computeIsDNT, parseDesc, parseText, descEncode, generateTranslationBlock, strEncodeUTF16,
     decodeUTF16, collectDuplicateLangGroups, applyDuplicateSelections, blockHash, hasLanguageMetadata };
 });

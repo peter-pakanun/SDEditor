@@ -244,6 +244,7 @@ input:focus, button:focus, textarea:focus {
 .cloudConflictCell button { white-space: normal; line-height: 1.5; }
 .cloudResultCell { background: var(--color-bg2); border-left: 2px solid var(--color-element-highlight); border-right: 2px solid var(--color-element-highlight); }
 .cloudConflictCell button[aria-pressed="true"], .cloudSaveResolution { background: var(--color-element-highlight); color: white; }
+.sdUseEnglish[aria-pressed="true"] { border-color: var(--ui-accent); background: var(--ui-accent-soft); color: var(--ui-accent); }
 .cloudResolverActions { display: flex; gap: 10px; margin-top: 20px; }
 .cloudSaveResolution { margin-left: auto; }
 .cloudImportConfirm { max-width: 560px; }

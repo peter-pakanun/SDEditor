@@ -5,6 +5,38 @@ const fs=require('node:fs');
 const root={SDText:require('../public/sdText.js'),ClientTextState:require('../public/clientTextState.js'),ClientTextMtlState:require('../public/clientTextMtlState.js'),ClientTextMtlUI:require('../public/clientTextMtlUi.js')};
 vm.runInNewContext(fs.readFileSync(require.resolve('../public/sdEditorTools.js'),'utf8'),{window:root});
 const methods=root.SDEditorTools.mixin.methods;
+root.StatDescCodec=require('../public/statDescCodec.js');root.crypto=require('node:crypto').webcrypto;
+
+test('SD Use English never overwrites translated drafts, DNT, IME or unresolved review buffers',()=>{
+  const disabled=root.SDEditorTools.mixin.computed.sdEnglishIntentDisabledReason;
+  const source={translations:{English:['Source'],Thai:[]}};
+  const host={editorReady:true,editorCurrentEditingDesc:source,workspaceSourceFile:()=>source,sdMtlRows:{},serializeEditorTranslations:()=>[''],editorBlocks:[{}]};
+  assert.equal(disabled.call(host),'');
+  host.serializeEditorTranslations=()=>['Source'];assert.equal(disabled.call(host),'');
+  host.serializeEditorTranslations=()=>[' Thai '];assert.match(disabled.call(host),/must be blank or exactly match/);
+  host.sdEnglishIntentActive=true;assert.equal(disabled.call(host),'','Existing approvals remain removable.');
+  source.isDNT=true;assert.match(disabled.call(host),/DNT/);source.isDNT=false;
+  host.getEditorRef=()=>({composing:true});assert.match(disabled.call(host),/composing/);delete host.getEditorRef;
+  host.sdMtlRows={review:{status:'review'}};assert.equal(disabled.call(host),'','Retired hidden MTL records never block the ordinary workflow.');
+  host.sdMtlVisible=true;assert.match(disabled.call(host),/MTL/);
+});
+
+test('SD Use English captures context through hashing and saves the whole file through the ordinary guarded save',async()=>{
+  const source={filepath:'stat.txt',name:'',stats:['example'],variables:['#'],remarks:[''],translations:{English:['Source']}};
+  const calls=[],host={...methods,editorCurrentEditingDesc:source,editorBlocks:[{translation:''}],_draftSession:{},
+    workspaceSourceFile:()=>source,captureCollaborationContext:()=>({language:'Thai'}),collaborationContextCurrent:()=>true,
+    serializeEditorTranslations(){return this.editorBlocks.map(b=>b.translation);},prepareMatchedEditorBlocks:async(english,targets)=>targets.map(translation=>({translation})),
+    applyPreparedEditorBlocks(blocks){this.editorBlocks=blocks;},editorSave:async options=>{calls.push(options);return true;}};
+  assert.equal(await methods.sdToggleUseEnglish.call(host),true);
+  assert.deepEqual(host.serializeEditorTranslations(),['Source']);
+  assert.equal(calls[0].englishIntent.protocol,'sd-use-english-v1');assert.equal(calls[0].close,false);assert.equal(calls[0].defer,false);
+  host.sdEnglishIntentActive=true;assert.equal(await methods.sdToggleUseEnglish.call(host),true);assert.equal(calls[1].englishIntent,null);
+  host.sdEnglishIntentActive=false;host._collaboration={};host.captureCollaborationContext=()=>({client:{contentPolicy:async()=>{host.collaborationContextCurrent=()=>false;return {statDescriptionEnglishIntent:'sd-use-english-v1'};}}});
+  assert.equal(await methods.sdToggleUseEnglish.call(host),false);assert.equal(calls.length,2,'A context change cannot approve the next file.');
+  host.collaborationContextCurrent=()=>true;
+  host.captureCollaborationContext=()=>({client:{sdEnglishIntent:true,contentPolicy:()=>assert.fail('Cached compatible work can save while disconnected.')}});
+  assert.equal(await methods.sdToggleUseEnglish.call(host),true);assert.equal(calls.length,3);
+});
 test('retired SD controls keep pending text separate and include only a human-accepted current source on Save',async()=>{
   const blocks=['acceptedDraft','pending','review','acceptedDraft'].map((status,index)=>({english:'English '+index,translation:'Translation '+index,status}));
   const host={...methods,editorBlocks:blocks,sdMtlScopeKey:'scope',sdToolContext:'session',sdMtlVisible:false,mtlUiEnabled:false,sdMtlRows:{}};

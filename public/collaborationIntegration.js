@@ -393,7 +393,14 @@
           },
           onChange: state => { this.pendingLocalSaves = state.pending; this.localSaveError = state.error || ''; this.updateLeaveProtection(); },
           onCommit: async (job, ack) => {
-            if (ack.tmChanged) window.OfflineStore.notifyTranslationMemoryChange?.({ profile: job.batch.accountId || 'guest', language: job.batch.language });
+            if (ack.tmChanged) {
+              const tmScope = { profile: job.batch.accountId || 'guest', language: job.batch.language };
+              // The save transaction already returned this command's committed
+              // TM units. Apply them so the change notification's version check
+              // skips reloading and republishing the whole TM library.
+              if (ack.tmPatch) this.applyStatDescriptionMemoryPatch?.(ack.tmPatch);
+              window.OfflineStore.notifyTranslationMemoryChange?.(tmScope);
+            }
             if (this.collaborationContextCurrent(job.context)) {
               if (job.batch.deferDisplay) {
                 const statuses = ack.duplicate ? ack.statuses || {} : job.batch.statuses || {};
@@ -656,6 +663,7 @@
           // Older servers use these wire fields; current workspace status comes
           // exclusively from staged records, never from persisted booleans.
           needsReview: modern ? false : !!desc.needsReview, trackedForExport: !!state.hasChanges,
+          ...(state.staged?.englishIntent ? { englishIntent: this.toPlainForStorage(state.staged.englishIntent) } : {}),
           ...(state.staged?.sourceCarry ? { sourceCarry: this.toPlainForStorage(state.staged.sourceCarry) } : {}) };
       },
       captureCollaborationContext() {
@@ -1119,6 +1127,12 @@
         try {
           const ctx = options.context || this.captureCollaborationContext();
           if (!this.collaborationContextCurrent(ctx)) return { stale: true };
+          const englishIntentFor = (desc, lines) => {
+            if (Object.hasOwn(options.englishIntentByPath || {}, desc.filepath)) return copy(options.englishIntentByPath[desc.filepath]);
+            const current = this.localDescs?.staged?.[ctx.language]?.[desc.filepath];
+            return current?.englishIntent && arrayEquals(lines, (this.workspaceSourceFile(desc.filepath) || desc).translations.English)
+              ? copy(current.englishIntent) : null;
+          };
           const capturedBases = copy(Object.fromEntries(updates.map(({ desc }) => [desc.filepath,
             options.bases?.[desc.filepath] || this.collaborationFile(desc, ctx.language)])));
           if (Number(this.localDescs.stagedVersion || 0) < 1) window.WorkspaceState.initializeWorkspace(this.localDescs, { source: this.workspaceSource(),
@@ -1159,6 +1173,7 @@
             window.WorkspaceState.scopeWorkspace(this.localDescs, ctx.language);
             const now = Date.now();
             const files = updates.map(({ desc, lines }) => ({ filepath: desc.filepath, translations: [...lines], needsReview: false,
+              englishIntent: englishIntentFor(desc, lines),
               trackedForExport: true, beforeTranslations: [...(desc.translations?.[ctx.language] || [])] }));
             const statuses = Object.fromEntries(updates.map(({ desc }, index) => [desc.filepath,
               window.WorkspaceState.setFileMetadata(copy(this.localDescs.status?.[desc.filepath] || {}), ctx.language,
@@ -1175,6 +1190,7 @@
                 { derivedStatus: true })),
               revisions: options.revisions || updates.map(({ desc }, index) => ({ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir,
                 lang: ctx.language, savedAt: now, note: origin, translations: files[index].translations,
+                ...(files[index].englishIntent ? { englishIntent: copy(files[index].englishIntent) } : {}),
                 ...(options.sdMtl?.length?{mtl:copy(options.sdMtl.map(({key,requestId,sourceHash,provenance})=>({requestId,sourceHash,provenance})))}:{}),
                 isMissing: computeIsMissing(desc.translations.English.length, files[index].translations), sourceHash: ctx.source,
                 sourceRef: { kind: 'sd-baseline', game: ctx.game, baselineId: ctx.source, filepath: desc.filepath } })),
@@ -1234,7 +1250,8 @@
             if (!options.revisions) revisions.push({ filepath: desc.filepath, filename: desc.filename, filedir: desc.filedir,
               lang: ctx.language, savedAt: now, note: origin, translations: lines, isMissing,
               ...(ctx.source ? { sourceHash: ctx.source, sourceRef: { kind: 'sd-baseline', game: ctx.game, baselineId: ctx.source, filepath: desc.filepath } } : {}) });
-            const file = { filepath: desc.filepath, translations: lines, needsReview, trackedForExport: true };
+            const file = { filepath: desc.filepath, translations: lines, needsReview, trackedForExport: true,
+              englishIntent: englishIntentFor(desc, lines) };
             if (!localRecords) window.WorkspaceState.stageTranslation(workspace, file, ctx.language,
               { source: this.workspaceSourceFile(desc.filepath), sourceHash: ctx.source, game: ctx.game, promoteDropped: promotions[desc.filepath] });
             return file;

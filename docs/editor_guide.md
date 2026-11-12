@@ -177,6 +177,12 @@ Page navigation and the workspace status counters sit together in a sticky bar a
 
 The **‹!** and **!›** buttons beside pagination jump to the previous or next file needing attention: **Missing**, **Dropped** (SD) or **Outdated** (ClientText), or committed diagnostic **Error/Warning** findings. They keep your search, status filters (including **Unchanged**), browsing group and sort order, move across pages, skip files being edited by others, and stop at the list boundaries. They are also available in the full editor and in ClientText **Sheets**, **NPCs** and **Convo** views. Hover or focus for details. **Ctrl+Shift+,** and **Ctrl+Shift+.** trigger these jumps (Ctrl+< and Ctrl+> on a US keyboard); **Ctrl+, / Ctrl+.** and **F1/F2** retain ordinary save-and-file navigation. Leaving edited work uses the existing save checks and draft recovery. A failed explicit save blocks the jump; SD inline navigation can retain an invalid or declined draft and its findings while moving to the next row. A draft-storage failure keeps the current editor open.
 
+### Intentional English text in StatDescriptions
+
+The full SD editor offers **Use English** for the whole file when its draft is blank or exactly English. It saves actual English text and remembers that choice through unchanged-source versions even if upstream omits the target block. Select it again to stop remembering the choice while retaining the saved text. Different source/metadata or a new upstream translation still needs review. This is separate from ClientText’s blank-target fallback. See [SD Use English](sd_use_english.md).
+
+If a Dropped file has verified unchanged English/metadata but the incoming ZIP retains excess translation rows, its banner is informational. **Use preserved translation** saves the complete retained copy. You can continue with other files and export Saved work while that copy remains unresolved. Source changes and competing copies keep their normal warnings.
+
 ### File Status Indicators
 
 In the file list, colors indicate each file's state. The bottom navigation bar shows the workspace counters:

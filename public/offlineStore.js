@@ -23,7 +23,7 @@
   // No stores are removed and no authored records or retry bodies are rewritten.
   // v26 fences older writers before private SD MTL review acceptance joins atomic saves.
   // v27 fences writers unaware of private ClientText TM review candidates.
-  const DB_VERSION = 27;
+  const DB_VERSION = 28;
   const runtime = typeof window === 'object' ? window : self;
   const migrationListeners = new Set(), migrationActivities = new Map();
   const tmListeners = new Set();
@@ -1246,6 +1246,7 @@
       }
       paths.add(file.filepath);
       return { filepath: file.filepath, translations: [...file.translations], needsReview: !!file.needsReview,
+        ...(Object.hasOwn(file, 'englishIntent') ? { englishIntent: file.englishIntent == null ? null : JSON.parse(JSON.stringify(file.englishIntent)) } : {}),
         trackedForExport: !!file.trackedForExport, revision: Number(file.revision) || 0,
         ...(!file.trackedForExport && file.stagingReset ? { stagingReset: true } : {}) };
     });
@@ -1626,8 +1627,16 @@
         if (batch.tmCapture?.length) {
           if (!normalized || !['save', 'confirm', 'confirm_unchanged', 'restore', 'consistency'].includes(batch.origin || batch.collaboration?.origin || 'save'))
             throw new Error('Translation Memory learning requires a confirmed local save.');
+          // Return only this command's committed TM units/conflicts from the same
+          // transaction. The editor applies that patch instead of reloading the
+          // whole memory library after every save.
+          const tmChanges = { entries: new Map() };
           normalized.tmCapture(tx, { profile: batch.accountId || 'guest', language: batch.language }, batch.tmCapture,
-            { origin: 'learn', mutationId: 'save:' + batch.jobId }).then(changed => { result.tmChanged = changed; writeReceipt(); }, fail);
+            { origin: 'learn', mutationId: 'save:' + batch.jobId }, tmChanges).then(changed => {
+              result.tmChanged = changed;
+              if (changed) result.tmPatch = { ...tmChanges, entries: [...tmChanges.entries.values()] };
+              writeReceipt();
+            }, fail);
         } else writeReceipt();
       } catch (error) { fail(error); }
     };

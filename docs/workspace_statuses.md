@@ -48,6 +48,16 @@ Browser v19 and API schema v21 remove invalid active SD stages regardless of the
 
 Dropping a file in this version permanently excludes it from Revised **for this version and language**, even after confirmation, replacement, or discard. Preserve version-specific assignment provenance, not a permanent file-wide exclusion. A new source version recalculates eligibility against its new immutable baseline.
 
+SD's explicit whole-file [Use English](sd_use_english.md) decision accompanies an
+ordinary complete staged translation containing the actual English target text.
+It never exempts an empty SD block. Only an explicit, source-bound decision
+carries through an unchanged-source upstream omission without new Dropped work;
+ordinary identical-English saves do not infer it. Changed source/metadata or a
+different incoming translation retains normal recovery/review. A verified
+excess-row upstream case may use an informational Dropped banner while preserving
+actual Missing/Error counts, owner-specific copies, Save/export validation and
+unrelated workflows.
+
 ## ClientText Status Definitions
 
 ClientText **Hide DNT entries** filters individual immutable English fields, including marked formatting payloads, while preserving ordinary siblings. It changes visible/search/navigation/manual-scan fields and matching row totals. Existing ClientText Loaded/status counters, assignment progress, sheet colours and exports continue to include their original committed field facts; hiding does not redefine accepted workload. Gender remains attached to visible prose, and all-hidden rows leave the result list. Raw drafts and reviews survive toggles and guarded navigation. See [ClientText DNT visibility](clienttext_dnt_visibility.md) for exact detection rules and local evidence. The SD whole-file eligibility rules below remain unchanged.

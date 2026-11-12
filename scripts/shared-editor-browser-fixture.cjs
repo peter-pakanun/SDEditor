@@ -325,6 +325,10 @@ async function run() {
     });
     await page.waitForSelector('.editor [data-editor-ref="translation_1"]:not([readonly])');
     console.log('SD full editor and native fields mounted.');
+    if(process.env.SDEDITOR_SD_USE_ENGLISH_ONLY==='1'){
+      await require('./sd-use-english-browser-check.cjs')({page,directory:join(__dirname,'../temp/sd-use-english-20261112')});
+      assert.deepEqual(failures,[]);return;
+    }
     if(process.env.SDEDITOR_SD_TOOLBAR_ONLY==='1'){
       await require('./sd-toolbar-browser-check.cjs')({page,directory:join(__dirname,'../temp/sd-toolbar')});
       assert.deepEqual(failures,[]);return;

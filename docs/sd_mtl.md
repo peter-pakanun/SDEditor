@@ -3,8 +3,9 @@
 MTL is retired as of 2026-11-10. Its generation, review and settings controls are hidden in both content modes. Existing request, candidate, history and recovery records remain stored. The MTL sections below document the retained implementation rather than an available editor feature.
 
 Both the inline and full SD editors use the shared field toolbar: Bold, Italic,
-Underline, comparison and revision history. SD has no Use English action or
-decision metadata. English fields remain read-only. Restoring history saves the
+Underline, comparison and revision history. The full editor separately offers
+the explicit whole-file [SD Use English](sd_use_english.md) choice; this does not
+create blank SD targets. English fields remain read-only. Restoring history saves the
 whole file, using the existing completeness, revision and recovery guards.
 
 MTL visibility uses the same function as ClientText: signed-in Translators and

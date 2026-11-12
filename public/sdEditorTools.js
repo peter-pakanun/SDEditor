@@ -4,8 +4,24 @@
     const plain=v=>JSON.parse(JSON.stringify(v)),raw=v=>root.Vue?.markRaw?root.Vue.markRaw(v):v;
     const fieldId=(index,column)=>JSON.stringify([index,column]);
     const mixin={
-        data:()=>({sdMtlRows:{},sdMtlJobs:{},sdMtlError:'',sdComparisons:{},sdHistoryMenu:'',sdDetails:null,sdStyleRevision:0}),
+        data:()=>({sdMtlRows:{},sdMtlJobs:{},sdMtlError:'',sdComparisons:{},sdHistoryMenu:'',sdDetails:null,sdStyleRevision:0,sdEnglishBusy:false}),
         computed:{
+            sdEnglishIntentActive(){const desc=this.editorCurrentEditingDesc,stage=this.localDescs?.staged?.[this.lang]?.[desc?.filepath];
+                return stage?.sourceHash===this.sourceIdentity&&root.StatDescCodec.validEnglishIntent(stage?.englishIntent)
+                    &&JSON.stringify(stage.translations)===JSON.stringify((this.workspaceSourceFile?.(desc?.filepath)||desc)?.translations?.English);},
+            sdEnglishIntentDisabledReason(){
+                if(this.ctActive)return 'Open a StatDescription file to choose Use English for the whole file.';
+                if(!this.editorReady||this.editorSaving||this.editorTranslationReadOnly||this.navigationBusy||this.editorCompareActive||this.entryAlignment||this.editorEntryAlignmentRequired||this.editorDroppedConflict)return 'Finish loading, alignment or conflict review before choosing Use English.';
+                if(this._draftSession?.conflict||this._draftSession?.record?.conflicts?.length)return 'Review the competing local draft before choosing Use English.';
+                if(this.editorBlocks?.some((block,index)=>block.isTable?block.tableColumns.some((_,column)=>this.getEditorRef?.('translation',index,column)?.composing):this.getEditorRef?.('translation',index)?.composing))return 'Finish composing text before choosing Use English.';
+                if(this.sdMtlVisible&&Object.values(this.sdMtlRows||{}).some(row=>['review','acceptedDraft','pending'].includes(row.status)))return 'Finish reviewing the MTL suggestion before choosing Use English.';
+                const desc=this.editorCurrentEditingDesc,source=this.workspaceSourceFile?.(desc?.filepath)||desc;
+                if(!source||source.isDNT||root.StatDescCodec.computeIsDNT(source.translations?.English))return 'Use English is unavailable for DNT files.';
+                if(this.sdEnglishIntentActive)return '';
+                const english=source.translations?.English||[],values=this.serializeEditorTranslations?.()||[];
+                if(!english.length||english.some(root.StatDescCodec.isBlankTranslation))return 'Use English requires complete English source text.';
+                return values.length===english.length&&values.every((value,index)=>root.StatDescCodec.isBlankTranslation(value)||value===english[index])?'':'Use English applies to the whole file. Its draft must be blank or exactly match English.';
+            },
             sdMtlVisible(){return root.ClientTextMtlUI?.visible(this)===true;},
             sdMtlScopeKey(){return JSON.stringify(this.sdScope());},
             sdToolContext(){return JSON.stringify([this.ctActive,this.editorSessionActive,this.sdMtlScopeKey,this.editorCurrentEditingDesc?.filepath,this._editorOpenCancelRevision,this.cloudSignedIn,this.cloudUser?.role,this.cloudUser?.language,this.cloudUser?.assignmentVersion,this._cloud?.epoch]);}
@@ -13,6 +29,32 @@
         watch:{sdToolContext:{flush:'sync',handler(){this.sdAbort();this._sdWrites=new Map();this._sdKnownRevisions=new Map();this.sdMtlRows={};this.sdComparisons={};this.sdHistoryMenu='';this.sdDetails=null;this.sdMtlError='';this._sdReviewLoad=this.sdLoadReviews();}}},
         beforeUnmount(){this.sdAbort();},
         methods:{
+            async sdToggleUseEnglish(){
+                if(this.sdEnglishIntentDisabledReason||this.sdEnglishBusy)return false;
+                const desc=this.editorCurrentEditingDesc,blocks=this.editorBlocks,context=this.captureCollaborationContext(),session=this._draftSession;
+                const source=this.workspaceSourceFile?.(desc.filepath)||desc,values=JSON.stringify(this.serializeEditorTranslations()),active=this.sdEnglishIntentActive,base=this._editorCollabBase;
+                const current=()=>this.editorCurrentEditingDesc===desc&&this.editorBlocks===blocks&&this._draftSession===session
+                    &&this._editorCollabBase===base&&this.sdEnglishIntentActive===active&&!this.sdEnglishIntentDisabledReason
+                    &&this.collaborationContextCurrent(context)&&JSON.stringify(this.serializeEditorTranslations())===values&&!this.editorTranslationReadOnly;
+                this.sdEnglishBusy=true;
+                try{
+                    if(context.client&&context.client.sdEnglishIntent!==true){
+                        const policy=await context.client.contentPolicy();
+                        if(!current())return false;
+                        if(policy?.statDescriptionEnglishIntent!==root.StatDescCodec.ENGLISH_INTENT_PROTOCOL)throw new Error('This server needs the SD Use English update before this choice can be shared.');
+                        context.client.sdEnglishIntent=true;
+                    }
+                    const intent=active?null:await root.StatDescCodec.englishIntentFor(source,root.crypto.randomUUID());
+                    if(!current())return false;
+                    if(!active){
+                        const prepared=await this.prepareMatchedEditorBlocks(source.translations.English,source.translations.English,current);
+                        if(!prepared||!current())return false;
+                        this.applyPreparedEditorBlocks(prepared);
+                    }
+                    return await this.editorSave({close:false,defer:false,englishIntent:intent});
+                }catch(error){if(this.editorCurrentEditingDesc===desc&&this.collaborationContextCurrent(context))this.collaborationNotice=error.message;return false;}
+                finally{this.sdEnglishBusy=false;}
+            },
             sdScope(){const managed=this.managedWorkspaceScope?.()||{},room=this._collaboration?.room?.(),roomId=room?.roomId||room?.id;
                 return {accountId:String(managed.accountId||this.cloudProfileId||this.cloudUser?.id||'guest'),game:this.gameVersion,branchId:this.branchId||'default',language:this.lang,
                     baselineId:this.sourceIdentity||managed.sourceHash||'',...(managed.groupId?{groupId:managed.groupId,versionId:managed.versionId}:{}),

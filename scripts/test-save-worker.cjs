@@ -7,6 +7,29 @@ const { create } = require('../public/saveWorkerClient.js');
 const queued = () => new Promise(resolve => setImmediate(resolve));
 const copy = value => JSON.parse(JSON.stringify(value));
 const W = require('../public/workspaceState.js');
+const SDCodec = require('../public/statDescCodec.js');
+
+test('Use English commits its decision with text, outbox and receipt, including lost-ack replay and revocation', async () => {
+  const f = fixture({ collaboration: true, worker: true }), workspace = f.kv.get('workspace_poe1');
+  Object.assign(workspace.descs[0], { name: '', stats: ['example'], variables: ['#'], remarks: [''] });
+  const originals = copy(workspace.descs), original = originals[0]; f.kv.set('source_poe1', originals);
+  W.initializeWorkspace(workspace, { source: originals, sourceHash: 'source', game: 'poe1', language: 'Thai' });
+  const intent = await SDCodec.englishIntentFor(original, 'english-action');
+  const command = batch({ descriptions: [original], files: [{ ...file('source text'), englishIntent: intent }],
+    collaboration: { key, identity, origin: 'save', bases: { 'stat.txt': file() } } });
+  const ack = await commit(f, f.store.saveTranslationBatch(command));
+  assert.deepEqual(f.kv.get('workspace_poe1').staged.Thai['stat.txt'].englishIntent, intent);
+  assert.deepEqual(f.kv.get('collaboration_v1').rooms[key].outbox[0].files[0].yours.englishIntent, intent);
+  assert.equal((await commit(f, f.store.saveTranslationBatch(command))).duplicate, true);
+  assert.equal(f.kv.get('collaboration_v1').rooms[key].outbox.length, 1);
+  const revoked = { ...copy(command), jobId: 'english-revoke', files: [{ ...file('source text'), englishIntent: null }] };
+  await commit(f, f.store.saveTranslationBatch(revoked));
+  assert.equal(f.kv.get('workspace_poe1').staged.Thai['stat.txt'].englishIntent, undefined);
+  assert.equal((await commit(f, f.store.saveTranslationBatch(command))).duplicate, true);
+  assert.equal(f.kv.get('workspace_poe1').staged.Thai['stat.txt'].englishIntent, undefined);
+  assert.deepEqual(f.kv.get('source_poe1'), originals);
+  assert.equal(ack.status, 'pending');
+});
 function assertNoStatusFlags(workspace) {
   const flags = ['hasChanges', 'isEdited', 'isRevised', 'isMissing', 'isDropped', 'needsReview', 'trackedForExport'];
   for (const value of [...(workspace.descs || []), ...Object.values(workspace.status || {})]) {
