@@ -397,8 +397,8 @@
               const tmScope = { profile: job.batch.accountId || 'guest', language: job.batch.language };
               // The save transaction already returned this command's committed
               // TM units. Apply them so the change notification's version check
-              // skips reloading and republishing the whole TM library.
-              if (ack.tmPatch) this.applyStatDescriptionMemoryPatch?.(ack.tmPatch);
+              // and the TM cloud pass skip the full library load.
+              if (ack.tmPatch) this.applyTranslationMemoryPatch?.(ack.tmPatch);
               window.OfflineStore.notifyTranslationMemoryChange?.(tmScope);
             }
             if (this.collaborationContextCurrent(job.context)) {

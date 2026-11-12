@@ -157,6 +157,17 @@
       applyClientTextMemoryPatch(patch) {
         return this.applyMemoryPatch(patch, 'clienttext');
       },
+      applyTranslationMemoryPatch(patch) {
+        // Cloud acknowledgements carry the units a command committed. Dispatch on
+        // their content mode so StatDescription uploads patch the library too;
+        // mixed or malformed patches keep the background snapshot path.
+        if (!patch || !Array.isArray(patch.entries)) return false;
+        const clientText = patch.entries.filter(entry => entry?.unit?.context?.contentMode === 'clienttext').length;
+        if (clientText && clientText !== patch.entries.length) return false;
+        const applied = this.applyMemoryPatch(patch, clientText ? 'clienttext' : 'statdescription');
+        if (applied) this._tmSync?.markPublished?.({ profile: patch.profile, language: patch.language }, patch.localVersion);
+        return applied;
+      },
       applyMemoryPatch(patch, contentMode) {
         const inMode = unit => contentMode === 'clienttext' ? unit?.context?.contentMode === 'clienttext'
           : unit?.context?.contentMode !== 'clienttext';
@@ -213,7 +224,7 @@
           this._tmSync = new window.TMCloudSync.Client({ cloud: this._cloud, store: window.OfflineStore,
             onPatch: (scope, patch) => {
               if (scope.profile !== (this.cloudProfileId || 'guest') || scope.language !== this.lang || this.tmBusy) return false;
-              return this.applyClientTextMemoryPatch(patch);
+              return this.applyTranslationMemoryPatch(patch);
             },
             onChange: (scope, state) => {
               if (scope.profile !== (this.cloudProfileId || 'guest') || scope.language !== this.lang) return;

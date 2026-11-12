@@ -105,6 +105,22 @@ test('TM uploads retain durable mutation IDs and exact returned per-unit revisio
   assert.deepEqual(f.work.map(item => item.active), [true, false]);
 });
 
+test('a published save acknowledgement keeps the next sync pass from rereading the TM library', async () => {
+  const f = fixture(); f.setBootstrapped(true, 5);
+  const scope = f.client.scope(f.cloud.context());
+  const state = await f.client.state(scope);
+  assert.equal(f.client.markPublished(scope, state.localVersion), true);
+  assert.equal(f.client.markPublished(null, 1), false);
+  assert.equal(f.client.markPublished(scope, 1.5), false);
+  f.setResponse(async path => path.includes('/changes?')
+    ? { revision: 5, changes: [], nextAfter: 5, hasMore: false }
+    : { revision: 5, units: [], tombstones: [], nextCursor: null });
+  await f.client.sync(f.cloud.context(), { tmRevision: 5 });
+  assert.equal(f.reads().fullReads, 0, 'publish reuses the visible version instead of rereading the library');
+  assert.equal(f.changes.filter(change => change.notification).length, 0);
+  assert.equal(f.notifications.length, 0);
+});
+
 test('consumed upload acknowledgements and their later cursor replay avoid full TM snapshot reads', async () => {
   const f = fixture({ patchResults: true, acceptPatches: true }); f.setBootstrapped(true, 5);
   const scopeKey = JSON.stringify(['alice', 'Thai']); f.client.publishedVersions.set(scopeKey, 0);

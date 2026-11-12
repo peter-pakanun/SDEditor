@@ -34,6 +34,15 @@
         this.publishedVersions.set(JSON.stringify([scope.profile, scope.language]), accepted.patch.localVersion);
     }
     async state(scope) { return this.store.getTranslationMemoryState(scope); }
+    // A committed local save (or any acknowledged patch applied elsewhere) can
+    // advance the visible library without this sync pass. Recording that version
+    // lets publish() skip rereading and republishing the whole TM library.
+    markPublished(scope, localVersion) {
+      if (!scope || typeof scope.profile !== 'string' || !scope.profile || typeof scope.language !== 'string'
+        || !scope.language || !Number.isSafeInteger(localVersion)) return false;
+      this.publishedVersions.set(JSON.stringify([scope.profile, scope.language]), localVersion);
+      return true;
+    }
     async publish(ctx, state, notify = false) {
       const scope = this.scope(ctx), scopeKey = JSON.stringify([scope.profile, scope.language]);
       let conflictCount = state.conflicts;

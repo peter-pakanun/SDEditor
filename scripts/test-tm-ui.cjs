@@ -597,6 +597,28 @@ test('StatDescription patches reject another account, language, version or Clien
   assert.equal(app.applyStatDescriptionMemoryPatch(memoryPatch(app, [{ unit: ct, conflict: null }])), false);
 });
 
+test('cloud acknowledgements patch StatDescription units and record the published version', () => {
+  const sd = row('sd', 'Damage', 'ความเสียหายเดิม'), ct = clientTextMemory('ct');
+  const { app, calls } = harness({ units: [sd, ct] });
+  app._tmAcceptedScope = app.tmScopeKey; app._tmSnapshotVersion = 7;
+  const marked = [];
+  app._tmSync = { markPublished(scope, version) { marked.push([scope.profile, scope.language, version]); return true; } };
+  const generation = app.tmGeneration;
+  const saved = { ...sd, target: 'บันทึกแล้ว', localRevision: 4 };
+  assert.equal(app.applyTranslationMemoryPatch(memoryPatch(app, [{ unit: saved, conflict: null }])), true);
+  assert.equal(app.tmUnits.find(unit => unit.id === 'sd').target, 'บันทึกแล้ว');
+  assert.deepEqual(marked, [['guest', 'Thai', 8]]);
+  const savedClientText = { ...ct, target: 'ClientText saved', localRevision: 4 };
+  assert.equal(app.applyTranslationMemoryPatch(memoryPatch(app, [{ unit: savedClientText, conflict: null }], 8, 9)), true);
+  assert.equal(app.tmUnits.find(unit => unit.id === 'ct').target, 'ClientText saved');
+  assert.deepEqual(marked[1], ['guest', 'Thai', 9]);
+  assert.equal(app.applyTranslationMemoryPatch(memoryPatch(app, [
+    { unit: { ...saved, target: 'mixed' }, conflict: null }, { unit: savedClientText, conflict: null }], 9, 10)), false);
+  assert.equal(app._tmSnapshotVersion, 9);
+  assert.equal(app.tmGeneration, generation, 'no full snapshot publication happens');
+  assert.deepEqual(calls.publications, []);
+});
+
 test('a queued notification waits when cloud acknowledgement starts before its reload timer fires', async () => {
   let notify, reloads = 0;
   const { app, mixin } = harness({ store: { onTranslationMemoryChange(listener) { notify = listener; return () => {}; } } });
