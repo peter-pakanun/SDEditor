@@ -45,15 +45,33 @@ buffers and other native memory. They are not a production capacity guarantee.
 
 Focused checks cover parser identity/duplicate choices, cache upgrades including
 concurrent readers, exact retry coalescing, failure recovery, storage failures,
-and browser publication warnings. The full API suite reported 900 passes and
-eight failures; the same eight migration failures were independently reproduced
-against unchanged HEAD. Syntax and whitespace checks pass. No deployment or live
-authenticated publication was performed during this investigation.
+and browser publication warnings. The initial full API run reported 900 passes
+and eight migration failures reproduced against unchanged HEAD. The follow-up
+below resolves those failures. No deployment or live authenticated publication
+was performed during this investigation.
 
 Concurrent legacy preparation and existing baseline readers may still overlap
 publication. Full parsed catalogs remain in process memory during comparisons.
 Increasing Node's old-space ceiling to 3,000 MiB on this approximately 1 GB RAM
 host can trade a V8 failure for swapping or operating-system memory pressure.
+
+## Migration verification follow-up
+
+Fresh carry-forward evidence now triggers immediate verification even when a
+recent checkpoint exists. The retry cooldown applies only to actual failed
+verification, so unavailable/corrupt originals still do not cause repeated
+parsing on routine reads. The existing reset, revision, receipt, history and
+collection guards remain intact.
+
+The ambiguous-receipt fixture now uses an unwitnessed sequence rather than a
+valid no-op sequence. The restored-original fixture advances its controlled
+clock through the cooldown and verifies that repeated reads do not retry early.
+The original sparse-witness and local-repair assertions remain unchanged.
+
+After these repairs, all **916 API tests** pass, together with syntax and
+whitespace checks. The focused frontend checks pass **1,151 tests**. These are
+local checks; hosted deployment remains a separate step, with API schema 32
+deployed before the companion frontend.
 
 ## Client-prepared publication follow-up
 
