@@ -582,6 +582,10 @@ If the number of `[]` keyword tags differs, this is usually an **error**. Check 
 
 ## Comparing Translations
 
+For an earlier SD version, choose **Recall translation…** in the full or inline editor, then select the reference version. The dialog shows old/current English differences and the historical translation in a separate review buffer. **Show whitespace** and **Character differences** change the diff. It prefers an exact preserved copy, then historical Saved text, then the matching original ZIP translation. Missing old ZIPs do not discard Saved or recovery targets.
+
+Viewing or editing recalled text leaves your normal draft unchanged. Confirm each unchanged entry with **Keep unchanged**, or correct it for the current English, then choose **Save reviewed translation**. The complete file must be nonblank and have the current entry count. A separate normal draft remains available, and unrelated preserved copies are not silently resolved. [Publication and recall details](sd_client_publication.md).
+
 The **History** panel on the right shows all saved versions of the current file. You can:
 
 - Click a different history entry to compare it with the current version

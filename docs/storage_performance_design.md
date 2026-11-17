@@ -22,6 +22,8 @@ The current design therefore distinguishes durable records from materialized rea
 
 ## Ownership and data layers
 
+New managed SD publication uses [client-prepared snapshots and bounded dispositions](sd_client_publication.md). ZIP parsing, duplicate choices, aggregate summaries and source comparison run in the browser. The API streams original verification, pages frozen affected records, and accepts their complete disposition set atomically; it does not load parsed source catalogs for this path. Existing legacy requests and compatibility exporters retain their original contracts. On-demand recall uses the requested historical file through the browser's existing source worker, rather than hydrating every historical catalog on the API.
+
 | Layer | Authority and lifetime | Rules |
 | --- | --- | --- |
 | Accepted original | Exact hashed original and accepted parser/duplicate configuration; complete browser baseline or verified reusable cache | Immutable source authority. Includes original English, original translations and entry metadata. StatDescription uses [ZIP-only source storage](sd_baseline_storage.md), without membership proofs or duplicate SD source text in SQLite. UI decoration, saves, shared edits and recovery do not rewrite it. |

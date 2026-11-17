@@ -8,6 +8,8 @@ The version chooser appears as soon as the game is selected. Its Online list loa
 
 ## Multi-content versions and ClientText import/export
 
+New StatDescription preparations run in the browser. **Prepare and validate** checks the ZIP and duplicate choices; **Publish complete groups** compares frozen predecessor Saved/recovery work and accepts the complete group atomically. If a response is lost, resume the same prepared publication. Existing work/history/recovery is retained. Untouched text found only in an older original is available through **Recall translation…** in the editor instead of automatically becoming new Dropped work. See [client-prepared SD publication and recall](sd_client_publication.md).
+
 Managers and admins can view, upload and manage ClientText groups for all 12 languages, with or without an assigned language. Use **Add content group** on the selected version, confirm each workbook's team, then prepare and publish the complete groups. The Assignment table lists every language's groups and offers Open editor, Download, Download and end, previous snapshots and Reopen. Opening a group selects its language and keeps its work and history scoped to that version/group. Translators see only their assigned language's online groups; changing the required workbook-role policy remains admin-only.
 
 A named version is metadata with its own ID. **Add content** accepts any available upstream originals; there is no requirement that the folder contain every file. Keep the upstream folder name, or use the timestamp/game default. Save metadata first when files are not ready. `Missing_XXX.txt` is ignored because the editor computes workload itself.

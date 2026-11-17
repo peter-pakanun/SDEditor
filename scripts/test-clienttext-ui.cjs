@@ -17,7 +17,7 @@ function mockOwnedStore(store){
 
 function harness(changes={}){
     let nextId=0;
-    const window={StatDescCodec:require('../public/statDescCodec.js'),ClientTextCodec:require('../public/clientTextCodec.js'),ClientTextExportProgress:require('../public/clientTextExportProgress.js'),ClientTextState:S,ClientTextStore:Store,TranslationDiagnostics:require('../public/translationDiagnostics.js'),
+    const window={StatDescCodec:require('../public/statDescCodec.js'),SDClientPublication:require('../public/sdClientPublication.js'),ClientTextCodec:require('../public/clientTextCodec.js'),ClientTextExportProgress:require('../public/clientTextExportProgress.js'),ClientTextState:S,ClientTextStore:Store,TranslationDiagnostics:require('../public/translationDiagnostics.js'),
         ClientTextNpcIndex:require('../public/clientTextNpcIndex.js'),
         ClientTextConvoIndex:require('../public/clientTextConvoIndex.js'),
         ClientTextIdentities:require('../public/clientTextIdentities.js'),
@@ -4682,12 +4682,15 @@ function interruptedStatPublication(failure){
 
 test('uncertain StatDescription finalization retains its journal and retries the same IDs without repeating accepted publication',async()=>{
     const {app,calls,store,version}=interruptedStatPublication(Object.assign(Error('Cloud request could not reach the server.'),{code:'NETWORK_ERROR'}));
+    app.ctPolicy.statDescriptionPublicationProtocols=[require('../public/sdClientPublication.js').STORAGE_PROTOCOL];
     await app.ctPublishPrepared();
     assert.match(app.ctUploadError,/Finalizing content group:.*may still have accepted/);
     assert.match(app.ctUploadError,/Retry Publish complete groups.*do not prepare it again/);
     assert.doesNotMatch(app.ctUploadError,/disk|storage/i);
     const warning=app.ctUploadError,prepared=app.ctPrepared[0],journalId=app._ctPublicationRequest,
         journal=await store.getRequest(app.ctRequestScope(),journalId),firstCreate=calls.find(call=>call.route==='/v1/content-uploads'),firstFinalize=calls.find(call=>call.route.endsWith('/finalize'));
+    assert.equal(firstCreate.body.storageProtocol,undefined,'An older prepared SD upload keeps its legacy body even after new capability appears');
+    assert.equal(firstFinalize.body.storageProtocol,undefined);
     assert.deepEqual(journal.payload.groups[0].createBody,firstCreate.body);assert.deepEqual(journal.payload.groups[0].finalizeBody,firstFinalize.body);
     assert.equal(prepared.published,undefined);assert.equal(app.ctUploading,false);assert.equal(app.ctProgress,null);
     const retryStarted=deferred(),release=deferred(),retryCalls=[];
@@ -4712,6 +4715,45 @@ test('publication timeouts and proxy errors show actionable uncertainty instead 
         assert.match(app.ctUploadError,/Finalizing content group:.*may still have accepted/);
         assert.match(app.ctUploadError,/Retry Publish complete groups/);assert.equal(app.ctPrepared.length,1);
     }
+});
+
+test('browser-prepared SD publication sends bounded frozen dispositions and journals exact new-protocol retries',async()=>{
+    const SD=require('../public/sdClientPublication.js'),P=require('../public/collaborationProtocol.js'),f=fixture(),
+        desc={filepath:'specific_skill_stat_descriptions/test/test.txt',name:'test',stats:['stat'],variables:['#'],remarks:[''],translations:{English:['Fire'],Thai:['Original']}},
+        facts=await SD.sourceFacts(desc),file=new File(['ZIP'],'StatDescriptions.zip'),
+        parsed={rawSource:[desc],identity:{zipHash:await P.zipHash(file),zipSize:file.size,fileCount:1}},
+        {app}=harness({_ctStore:f.store,ctUploadVersion:{id:'v1',game:'poe2',branchId:'default',membershipRevision:0},ctUploadName:'Client SD'}),calls=[];
+    app.ctPrepared=[{contentMode:'statdescription',storageProtocol:SD.STORAGE_PROTOCOL,_sdParsed:parsed,assignments:['Thai'],candidates:[{file}],duplicateGroups:[]}];
+    app._cloud={async request(route,options){
+        calls.push({route,body:clone(options?.body)});
+        if(route==='/v1/content-uploads' || route==='/v1/content-uploads/upload')return{upload:{id:'upload',status:'uploading'}};
+        if(route.includes('/assets/'))return{};
+        if(route.endsWith('/sd-snapshot'))return{snapshot:{id:'snapshot',recordCount:1,teams:[{language:'Thai',recordCount:1}]}};
+        if(route.includes('/sd-snapshot/records?'))return{snapshotId:'snapshot',language:'Thai',total:1,records:[{id:'frozen-save',kind:'saved',filepath:desc.filepath,translations:['Authored'],sourceFacts:facts}],nextCursor:null};
+        if(route.endsWith('/sd-dispositions/chunks'))return{received:true};
+        if(route.endsWith('/finalize'))throw Object.assign(Error('Acknowledgement lost'),{code:'NETWORK_ERROR'});
+        throw Error('Unexpected route '+route);
+    }};
+    app.refreshManagedVersions=async()=>{};app.managedReadDetails=async()=>{};await app.ctPublishPrepared();
+    assert.match(app.ctUploadError,/may still have accepted/);
+    const firstCreate=calls.find(call=>call.route==='/v1/content-uploads'),chunks=calls.filter(call=>call.route.endsWith('/sd-dispositions/chunks')),finalize=calls.find(call=>call.route.endsWith('/finalize')),
+        journal=await f.store.getRequest(app.ctRequestScope(),app._ctPublicationRequest),retained=journal.payload.groups[0];
+    assert.equal(firstCreate.body.storageProtocol,SD.STORAGE_PROTOCOL);assert.equal(finalize.body.snapshotId,'snapshot');assert.equal(finalize.body.decisions,undefined);
+    assert.equal(finalize.body.descriptors[0].role,'source');assert.equal(finalize.body.summaries.source.format,'sd-baseline-summary-v1');
+    assert.equal(chunks.length,1);assert.equal(chunks[0].body.records[0].action,'carry');assert.equal(chunks[0].body.records[0].translations,undefined);
+    assert.equal(retained._sdParsed,undefined);assert.deepEqual(retained.sdDispositions,[chunks[0].body]);assert.deepEqual(retained.finalizeBody,finalize.body);
+    const replay=[],resumed={...retained,candidates:[{file}]};app.ctPrepared=[resumed];
+    app._cloud.request=async(route,options)=>{
+        replay.push({route,body:clone(options?.body)});
+        if(route==='/v1/content-uploads' || route==='/v1/content-uploads/upload')return{upload:{id:'upload',status:'uploading'}};
+        if(route.includes('/assets/') || route.endsWith('/sd-dispositions/chunks'))return{};
+        if(route.endsWith('/finalize'))return{version:{...app.ctUploadVersion,membershipRevision:1}};
+        throw Error('A retained snapshot/disposition retry must not reparse source or refetch predecessor pages');
+    };
+    await app.ctPublishPrepared();assert.equal(app.ctUploadError,'');
+    assert.deepEqual(replay.find(call=>call.route==='/v1/content-uploads').body,firstCreate.body);
+    assert.deepEqual(replay.find(call=>call.route.endsWith('/sd-dispositions/chunks')).body,chunks[0].body);
+    assert.deepEqual(replay.find(call=>call.route.endsWith('/finalize')).body,finalize.body);
 });
 
 test('publication creation failures identify their phase without claiming finalization was accepted',async()=>{

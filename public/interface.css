@@ -75,6 +75,21 @@ button:hover:not(:disabled) { border-color: var(--ui-accent); }
 .rawFileDialog { box-sizing: border-box; width: min(1200px, calc(100vw - 40px)); max-width: none; max-height: calc(100dvh - 40px); padding: 20px; color: var(--color-font); background: var(--color-bg); border: 1px solid var(--ui-border); border-radius: 10px; box-shadow: var(--ui-shadow); font: inherit; }
 .rawFileDialog[open] { display: flex; flex-direction: column; gap: 14px; }
 .rawFileDialog::backdrop { background: rgba(0, 0, 0, .65); }
+.sdRecallDialog { box-sizing: border-box; width: min(1280px, calc(100vw - 40px)); max-width: none; max-height: calc(100dvh - 40px); overflow: auto; padding: 20px; color: var(--color-font); background: var(--color-bg); border: 1px solid var(--ui-border); border-radius: 10px; box-shadow: var(--ui-shadow); font: inherit; }
+.sdRecallDialog::backdrop { background: rgba(0, 0, 0, .65); }
+.sdRecallHeading, .sdRecallControls, .sdRecallFooter { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.sdRecallHeading h2, .sdRecallHeading p, .sdRecallFooter p { margin: 0; }
+.sdRecallControls { justify-content: flex-start; margin: 16px 0; }
+.sdRecallControls label { display: flex; align-items: center; gap: 6px; }
+.sdRecallEntry { display: grid; grid-template-columns: 1fr 1fr; align-items: start; gap: 16px; padding: 16px 0; border-top: 1px solid var(--ui-border); }
+.sdRecallEntry > div { min-width: 0; }
+.sdRecallEntry h3, .sdRecallEntry label { display: block; margin: 0 0 8px; font-size: 1em; font-weight: bold; }
+.sdRecallEntry textarea { box-sizing: border-box; width: 100%; min-height: 110px; resize: vertical; padding: 8px; color: var(--color-font); background: var(--color-element); border: 1px solid var(--ui-border); font: inherit; }
+.sdRecallEntry .englishDiff { margin: 0; overflow-wrap: anywhere; border-color: var(--ui-border); }
+.sdRecallEdited { color: var(--ui-muted); }
+.sdRecallFooter { position: sticky; bottom: -20px; padding: 14px 0; background: var(--color-bg); border-top: 1px solid var(--ui-border); }
+.sdRecallFooter p { max-width: 72ch; }
+.sdRecallDialog :focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 2px; }
 .rawFileHeading, .rawFileControls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .rawFileHeading { justify-content: space-between; align-items: flex-start; }
 .rawFileHeading > div { min-width: 0; flex: 1; }

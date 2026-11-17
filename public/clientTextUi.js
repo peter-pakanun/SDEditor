@@ -6,6 +6,7 @@
     'use strict';
     const exportProgress = root.ClientTextExportProgress || (typeof require === 'function' ? require('./clientTextExportProgress.js') : null);
     const statDescCodec = root.StatDescCodec || (typeof require === 'function' ? require('./statDescCodec.js') : null);
+    const sdPublication = root.SDClientPublication || (typeof require === 'function' ? require('./sdClientPublication.js') : null);
     const teams = ['French', 'German', 'Spanish', 'Portuguese', 'Russian', 'Thai', 'Korean', 'Japanese', 'Simplified Chinese', 'Traditional Chinese', 'Turkish', 'Polish'];
     const copy = value => JSON.parse(JSON.stringify(value));
     const raw = value => root.Vue?.markRaw ? root.Vue.markRaw(value) : value;
@@ -3473,12 +3474,18 @@
                         if (/\.zip$/i.test(candidate.file.name)) {
                             if (this.ctUploadLocal) throw new Error('Use Import ZIP for local StatDescription imports.');
                             if (prepared.some(group => group.contentMode === 'statdescription')) throw new Error('A version can contain only one StatDescription ZIP group.');
-                            const zip=await root.JSZip.loadAsync(candidate.file),entries=Object.values(zip.files).filter(entry=>!entry.dir && /\.txt$/i.test(entry.name));
-                            if(!entries.length || root.StatDescCodec.detectGameVersionFromFilepaths(entries.map(entry=>entry.name))!==this.gameVersion)throw new Error('The ZIP does not match the selected game.');
-                            const source=[];for(let index=0;index<entries.length;index++){const desc=await root.parseFile(entries[index].name,entries[index],this.lang || 'Thai',{strict:true});if(desc)source.push(desc);this.ctReport({phase:'Checking StatDescription',completed:index+1,total:entries.length,sheet:entries[index].name});if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;}
-                            const duplicateGroups=root.StatDescCodec.collectDuplicateLangGroups(source);
+                            if(!sdPublication)throw new Error('Reload the editor to load StatDescription publication support.');
+                            if(!this.ctPolicy?.statDescriptionPublicationProtocols?.includes(sdPublication.STORAGE_PROTOCOL)){
+                                const policy=await this._cloud.request('/v1/content-policy',{signal:this._ctAbort.signal});
+                                if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
+                                if(!policy.statDescriptionPublicationProtocols?.includes(sdPublication.STORAGE_PROTOCOL))throw new Error('This server needs the browser-prepared StatDescription publication API update. Existing prepared uploads remain resumable.');
+                                this.ctPolicy=policy;
+                            }
+                            const parsed=await sdPublication.parse(candidate.file,{JSZip:root.JSZip,game:this.gameVersion,language:this.lang || 'Thai',signal:this._ctAbort.signal,current:()=>key===this.managedCatalogScope,onProgress:progress=>this.ctReport(progress)}),duplicateGroups=parsed.duplicateGroups;
+                            candidate.file=new File([parsed.original],candidate.file.name,{type:'application/zip'});
                             const parent=(await this.ctFindPreviousGroup({contentMode:'statdescription'}))?.group;
-                            prepared.push({ contentMode: 'statdescription', candidates: [candidate], assignments: this.ctUploadAssignments.slice(),parentGroupId:parent?.id,duplicateGroups }); continue;
+                            if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
+                            prepared.push({ contentMode: 'statdescription', storageProtocol:sdPublication.STORAGE_PROTOCOL,_sdParsed:raw(parsed),candidates: [candidate], assignments: this.ctUploadAssignments.slice(),parentGroupId:parent?.id,duplicateGroups }); continue;
                         }
                         if (!candidate.language) throw new Error('Confirm the language team for ' + candidate.file.name + '.');
                         if (this.ctUploadTest && !['previous','current'].includes(candidate.testVersion || 'current')) throw new Error('Choose Previous or Current for ' + candidate.file.name + '.');
@@ -3558,7 +3565,8 @@
                 }
                 const groups=this.ctPrepared.map(prepared=>({contentMode:prepared.contentMode,language:prepared.language,storageProtocol:prepared.storageProtocol,assignments:prepared.assignments,parentGroupId:prepared.parentGroupId,cacheScope:prepared.cacheScope,carry:prepared.carry,
                     requestId:prepared.requestId,uploadId:prepared.uploadId,createBody:prepared.createBody,finalizeBody:prepared.finalizeBody,published:prepared.published,
-                    candidates:prepared.contentMode==='statdescription'?prepared.candidates:undefined,warnings:prepared.warnings,duplicateGroups:prepared.duplicateGroups}));
+                    candidates:prepared.contentMode==='statdescription'?prepared.candidates:undefined,warnings:prepared.warnings,duplicateGroups:prepared.duplicateGroups,
+                    ...(prepared.contentMode==='statdescription' && sdPublication && prepared.storageProtocol===sdPublication.STORAGE_PROTOCOL?{sdPublication:prepared.sdPublication,sdDispositions:prepared.sdDispositions}:{} )}));
                 if(key!==this.managedCatalogScope || signal.aborted)throw Object.assign(new Error('Publication context changed'),{stale:true});
                 await this._ctStore.putRequest(this.ctRequestScope(),this._ctPublicationRequest,{kind:'publication',name:this.ctUploadName,deadline:this.ctUploadDeadline,version:this.ctUploadVersion ? copy(this.ctUploadVersion) : null,predecessor:copy(this.ctUploadPredecessor),releaseRequest:this._ctReleaseRequest,releaseCommand:this._ctReleaseCommand,duplicateChoices:copy(this.ctDuplicateChoices),groups},{immutablePublicationData:true,guard:()=>key===this.managedCatalogScope && !signal.aborted});
             },
@@ -3648,6 +3656,36 @@
                     expectedMembershipRevision:version.membershipRevision || 0,idempotencyKey:prepared.requestId};
                 await this.ctRememberPublication();
             },
+            async ctPrepareStatPublication(prepared,upload,decisions,current) {
+                if(!sdPublication)throw new Error('Reload the editor to resume browser-prepared StatDescription publication.');
+                const signal=this._ctAbort.signal,options={signal,current,onProgress:progress=>this.ctReport(progress)},base='/v1/content-uploads/'+encodeURIComponent(upload.id);
+                prepared.sdPublication ||= {snapshotRequestId:uuid()};
+                await this.ctRememberPublication();
+                if(!current() || signal.aborted)return;
+                const retained=prepared.sdPublication;
+                if(!retained.snapshot){
+                    const result=await this._cloud.request(base+'/sd-snapshot',{method:'POST',body:{storageProtocol:sdPublication.STORAGE_PROTOCOL,idempotencyKey:retained.snapshotRequestId},signal,timeout:180000});
+                    if(!current() || signal.aborted)return;
+                    retained.snapshot=result.snapshot;await this.ctRememberPublication();
+                }
+                if(!prepared.sdDispositions || !retained.archive){
+                    const parsed=prepared._sdParsed || await sdPublication.parse(prepared.candidates[0].file,{...options,JSZip:root.JSZip,game:this.gameVersion,language:this.lang || 'Thai'});
+                    if(!current() || signal.aborted)return;
+                    const source=await sdPublication.prepare(parsed,decisions,{...options,canonicalArchive:upload.canonicalArchive || retained.snapshot?.canonicalArchive});
+                    const chunks=await sdPublication.buildDispositions(retained.snapshot,(language,cursor)=>this._cloud.request(base+'/sd-snapshot/records?language='+encodeURIComponent(language)+'&cursor='+encodeURIComponent(cursor)+'&limit=100',{signal,timeout:180000}),source,options);
+                    if(!current() || signal.aborted)return;
+                    retained.archive=source.archive;retained.summary=source.summary;prepared.sdDispositions=raw(chunks);
+                    // Only compact aggregate metadata and sparse affected-file
+                    // facts enter the retry journal; the full source stays local.
+                    delete prepared._sdParsed;await this.ctRememberPublication();
+                }
+                for(const body of prepared.sdDispositions){
+                    if(!current() || signal.aborted)return;
+                    this.ctReport({phase:'Uploading StatDescription dispositions',completed:body.index,total:prepared.sdDispositions.length,workbook:'',sheet:''});
+                    await this._cloud.request(base+'/sd-dispositions/chunks',{method:'POST',body,signal,timeout:180000});
+                }
+                return {storageProtocol:sdPublication.STORAGE_PROTOCOL,snapshotId:retained.snapshot.id,descriptors:[{role:'source',...retained.archive}],summaries:{source:retained.summary}};
+            },
             async ctPublishPrepared() {
                 if (!this.ctPrepared.length || this.ctUploading) return; this.ctUploading = true; const key = this.managedCatalogScope,client=this._cloud,epoch=this._ctEpoch || 0; this._ctAbort = new AbortController();
                 const controller=this._ctAbort,current=()=>key===this.managedCatalogScope && epoch===(this._ctEpoch || 0) && this._ctAbort===controller;
@@ -3721,7 +3759,7 @@
                         if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
                         if (prepared.published) continue;
                         prepared.requestId ||= uuid();
-                        prepared.createBody ||= { versionId: version.id,game:this.gameVersion,branchId:this.branchId, contentMode: prepared.contentMode,...(prepared.contentMode==='clienttext'?{storageProtocol:trustedProtocol}:{}), language: prepared.language, assignments: prepared.assignments, roles: prepared.contentMode==='statdescription'?['source']:prepared.candidates.map(item => item.role),parentGroupId:prepared.parentGroupId, expectedMembershipRevision: version.membershipRevision || 0, idempotencyKey: prepared.requestId };
+                        prepared.createBody ||= { versionId: version.id,game:this.gameVersion,branchId:this.branchId, contentMode: prepared.contentMode,...(prepared.contentMode==='clienttext'?{storageProtocol:trustedProtocol}:sdPublication && prepared.storageProtocol===sdPublication.STORAGE_PROTOCOL?{storageProtocol:sdPublication.STORAGE_PROTOCOL}:{}), language: prepared.language, assignments: prepared.assignments, roles: prepared.contentMode==='statdescription'?['source']:prepared.candidates.map(item => item.role),parentGroupId:prepared.parentGroupId, expectedMembershipRevision: version.membershipRevision || 0, idempotencyKey: prepared.requestId };
                         await this.ctRememberPublication();
                         reportPublication('Creating content upload');
                         const response = await this._cloud.request('/v1/content-uploads', { method: 'POST', body: prepared.createBody,signal:this._ctAbort.signal });
@@ -3746,7 +3784,8 @@
                             if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
                             publicationPhase='Uploading original '+candidate.file.name;
                             this.ctReport({ phase: 'Uploading original', workbook: candidate.file.name, sheet: '', completed: 0, total: candidate.file.size });
-                            await this._cloud.request('/v1/content-uploads/' + encodeURIComponent(upload.id) + '/assets/' + encodeURIComponent(prepared.contentMode === 'statdescription' ? 'source' : candidate.role) + '?filename='+encodeURIComponent(candidate.file.name), { method: 'PUT', rawBody: candidate.file,signal:this._ctAbort.signal, timeout: 180000, onUploadProgress: (completed, total) => this.ctReport({ completed, total }) });
+                            const acceptedAsset=await this._cloud.request('/v1/content-uploads/' + encodeURIComponent(upload.id) + '/assets/' + encodeURIComponent(prepared.contentMode === 'statdescription' ? 'source' : candidate.role) + '?filename='+encodeURIComponent(candidate.file.name), { method: 'PUT', rawBody: candidate.file,signal:this._ctAbort.signal, timeout: 180000, onUploadProgress: (completed, total) => this.ctReport({ completed, total }) });
+                            if(acceptedAsset?.upload?.canonicalArchive)upload.canonicalArchive=acceptedAsset.upload.canonicalArchive;
                         }
                         for(let start=0,index=0;start<(prepared.carry?.length||0);index++){
                             let end=start,bytes=0;while(end<prepared.carry.length && end-start<2000){const size=new TextEncoder().encode(JSON.stringify(prepared.carry[end])).length+1;if(bytes+size>1800000 && end>start)break;bytes+=size;end++;}
@@ -3755,7 +3794,10 @@
                             if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
                         }
                         const decisions=[];for(const duplicate of prepared.duplicateGroups || []){const choice=this.ctDuplicateChoices[duplicate.filepath+'|'+(duplicate.language || duplicate.lang)],option=duplicate.options.find(option=>String(option.occurrence)===String(choice));if(!option)throw new Error('Choose one block for '+duplicate.filepath+' · '+(duplicate.language || duplicate.lang));decisions.push({filepath:duplicate.filepath,language:duplicate.language || duplicate.lang,occurrence:option.occurrence,blockHash:option.blockHash || await root.CollaborationProtocol.blockHash(option)});}
-                        prepared.finalizeBody ||= { ...(prepared.contentMode==='clienttext'?{storageProtocol:trustedProtocol,descriptors:prepared.originals.descriptors,summaries:prepared.originals.summaries}:{}),decisions, expectedMembershipRevision: version.membershipRevision || 0, idempotencyKey: prepared.requestId };
+                        const browserSD=prepared.contentMode==='statdescription' && sdPublication && prepared.createBody.storageProtocol===sdPublication.STORAGE_PROTOCOL;
+                        let sdBody;
+                        if(browserSD){reportPublication('Preparing StatDescription publication');sdBody=await this.ctPrepareStatPublication(prepared,upload,decisions,current);if(!current() || controller.signal.aborted)return;}
+                        prepared.finalizeBody ||= { ...(prepared.contentMode==='clienttext'?{storageProtocol:trustedProtocol,descriptors:prepared.originals.descriptors,summaries:prepared.originals.summaries}:sdBody || {}),...(!browserSD?{decisions}:{}), expectedMembershipRevision: version.membershipRevision || 0, idempotencyKey: prepared.requestId };
                         await this.ctRememberPublication();
                         let result;
                         reportPublication('Finalizing content group');finalizing=true;

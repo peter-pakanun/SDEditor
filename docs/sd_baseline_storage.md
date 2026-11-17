@@ -1,8 +1,9 @@
 # ZIP-only StatDescription source storage
 
-The frontend uses IndexedDB v22 and the companion API uses schema v25. Deploy
-the API first. This replaces the undeployed per-file-fragment design; production
-has not been migrated by agent work.
+Client-prepared managed publication requires companion API schema 32 before
+the frontend. It retains the current browser storage layout and existing data.
+The earlier ZIP-only conversion replaced the undeployed per-file-fragment
+design; this document does not establish hosted migration or deployment.
 
 ## Source authority and trust
 
@@ -50,14 +51,22 @@ remain available. Missing old source never falls back to current English.
 
 ## Advancement and the Dropped model
 
-For managed advancement, the manager's browser uploads the incoming ZIP and asks
-the API to prepare it. The API performs the comparison for each team's matching
-predecessor. It reads the predecessor ZIP when available and combines that source
-context with a captured snapshot of server-accepted Saved translations; an ended
-team uses its frozen ending-collection cutoff. Conceptually this is the previous
-baseline with Saved work overlaid. A complete merged baseline is not persisted in
-SQLite. Offline **Import Next Version** performs the equivalent comparison in the
-browser. Selecting an existing version performs no carry-forward.
+New managed advancement negotiates `sd-client-publication-v1`. The browser
+uploads the exact incoming ZIP, prepares its descriptor and aggregate summaries,
+and compares a frozen, paged snapshot of each team's accepted Saved work and
+existing recovery against the verified incoming baseline. An ended team uses
+its immutable ending-collection cutoff. The API validates bounded dispositions,
+source bindings, revisions and complete coverage before atomic acceptance; it
+does not parse the source ZIP for this publication path. It retains compact
+affected facts and server-owned targets, not a complete parsed catalog.
+
+Untouched older ZIP translations are recalled explicitly in the browser rather
+than automatically becoming new Dropped copies. Existing recovery generations
+remain durable and advance independently of this optional source recall. Legacy
+publication requests retain their original server-prepared path and retry
+identities. Offline **Import Next Version** retains its current browser-side
+advancement behavior. Selecting an existing version performs no carry-forward.
+See [client-prepared SD publication](sd_client_publication.md).
 
 Changed English or missing/incomplete incoming translation at a retained filepath
 can preserve predecessor text as Dropped. Existing unresolved copies propagate only

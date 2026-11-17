@@ -962,7 +962,8 @@
             <td class="fileIdentityCell"><button class="fileOpenButton" tabindex="-1" @click.stop="openInlineFullEditor(desc.filepath)" :aria-label="'Open full editor for ' + desc.filename" v-tooltip="(desc.hasDiagnosticError || desc.hasDiagnosticWarning) ? (desc.filepath + '\n' + desc.diagnosticScanTitle) : desc.filepath">{{ desc.filename }}</button><span v-if="desc.hasDiagnosticError || desc.hasDiagnosticWarning" class="fileDiagnosticLabel" :class="desc.hasDiagnosticError ? 'error' : 'warning'">{{ desc.hasDiagnosticError ? 'Error' : 'Warning' }}</span><span v-if="desc.isDropped" class="fileDroppedLabel">Dropped</span><span v-if="desc.hasLocalRecovery" class="fileDroppedLabel" v-tooltip="'A local recovery copy is available. Shared Dropped work and progress are independent.'">Local recovery</span><span v-if="desc.isRevised" class="fileRevisedLabel">Revised</span>
               <span v-if="desc.hasSharedRecovery" class="fileDroppedLabel" v-tooltip="'A shared recovery copy is available. Local Dropped work and progress are independent.'">Shared recovery</span>
               <span v-if="metadataCorrectionDetails(desc.filepath)" class="fileMetadataLabel" tabindex="0" v-tooltip="metadataCorrectionDetails(desc.filepath)">Metadata updated</span>
-              <div v-if="inlineEditor && ((inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath && editorConsistencyDiagnostics.some(Boolean)) || desc.isDropped || desc.hasLocalRecovery || desc.hasSharedRecovery || fileNeedsEntryAlignment(desc))" class="inlineFileActions" @click.stop>
+              <div v-if="inlineEditor && ((inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath) || desc.isDropped || desc.hasLocalRecovery || desc.hasSharedRecovery || fileNeedsEntryAlignment(desc))" class="inlineFileActions" @click.stop>
+                <button v-if="inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath" type="button" @click="sdRecallOpen" :disabled="!editorReady || editorSaving || !!entryAlignment">Recall translation…</button>
                 <button v-if="fileNeedsEntryAlignment(desc)" type="button" class="inlineReviewLink" @click="openFileEntryAlignment(desc.filepath)">Align translation entries</button>
                 <button v-if="inlineActive && editorCurrentEditingDesc?.filepath === desc.filepath && editorConsistencyDiagnostics.some(Boolean)" type="button" @click="openInlineFullEditor(desc.filepath, 'consistency')">Compare inconsistencies in editor</button>
                 <button v-if="desc.isDropped || desc.hasLocalRecovery || desc.hasSharedRecovery" type="button" class="inlineReviewLink" @click="openInlineFullEditor(desc.filepath, 'dropped')">{{ desc.hasSharedRecovery && !desc.isDropped ? 'Review shared recovery in editor' : desc.hasLocalRecovery && !desc.isDropped ? 'Review local recovery in editor' : 'Review dropped copies in editor' }}</button>
@@ -1123,6 +1124,7 @@
           <button v-if="editorDraftBlocked && draftRecoveryItems.some(record => record.conflict && record.filepath === editorCurrentEditingDesc?.filepath)" @click="openDraftRecovery" :disabled="editorSaving || navigationBusy">Review competing edits</button>
           <button v-if="editorHasStagedTranslation" class="deleteStagedTranslation" @click="deleteEditorStagedTranslation" :disabled="editorSaving || navigationBusy || editorTranslationReadOnly" v-tooltip="'Delete the staged save and restore the original ZIP translation'">Delete staged translation</button>
           <button type="button" @click="openRawFileDialog" :disabled="editorLoading || !!editorLoadError || editorSaving || navigationBusy" v-tooltip="'View and download this file as text'">Show raw file</button>
+          <button type="button" @click="sdRecallOpen" :disabled="!editorReady || editorSaving || !!entryAlignment || editorCompareActive">Recall translation…</button>
           <button v-if="!entryAlignment" type="button" @click="startEntryAlignment()" :disabled="!editorReady || editorSaving || editorCompareActive || !!editorDroppedConflict">Align entries</button>
           <button type="button" class="sdUseEnglish" @click="sdToggleUseEnglish" :aria-pressed="sdEnglishIntentActive" :disabled="!!sdEnglishIntentDisabledReason || sdEnglishBusy" v-tooltip="sdEnglishIntentDisabledReason || (sdEnglishIntentActive ? 'Stop carrying the English choice and save this draft.' : 'Save English for this whole file and carry that choice when upstream omits it while the source stays unchanged.')">Use English</button>
           <button @click="editorExit" v-tooltip="'Close the file (Esc); keep unsaved edits'">Close</button>
@@ -1251,6 +1253,30 @@
     <editor-tools v-if="sharedEditorToolsMounted" :target="sharedEditorToolsTarget" :controller="sharedEditorController"></editor-tools>
     <editor-preview v-if="sharedEditorPreviewMounted" :target="sharedEditorPreviewTarget" :controller="sharedEditorPreviewController"></editor-preview>
     <editor-autocomplete :controller="sharedEditorPopupController"></editor-autocomplete>
+    <dialog ref="sdRecallDialog" class="sdRecallDialog" data-inline-focus-surface aria-labelledby="sdRecallTitle" @cancel.prevent="sdRecallClose()" @close="sdRecallVisible && sdRecallClose(true)" @keydown.stop>
+      <template v-if="sdRecallVisible">
+        <header class="sdRecallHeading"><div><h2 id="sdRecallTitle">Recall a historical translation</h2><p>{{ editorCurrentEditingDesc?.filepath }} · {{ lang }}</p></div><button type="button" @click="sdRecallClose()" :disabled="sdRecallSaving">Close</button></header>
+        <p>Review earlier text against the current English. Viewing and typing here leave your normal draft unchanged.</p>
+        <div class="sdRecallControls"><label>Reference version <select :value="sdRecallReferenceId" @change="sdRecallSelect($event.target.value)" :disabled="sdRecallLoading || sdRecallSaving || !sdRecallReferences.length"><option value="" disabled>Choose an earlier source</option><option v-for="choice in sdRecallReferences" :key="choice.id" :value="choice.id">{{ choice.label }}</option></select></label>
+          <label v-if="sdRecallCandidates.length > 1">Preserved copy <select :value="sdRecallCandidateId" @change="sdRecallSelect(sdRecallReferenceId, $event.target.value)" :disabled="sdRecallLoading || sdRecallSaving"><option value="">Choose the exact copy</option><option v-for="candidate in sdRecallCandidates" :key="sdRecallCandidateKey(candidate)" :value="sdRecallCandidateKey(candidate)">{{ droppedOwnershipLabel(candidate) }} · {{ candidate.id }} · revision {{ candidate.revision || 0 }}</option></select></label>
+          <label><input type="checkbox" v-model="sdRecallWhitespace">Show whitespace</label><label><input type="checkbox" v-model="sdRecallCharacters">Character differences</label>
+        </div>
+        <p v-if="sdRecallLoading" role="status">Loading the historical translation and verified source…</p>
+        <app-notice v-if="sdRecallError" tone="error" role="alert">{{ sdRecallError }}</app-notice>
+        <app-notice v-if="sdRecallNotice" tone="info" role="status">{{ sdRecallNotice }}</app-notice>
+        <template v-if="sdRecallReview">
+          <p><strong>{{ sdRecallReview.label }}</strong> · {{ sdRecallReview.kind }} · Review only until Save</p>
+          <details v-if="sdRecallReview.retained.length !== sdRecallReview.currentEnglish.length" open><summary>Complete retained translation ({{ sdRecallReview.retained.length }} entries)</summary><pre class="englishDiff">{{ sdRecallReview.retained.map(decodeEscapedNewlines).join('\n\n') }}</pre></details>
+          <div class="sdRecallEntries"><section v-for="(english, index) in sdRecallReview.currentEnglish" :key="index" class="sdRecallEntry">
+            <div><h3>English entry {{ index + 1 }}</h3><div v-if="sdRecallReview.oldEnglish && !sdRecallDiffLimited(index)" class="englishDiff" v-html="sdRecallDiff(index)"></div><pre v-else class="englishDiff">{{ decodeEscapedNewlines(english) }}</pre><p v-if="sdRecallDiffLimited(index)">This comparison is too large for inline differences. The current English is shown.</p></div>
+            <div><label :for="'sdRecallTarget-' + index">Reviewed {{ lang }} translation {{ index + 1 }}</label><textarea :id="'sdRecallTarget-' + index" :value="decodeEscapedNewlines(sdRecallReview.values[index])" @input="sdRecallSetValue(index, $event.target.value)" :disabled="sdRecallSaving" rows="3" spellcheck="false"></textarea>
+              <button v-if="sdRecallReview.values[index] === sdRecallReview.retained[index]" type="button" @click="sdRecallConfirm(index)" :disabled="sdRecallSaving" :aria-pressed="!!sdRecallReview.confirmed[index]">{{ sdRecallReview.confirmed[index] ? 'Reviewed unchanged ✓' : 'Keep unchanged' }}</button><span v-else class="sdRecallEdited">Corrected for the current source</span>
+            </div>
+          </section></div>
+          <footer class="sdRecallFooter"><p>Confirm every unchanged entry or correct it, then save the complete file. A separate normal draft remains available.</p><button type="button" class="btnPrimary" @click="sdRecallSave" :disabled="!sdRecallCanSave">{{ sdRecallSaving ? 'Saving…' : 'Save reviewed translation' }}</button></footer>
+        </template>
+      </template>
+    </dialog>
     <dialog ref="rawFileDialog" class="rawFileDialog" aria-labelledby="rawFileDialogTitle" aria-describedby="rawFileDialogDescription" @cancel.prevent="closeRawFileDialog" @close="rawFileDialogClosed" @keydown.stop="rawFileDialogKeydown">
       <template v-if="rawFilePreview">
         <header class="rawFileHeading">
@@ -1622,6 +1648,7 @@
   <script src="collaborationProtocol.js"></script>
   <script src="sdBaselineFiles.js"></script>
   <script src="sdBaselineUi.js"></script>
+  <script src="sdRecall.js"></script>
   <script src="collaborationSync.js"></script>
   <script src="collaborationUi.js"></script>
   <script src="collaborationIntegration.js"></script>
@@ -1663,6 +1690,7 @@
   <script src="mtlLimitsUi.js"></script>
   <script src="clientTextResourceSync.js"></script>
   <script src="clientTextTmUi.js"></script>
+  <script src="sdClientPublication.js"></script>
   <script src="clientTextUi.js"></script>
   <script src="clientTextClipboard.js"></script>
   <script src="clientTextUndo.js"></script>

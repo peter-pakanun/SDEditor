@@ -55,7 +55,7 @@ publication. Full parsed catalogs remain in process memory during comparisons.
 Increasing Node's old-space ceiling to 3,000 MiB on this approximately 1 GB RAM
 host can trade a V8 failure for swapping or operating-system memory pressure.
 
-## Proposed client-prepared publication
+## Client-prepared publication follow-up
 
 The separate SDEditor2 project prepares SD sources and advancement in the browser.
 It uploads exact originals separately in resumable 4 MiB parts, pages frozen
@@ -65,10 +65,20 @@ snapshots, revisions and prepared generations before coordinated acceptance;
 the server does not reparse the ZIP to independently prove the supplied facts.
 The browser still materializes source catalogs and team decision arrays.
 
-That design is a suitable direction for SDEditor, but it is not implemented here.
-It requires a negotiated SD protocol, frozen per-team predecessor snapshots,
-bounded facts/disposition parts and atomic final acceptance, preserving existing
-retry bodies and server ownership of authored targets/history/recovery.
+SDEditor now implements [client-prepared SD publication](sd_client_publication.md)
+under negotiated `sd-client-publication-v1` and API schema 32. It uses frozen
+per-team predecessor snapshots, bounded facts/disposition parts and atomic final
+acceptance while preserving retry bodies and server ownership of authored
+targets/history/recovery. This is implemented source, not deployment.
+
+Three real-ZIP publications (20,547 → 20,732 → 20,547 descriptions), each for
+seven teams, passed with API old-space capped at 128 MiB and browser parsing in
+a separate Edge renderer. API parser hooks were configured to throw and were
+never called. Sampled API peak heap was 68.35 MiB and RSS 144.93 MiB. This fixture
+had no authored predecessor work; the separate synthetic native browser fixture
+checks Saved/recovery/history preservation and recalled-text Save with a normal
+draft present. V8's total heap ceiling differs from the old-space setting, and
+these development measurements are not a production capacity guarantee.
 
 SDEditor currently creates automatic Dropped copies of untouched predecessor ZIP
 translations when incoming text disappears. SDEditor2 instead permits on-demand
@@ -81,11 +91,10 @@ the reference does not create authored work. The original fallback requires a
 complete translation and an available matching ZIP/client cache; this particular
 loader also makes a historical-work request before trying that fallback.
 
-Thus porting SDEditor2 does not make old untouched text inaccessible, but changes
-automatic Dropped creation into explicit recall. That workload/lifecycle policy
-must be chosen deliberately before migration. Retaining SDEditor's current
-automatic behavior would require client inspection of available predecessor ZIPs
-and source-bound recovery candidates in addition to authored-work dispositions.
+The user selected on-demand recall for new client-prepared managed publications.
+Old automatically created Dropped copies remain intact, and local import/legacy
+request semantics stay compatible. Untouched ZIP-only text is recalled from its
+exact original instead of manufactured as a new Dropped copy.
 Missing historical ZIPs remain optional; never invent unavailable old text.
 Permanent extracted catalogs or additional full source catalogs in SQLite are
 unnecessary. Temporary server extraction alone would not remove the catalog

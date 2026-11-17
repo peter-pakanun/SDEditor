@@ -258,8 +258,9 @@
                 if(value===null || typeof value!=='object')return value;
                 if(Array.isArray(value)){
                     // Publication metadata remains mutable between checkpoints.
-                    // Only the prepared carry witness array is declared immutable.
-                    const reusable=options.immutablePublicationData && path.at(-1)==='carry';
+                    // Prepared sparse work/disposition arrays are immutable;
+                    // retries reuse their original bounded fragment generation.
+                    const reusable=options.immutablePublicationData && ['carry','sdDispositions'].includes(path.at(-1));
                     const cached=reusable && snapshots.get(value);
                     if(cached && cached.parts.every(part=>part.chunkIds.every(id=>active.has(id)))){
                         parts.push(...cached.parts.map(part=>({...part,path:[...path,...part.path]})));return [];

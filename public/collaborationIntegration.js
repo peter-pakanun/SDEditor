@@ -1160,7 +1160,7 @@
             if (options.inline && (choices.length || this.localDescs.droppedConflicts?.[ctx.language]?.[desc.filepath])) {
               throw new Error('Open the full editor to review the dropped translation before saving this file.');
             }
-            if (candidate && !promotions[desc.filepath]
+            if (!options.preserveDropped && candidate && !promotions[desc.filepath]
               && !(options.promoteDropped && updates.length === 1)) promotions[desc.filepath] = this.capturedDroppedPromotion(desc.filepath, candidate);
           }
           if (options.promoteDropped && updates.length === 1) promotions[updates[0].desc.filepath] = options.promoteDropped;

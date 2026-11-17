@@ -210,6 +210,16 @@ test('immutable publication checkpoints reuse durable carry fragments while muta
     assert.notDeepEqual((await f.store.listRequests(owner))[0].storage.parts[0].chunkIds,ids);
     assert.equal((await f.store.getRequest(owner,'release')).payload.carry[0].text,'Mutable replacement');
 });
+
+test('immutable SD publication dispositions reuse exact durable chunks through upload checkpoints',async()=>{
+    const f=fixture({requestChunkRows:2}),owner={accountId:'alice',game:'poe2'},sdDispositions=Array.from({length:7},(_,index)=>({snapshotId:'frozen',index,records:[{recordId:'saved-'+index,action:'drop',nextFacts:{entryCount:1,englishHash:'a'.repeat(64)}}]}));
+    await f.store.putRequest(owner,'release',{kind:'publication',groups:[{sdDispositions}]},{immutablePublicationData:true});
+    const first=await f.store.listRequests(owner),ids=first[0].storage.parts.flatMap(part=>part.chunkIds);f.operations.length=0;
+    await f.store.putRequest(owner,'release',{kind:'publication',groups:[{sdDispositions,finalizeBody:{snapshotId:'frozen',idempotencyKey:'same-publication'}}]},{immutablePublicationData:true});
+    assert.deepEqual((await f.store.listRequests(owner))[0].storage.parts.flatMap(part=>part.chunkIds),ids);
+    assert.equal(f.operations.filter(operation=>operation.method==='put').length,2);
+    assert.deepEqual((await f.store.getRequest(owner,'release')).payload.groups[0].sdDispositions,sdDispositions);
+});
 test('a newer request can replace an interrupted large write without the older writer resurfacing',async()=>{
     let entered,release;
     const ready=new Promise(resolve=>entered=resolve),resume=new Promise(resolve=>release=resolve);let hold=true;
