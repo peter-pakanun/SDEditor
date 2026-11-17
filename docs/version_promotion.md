@@ -25,8 +25,17 @@ An unfinished upload attached to a withdrawn version does not block promotion.
 Its original assets, prepared work and exact retry records remain retained, and
 group acceptance stays blocked while that version is withdrawn. Restoring the
 version makes its unfinished publication subject to the guard again. The error
-names the blocking versions. Ending release assignments and completing or
+names the blocking versions and their SD/CT assignments. Ending release assignments and completing or
 cancelling a pending publication are separate actions.
+
+An older upload attempt also stops blocking when its exact assignment is already
+published by another attempt, or when it would create a new release whose name
+is already taken. Its original identity, prepared records and retries remain
+retained. This prevents a complete candidate from blocking itself on a failed or
+competing upload. A genuinely unfinished additional assignment on that candidate
+still blocks promotion, even when it uses the same original ZIP. New duplicate
+attempts are rejected at creation; already recorded creation receipts retain
+their exact replay behavior.
 
 Each manual upload captures compact references to its latest matching promoted
 ancestor assignments and their ending collections. Preparation, acceptance and
