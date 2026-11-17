@@ -21,6 +21,13 @@ have been promoted previously. Every outgoing HEAD assignment must be ended,
 including teams or content modes absent from the candidate. Pending assignment
 publications or collection preparation block promotion.
 
+An unfinished upload attached to a withdrawn version does not block promotion.
+Its original assets, prepared work and exact retry records remain retained, and
+group acceptance stays blocked while that version is withdrawn. Restoring the
+version makes its unfinished publication subject to the guard again. The error
+names the blocking versions. Ending release assignments and completing or
+cancelling a pending publication are separate actions.
+
 Each manual upload captures compact references to its latest matching promoted
 ancestor assignments and their ending collections. Preparation, acceptance and
 promotion recheck those references and team revisions. Reopening or replacing a
