@@ -991,6 +991,40 @@
       managedTimestampTooltip(instant) { return instant ? this.managedFormatDate(instant) + ' local' : ''; },
       managedReminder(instant) { return reminder(instant, this.managedNow); },
       managedVersionIsHead(version) { return !!version && (version.isHead || this.managedBranch?.headVersionId === version.id); },
+      managedPromotionCandidate(version) { return !!version && version.status === 'published' && !version.promotedAt && !this.managedVersionIsHead(version) && !version.zipHash; },
+      managedPromotionBlockedReason(version) {
+        if (!this.managedManagerAccess || !this.managedOnlineAvailable || this.managedVersionsUnavailable) return 'Reconnect with Manager or Admin access before promotion.';
+        if (version.parentVersionId !== (this.managedBranch?.headVersionId ?? null)) return 'Prepare a candidate from the current HEAD.';
+        if (!(version.contentGroups?.length && version.membershipRevision)) return 'Publish complete assignments before promotion.';
+        if (this.managedHeadVersion && !this.managedVersionEnded(this.managedHeadVersion)) return 'End every assignment in the current HEAD before promotion.';
+        return '';
+      },
+      async managedPromote(version) {
+        if (!version || this.managedVersionBusy || !this.managedManagerAccess || !this.managedOnlineAvailable || !this._ctStore) return false;
+        const key = this.managedCatalogScope, client = this._cloud, scope = this.ctRequestScope(), requestKey = 'promotion:' + version.id;
+        const operation = this.managedBeginOperation({ key: 'promote', label: 'Promoting version to HEAD' });
+        const current = () => key === this.managedCatalogScope && client === this._cloud && this.managedManagerAccess && operation === this._managedOperation;
+        const path = '/v1/versions/' + encodeURIComponent(version.id) + '/promote';
+        try {
+          const retained = await this._ctStore.getRequest(scope, requestKey, { guard: current });
+          if (!current()) return false;
+          const command = retained?.payload.command || { game: scope.game, branchId: scope.branchId, expectedHeadId: this.managedBranch?.headVersionId ?? null, expectedMembershipRevision: version.membershipRevision, idempotencyKey: id() };
+          if (!retained && !await this.appConfirm('Make “' + version.name + '” HEAD? Every outgoing assignment must be ended, and the candidate must match its final predecessor snapshots.', { title: 'Promote version?', confirmLabel: 'Promote' })) return false;
+          if (!current()) return false;
+          await this._ctStore.putRequest(scope, requestKey, { kind: 'promotion', name: version.name, version: copy(version), command }, { guard: current });
+          if (!current()) return false;
+          await client.request(path, { method: 'POST', body: command });
+          // Clean up only the captured account/game/branch journal, even when
+          // the user changed context during the response.
+          await this._ctStore.deleteRequest(scope, requestKey);
+          if (current()) { this.managedSetOperationError(path, ''); await this.refreshManagedVersions(); await this.ctRefreshLocal?.(); }
+          return true;
+        } catch (error) {
+          if (error.status >= 400 && error.status < 500 && error.status !== 408) await this._ctStore.deleteRequest(scope, requestKey);
+          if (!error.stale && current()) { this.managedSetOperationError(path, error); await this.ctRefreshLocal?.(); }
+          return false;
+        } finally { this.managedFinishOperation(operation); }
+      },
       managedVersionEnded(version) {
         if (!this.cloudCanAccessAllLanguages) return !!version.assignedTeam?.ended;
         const teamCount = version.teamCount || 12;
@@ -1014,7 +1048,9 @@
       },
       managedVersionOpenWarning(version, team, language) {
         const warnings = [];
-        if (!version.isHead) warnings.push('“' + version.name + '” is not HEAD. You are opening an older source version.');
+        if (!this.managedVersionIsHead(version)) warnings.push(this.managedPromotionCandidate(version)
+          ? '“' + version.name + '” is awaiting promotion and is not HEAD.'
+          : '“' + version.name + '” is not HEAD. You are opening an older source version.');
         if (team?.ended) warnings.push('The ' + language + ' team’s translation window has ended. Further saves are allowed, but they will not change the ZIP already collected by the manager.');
         if (version.status === 'withdrawn') warnings.push('This source version was withdrawn. Shared saves are paused; local work remains available for recovery.');
         return warnings.join('\n\n');
@@ -1199,7 +1235,7 @@
       managedRestore(version) {
         if (!this.managedManagerAccess || !version) return false;
         const head = this.managedBranch?.headVersionId ?? null;
-        return this.managedAction('/v1/versions/' + encodeURIComponent(version.id) + '/restore', { setHead: head === null, expectedHeadId: head });
+        return this.managedAction('/v1/versions/' + encodeURIComponent(version.id) + '/restore', { setHead: head === null && !!version.promotedAt, expectedHeadId: head });
       },
       openManagedMetadata(version = this.managedSelectedVersion) {
         if (!version || this.managedVersionBusy || !this.managedManagerAccess) return;

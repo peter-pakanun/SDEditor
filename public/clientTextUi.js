@@ -3432,7 +3432,7 @@
                 this.ctUploadHistory=false;this.ctUploadHistoryFiles=raw([]);
                 const defaults = root.ManagedVersions.defaults(this.gameVersion); this.ctUploadName = test ? '' : version?.name || defaults.name; this.ctUploadDeadline = root.ManagedVersions.deadlineInput(version?.deadlineAt || defaults.deadlineAt);
                 if (!local) {
-                    try { await this.ctRequireTrustedProtocol();if(!current())return false;this.ctPolicyText = JSON.stringify(this.ctPolicy.clientTextRoles, null, 2); }
+                    try { await this.ctRequireTrustedProtocol();if(!current())return false;if(!options.resume && (!version || version.status==='draft' || version.promotion==='manual') && !this.ctPolicy.versionPromotionProtocols?.includes('manual-v1'))throw new Error('Update the API before preparing versions with manual HEAD promotion.');this.ctPolicyText = JSON.stringify(this.ctPolicy.clientTextRoles, null, 2); }
                     catch (error) { if(current())this.ctUploadError = error.message; }
                     if(!current())return false;
                     if(this.ctUploadPredecessor && (!this.ctUploadPredecessor.name || this.ctUploadPredecessor.name===predecessorId))try{const result=await this._cloud.request('/v1/versions/'+encodeURIComponent(predecessorId));if(!current())return false;this.ctUploadPredecessor=copy(result.version);}catch(error){if(current())this.ctUploadError=error.message;}
@@ -3546,7 +3546,7 @@
                 const key=this.managedCatalogScope;this.ctUploading=true;
                 try{
                     this._ctReleaseRequest ||= uuid();const scope=this.ctRequestScope(),client=this._cloud,existing=await this._ctStore.getRequest(scope,this._ctReleaseRequest);
-                    const command=existing?.payload.command || {game:scope.game,branchId:scope.branchId,name:this.ctUploadName.trim(),deadlineAt:root.ManagedVersions.parseDeadline(this.ctUploadDeadline),expectedHeadId:this.ctUploadPredecessor?.id || null,idempotencyKey:this._ctReleaseRequest};
+                    const command=existing?.payload.command || {game:scope.game,branchId:scope.branchId,name:this.ctUploadName.trim(),deadlineAt:root.ManagedVersions.parseDeadline(this.ctUploadDeadline),expectedHeadId:this.ctUploadPredecessor?.id || null,promotion:'manual',idempotencyKey:this._ctReleaseRequest};
                     await this._ctStore.putRequest(scope,this._ctReleaseRequest,{kind:'metadata',name:command.name,deadline:this.ctUploadDeadline,predecessor:existing?.payload.predecessor || copy(this.ctUploadPredecessor),command});if(key!==this.managedCatalogScope)return;
                     const response=await client.request('/v1/content-versions',{method:'POST',body:command});
                     if(key!==this.managedCatalogScope)return;
@@ -3563,7 +3563,7 @@
                         await this._ctStore.import(prepared.cacheScope,{units:prepared.units,assets:prepared.assets,descriptors:prepared.originals.descriptors,summaries:prepared.originals.summaries,metadata:{name:this.ctUploadName}},{guard:()=>key===this.managedCatalogScope && !signal.aborted,onProgress:progress=>this.ctReport({...progress,workbook:prepared.language})});
                     }
                 }
-                const groups=this.ctPrepared.map(prepared=>({contentMode:prepared.contentMode,language:prepared.language,storageProtocol:prepared.storageProtocol,assignments:prepared.assignments,parentGroupId:prepared.parentGroupId,cacheScope:prepared.cacheScope,carry:prepared.carry,
+                const groups=this.ctPrepared.map(prepared=>({contentMode:prepared.contentMode,language:prepared.language,storageProtocol:prepared.storageProtocol,assignments:prepared.assignments,parentGroupId:prepared.parentGroupId,predecessorCutoffs:prepared.predecessorCutoffs,cacheScope:prepared.cacheScope,carry:prepared.carry,
                     requestId:prepared.requestId,uploadId:prepared.uploadId,createBody:prepared.createBody,finalizeBody:prepared.finalizeBody,published:prepared.published,
                     candidates:prepared.contentMode==='statdescription'?prepared.candidates:undefined,warnings:prepared.warnings,duplicateGroups:prepared.duplicateGroups,
                     ...(prepared.contentMode==='statdescription' && sdPublication && prepared.storageProtocol===sdPublication.STORAGE_PROTOCOL?{sdPublication:prepared.sdPublication,sdDispositions:prepared.sdDispositions}:{} )}));
@@ -3576,7 +3576,7 @@
                     const requestScope=this.ctRequestScope(),stored=await this._ctStore.getRequest(requestScope,request.requestId,{guard:current});
                     if(!current())return;
                     if(!stored){await this.ctRefreshLocal();return;}
-                    const payload=stored.payload,previousId=payload.releaseCommand?.expectedHeadId || payload.command?.expectedHeadId;
+                    const payload=stored.payload;if(payload.kind==='promotion')return this.managedPromote(payload.version);const previousId=payload.releaseCommand?.expectedHeadId || payload.command?.expectedHeadId;
                     const opened=await this.ctOpenUpload(payload.version || null,false,false,{resume:true,predecessor:payload.predecessor || (previousId ? {id:previousId} : null)});
                     if(opened===false || !current())return;
                     this.ctUploadName=payload.name;this.ctUploadDeadline=payload.deadline;this._ctPublicationRequest=request.requestId;this._ctReleaseRequest=payload.releaseRequest || (payload.kind==='metadata'?request.requestId:null);this._ctReleaseCommand=payload.releaseCommand || payload.command || null;
@@ -3592,12 +3592,36 @@
                     if(current())this.ctPrepared=raw(prepared);
                 } catch(error) { if(current() && !error.stale && error.name!=='AbortError')this.ctUploadError='Prepared upload could not be restored: '+error.message; }
             },
+            async ctCancelPublication(request) {
+                if (!this.managedManagerAccess || this.managedVersionBusy || this.ctUploading || !request || request.payload?.kind === 'promotion') return;
+                const key=this.managedCatalogScope,scope=this.ctRequestScope(),client=this._cloud,current=()=>key===this.managedCatalogScope && client===this._cloud && this.managedManagerAccess;
+                const operation=this.managedBeginOperation();
+                try {
+                    const stored=await this._ctStore.getRequest(scope,request.requestId,{guard:current});
+                    if(!stored || !current())return;
+                    if(!await this.appConfirm('Cancel this pending publication? Retained originals, accepted groups and existing translations stay available.',{title:'Cancel pending publication?',confirmLabel:'Cancel publication'}))return;
+                    if(!current())return;
+                    const uploadIds=[];
+                    for(const group of stored.payload.groups || []){
+                        let uploadId=group.uploadId;
+                        // Creation may have committed before its response was
+                        // lost. Recover that exact receipt before cancellation.
+                        if(!uploadId && group.createBody){const created=await client.request('/v1/content-uploads',{method:'POST',body:group.createBody});if(!current())return;uploadId=created.upload?.id;if(!uploadId)throw new Error('The pending upload identity could not be recovered. Resume publication.');}
+                        if(uploadId)uploadIds.push(uploadId);
+                    }
+                    if(uploadIds.length)await client.request('/v1/content-uploads/'+encodeURIComponent(uploadIds[0])+'/cancel',{method:'POST',body:{uploadIds,idempotencyKey:'cancel-'+request.requestId}});
+                    if(!current())return;
+                    await this._ctStore.deleteRequest(scope,request.requestId);
+                    if(current()){this.managedSetOperationError('cancel-publication:'+request.requestId,'');await this.ctRefreshLocal();}
+                } catch(error) { if(current() && !error.stale)this.managedSetOperationError('cancel-publication:'+request.requestId,error); }
+                finally { this.managedFinishOperation(operation); }
+            },
             async ctFindPreviousGroup(prepared) {
                 const key=this.managedCatalogScope,game=this.gameVersion,branchId=this.branchId || 'default',versionId=this.ctUploadVersion?.id || '',signal=this._ctAbort?.signal,client=this._cloud;
-                const query={game,branchId,contentMode:prepared.contentMode,...(prepared.contentMode==='clienttext'?{language:prepared.language}:{}),...(versionId?{versionId}:{expectedHeadId:this.ctUploadPredecessor?.id || ''}),...(prepared.logicalKey?{logicalKey:prepared.logicalKey}:{})};
+                const query={game,branchId,contentMode:prepared.contentMode,...((!this.ctUploadVersion || this.ctUploadVersion.status==='draft' || this.ctUploadVersion.promotion==='manual') && this.ctPolicy?.versionPromotionProtocols?.includes('manual-v1')?{promotion:'manual'}:{}),...(prepared.contentMode==='clienttext'?{language:prepared.language}:{}),...(versionId?{versionId}:{expectedHeadId:this.ctUploadPredecessor?.id || ''}),...(prepared.logicalKey?{logicalKey:prepared.logicalKey}:{})};
                 const result=await client.request('/v1/content-predecessor?'+Object.entries(query).map(([key,value])=>encodeURIComponent(key)+'='+encodeURIComponent(value)).join('&'),{signal});
                 if(key!==this.managedCatalogScope || game!==this.gameVersion || branchId!==(this.branchId || 'default') || versionId!==(this.ctUploadVersion?.id || '') || signal?.aborted)throw Object.assign(new Error('Content preparation was superseded.'),{name:'AbortError',stale:true});
-                if(!result.group && !result.version)return null;
+                if(!result.group && !result.version){if(query.promotion==='manual')prepared.predecessorCutoffs=result.predecessorCutoffs;return null;}
                 if(!result.group || !result.version || result.version.game!==game || (result.version.branchId || 'default')!==branchId || result.version.id===versionId || result.group.versionId!==result.version.id || mode(result.group)!==prepared.contentMode || prepared.contentMode==='clienttext' && result.group.language!==prepared.language)throw new Error('The previous content group does not match this release and team. Prepare the originals again.');
                 return result;
             },
@@ -3615,7 +3639,11 @@
                 const previousUnits=new Map((await this._ctStore.getUnits(scope)).map(unit=>[unit.id,unit])),accepted={},previousAssets={};let after=0;
                 current();
                 for(const asset of prepared.assets){const previous=await this._ctStore.getAsset(scope,asset.role);current();previousAssets[asset.role]=previous;const before=new Map((previous?.parsed?.sheets || []).map(sheet=>[sheet.name,sheet]));for(const sheet of asset.parsed.sheets){const old=before.get(sheet.name);before.delete(sheet.name);if(!old){prepared.warnings.push({message:asset.role+' / '+sheet.name+': added sheet.'});continue;}const oldHeaders=new Map(old.headers.map(header=>[header.name,header.column])),changes=[];for(const header of sheet.headers){const column=oldHeaders.get(header.name);oldHeaders.delete(header.name);if(column===undefined)changes.push('added '+header.name);else if(column!==header.column)changes.push(header.name+' moved from column '+column+' to '+header.column);}for(const heading of oldHeaders.keys())changes.push('removed '+heading);if(changes.length)prepared.warnings.push({message:asset.role+' / '+sheet.name+': '+changes.join('; ')+'. Recognized fields retain their identity.'});}for(const sheet of before.keys())prepared.warnings.push({message:asset.role+' / '+sheet+': removed sheet; previous work remains in history.'});}
-                do{
+                if(previous.predecessorCutoffs){
+                    prepared.predecessorCutoffs=previous.predecessorCutoffs;
+                    const cutoff=previous.predecessorCutoffs.find(item=>item.language===prepared.language);
+                    if(cutoff?.collectionId){const frozen=await this._cloud.request('/v1/content-collections/'+encodeURIComponent(cutoff.collectionId)+'/manifest',{signal});current();for(const work of [...(frozen.units || []),...(frozen.sourceReviews || [])])accepted[work.id || work.unitId]=work;}
+                }else do{
                     const result=await this._cloud.request('/v1/content-groups/'+encodeURIComponent(previousGroup.id)+'/events?language='+encodeURIComponent(prepared.language)+'&after='+after+'&limit=100',{signal});
                     current();
                     for(const event of result.events){accepted[event.unitId]=event.unit;after=event.sequence;}
@@ -3746,7 +3774,7 @@
                         this.ctUploadVisible = false; await this.ctRefreshLocal(); return;
                     }
                     let version = this.ctUploadVersion;
-                    this._ctReleaseRequest ||= uuid();if(!version)this._ctReleaseCommand ||= {game:this.gameVersion,branchId:this.branchId,name:this.ctUploadName.trim(),deadlineAt:root.ManagedVersions.parseDeadline(this.ctUploadDeadline),expectedHeadId:this.ctUploadPredecessor?.id || null,idempotencyKey:this._ctReleaseRequest};await this.ctRememberPublication();
+                    this._ctReleaseRequest ||= uuid();if(!version)this._ctReleaseCommand ||= {game:this.gameVersion,branchId:this.branchId,name:this.ctUploadName.trim(),deadlineAt:root.ManagedVersions.parseDeadline(this.ctUploadDeadline),expectedHeadId:this.ctUploadPredecessor?.id || null,promotion:'manual',idempotencyKey:this._ctReleaseRequest};await this.ctRememberPublication();
                     if (!version) {
                         this._ctReleaseRequest ||= uuid();
                         reportPublication('Creating source version');
@@ -3759,7 +3787,7 @@
                         if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
                         if (prepared.published) continue;
                         prepared.requestId ||= uuid();
-                        prepared.createBody ||= { versionId: version.id,game:this.gameVersion,branchId:this.branchId, contentMode: prepared.contentMode,...(prepared.contentMode==='clienttext'?{storageProtocol:trustedProtocol}:sdPublication && prepared.storageProtocol===sdPublication.STORAGE_PROTOCOL?{storageProtocol:sdPublication.STORAGE_PROTOCOL}:{}), language: prepared.language, assignments: prepared.assignments, roles: prepared.contentMode==='statdescription'?['source']:prepared.candidates.map(item => item.role),parentGroupId:prepared.parentGroupId, expectedMembershipRevision: version.membershipRevision || 0, idempotencyKey: prepared.requestId };
+                        prepared.createBody ||= { versionId: version.id,...(version.promotion==='manual' || version.status==='draft'?{promotion:'manual'}:{}),game:this.gameVersion,branchId:this.branchId, contentMode: prepared.contentMode,...(prepared.contentMode==='clienttext'?{storageProtocol:trustedProtocol}:sdPublication && prepared.storageProtocol===sdPublication.STORAGE_PROTOCOL?{storageProtocol:sdPublication.STORAGE_PROTOCOL}:{}), language: prepared.language, assignments: prepared.assignments, roles: prepared.contentMode==='statdescription'?['source']:prepared.candidates.map(item => item.role),parentGroupId:prepared.parentGroupId,...(prepared.predecessorCutoffs?{predecessorCutoffs:prepared.predecessorCutoffs}:{}), expectedMembershipRevision: version.membershipRevision || 0, idempotencyKey: prepared.requestId };
                         await this.ctRememberPublication();
                         reportPublication('Creating content upload');
                         const response = await this._cloud.request('/v1/content-uploads', { method: 'POST', body: prepared.createBody,signal:this._ctAbort.signal });

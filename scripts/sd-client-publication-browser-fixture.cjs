@@ -135,6 +135,41 @@ async function run() {
         assert.deepEqual(db.prepare("SELECT id,snapshot,status FROM collaboration_dropped_candidates WHERE content_group_id=? AND status='dropped'").all(old.group.id), recoveryBefore);
         assert.ok(db.prepare('SELECT COUNT(*) n FROM collaboration_history').get().n >= historyBefore);
         assert.equal(forbiddenServerParses, 0);
+        assert.equal(api.locals.versions.branch('poe2').head_version_id, old.version.id, 'Publishing a manual candidate leaves the outgoing HEAD in place');
+        const metadataDraft = content.createVersion('fixture-admin', { game: 'poe2', name: 'Fixture metadata only', promotion: 'manual', expectedHeadId: old.version.id, idempotencyKey: randomUUID() }).version;
+        await page.evaluate(async () => { await window.__sdFixtureApp.showVersionChooser(); });
+        const candidateRow = page.locator('[data-version-id="' + published.version.id + '"]');
+        await candidateRow.getByText('Awaiting promotion', { exact: true }).waitFor();
+        await page.locator('[data-version-id="' + metadataDraft.id + '"]').getByText('Draft', { exact: true }).waitFor();
+        assert.equal(await page.locator('[data-version-id="' + metadataDraft.id + '"]').getByRole('button', { name: 'Promote', exact: true }).count(), 0);
+        for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
+            await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+            await page.setViewportSize({ width: 1160, height: 1000 });
+            await page.screenshot({ path: join(directory, 'promotion-' + theme + '.png') });
+        }
+        await page.setViewportSize({ width: 1440, height: 1000 });
+        await candidateRow.getByRole('button', { name: 'Promote', exact: true }).click();
+        await page.locator('.appDialogCancel').click();
+        assert.equal(api.locals.versions.branch('poe2').head_version_id, old.version.id, 'Cancelling promotion changes no release state');
+        const promotionRequests = [];
+        await page.route('**/v1/versions/' + published.version.id + '/promote', async route => {
+            promotionRequests.push(route.request().postDataJSON());
+            if (promotionRequests.length === 1) { const accepted = await route.fetch(); assert.equal(accepted.status(), 200); await route.abort('failed'); }
+            else await route.continue();
+        });
+        await candidateRow.getByRole('button', { name: 'Promote', exact: true }).focus();
+        await page.keyboard.press('Enter');
+        await page.locator('.appDialogConfirm').click();
+        await page.getByRole('button', { name: 'Resume promotion', exact: true }).waitFor();
+        assert.equal(api.locals.versions.branch('poe2').head_version_id, published.version.id, 'A lost acknowledgement does not undo committed HEAD');
+        await page.getByRole('button', { name: 'Resume promotion', exact: true }).click();
+        await page.waitForFunction(id => window.__sdFixtureApp.managedBranch?.headVersionId === id && !window.__sdFixtureApp.managedVersionBusy, published.version.id);
+        assert.equal(promotionRequests.length, 2); assert.deepEqual(promotionRequests[1], promotionRequests[0], 'Lost promotion responses retry the exact durable command');
+        await candidateRow.getByText('HEAD', { exact: true }).waitFor();
+        assert.equal(await candidateRow.getByText('Awaiting promotion', { exact: true }).count(), 0);
+        assert.deepEqual(collaboration.file(oldRoom, path('carry')), oldSaved, 'Promotion preserves predecessor Saved work and history');
+        assert.equal((await page.evaluate(() => window.__sdFixtureApp._ctStore.listRequests(window.__sdFixtureApp.ctRequestScope()))).filter(row => row.payload.kind === 'promotion').length, 0);
+        published.version = content.publicVersion(content.version(published.version.id, 'fixture-admin'));
         await page.evaluate(async ({ version, group }) => { const vm = window.__sdFixtureApp; await vm.ctOpenGroup(version, group, 'Thai'); }, { version: published.version, group: published });
         await page.waitForFunction(() => window.__sdFixtureApp.sourceLoaded && !window.__sdFixtureApp.managedVersionBusy);
         await page.evaluate(async filepath => {

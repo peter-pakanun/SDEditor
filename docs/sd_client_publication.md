@@ -1,7 +1,7 @@
 # Client-prepared StatDescription publication and recall
 
 Implemented in browser/API source, not confirmation of hosted deployment.
-Deploy API schema **32** before the companion frontend. Retain the pre-upgrade
+Deploy API schema **33** before the companion frontend. Retain the pre-upgrade
 database/configuration backup and required artifacts. Do not clear browser data.
 
 ## Publication and source authority
@@ -32,6 +32,10 @@ team/candidate revisions, ancestry and membership before atomic group acceptance
 Prepared chunks are not active work. Snapshot/chunk/finalize requests retain
 stable IDs and exact journaled bodies across uncertain responses and restart.
 Legacy prepared uploads retain their original protocol and retry bodies.
+
+New named releases use [explicit HEAD promotion](version_promotion.md).
+Publication creates an Awaiting promotion candidate; Promote verifies final
+predecessor cutoffs and every outgoing assignment before changing HEAD.
 
 New publications do not automatically create Dropped copies of untouched older
 ZIP translations. Those are recalled explicitly. Existing Saved work, recovery

@@ -1896,10 +1896,49 @@ test('restore fills an empty branch HEAD with a null compare-and-swap guard and 
   for (const head of [null, 'other-head']) {
     const { app, requests } = harness({ request: async () => ({}) });
     app.managedBranch = { headVersionId: head }; app.refreshManagedVersions = async () => {};
-    await app.managedRestore(version({ status: 'withdrawn' }));
+    await app.managedRestore(version({ status: 'withdrawn', promotedAt: '2026-10-05T00:00:00Z' }));
     assert.equal(requests[0].options.body.setHead, head === null);
     assert.equal(requests[0].options.body.expectedHeadId, head);
   }
+});
+
+test('manual promotion keeps the exact scoped command after a lost acknowledgement and retries it without changing HEAD guards', async () => {
+  let fail = true;
+  const { app, requests } = harness({ request: async () => { if (fail) throw Object.assign(new Error('Connection lost'), { code: 'NETWORK_ERROR' }); return {}; } });
+  const candidate = version({ id: 'candidate', isHead: false, sourceHash: null, zipHash: null, parentVersionId: 'weekly-1', promotion: 'manual', membershipRevision: 1, contentGroups: [{ id: 'group', teams: [team()] }] });
+  const journal = new Map();
+  app._ctStore = { async getRequest(scope, id) { return journal.get(id); }, async putRequest(scope, id, payload) { journal.set(id, { payload: copy(payload), scope: copy(scope) }); }, async deleteRequest(scope, id) { journal.delete(id); } };
+  app.ctRequestScope = () => ({ accountId: app.cloudProfileId, game: app.gameVersion, branchId: app.branchId });
+  app.ctRefreshLocal = async () => {}; app.refreshManagedVersions = async () => {};
+  app.managedBranch = { headVersionId: 'weekly-1' };
+  assert.equal(await app.managedPromote(candidate), false);
+  const first = requests[0].options.body;
+  assert.equal(journal.size, 1);
+  app.managedBranch = { headVersionId: 'changed-head' }; candidate.membershipRevision = 3; fail = false;
+  assert.equal(await app.managedPromote(candidate), true);
+  assert.deepEqual(requests[1].options.body, first);
+  assert.equal(journal.size, 0);
+  assert.equal(requests.filter(request => request.route.endsWith('/promote')).length, 2);
+});
+
+test('manual promotion checks the captured account after confirmation and leaves the new scope untouched', async () => {
+  const confirmation = deferred(), { app, requests } = harness({ request: async () => ({}) });
+  const candidate = version({ id: 'candidate', isHead: false, zipHash: null, parentVersionId: null, membershipRevision: 1 });
+  let writes = 0;
+  app._ctStore = { async getRequest() { return null; }, async putRequest() { writes++; } };
+  app.ctRequestScope = () => ({ accountId: app.cloudProfileId, game: app.gameVersion, branchId: app.branchId });
+  app.appConfirm = () => confirmation.promise;
+  const pending = app.managedPromote(candidate); await settle();
+  app.cloudProfileId = 'bob'; app.cloudUser = { id: 'bob', role: 'manager' };
+  confirmation.resolve(true); await pending;
+  assert.equal(writes, 0); assert.equal(requests.length, 0);
+});
+
+test('restoring an unpromoted candidate never fills HEAD implicitly', async () => {
+  const { app, requests } = harness({ request: async () => ({}) });
+  app.managedBranch = { headVersionId: null }; app.refreshManagedVersions = async () => {};
+  await app.managedRestore(version({ status: 'withdrawn', promotion: 'manual', promotedAt: null }));
+  assert.equal(requests[0].options.body.setHead, false);
 });
 
 test('opening another game or branch version refuses to import or activate it in the current scope', async () => {

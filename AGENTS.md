@@ -129,6 +129,8 @@ Keep `workspaceState.js` loaded before its helper/storage/protocol consumers and
 
 ## Syncing UX
 
+- Fresh named versions use explicit HEAD promotion (`manual-v1`, API schema 33). Read [Explicit HEAD promotion](docs/version_promotion.md) before changing publication, promotion, restoration or predecessor cutoffs. Preserve exact legacy retry bodies and their earlier behavior. New candidates never become HEAD automatically.
+
 - Healthy background synchronization is silent. Do not show loading/syncing messages, success notices or timestamps, or routine Refresh/Retry controls for automatic sync.
 - Keep existing content, scroll position, focus, and settled empty states stable during background requests. Polling must not clear a list, replace it with a loader, or briefly hide its empty state.
 - Show only actionable sync warnings, errors, and conflicts. Keep a failure visible until the relevant operation succeeds; starting a retry or completing an unrelated request must not clear it.

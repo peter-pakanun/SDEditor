@@ -5506,3 +5506,21 @@ test('export clipboard rejection expands and selects the retained timing report 
     const details={open:false};app.$refs.ctExportLog={parentElement:details,focus(){focused++;},select(){selected++;}};
     await app.ctCopyExportLog();assert.equal(details.open,true);assert.equal(focused,1);assert.equal(selected,1);assert.match(app.ctExportCopyMessage,/Ctrl.C/);assert.equal(app.ctExportCopyBusy,false);
 });
+
+test('manual preparation retains the captured absence of a predecessor so later matching assignments cannot silently replace it',async()=>{
+    const {app}=harness(),prepared={contentMode:'clienttext',language:'Thai'},cutoffs=[{language:'Thai',parentGroupId:null}];
+    app.ctPolicy.versionPromotionProtocols=['manual-v1'];app.ctUploadVersion=null;app.ctUploadPredecessor={id:'head'};
+    app._cloud={async request(path){assert.match(path,/promotion=manual/);return{version:null,group:null,predecessorCutoffs:cutoffs};}};
+    assert.equal(await app.ctFindPreviousGroup(prepared),null);
+    assert.deepEqual(prepared.predecessorCutoffs,cutoffs);
+});
+
+test('cancelling publication recovers a lost upload-creation receipt and cancels the whole batch before removing its journal',async()=>{
+    const {app}=harness({managedManagerAccess:true}),body={versionId:'candidate',game:'poe2',promotion:'manual',idempotencyKey:'exact-create'},calls=[];
+    app.managedBeginOperation=()=>({});app.managedFinishOperation=()=>{};app.managedSetOperationError=()=>{};app.ctRefreshLocal=async()=>{};
+    app._ctStore={async getRequest(){return{payload:{groups:[{createBody:body},{uploadId:'known-upload'}]}};},async deleteRequest(){calls.push('delete');}};
+    app._cloud={async request(path,options){calls.push({path,body:clone(options.body)});if(path==='/v1/content-uploads')return{upload:{id:'recovered-upload'}};return{};}};
+    await app.ctCancelPublication({requestId:'pending-publication',payload:{kind:'publication'}});
+    assert.deepEqual(calls[0].body,body);
+    assert.deepEqual(calls[1].body.uploadIds,['recovered-upload','known-upload']);assert.equal(calls[2],'delete');
+});
