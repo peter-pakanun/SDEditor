@@ -654,7 +654,7 @@
           if (!operation) this.managedSetOperationError(errorKey, '');
           completed = true; return true;
         } catch (error) {
-          if (!operation && run.current() && !run.signal.aborted && !error.stale) this.managedSetOperationError(errorKey, error);
+          if (!operation && run.current() && !run.signal.aborted && !error.stale) { run.fail(error); this.managedSetOperationError(errorKey, error); }
           if (operation) throw error;
           return false;
         } finally { if (!operation) this.managedFinishExport(run, completed); }
@@ -690,7 +690,7 @@
           return completed;
         } catch (error) {
           completed = false;
-          if (run.current() && !run.signal.aborted && !error.stale) this.managedSetOperationError(errorKey, error);
+          if (run.current() && !run.signal.aborted && !error.stale) { run.fail(error); this.managedSetOperationError(errorKey, error); }
           return false;
         } finally {
           const reconcile = run.current();
@@ -1129,7 +1129,7 @@
           run.phase('Download initiation'); root.saveAs(blob, name); run.state.downloadStarted = true;
           this.managedSetOperationError(errorKey, ''); completed = true; return true;
         } catch (error) {
-          if (!error.stale && !run.signal.aborted && run.current()) this.managedSetOperationError(errorKey, error);
+          if (!error.stale && !run.signal.aborted && run.current()) { run.fail(error); this.managedSetOperationError(errorKey, error); }
           return false;
         } finally { if (!operation) this.managedFinishExport(run, completed); }
       },
@@ -1196,7 +1196,7 @@
           this.managedSetOperationError(errorKey, ''); completed = true; return true;
         } catch (error) {
           completed = false;
-          if (!error.stale && !run?.signal.aborted && current()) this.managedSetOperationError(errorKey, error);
+          if (!error.stale && !run?.signal.aborted && current()) { run?.fail(error); this.managedSetOperationError(errorKey, error); }
           return false;
         } finally {
           const reconcile = run?.current();

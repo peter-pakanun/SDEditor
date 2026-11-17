@@ -8033,15 +8033,24 @@ function formatPageRange(total, page, pageSize) {
     async exportZip(doFullExport) {
       const run = this.managedBeginExport(doFullExport ? 'Export all StatDescription files' : 'Export saved StatDescription work', { manager: false, show: false });
       if (!run) return false;
+      run.state.sdContext = { game: ['poe1', 'poe2'].includes(this.gameVersion) ? this.gameVersion : '',
+        language: this.langs?.includes(this.lang) ? this.lang : '',
+        sourceHash: /^[a-f0-9]{64}$/.test(this.sourceIdentity) ? this.sourceIdentity : '' };
       let completed = false;
       try {
         run.phase('Checkpoint / preparation');
-        if (this.inlineActive && this.finishInlineSession && !await this.finishInlineSession({ promote: true })) return false;
+        if (this.inlineActive && this.finishInlineSession && !await this.finishInlineSession({ promote: true })) {
+          throw Object.assign(new Error('The inline editor could not finish.'), { code: 'SD_EXPORT_DRAFT_FAILED' });
+        }
         run.check();
-        if (this.flushEditorDraft && !await this.flushEditorDraft()) return false;
+        if (this.flushEditorDraft && !await this.flushEditorDraft()) {
+          throw Object.assign(new Error('The editor draft could not be preserved.'), { code: 'SD_EXPORT_DRAFT_FAILED' });
+        }
         run.check();
         if (!doFullExport) this.ctShowExport();
-        if (this._pendingSaves?.snapshot().jobs.length && !await run.wait(this.waitForPendingSaves())) return false;
+        if (this._pendingSaves?.snapshot().jobs.length && !await run.wait(this.waitForPendingSaves())) {
+          throw Object.assign(new Error('Pending local saves did not complete.'), { code: 'SD_EXPORT_PENDING_SAVES' });
+        }
         run.check();
         if (doFullExport) {
           run.phase('Full export confirmation');
@@ -8051,8 +8060,11 @@ function formatPageRange(total, page, pageSize) {
           run.check();
         }
         this.ctShowExport(); run.phase('Checkpoint / preparation');
-        if (this._pendingSaves?.snapshot().jobs.length && !await run.wait(this.waitForPendingSaves())) return false;
+        if (this._pendingSaves?.snapshot().jobs.length && !await run.wait(this.waitForPendingSaves())) {
+          throw Object.assign(new Error('Pending local saves did not complete.'), { code: 'SD_EXPORT_PENDING_SAVES' });
+        }
         run.check();
+        run.phase('Translation validation');
         const descsToExport = (this.descs || []).filter(desc => {
           const baseline = this.localDescs?.stagedVersion >= 1 ? this.workspaceSourceFile?.(desc.filepath) : null;
           const state = baseline ? window.WorkspaceState.workspaceFile(this.localDescs, baseline, this.lang) : desc;
@@ -8061,14 +8073,17 @@ function formatPageRange(total, page, pageSize) {
           return doFullExport ? !(state.isDropped && state.isMissing && !state.hasChanges) : !!state.hasChanges;
         });
         if (!descsToExport.length) {
-          throw new Error('There are no saved files to export.');
+          throw Object.assign(new Error('There are no saved files to export.'), { code: 'SD_EXPORT_NO_SAVED_FILES' });
         }
-        const invalidFiles = descsToExport.filter(desc => {
+        const invalidFiles = descsToExport.flatMap(desc => {
           const issues = this.committedTranslationIssues(desc, this.lang);
-          return issues.languageBlockPresent && !issues.valid;
+          return issues.languageBlockPresent && !issues.valid
+            ? [{ filepath: desc.filepath, expectedCount: issues.expectedCount, actualCount: issues.actualCount,
+              blankEntries: [...issues.blankEntries] }] : [];
         });
         if (invalidFiles.length) {
-          throw new Error('Export blocked: ' + invalidFiles.length + ' files have incomplete StatDescription translations. Complete every entry before exporting.');
+          throw Object.assign(new Error('Export blocked: ' + invalidFiles.length + ' files have incomplete StatDescription translations. Complete every entry before exporting.'),
+            { code: 'SD_EXPORT_INCOMPLETE_TRANSLATIONS', invalidFiles });
         }
 
         run.phase('Encoding');
@@ -8116,7 +8131,9 @@ function formatPageRange(total, page, pageSize) {
         saveAs(zippedBuffer, "StatDescriptions_Translated.zip"); run.state.downloadStarted = true; completed = true;
         this.managedSetOperationError('export', ''); return true;
       } catch (error) {
-        if (run.current() && !run.signal.aborted && !error.stale) this.managedSetOperationError('export', error);
+        if (run.current() && !run.signal.aborted && !error.stale) {
+          run.fail(error); this.managedSetOperationError('export', error);
+        }
         return false;
       } finally {
         const show = run.current() && !run.signal.aborted;
@@ -8137,7 +8154,8 @@ function formatPageRange(total, page, pageSize) {
         fetchZip: () => {
           window.SDBaselineFiles.checkpoint({ current, signal });
           if (!this.managedOnlineAvailable || !version || version.sourceHash !== sourceHash || archive.baselineId !== sourceHash) {
-            throw new Error('The original ZIP is unavailable. Reimport the matching original ZIP before exporting; your saved translations are preserved.');
+            throw Object.assign(new Error('The original ZIP is unavailable. Reimport the matching original ZIP before exporting; your saved translations are preserved.'),
+              { code: 'SD_BASELINE_UNAVAILABLE' });
           }
           const route = group && !group.legacyVersionId
             ? '/v1/content-groups/' + encodeURIComponent(group.id) + '/assets/source/original'

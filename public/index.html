@@ -818,12 +818,13 @@
         <p id="ctExportExplanation">{{ ctExportCollectionText }}</p>
         <p v-if="ctExportTiming.downloadStarted">Browser download initiated. Check your browser for its final result.</p>
         <p v-if="ctExportTiming.status === 'failed'" role="alert">The highlighted phase failed. <template v-if="!ctExportTiming.memoryOnly">Saved work and any pending collection receipt are retained. </template>{{ ctExportTiming.failure ? ctExportTiming.failure.message : 'The workspace error has details.' }}</p>
+        <pre v-if="ctExportTiming.status === 'failed' && ctExportTiming.contentMode === 'statdescription' && ctExportTiming.failure" class="ctExportFailureDetails" aria-label="Export failure details">{{ ctExportFailureDetails }}</pre>
         <div ref="ctExportPhases" class="workspaceInitializationTerminal ctExportPhases" role="log" aria-label="Export phases" aria-live="polite" aria-relevant="additions" tabindex="0">
           <div v-for="(row,index) in ctExportTiming.rows" :key="index" class="workspaceInitializationRow" :class="row.status"><span class="workspaceInitializationMarker" aria-hidden="true">{{ row.status === 'running' ? '›' : row.status === 'done' ? '✓' : '!' }}</span><span class="workspaceInitializationTask">{{ row.label }}<span v-if="row.detail"> ({{ row.detail }})</span><span class="srOnly">: {{ row.status }}</span></span><span class="workspaceInitializationTime">{{ ctExportDuration(row.elapsed) }}</span></div>
         </div>
         <p class="settingsHelp">Request times include network and server wall time. Browser download completion cannot be measured here.</p>
         <details><summary>Copyable timing report</summary><textarea ref="ctExportLog" class="settingsLogText" aria-label="Export timing report" :value="ctExportLogText" readonly spellcheck="false"></textarea></details>
-        <footer class="ctExportActions"><span role="status">{{ ctExportCopyMessage }}</span><button @click="ctCopyExportLog" :disabled="ctExportCopyBusy">Copy timings</button><button v-if="ctExportActive" data-ct-export-abort autofocus @click="ctAbortExport" :disabled="ctExportTiming.stopping">Abort</button><button v-else data-ct-export-close autofocus @click="ctCloseExport">Close</button></footer>
+        <footer class="ctExportActions"><span role="status">{{ ctExportCopyMessage }}</span><button @click="ctCopyExportLog" :disabled="ctExportCopyBusy">Copy timings</button><button v-if="!ctExportActive" @click="ctDownloadExportLog">Download report</button><button v-if="ctExportActive" data-ct-export-abort autofocus @click="ctAbortExport" :disabled="ctExportTiming.stopping">Abort</button><button v-else data-ct-export-close autofocus @click="ctCloseExport">Close</button></footer>
       </template>
     </dialog>
     <section v-if="workspaceInitializationActive && !needsInitialSettings && !showSetting" class="workspaceInitialization centerContainer loadingPage" aria-labelledby="workspaceInitializationTitle" aria-busy="true">

@@ -301,6 +301,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ui-accent); }
 .ctExportDialog summary { cursor: pointer; padding: 6px 0; }
 .ctExportDialog details { margin-top: 12px; }
 .ctExportDialog textarea { width: 100%; box-sizing: border-box; }
+.ctExportDialog .ctExportFailureDetails { max-height: 200px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
 @media (max-width: 480px) { .ctExportDialog { padding: 16px; width: calc(100vw - 24px); } .ctExportDialog .workspaceInitializationHeading { flex-wrap: wrap; } }
 .workspaceInitializationHeading { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 18px; }
 .workspaceInitializationHeading h1 { margin: 0; font-size: 26px; }

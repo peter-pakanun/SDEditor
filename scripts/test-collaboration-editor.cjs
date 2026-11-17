@@ -3692,6 +3692,73 @@ test('a local receipt replay adopts a later staged deletion instead of restoring
   assert.equal(e.pendingLocalSaves, 0); e._pendingSaves.dispose();
 });
 
+test('full SD export reports incomplete file counts and entry positions without copying translations', async () => {
+  const h = harness(), e = h.editor;
+  e.gameVersion = 'poe2'; e.flushEditorDraft = async () => true;
+  e.descs = [description('blank', ['PRIVATE TARGET', ' ']), description('short', ['PRIVATE TARGET']),
+    description('extra', ['PRIVATE TARGET', 'Complete', 'Excess'])];
+  e._workspaceSourceBaseline = structuredClone(e.descs);
+  const before = JSON.stringify({ descs: e.descs, workspace: e.localDescs });
+  h.context.JSZip = class { constructor() { assert.fail('Invalid files must fail before ZIP encoding.'); } };
+  assert.equal(await e.exportZip(true), false);
+  const failure = e.ctExportTiming.failure, report = e.ctExportLogText;
+  assert.equal(failure.code, 'SD_EXPORT_INCOMPLETE_TRANSLATIONS');
+  assert.equal(failure.step, 'Translation validation'); assert.equal(failure.invalidFileCount, 3);
+  assert.equal(e.ctExportTiming.rows.at(-1).status, 'failed');
+  assert.match(report, /Incomplete files: 3 \(3 listed\)/);
+  assert.match(report, /Game: poe2\nLanguage: Thai/);
+  assert(report.includes(e.descs[0].filepath + ': English entries 2, translation entries 2; blank/missing entries 2'));
+  assert(report.includes(e.descs[1].filepath + ': English entries 2, translation entries 1; blank/missing entries 2'));
+  assert(report.includes(e.descs[2].filepath + ': English entries 2, translation entries 3'));
+  assert.doesNotMatch(report, /PRIVATE TARGET/); assert.match(report, /No collection request sent/);
+  assert.equal(JSON.stringify({ descs: e.descs, workspace: e.localDescs }), before);
+  assert.equal(e.ctBusy, false); assert.equal(e.managedVersionBusy, false);
+});
+
+test('large SD validation failures retain total counts while bounding the listed files and blank positions', async () => {
+  const h = harness(), e = h.editor;
+  e.flushEditorDraft = async () => true; e.sourceIdentity = 'a'.repeat(64);
+  e.descs = Array.from({ length: 25 }, (_, index) => {
+    const desc = description(index, Array(30).fill(' ')); desc.translations.English = Array(30).fill('PRIVATE SOURCE'); return desc;
+  });
+  e._workspaceSourceBaseline = structuredClone(e.descs);
+  assert.equal(await e.exportZip(true), false);
+  assert.match(e.ctExportLogText, /Incomplete files: 25 \(20 listed\)/);
+  assert.match(e.ctExportLogText, /\(first 20 of 30\)/);
+  assert.match(e.ctExportLogText, /Source identity: a{64}/);
+  assert.equal(e.ctExportTiming.failure.files.length, 20);
+  assert.doesNotMatch(e.ctExportLogText, /PRIVATE SOURCE/);
+});
+
+for (const checkpoint of ['inline', 'draft', 'saves']) test('SD export records a failed ' + checkpoint + ' checkpoint instead of an unexplained early return', async () => {
+  const h = harness(), e = h.editor;
+  e.flushEditorDraft = async () => checkpoint !== 'draft';
+  if (checkpoint === 'inline') { e.inlineActive = true; e.finishInlineSession = async () => false; }
+  if (checkpoint === 'saves') { e._pendingSaves = { snapshot: () => ({ jobs: [{}] }) }; e.waitForPendingSaves = async () => false; }
+  assert.equal(await e.exportZip(true), false);
+  assert.equal(e.ctExportTiming.failure.code, checkpoint === 'saves' ? 'SD_EXPORT_PENDING_SAVES' : 'SD_EXPORT_DRAFT_FAILED');
+  assert.match(e.ctExportLogText, /Failure step: Checkpoint \/ preparation/);
+  assert.equal(e.ctBusy, false); assert.equal(e.managedVersionBusy, false);
+});
+
+test('SD export reports unexpected exception type and code locations while excluding raw error payloads', async () => {
+  const h = harness(), e = h.editor;
+  const error = new TypeError('PRIVATE TARGET token=secret');
+  error.stack = 'TypeError: PRIVATE TARGET token=secret\n    at exportZip (https://private.example/index.js:8067:19?token=secret)\n    at call (C:/private/account/managedVersions.js:603:14)';
+  e.flushEditorDraft = async () => { throw error; };
+  assert.equal(await e.exportZip(true), false);
+  assert.equal(e.ctExportTiming.failure.code, 'SD_EXPORT_FAILED');
+  assert.match(e.ctExportLogText, /Error type: TypeError/);
+  assert.match(e.ctExportLogText, /Code location: index.js:8067:19/);
+  assert.match(e.ctExportLogText, /Code location: managedVersions.js:603:14/);
+  assert.doesNotMatch(e.ctExportLogText, /PRIVATE|secret|private\.example|C:\/private/);
+  assert.equal(e.managedOperationErrors.export, error.message, 'The original error remains in the workspace.');
+  e.flushEditorDraft = async () => true; e.descs = [];
+  assert.equal(await e.exportZip(false), false);
+  assert.equal(e.ctExportTiming.failure.code, 'SD_EXPORT_NO_SAVED_FILES');
+  assert.doesNotMatch(e.ctExportLogText, /index.js:8067:19/, 'A new run replaces old failure evidence.');
+});
+
 test('local SD export Abort during pending checkpoint suppresses packaging and releases its shared operation lock',async()=>{
   const h=harness(),e=h.editor;let resolveCheckpoint,entered=false;
   const checkpoint=new Promise(resolve=>{resolveCheckpoint=resolve;});e.flushEditorDraft=async()=>true;e._pendingSaves={snapshot:()=>({jobs:[{}]})};e.waitForPendingSaves=()=>{entered=true;return checkpoint;};

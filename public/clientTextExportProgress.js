@@ -14,6 +14,39 @@
         'workbook-bytes': 'Reading original workbook bytes'
     };
     const failureCodes = new Set(['CLIENTTEXT_NOT_READY', 'CLIENTTEXT_ORIGINAL_UNIT_MISSING', 'CLIENTTEXT_ORIGINAL_ASSET_MISSING', 'CLIENTTEXT_ORIGINAL_FILE_UNAVAILABLE']);
+    const sdFailures = {
+        SD_EXPORT_INCOMPLETE_TRANSLATIONS: 'Included files have incomplete StatDescription translations. Complete every entry and match the English entry count before exporting. Affected files are listed in the report below.',
+        SD_EXPORT_NO_SAVED_FILES: 'There are no saved files to export.',
+        SD_EXPORT_DRAFT_FAILED: 'Export could not preserve the current editor draft. Keep this tab open and resolve the editor error before retrying.',
+        SD_EXPORT_PENDING_SAVES: 'Pending local saves did not complete. Resolve the local save error before retrying export.',
+        SD_BASELINE_UNAVAILABLE: 'The matching original ZIP is unavailable. Reconnect or reimport that original ZIP before retrying; saved translations are preserved.',
+        SD_TRANSLATION_INVALID: 'A StatDescription translation is incomplete. Complete every entry and match the English entry count before exporting.',
+    };
+    // Keep arbitrary exception messages, URLs and stack payloads out of shared reports.
+    // Code locations and explicitly supplied validation facts still identify the failure.
+    function sdFailureDetails(error) {
+        const integer = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+        const files = (Array.isArray(error?.invalidFiles) ? error.invalidFiles : []).slice(0, 20)
+            .filter(file => typeof file?.filepath === 'string' && file.filepath.length <= 1024
+                && !/[\u0000-\u001f?#:]/.test(file.filepath) && !file.filepath.includes('\\')
+                && !file.filepath.split('/').some(part => !part || part === '.' || part === '..'))
+            .map(file => ({ filepath: file.filepath, expectedCount: integer(file.expectedCount), actualCount: integer(file.actualCount),
+                blankEntryCount: Array.isArray(file.blankEntries) ? file.blankEntries.length : 0,
+                blankEntries: (Array.isArray(file.blankEntries) ? file.blankEntries : []).filter(value => integer(value) !== null && value > 0).slice(0, 20) }));
+        const locations = [...new Set(String(error?.stack || '').split('\n').slice(1)
+            .flatMap(line => [...line.matchAll(/\b([A-Za-z][A-Za-z0-9_-]*\.(?:js|cjs)):(\d+):(\d+)\b/g)].map(match => match[0])))].slice(0, 8);
+        return { files, invalidFileCount: integer(error?.invalidFiles?.length), locations };
+    }
+    function failureDetails(failure) {
+        if (!failure) return '';
+        return ['Failure code: ' + failure.code, 'Error type: ' + failure.name, 'Failure step: ' + failure.step,
+            ...(failure.invalidFileCount !== null && failure.invalidFileCount !== undefined
+                ? ['Incomplete files: ' + failure.invalidFileCount + ' (' + failure.files.length + ' listed)'] : []),
+            ...(failure.files || []).map(file => file.filepath + ': English entries ' + file.expectedCount
+                + ', translation entries ' + file.actualCount + (file.blankEntries.length ? '; blank/missing entries ' + file.blankEntries.join(', ')
+                    + (file.blankEntryCount > file.blankEntries.length ? ' (first ' + file.blankEntries.length + ' of ' + file.blankEntryCount + ')' : '') : '')),
+            ...(failure.locations || []).map(location => 'Code location: ' + location)].join('\n');
+    }
     const errorNames = new Set(['Error', 'TypeError', 'SyntaxError', 'DataError', 'DataCloneError', 'InvalidStateError', 'NotFoundError', 'NotReadableError', 'QuotaExceededError', 'TransactionInactiveError', 'UnknownError', 'VersionError', 'ReadOnlyError', 'ConstraintError', 'NetworkError']);
     const collectionText = state => state === 'accepted'
         ? 'Collection accepted by the server. Local Abort cannot undo collection or ending. An interrupted download can retry using the retained receipt.'
@@ -58,6 +91,13 @@
                     ? 'Export could not read its original workbook data. Reopen the same content group and retry. If it fails again, share Copy timings and the workspace error details.'
                     : 'Share Copy timings and the workspace error details if retrying the export fails.'
             };
+            if (this.state.contentMode === 'statdescription') {
+                const code = Object.hasOwn(sdFailures, error?.code) ? error.code : 'SD_EXPORT_FAILED';
+                this.state.failure = { code,
+                    name: this.state.failure.name, step: this.state.failure.step,
+                    message: sdFailures[code] || 'StatDescription export failed. Share Copy timings, including the failure details and code locations below, to diagnose this run.',
+                    ...sdFailureDetails(error) };
+            }
             this.tick();
         }
         async delay(ms) {
@@ -89,13 +129,17 @@
         computed: {
             ctExportActive() { return this.ctExportTiming?.status === 'running'; },
             ctExportCollectionText() { return collectionText(this.ctExportTiming?.collection); },
+            ctExportFailureDetails() { return failureDetails(this.ctExportTiming?.failure); },
             ctExportLogText() {
                 const state = this.ctExportTiming;
                 if (!state) return '';
                 return [(state.contentMode === 'statdescription' ? 'StatDescription' : 'ClientText') + ' export timing', state.label, 'Status: ' + state.status, 'Total elapsed: ' + duration(state.elapsed),
+                    ...(state.sdContext ? [state.sdContext.game ? 'Game: ' + state.sdContext.game : '',
+                        state.sdContext.language ? 'Language: ' + state.sdContext.language : '',
+                        state.sdContext.sourceHash ? 'Source identity: ' + state.sdContext.sourceHash : ''].filter(Boolean) : []),
                     ...(state.localOnly ? ['Workbook storage: local IndexedDB; checkpoint failures remain in the open tab. Browser storage is not a backup.'] : []),
                     collectionText(state.collection), state.downloadStarted ? 'Browser download initiated; completion is not observable.' : 'Download not initiated.',
-                    ...(state.failure ? ['Failure code: ' + state.failure.code, 'Error type: ' + state.failure.name, 'Failure step: ' + state.failure.step, 'Next action: ' + state.failure.message] : []),
+                    ...(state.failure ? [failureDetails(state.failure), 'Next action: ' + state.failure.message] : []),
                     'Request durations include network and server wall time; they are not server CPU measurements.',
                     ...state.rows.map(row => `${row.label}${row.detail ? ' [' + row.detail + ']' : ''}: ${duration(row.elapsed)} (${row.status})`)].join('\n');
             },
@@ -136,6 +180,13 @@
                 if (focusClose) this.$nextTick?.(() => { const dialog = this.$refs?.ctExportDialog; if (dialog?.open) dialog.querySelector('[data-ct-export-close]')?.focus(); });
             },
             ctCloseExport() { if (!this.ctExportActive) this.$refs?.ctExportDialog?.close(); },
+            ctDownloadExportLog() {
+                if (!this.ctExportTiming || this.ctExportActive) return;
+                try {
+                    const mode = this.ctExportTiming.contentMode === 'statdescription' ? 'StatDescription' : 'ClientText';
+                    root.saveAs(new Blob([this.ctExportLogText], { type: 'text/plain;charset=utf-8' }), mode + '_Export_Report.txt');
+                } catch (_) { this.ctExportCopyMessage = 'Could not download the report. Use Copy timings instead.'; }
+            },
             async ctCopyExportLog() {
                 if (this.ctExportCopyBusy) return;
                 const text = this.ctExportLogText;

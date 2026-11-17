@@ -129,6 +129,41 @@ async function main() {
         const localDownload = page.waitForEvent('download'); await page.locator('#local').click(); const local = await localDownload; await local.saveAs(join(output, 'local.zip')); await finished();
         const localZip = await JSZip.loadAsync(readFileSync(join(output, 'local.zip'))); assert(Codec.decodeUTF16(await localZip.file('synthetic/local.txt').async('uint8array')).includes('Local saved target')); await close();
         results.push('The production local export method uses the shared dialog and preserves saved UTF-16 output.');
+        const workspaceBefore = await page.evaluate(() => {
+            app.descs = [{ filepath: 'synthetic/incomplete.txt', name: 'synthetic', stats: ['synthetic_stat'], variables: ['1', '2'], remarks: ['', ''],
+                translations: { English: ['PRIVATE SOURCE', 'Second source'], German: ['PRIVATE TARGET'] }, hasChanges: false }];
+            app.committedTranslationIssues = desc => StatDescCodec.baselineTranslationIssues(desc, app.lang);
+            return JSON.stringify({ descs: app.descs, localDescs: app.localDescs });
+        });
+        await page.evaluate(() => app.exportZip(true)); await finished();
+        assert.equal(await page.evaluate(() => app.ctExportTiming.failure.code), 'SD_EXPORT_INCOMPLETE_TRANSLATIONS');
+        assert(await page.getByLabel('Export failure details').isVisible());
+        const failureText = (await page.getByLabel('Export failure details').textContent()).trim();
+        assert.match(failureText, /synthetic\/incomplete.txt: English entries 2, translation entries 1; blank\/missing entries 2/);
+        for (const viewport of [{ width: 1440, height: 1000 }, { width: 900, height: 650 }]) {
+            await page.setViewportSize(viewport);
+            for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
+                await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
+                assert(await page.getByRole('button', { name: 'Download report', exact: true }).isVisible());
+                assert(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth + 1));
+                await page.screenshot({ path: join(output, 'validation-' + theme + '-' + viewport.width + '.png') });
+            }
+        }
+        await page.getByRole('button', { name: 'Copy timings', exact: true }).click();
+        await page.waitForFunction(() => app.ctExportCopyMessage === 'Timings copied.');
+        const failureReport = (await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, '\n');
+        assert.match(failureReport, /Failure code: SD_EXPORT_INCOMPLETE_TRANSLATIONS/);
+        assert.match(failureReport, /Failure step: Translation validation/); assert(failureReport.includes(failureText));
+        assert.doesNotMatch(failureReport, /PRIVATE SOURCE|PRIVATE TARGET|synthetic-account/);
+        const reportDownload = page.waitForEvent('download'); await page.getByRole('button', { name: 'Download report', exact: true }).click();
+        const reportFile = await reportDownload; assert.equal(reportFile.suggestedFilename(), 'StatDescription_Export_Report.txt');
+        await reportFile.saveAs(join(output, reportFile.suggestedFilename()));
+        assert.equal(readFileSync(join(output, reportFile.suggestedFilename()), 'utf8'), failureReport);
+        assert.equal(await page.evaluate(() => JSON.stringify({ descs: app.descs, localDescs: app.localDescs })), workspaceBefore);
+        assert.equal(await page.evaluate(() => app.ctExportTiming.downloadStarted), false, 'A diagnostic download is not a successful translation export.');
+        await close(); await page.locator('#reopen').click(); assert.equal((await page.getByLabel('Export failure details').textContent()).trim(), failureText);
+        await page.keyboard.press('Escape');
+        results.push('Failed Full Export exposes validation facts in all desktop themes; clipboard and downloaded report retain identical diagnostics after reopening without source or target text.');
         assert.deepEqual(errors, []); const result = { status: 'PASS', localEndpointsOnly: true, syntheticContentOnly: true, nativeIndexedDB: true, realVerificationWorker: true, controlledWorkerStall: true, results, layouts, errors };
         writeFileSync(join(output, 'results.json'), JSON.stringify(result, null, 2)); console.log(JSON.stringify(result, null, 2));
     } finally { held.forEach(response => response.destroy()); await browser?.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
