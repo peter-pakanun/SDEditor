@@ -289,7 +289,8 @@
       options.signal?.addEventListener('abort', cancel, { once: true });
       if (options.signal?.aborted) controller.abort();
       if(controller.signal.aborted){options.signal?.removeEventListener('abort',cancel);throw Object.assign(new Error('Cancelled'),{name:'AbortError'});}
-      const timeout = setTimeout(() => controller.abort(), options.timeout || 20000);
+      let timedOut = false, transportStarted = false, response;
+      const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, options.timeout || 20000);
       try {
         let body = options.rawBody || (options.body ? JSON.stringify(options.body) : undefined), gzip = false;
         if (options.compressJson && options.body && !options.rawBody && typeof CompressionStream === 'function' && typeof Blob === 'function' && typeof Response === 'function') {
@@ -313,7 +314,8 @@
               ? { 'X-SDEditor-ClientText-Protocol': 'clienttext-trusted-v1' } : {}),
             ...(/^\/v1\/(collaboration|versions|version-uploads|collections)(\/|\?|$)/.test(path) ? { 'X-SDEditor-Workspace-Version': '2' } : {}) },
           ...(body !== undefined ? { body } : {}) };
-        const response = (options.onUploadProgress || options.onDownloadProgress) && typeof XMLHttpRequest === 'function'
+        transportStarted = true;
+        response = (options.onUploadProgress || options.onDownloadProgress) && typeof XMLHttpRequest === 'function'
           ? await new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest(); xhr.open(request.method, this.apiBase + path); xhr.responseType = 'blob';
             for (const [key, value] of Object.entries(request.headers)) xhr.setRequestHeader(key, value);
@@ -321,11 +323,25 @@
             if (options.onDownloadProgress) xhr.onprogress = event => { if (this.permissionsCurrent(ctx)) options.onDownloadProgress(event.loaded, event.lengthComputable ? event.total : undefined); };
             xhr.onload = () => resolve({ status: xhr.status, ok: xhr.status >= 200 && xhr.status < 300,
               json: async () => JSON.parse(await xhr.response.text()), blob: async () => xhr.response });
-            xhr.onerror = () => reject(new Error(options.onUploadProgress ? 'Archive upload could not reach the server. Retry to resume this upload.' : 'Archive download could not reach the server. Open this source version again to retry.'));
+            xhr.onerror = () => reject(Object.assign(new Error(options.onUploadProgress ? 'Archive upload could not reach the server. Retry to resume this upload.' : 'Archive download could not reach the server. Open this source version again to retry.'), { code: 'NETWORK_ERROR' }));
             xhr.onabort = () => reject(Object.assign(new Error(options.onUploadProgress ? 'Archive upload was interrupted. Retry this upload.' : 'Archive download was interrupted. Open this source version again to retry.'), { name: 'AbortError' }));
             controller.signal.addEventListener('abort', () => xhr.abort(), { once: true }); if(controller.signal.aborted){reject(Object.assign(new Error('Cancelled'),{name:'AbortError'}));return;}xhr.send(request.body);
           }) : await this.fetcher(this.apiBase + path, request);
-        const data = response.status === 204 ? null : response.ok && options.responseType === 'blob' ? await response.blob() : await response.json();
+        let data;
+        if (response.status === 204) data = null;
+        else if (response.ok && options.responseType === 'blob') data = await response.blob();
+        else {
+          try { data = await response.json(); }
+          catch (error) {
+            if (controller.signal.aborted) throw error;
+            if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or language access changed'), { stale: true });
+            // Tunnel/proxy error pages are often HTML. Keep the status for
+            // diagnosis without displaying their body or a JSON parser error.
+            throw Object.assign(new Error(response.ok ? 'The server returned an unreadable response. Retry the same operation.'
+              : `The server returned HTTP ${response.status} without a readable error response. Retry the same operation.`),
+            { status: response.status, code: response.ok ? 'INVALID_RESPONSE' : 'HTTP_ERROR' });
+          }
+        }
         if (!this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or language access changed'), { stale: true });
         if (!response.ok) {
           const error = Object.assign(new Error(data?.error?.message || 'Cloud request failed'), { status: response.status, code: data?.error?.code, current: data?.current, details: data });
@@ -360,6 +376,14 @@
           throw error;
         }
         return data;
+      } catch (error) {
+        if (!response || controller.signal.aborted) {
+          if (error.stale || !this.permissionsCurrent(ctx)) throw Object.assign(new Error('Account or language access changed'), { stale: true });
+          if (options.signal?.aborted) throw Object.assign(new Error('Cancelled'), { name: 'AbortError' });
+          if (timedOut) throw Object.assign(new Error('The server did not respond in time. Retry the same operation.'), { code: 'REQUEST_TIMEOUT' });
+          if (transportStarted && error.name !== 'AbortError' && !error.code) throw Object.assign(new Error('Cloud request could not reach the server. Check your connection and retry the same operation.'), { code: 'NETWORK_ERROR' });
+        }
+        throw error;
       } finally { clearTimeout(timeout); options.signal?.removeEventListener('abort', cancel); }
     }
     async acceptLogin(result) {

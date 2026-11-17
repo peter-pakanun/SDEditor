@@ -215,6 +215,13 @@ test('canonical duplicate decisions fingerprint complete blocks and preserve ori
   const api = require(vendorPath);
   assert.deepEqual(await api.applyDuplicateSelections(raw, decisions, { language: 'Thai' }), selected);
   assert.deepEqual(plain(await browser().applyDuplicateSelections(raw, decisions, { language: 'Thai' })), selected);
+  for (const parser of [codec, api, browser()]) {
+    const owned = plain(raw), untouchedTranslations = owned[0].translations.Thai;
+    const accepted = await parser.applyDuplicateSelections(owned, decisions, { language: 'Thai', inPlace: true });
+    assert.equal(accepted[0], owned[0]);
+    assert.deepEqual(plain(accepted), plain(selected));
+    assert.notEqual(owned[0].translations.Thai, untouchedTranslations);
+  }
   await assert.rejects(codec.applyDuplicateSelections(raw, []), /decisions do not match/);
   await assert.rejects(codec.applyDuplicateSelections(raw, decisions.map(item => ({ ...item, blockHash: '0'.repeat(64) }))), /does not match the original ZIP/);
   await assert.rejects(codec.applyDuplicateSelections(raw, [decisions[0], decisions[0]]), /Duplicate archive decision/);

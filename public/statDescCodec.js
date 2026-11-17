@@ -461,8 +461,10 @@ function strEncodeUTF16(str) {
     const digest = await provider.subtle.digest('SHA-256', new TextEncoder().encode('sdeditor:baseline:block:v1\n' + JSON.stringify(value)));
     return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
   }
-  async function applyDuplicateSelections(rawSource, decisions = [], { language } = {}) {
-    const source = JSON.parse(JSON.stringify(rawSource));
+  async function applyDuplicateSelections(rawSource, decisions = [], { language, inPlace = false } = {}) {
+    // The server parser owns its freshly parsed input. Avoid serializing a
+    // second multilingual catalog there; editor callers keep detached copies.
+    const source = inPlace ? rawSource : JSON.parse(JSON.stringify(rawSource));
     const groups = collectDuplicateLangGroups(source);
     if (!Array.isArray(decisions) || decisions.length !== groups.length) throw new Error('The shared import decisions do not match this ZIP.');
     const keys = new Set();

@@ -4664,6 +4664,82 @@ test('trusted publication sends only original assets, small descriptors and spar
     assert.deepEqual(finalize.body.summaries,originals.summaries);assert.equal(finalize.body.storageProtocol,S.STORAGE_PROTOCOL);
     assert.equal(finalize.body.descriptors[0].root,undefined);assert.equal(await f.store.getRequest(app.ctRequestScope(),app._ctPublicationRequest || 'unused'),undefined);
 });
+
+function interruptedStatPublication(failure){
+    const f=fixture(),version={id:'v1',game:'poe2',branchId:'default',membershipRevision:0},
+        {app}=harness({_ctStore:f.store,ctUploadVersion:version,ctUploadName:'Stats release'}),calls=[];
+    app.ctPrepared=[{contentMode:'statdescription',assignments:['Thai'],candidates:[{file:new File(['original ZIP'],'StatDescriptions.zip')}],duplicateGroups:[]}];
+    app._cloud={async request(route,options){
+        calls.push({route,body:clone(options?.body)});
+        if(route==='/v1/content-uploads' || route==='/v1/content-uploads/upload')return{upload:{id:'upload',status:'uploading'}};
+        if(route.includes('/assets/'))return{};
+        if(route.endsWith('/finalize')){assert.equal(app.ctProgress.phase,'Finalizing content group');throw failure;}
+        throw Error('Unexpected publication request '+route);
+    }};
+    app.refreshManagedVersions=async()=>{};app.managedReadDetails=async()=>{};
+    return{app,calls,store:f.store,version};
+}
+
+test('uncertain StatDescription finalization retains its journal and retries the same IDs without repeating accepted publication',async()=>{
+    const {app,calls,store,version}=interruptedStatPublication(Object.assign(Error('Cloud request could not reach the server.'),{code:'NETWORK_ERROR'}));
+    await app.ctPublishPrepared();
+    assert.match(app.ctUploadError,/Finalizing content group:.*may still have accepted/);
+    assert.match(app.ctUploadError,/Retry Publish complete groups.*do not prepare it again/);
+    assert.doesNotMatch(app.ctUploadError,/disk|storage/i);
+    const warning=app.ctUploadError,prepared=app.ctPrepared[0],journalId=app._ctPublicationRequest,
+        journal=await store.getRequest(app.ctRequestScope(),journalId),firstCreate=calls.find(call=>call.route==='/v1/content-uploads'),firstFinalize=calls.find(call=>call.route.endsWith('/finalize'));
+    assert.deepEqual(journal.payload.groups[0].createBody,firstCreate.body);assert.deepEqual(journal.payload.groups[0].finalizeBody,firstFinalize.body);
+    assert.equal(prepared.published,undefined);assert.equal(app.ctUploading,false);assert.equal(app.ctProgress,null);
+    const retryStarted=deferred(),release=deferred(),retryCalls=[];
+    app._cloud.request=async(route,options)=>{
+        retryCalls.push({route,body:clone(options?.body)});
+        if(route==='/v1/content-uploads'){retryStarted.resolve();await release.promise;return{upload:{id:'upload',status:'uploading'}};}
+        if(route==='/v1/content-uploads/upload')return{upload:{id:'upload',status:'accepted',groupId:'accepted-group'}};
+        if(route==='/v1/content-groups/accepted-group')return{group:{version:{...version,membershipRevision:1}}};
+        throw Error('An accepted upload must not be uploaded or finalized again');
+    };
+    const retry=app.ctPublishPrepared();await retryStarted.promise;
+    assert.equal(app.ctUploadError,warning,'The actionable failure stays visible until this publication succeeds');
+    release.resolve();await retry;
+    assert.deepEqual(retryCalls[0].body,firstCreate.body);assert.equal(retryCalls.some(call=>/assets|finalize/.test(call.route)),false);
+    assert.equal(app.ctUploadError,'');assert.equal(await store.getRequest(app.ctRequestScope(),journalId),undefined);
+});
+
+test('publication timeouts and proxy errors show actionable uncertainty instead of disappearing',async()=>{
+    for(const failure of [Object.assign(Error('The server did not respond in time.'),{code:'REQUEST_TIMEOUT'}),
+        Object.assign(Error('The server returned HTTP 502 without a readable error response.'),{code:'HTTP_ERROR',status:502})]){
+        const {app}=interruptedStatPublication(failure);await app.ctPublishPrepared();
+        assert.match(app.ctUploadError,/Finalizing content group:.*may still have accepted/);
+        assert.match(app.ctUploadError,/Retry Publish complete groups/);assert.equal(app.ctPrepared.length,1);
+    }
+});
+
+test('publication creation failures identify their phase without claiming finalization was accepted',async()=>{
+    const {app}=interruptedStatPublication();app._cloud.request=async()=>{throw Object.assign(Error('Could not reach the server.'),{code:'NETWORK_ERROR'});};
+    await app.ctPublishPrepared();assert.match(app.ctUploadError,/Creating content upload:/);
+    assert.match(app.ctUploadError,/Retry Publish complete groups/);assert.doesNotMatch(app.ctUploadError,/may still have accepted/);
+});
+
+test('a version-list failure after confirmed publication is reported without asking to republish a cleared upload',async()=>{
+    const {app,version}=interruptedStatPublication();
+    const request=app._cloud.request;app._cloud.request=async(route,options)=>route.endsWith('/finalize')?{version:{...version,membershipRevision:1}}:request(route,options);
+    app.refreshManagedVersions=async()=>{throw Object.assign(Error('Could not reach the server.'),{code:'NETWORK_ERROR'});};
+    await app.ctPublishPrepared();assert.match(app.ctError,/were published, but the version details could not be refreshed/);
+    assert.doesNotMatch(app.ctError,/Retry Publish|may still/);assert.equal(app.ctUploadError,'');assert.equal(app.ctPrepared.length,0);
+});
+
+test('explicit cancellation and obsolete publication scopes do not display a late transport warning',async()=>{
+    for(const change of ['cancel','scope','epoch']){
+        const {app}=interruptedStatPublication(),gate=deferred(),started=deferred();
+        const request=app._cloud.request;app._cloud.request=async(route,options)=>{
+            if(route.endsWith('/finalize')){started.resolve();await gate.promise;throw Object.assign(Error('Late failure'),{code:'NETWORK_ERROR'});}
+            return request(route,options);
+        };
+        const pending=app.ctPublishPrepared();await started.promise;
+        if(change==='cancel')app._ctAbort.abort();else if(change==='scope')app.managedCatalogScope='another-account:poe2';else app._ctEpoch=(app._ctEpoch || 0)+1;
+        gate.resolve();await pending;assert.equal(app.ctUploadError,'');
+    }
+});
 test('unfinished legacy publication conversion retains exact old bodies and creates new trusted request identities',async()=>{
     const {app}=harness(),createBody={idempotencyKey:'old-group-command',contentMode:'clienttext'},finalizeBody={idempotencyKey:'old-group-command',descriptors:[{root:'retained-root'}]},
         prepared={contentMode:'clienttext',language:'Thai',assignments:['Thai'],units:[unit()],assets:[{...asset,parsed:{parserVersion:'clienttext-v1'}}],candidates:[{role:'normal'}],requestId:'old-group-command',createBody:clone(createBody),finalizeBody:clone(finalizeBody)},writes=[];

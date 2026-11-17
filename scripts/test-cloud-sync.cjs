@@ -296,6 +296,54 @@ test('archive progress transport retains upload totals and JSON server failures'
   assert.deepEqual(progress, [[5, body.size]]);
 });
 
+test('proxy HTML errors retain their HTTP status without exposing HTML or a JSON parser failure', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  h.api.intercept = () => ({ status: 502, ok: false, json: async () => { throw new SyntaxError('Unexpected token < from private proxy page'); } });
+  await assert.rejects(h.client.request('/v1/content-uploads/upload/finalize'), error => {
+    assert.equal(error.status, 502); assert.equal(error.code, 'HTTP_ERROR');
+    assert.match(error.message, /HTTP 502/); assert.doesNotMatch(error.message, /private|Unexpected|</);
+    return true;
+  });
+  assert.equal(h.client.state.auth.token, 'token-alice');
+});
+
+test('archive transport also preserves non-JSON HTTP failures', async t => {
+  const requests = xhrHarness(t), h = await harness(t, { state: authenticatedState() });
+  const pending = h.client.request('/v1/content-uploads/upload/assets/source', { method: 'PUT', rawBody: new Blob(['ZIP']), onUploadProgress() {} });
+  requests[0].complete(new Blob(['<html>proxy failure</html>']), 507);
+  await assert.rejects(pending, error => error.status === 507 && error.code === 'HTTP_ERROR' && /HTTP 507/.test(error.message) && !error.message.includes('<html>'));
+});
+
+test('unreadable successful responses remain distinguishable from network failures', async t => {
+  const h = await harness(t, { state: authenticatedState() });
+  h.api.intercept = () => ({ status: 200, ok: true, json: async () => { throw new SyntaxError('Malformed response'); } });
+  await assert.rejects(h.client.request('/v1/content-uploads/upload'), error => error.status === 200 && error.code === 'INVALID_RESPONSE');
+});
+
+test('fetch network failures have a stable code and keep the current account signed in', async t => {
+  const h = await harness(t, { state: authenticatedState() }); h.api.online = false;
+  await assert.rejects(h.client.request('/v1/content-uploads/upload/finalize'), error => error.code === 'NETWORK_ERROR' && /could not reach the server/.test(error.message));
+  assert.equal(h.client.state.auth.token, 'token-alice');
+});
+
+test('request deadlines report timeout for fetch and archive transports while explicit cancellation stays AbortError', async t => {
+  const requests = xhrHarness(t), h = await harness(t, { state: authenticatedState() });
+  h.api.intercept = request => new Promise((resolve, reject) => request.options.signal.addEventListener('abort', () => reject(Object.assign(new Error('Aborted'), { name: 'AbortError' })), { once: true }));
+  await assert.rejects(h.client.request('/v1/content-uploads/upload/finalize', { timeout: 5 }), error => error.code === 'REQUEST_TIMEOUT' && error.name !== 'AbortError');
+  await assert.rejects(h.client.request('/v1/content-uploads/upload/assets/source', { timeout: 5, onUploadProgress() {} }), error => error.code === 'REQUEST_TIMEOUT');
+  assert.equal(requests.length, 1);
+  const controller = new AbortController(), pending = h.client.request('/v1/content-uploads/upload/finalize', { signal: controller.signal });
+  controller.abort(); await assert.rejects(pending, error => error.name === 'AbortError' && !error.code);
+});
+
+test('late transport failures are stale after account or language access changes', async t => {
+  const h = await harness(t, { state: authenticatedState() }), gate = deferred();
+  h.api.intercept = () => gate.promise;
+  const pending = h.client.request('/v1/content-uploads/upload/finalize');
+  h.client.state.auth.user.language = 'French'; gate.reject(new TypeError('Failed to fetch'));
+  await assert.rejects(pending, error => error.stale === true && error.code !== 'NETWORK_ERROR');
+});
+
 const legacyClientTextRetry = () => ({ mutationId: 'original-retry', baseRevision: 3,
   values: { text: ' @ literal\\n\n line ' }, reviewed: { text: 'source-hash' },
   baseline: { id: 'old-baseline', fields: [{ id: 'text', source: 'Original English' }] },
@@ -833,7 +881,7 @@ test('pending resolution is durable before PATCH and retries after restart with 
       throw new Error('Network lost before response');
     }
   };
-  await assert.rejects(h.client.resolveConflict('fire', { definitions: 'local', note: 'local' }, 2), /Network lost/);
+  await assert.rejects(h.client.resolveConflict('fire', { definitions: 'local', note: 'local' }, 2), error => error.code === 'NETWORK_ERROR');
   const pending = clone(h.store.state.profiles.alice.dictionaries.Thai.pendingResolution);
   assert.ok(pending);
   h.client.destroy();
@@ -854,7 +902,7 @@ test('accepted resolution whose response was lost is idempotent after restart', 
   h.api.after = request => {
     if (request.method === 'PATCH' && loseResponse) { loseResponse = false; throw new Error('Response lost'); }
   };
-  await assert.rejects(h.client.resolveConflict('fire', { definitions: 'local', note: 'local' }, 2), /Response lost/);
+  await assert.rejects(h.client.resolveConflict('fire', { definitions: 'local', note: 'local' }, 2), error => error.code === 'NETWORK_ERROR');
   assert.equal(h.api.dictionaries.get('Thai').revision, 3);
   h.client.destroy();
   const next = await harness(t, { store: h.store, api: h.api });
@@ -869,7 +917,7 @@ test('pending resolution rejected with 409 after restart refreshes the conflict 
   seedAPI(h.api, { remote: dictionary([word('fire', { replace: 'remote' })], 2) });
   await h.client.sync();
   h.api.online = false;
-  await assert.rejects(h.client.resolveConflict('fire', { definitions: 'local', note: 'local' }, 2), /Network unavailable/);
+  await assert.rejects(h.client.resolveConflict('fire', { definitions: 'local', note: 'local' }, 2), error => error.code === 'NETWORK_ERROR');
   h.client.destroy();
   h.api.online = true;
   h.api.dictionaries.set('Thai', dictionary([word('fire', { replace: 'newer remote', tlnote: 'new note' })], 3));

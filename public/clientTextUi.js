@@ -3649,7 +3649,11 @@
                 await this.ctRememberPublication();
             },
             async ctPublishPrepared() {
-                if (!this.ctPrepared.length || this.ctUploading) return; this.ctUploading = true; this.ctUploadError = ''; const key = this.managedCatalogScope,client=this._cloud; this._ctAbort = new AbortController();
+                if (!this.ctPrepared.length || this.ctUploading) return; this.ctUploading = true; const key = this.managedCatalogScope,client=this._cloud,epoch=this._ctEpoch || 0; this._ctAbort = new AbortController();
+                const controller=this._ctAbort,current=()=>key===this.managedCatalogScope && epoch===(this._ctEpoch || 0) && this._ctAbort===controller;
+                let publicationPhase='Preparing publication',finalizing=false,publicationConfirmed=false;
+                const reportPublication=phase=>{publicationPhase=phase;this.ctReport({phase,workbook:'',sheet:'',completed:0,total:null});};
+                if(this.ctUploadLocal || this.ctUploadTest)this.ctUploadError='';
                 try {
                     if(this.ctUploadTest){
                         if(this.ctPrepared.length!==1 || this.ctPrepared[0].contentMode!=='clienttext')throw new Error('Prepare one ClientText language for this test session.');
@@ -3707,6 +3711,7 @@
                     this._ctReleaseRequest ||= uuid();if(!version)this._ctReleaseCommand ||= {game:this.gameVersion,branchId:this.branchId,name:this.ctUploadName.trim(),deadlineAt:root.ManagedVersions.parseDeadline(this.ctUploadDeadline),expectedHeadId:this.ctUploadPredecessor?.id || null,idempotencyKey:this._ctReleaseRequest};await this.ctRememberPublication();
                     if (!version) {
                         this._ctReleaseRequest ||= uuid();
+                        reportPublication('Creating source version');
                         const result = await client.request('/v1/content-versions', { method: 'POST', body: this._ctReleaseCommand,signal:this._ctAbort.signal }); version = result.version;
                         if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
                         this.ctUploadVersion = version; this._ctReleaseRequest = null;
@@ -3718,16 +3723,19 @@
                         prepared.requestId ||= uuid();
                         prepared.createBody ||= { versionId: version.id,game:this.gameVersion,branchId:this.branchId, contentMode: prepared.contentMode,...(prepared.contentMode==='clienttext'?{storageProtocol:trustedProtocol}:{}), language: prepared.language, assignments: prepared.assignments, roles: prepared.contentMode==='statdescription'?['source']:prepared.candidates.map(item => item.role),parentGroupId:prepared.parentGroupId, expectedMembershipRevision: version.membershipRevision || 0, idempotencyKey: prepared.requestId };
                         await this.ctRememberPublication();
+                        reportPublication('Creating content upload');
                         const response = await this._cloud.request('/v1/content-uploads', { method: 'POST', body: prepared.createBody,signal:this._ctAbort.signal });
                         let upload = response.upload; prepared.uploadId = upload.id;
                         // A creation receipt freezes its original response.
                         // Resolve live state before replaying assets/converting
                         // an upload whose finalize may already have succeeded.
+                        reportPublication('Checking content upload');
                         upload=(await client.request('/v1/content-uploads/'+encodeURIComponent(upload.id),{signal:this._ctAbort.signal})).upload;
                         if(!upload || upload.id!==prepared.uploadId)throw new Error('The upload state identifies another publication.');
                         await this.ctRememberPublication();
                         if(upload.status==='accepted'){
-                            prepared.published=true;version=(await this._cloud.request('/v1/content-groups/'+encodeURIComponent(upload.groupId))).group.version;this.ctUploadVersion=version;await this.ctRememberPublication();continue;
+                            reportPublication('Reading accepted content group');
+                            version=(await this._cloud.request('/v1/content-groups/'+encodeURIComponent(upload.groupId),{signal:this._ctAbort.signal})).group.version;prepared.published=true;this.ctUploadVersion=version;await this.ctRememberPublication();continue;
                         }
                         if(prepared.contentMode==='clienttext' && (upload.legacyConversionRequired || prepared.createBody.storageProtocol!==trustedProtocol)){
                             await this.ctConvertLegacyPublication(prepared,version);
@@ -3736,12 +3744,13 @@
                         }
                         for (const candidate of prepared.candidates) {
                             if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
+                            publicationPhase='Uploading original '+candidate.file.name;
                             this.ctReport({ phase: 'Uploading original', workbook: candidate.file.name, sheet: '', completed: 0, total: candidate.file.size });
                             await this._cloud.request('/v1/content-uploads/' + encodeURIComponent(upload.id) + '/assets/' + encodeURIComponent(prepared.contentMode === 'statdescription' ? 'source' : candidate.role) + '?filename='+encodeURIComponent(candidate.file.name), { method: 'PUT', rawBody: candidate.file,signal:this._ctAbort.signal, timeout: 180000, onUploadProgress: (completed, total) => this.ctReport({ completed, total }) });
                         }
                         for(let start=0,index=0;start<(prepared.carry?.length||0);index++){
                             let end=start,bytes=0;while(end<prepared.carry.length && end-start<2000){const size=new TextEncoder().encode(JSON.stringify(prepared.carry[end])).length+1;if(bytes+size>1800000 && end>start)break;bytes+=size;end++;}
-                            this.ctReport({phase:'Uploading carry-forward work',workbook:prepared.language,completed:start,total:prepared.carry.length,sheet:''});
+                            publicationPhase='Uploading carry-forward work';this.ctReport({phase:publicationPhase,workbook:prepared.language,completed:start,total:prepared.carry.length,sheet:''});
                             await this._cloud.request('/v1/content-uploads/'+encodeURIComponent(upload.id)+'/carry/chunks',{method:'POST',body:{storageProtocol:trustedProtocol,index,units:prepared.carry.slice(start,end)},compressJson:this.ctPolicy.uploadEncodings?.includes('gzip'),signal:this._ctAbort.signal,timeout:180000});start=end;
                             if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
                         }
@@ -3749,8 +3758,10 @@
                         prepared.finalizeBody ||= { ...(prepared.contentMode==='clienttext'?{storageProtocol:trustedProtocol,descriptors:prepared.originals.descriptors,summaries:prepared.originals.summaries}:{}),decisions, expectedMembershipRevision: version.membershipRevision || 0, idempotencyKey: prepared.requestId };
                         await this.ctRememberPublication();
                         let result;
+                        reportPublication('Finalizing content group');finalizing=true;
                         try{result=await this._cloud.request('/v1/content-uploads/' + encodeURIComponent(upload.id) + '/finalize', { method: 'POST', body: prepared.finalizeBody,signal:this._ctAbort.signal, timeout: 180000 });}
-                        catch(error){if(error.code==='VERSION_MEMBERSHIP_CHANGED' && key===this.managedCatalogScope){const details=await this._cloud.request('/v1/versions/'+encodeURIComponent(version.id),{signal:this._ctAbort.signal});if(key!==this.managedCatalogScope)return;this.ctUploadVersion=details.version;prepared.finalizeBody.expectedMembershipRevision=details.version.membershipRevision;await this.ctRememberPublication();throw new Error('Another complete group was added to this version. Its membership is refreshed; retry publication to add your prepared group.');}throw error;}
+                        catch(error){if(error.code==='VERSION_MEMBERSHIP_CHANGED' && key===this.managedCatalogScope){finalizing=false;const details=await this._cloud.request('/v1/versions/'+encodeURIComponent(version.id),{signal:this._ctAbort.signal});if(key!==this.managedCatalogScope)return;this.ctUploadVersion=details.version;prepared.finalizeBody.expectedMembershipRevision=details.version.membershipRevision;await this.ctRememberPublication();throw new Error('Another complete group was added to this version. Its membership is refreshed; retry publication to add your prepared group.');}throw error;}
+                        finalizing=false;reportPublication('Retaining accepted content group');
                         if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
                         prepared.published = true; version = result.version || { ...version, membershipRevision: (version.membershipRevision || 0) + 1 }; this.ctUploadVersion = version;
                         const group = result.group || result.contentGroup;
@@ -3759,9 +3770,18 @@
                         if (key !== this.managedCatalogScope || this._ctAbort.signal.aborted) return;
                     }
                     await this._ctStore.deleteRequest(this.ctRequestScope(),this._ctPublicationRequest);this._ctPublicationRequest=null;
+                    publicationConfirmed=true;
+                    this.ctUploadError='';
                     this.ctUploadVisible = false; this.ctPrepared = raw([]); await this.refreshManagedVersions(); await this.managedReadDetails(version.id);
-                } catch (error) { if (key === this.managedCatalogScope && error.name !== 'AbortError') this.ctUploadError = error.message; }
-                finally { if (key === this.managedCatalogScope) { this.ctUploading = false; this.ctProgress = null; } }
+                } catch (error) {
+                    if(current() && !controller.signal.aborted && !error.stale){
+                        if(publicationConfirmed){this.ctError='Content groups were published, but the version details could not be refreshed. '+error.message;return;}
+                        const interrupted=['NETWORK_ERROR','REQUEST_TIMEOUT','HTTP_ERROR','INVALID_RESPONSE'].includes(error.code) || error.name==='AbortError';
+                        this.ctUploadError=this.ctUploadLocal || this.ctUploadTest ? error.message : publicationPhase+': '+error.message
+                            +(interrupted ? (finalizing ? ' The server may still have accepted this group.' : '')+' Retry Publish complete groups for this prepared upload; do not prepare it again.' : '');
+                    }
+                }
+                finally { if (current()) { this.ctUploading = false; this.ctProgress = null; } }
             }
         }
     };
