@@ -27,11 +27,17 @@ function editorBlock(source, target) {
 }
 
 function harness({ desc = description(), units = [], testMode = true, store = {}, query } = {}) {
-  const calls = { queries: [], saved: 0, drafts: 0, focus: 0, confirms: 0, publications: [], exported: [] };
+  const calls = { queries: [], saved: 0, drafts: 0, focus: 0, confirms: 0, publications: [], patches: [], exported: [] };
   let app, currentSnapshot = { generation: 1, game: 'poe1', units };
   const worker = {
     setScope(key) { this.scope = key; },
     submitSnapshot(snapshot) { currentSnapshot = snapshot; calls.publications.push(snapshot.generation); },
+    submitPatch({ generation, game, units }) {
+      calls.patches.push(units);
+      const rows = new Map(currentSnapshot.units.map(unit => [unit.id, unit]));
+      for (const unit of units) rows.set(unit.id, unit);
+      currentSnapshot = { generation, game, units: [...rows.values()] };
+    },
     waitReady() { return Promise.resolve({ generation: currentSnapshot.generation }); },
     query(input, options) {
       calls.queries.push(copy(input));
@@ -561,14 +567,18 @@ test('ClientText patches reject another account, language, version or SD identit
   assert.equal(app.applyClientTextMemoryPatch(memoryPatch(app, [{ unit: clientTextMemory('new'), conflict: null }])), false);
 });
 
-test('an acknowledged StatDescription save patch keeps the compiled worker and applies only its units', () => {
+test('an acknowledged StatDescription save refreshes cross-file matches using only the changed units', async () => {
   const unrelated = row('unrelated'), corrected = row('corrected', 'Damage', 'ความเสียหายเดิม'), removed = row('removed');
   const deleted = { ...row('restored'), deleted: true, suppressed: true };
   const { app, calls } = harness({ units: [unrelated, corrected, removed] });
   app.tmTombstones = [deleted]; app.tmConflicts = [{ id: 'corrected', local: corrected }];
   app._tmAcceptedScope = app.tmScopeKey; app._tmSnapshotVersion = 7;
+  const query = app.queryTranslationMemory;
+  let refreshed;
+  app.queryTranslationMemory = () => { refreshed = query(); return refreshed; };
   const generation = app.tmGeneration, updated = { ...corrected, target: 'ความเสียหายที่บันทึกแล้ว', localRevision: 4 };
-  const restored = { ...deleted, target: 'คืนค่าที่บันทึกแล้ว', deleted: false, suppressed: false };
+  const restored = { ...deleted, target: 'คืนค่าที่บันทึกแล้ว', deleted: false, suppressed: false,
+    context: { filepath: 'stats/other.txt', entryIndex: 2, stats: ['other_damage'], condition: '1|#' } };
   const tombstone = { ...removed, deleted: true, suppressed: true };
   assert.equal(app.applyStatDescriptionMemoryPatch(memoryPatch(app, [
     { unit: updated, conflict: null }, { unit: restored, conflict: null }, { unit: tombstone, conflict: null }])), true);
@@ -577,8 +587,14 @@ test('an acknowledged StatDescription save patch keeps the compiled worker and a
   assert.equal(app.tmUnits.find(unit => unit.id === restored.id), restored);
   assert.equal(app.tmUnits.some(unit => unit.id === removed.id), false);
   assert.equal(app.tmTombstones.length, 1); assert.equal(app.tmTombstones[0], tombstone);
-  assert.equal(app._tmSnapshotVersion, 8); assert.equal(app.tmGeneration, generation);
+  assert.equal(app._tmSnapshotVersion, 8); assert.equal(app.tmGeneration, generation + 1);
   assert.deepEqual(calls.publications, [], 'the whole TM library is not republished to the worker');
+  assert.deepEqual(copy(calls.patches), [[updated, restored, tombstone]]);
+  assert.ok(refreshed, 'An open TM panel refreshes when Save learns new translations');
+  await refreshed;
+  assert.equal(app.tmMatches.find(match => match.id === restored.id)?.score, 100);
+  assert.equal(app.tmMatches.find(match => match.id === updated.id)?.target, updated.target);
+  assert.equal(app.tmMatches.some(match => match.id === removed.id), false);
 });
 
 test('StatDescription patches reject another account, language, version or ClientText identity', () => {
@@ -615,7 +631,7 @@ test('cloud acknowledgements patch StatDescription units and record the publishe
   assert.equal(app.applyTranslationMemoryPatch(memoryPatch(app, [
     { unit: { ...saved, target: 'mixed' }, conflict: null }, { unit: savedClientText, conflict: null }], 9, 10)), false);
   assert.equal(app._tmSnapshotVersion, 9);
-  assert.equal(app.tmGeneration, generation, 'no full snapshot publication happens');
+  assert.equal(app.tmGeneration, generation + 1, 'only the StatDescription patch advances the search generation');
   assert.deepEqual(calls.publications, []);
 });
 

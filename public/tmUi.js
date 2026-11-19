@@ -178,7 +178,6 @@
         const updates = new Map(patch.entries.map(entry => [entry.unit.id, entry]));
         if ([...this.tmUnits, ...this.tmTombstones].some(unit => updates.has(unit.id) && !inMode(unit))) return false;
         // One acknowledged save changes only its own committed TM units.
-        // Keep the SD worker's compiled generation and all other unit objects.
         const replace = (units, deleted) => {
           const seen = new Set(), next = [];
           for (const unit of units) {
@@ -196,6 +195,13 @@
         this.tmTombstones = mark(replace(this.tmTombstones, true));
         this.tmConflicts = mark([...this.tmConflicts.filter(conflict => !updates.has(conflict.id)),
           ...patch.entries.map(entry => entry.conflict).filter(Boolean)]);
+        if (contentMode === 'statdescription') {
+          const units = this.tmUnits;
+          this.ensureTMWorker().submitPatch({ generation: ++this.tmGeneration, game: this.gameVersion,
+            units: [...updates.values()].map(entry => entry.unit),
+            getSnapshotUnits: () => units.filter(unit => unit.context?.contentMode !== 'clienttext') });
+          if (this.sideTab === 'tm') this.queryTranslationMemory();
+        }
         return true;
       },
       acceptTranslationMemory(state) {

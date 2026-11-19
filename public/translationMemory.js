@@ -253,45 +253,79 @@
     return counts;
   }
 
+  function appendToBucket(map, key, ...values) {
+    const bucket = map.get(key);
+    if (bucket) bucket.push(...values); else map.set(key, values);
+  }
+
+  function* indexGroup(index, source, postings) {
+    const fold = fuzzyKey(source), points = Array.from(fold), skeleton = skeletonFor(source);
+    const group = { id: index.groups.length, source, fold, length: points.length,
+      grams: Math.max(points.length - 1, 0), skeleton, rows: [], units: [] };
+    index.groups.push(group);
+    index.exact.set(source, group);
+    appendToBucket(index.lengths, group.length, group.id);
+    if (skeleton) appendToBucket(index.skeletons, skeleton.key, group.id);
+    for (const [gram, count] of bigrams(points)) {
+      yield;
+      appendToBucket(postings, gram, group.id, count);
+    }
+    return group;
+  }
+
+  const indexable = (unit, game) => !unit.deleted && !unit.suppressed && unit.enabled !== false
+    && (unit.gameScope === game || unit.gameScope === 'all');
+
+  function addIndexedUnit(index, group, unit) {
+    group.rows.push({ unit, contextKey: canonicalContext(unit.context), identity: unit.id || identityFor(unit) });
+    if (unit.id) index.byId.set(unit.id, group);
+  }
+
+  function selectGroupUnits(group, game) {
+    // Keep the All rows so deleting the last game-specific row restores them.
+    group.units = group.rows;
+    if (group.rows.some(row => row.unit.gameScope === game) && group.rows.some(row => row.unit.gameScope === 'all')) {
+      group.units = group.rows.filter(row => row.unit.gameScope === game);
+    }
+  }
+
   function* indexSteps(units, options = {}) {
     const game = options.game || 'poe1', generation = Number(options.generation) || 1;
     if (game !== 'poe1' && game !== 'poe2') throw new TypeError('Translation Memory requires the current game.');
-    const rows = [], overrides = new Set();
+    const index = { game, generation, groups: [], exact: new Map(), skeletons: new Map(), lengths: new Map(),
+      postings: new Map(), addedPostings: new Map(), byId: new Map() };
     for (const raw of Array.isArray(units) ? units : []) {
       yield;
       const unit = normalizeUnit(raw);
-      if (unit.deleted || unit.suppressed || unit.enabled === false) continue;
-      if (unit.gameScope === game) overrides.add(unit.source);
-      rows.push(unit);
+      if (!indexable(unit, game)) continue;
+      const group = index.exact.get(unit.source) || (yield* indexGroup(index, unit.source, index.postings));
+      addIndexedUnit(index, group, unit);
     }
-    const groups = [], grouped = new Map(), exact = new Map(), skeletons = new Map(), lengths = new Map(), postings = new Map();
-    for (const unit of rows) {
-      yield;
-      if (unit.gameScope !== game && unit.gameScope !== 'all' || unit.gameScope === 'all' && overrides.has(unit.source)) continue;
-      const key = JSON.stringify([unit.gameScope, unit.source]);
-      let group = grouped.get(key);
-      if (!group) {
-        const fold = fuzzyKey(unit.source), points = Array.from(fold), skeleton = skeletonFor(unit.source);
-        group = { id: groups.length, key, source: unit.source, fold, length: points.length,
-          grams: Math.max(points.length - 1, 0), skeleton, units: [] };
-        groups.push(group); grouped.set(key, group);
-        exact.set(unit.source, group);
-        if (!lengths.has(group.length)) lengths.set(group.length, []);
-        lengths.get(group.length).push(group.id);
-        if (skeleton) {
-          if (!skeletons.has(skeleton.key)) skeletons.set(skeleton.key, []);
-          skeletons.get(skeleton.key).push(group.id);
-        }
-        for (const [gram, count] of bigrams(points)) {
-          yield;
-          if (!postings.has(gram)) postings.set(gram, []);
-          postings.get(gram).push(group.id, count);
-        }
+    for (const group of index.groups) { yield; selectGroupUnits(group, game); }
+    for (const [gram, values] of index.postings) { yield; index.postings.set(gram, Uint32Array.from(values)); }
+    return index;
+  }
+
+  function patchIndex(index, units, generation) {
+    const updates = units.map(normalizeUnit), touched = new Set();
+    for (const unit of updates) {
+      const previous = index.byId.get(unit.id);
+      if (previous) {
+        const position = previous.rows.findIndex(row => row.unit.id === unit.id);
+        previous.rows.splice(position, 1);
+        index.byId.delete(unit.id);
+        touched.add(previous);
       }
-      group.units.push({ unit, contextKey: canonicalContext(unit.context), identity: unit.id || identityFor(unit) });
+      if (!indexable(unit, index.game)) continue;
+      // Append postings for new sources without copying the packed snapshot.
+      // Empty groups remain reusable and are skipped by lookup until refreshed.
+      const group = index.exact.get(unit.source) || consume(indexGroup(index, unit.source, index.addedPostings));
+      addIndexedUnit(index, group, unit);
+      touched.add(group);
     }
-    for (const [gram, values] of postings) { yield; postings.set(gram, Uint32Array.from(values)); }
-    return { game, generation, groups, exact, skeletons, lengths, postings };
+    for (const group of touched) selectGroupUnits(group, index.game);
+    index.generation = generation;
+    return index;
   }
 
   function consume(iterator) { let result; do { result = iterator.next(); } while (!result.done); return result.value; }
@@ -368,7 +402,7 @@
   }
   function candidateCompare(left, right) {
     return right.upper - left.upper || right.overlap - left.overlap
-      || (left.group.key < right.group.key ? -1 : left.group.key > right.group.key ? 1 : 0);
+      || (left.group.source < right.group.source ? -1 : left.group.source > right.group.source ? 1 : 0);
   }
   function heapPop(heap) {
     const first = heap[0], last = heap.pop();
@@ -426,13 +460,12 @@
     const points = Array.from(fuzzyKey(source)), queryGrams = bigrams(points), overlap = new Uint32Array(index.groups.length);
     const candidates = new Set();
     const admissibleLength = length => Math.abs(points.length - length) <= Math.floor((100 - threshold) * Math.max(points.length, length) / 100);
-    for (const [gram, count] of queryGrams) {
-      const posting = index.postings.get(gram);
+    for (const [gram, count] of queryGrams) for (const posting of [index.postings.get(gram), index.addedPostings.get(gram)]) {
       if (!posting) continue;
       for (let offset = 0; offset < posting.length; offset += 2) {
         yield;
         const id = posting[offset], group = index.groups[id];
-        if (!admissibleLength(group.length) || seen.has(id)) continue;
+        if (!group.units.length || !admissibleLength(group.length) || seen.has(id)) continue;
         overlap[id] += Math.min(count, posting[offset + 1]); candidates.add(id);
       }
     }
@@ -441,7 +474,7 @@
       yield;
       const maximum = Math.max(points.length, length), radius = Math.floor((100 - threshold) * maximum / 100);
       if (!admissibleLength(length) || Math.max(Math.max(points.length - 1, 0), Math.max(length - 1, 0)) - 2 * radius > 0) continue;
-      for (const id of ids) { yield; if (!seen.has(id)) candidates.add(id); }
+      for (const id of ids) { yield; if (index.groups[id].units.length && !seen.has(id)) candidates.add(id); }
     }
     const heap = [];
     for (const id of candidates) {
@@ -483,11 +516,16 @@
     const execution = token => ({ schedule, now: options.now, sliceMs: options.sliceMs ?? 4,
       cancelled: () => disposed || token.epoch !== epoch || token.cancelled });
     function buildNext() {
-      if (building || !pending || disposed || retired && pins.get(retired)) return;
+      if (building || !pending || disposed || retired && pins.get(retired) || pending.patch && pins.get(ready)) return;
       const snapshot = pending, token = { epoch }; pending = null; building = true;
-      buildIndex(snapshot.units, { ...execution(token), game: snapshot.game, generation: snapshot.generation }).then(index => {
+      const build = async () => {
+        if (!snapshot.patch) return buildIndex(snapshot.units, { ...execution(token), game: snapshot.game, generation: snapshot.generation });
+        if (!ready || ready.generation !== snapshot.baseGeneration || ready.game !== snapshot.game) throw new Error('Translation Memory patch is out of date.');
+        return patchIndex(ready, snapshot.units, snapshot.generation);
+      };
+      build().then(index => {
         if (token.epoch !== epoch || disposed) return;
-        if (ready && pins.get(ready)) retired = ready;
+        if (ready && ready !== index && pins.get(ready)) retired = ready;
         ready = index; post({ type: 'ready', scopeEpoch: epoch, generation: ready.generation });
       }).catch(error => { if (error.name !== 'AbortError') post({ type: 'error', scopeEpoch: token.epoch, generation: snapshot.generation,
         error: { message: error.message, name: error.name } }); }).finally(() => { building = false; buildNext(); });

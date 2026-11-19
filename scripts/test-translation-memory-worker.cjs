@@ -28,7 +28,7 @@ function harness({ unavailable = false, handshake = true } = {}) {
     setTimeout(callback) { const timer = () => { if (!timer.cancelled) callback(); }; timers.push(timer); return timer; },
     clearTimeout(timer) { if (timer) timer.cancelled = true; }, onReady: message => publications.push(message.generation),
     onError: error => failures.push(error) });
-  if (!unavailable && handshake) workers[0].emit({ type: 'started', version: 1 });
+  if (!unavailable && handshake) workers[0].emit({ type: 'started', version: 2 });
   const flush = () => { while (timers.length) timers.shift()(); };
   return { client, workers, runtimes, timers, publications, failures, flush };
 }
@@ -94,6 +94,54 @@ test('direct fallback uses the same matching engine and excludes disposed reques
   client.dispose(); await assert.rejects(client.query({ source: 'damage' }), { name: 'AbortError' }); assert.deepEqual(failures, []);
 });
 
+test('patches coalesce without rebuilding and update exact, adapted and fuzzy queries and game fallbacks', async () => {
+  const client = create({ Worker: null });
+  client.setScope('Thai');
+  const all = { ...snapshot(1).units[0], gameScope: 'all' };
+  const learned = { ...all, id: 'learned', target: 'แปล {0}% ใหม่', gameScope: 'poe1', context: { filepath: 'other.txt', entryIndex: 2 } };
+  const newSource = { id: 'new-source', source: 'Cold Damage', target: 'ความเสียหายน้ำแข็ง', gameScope: 'poe1' };
+  const corrected = { ...learned, target: 'แก้ไข {0}% แล้ว', revision: 1 };
+  const submit = (generation, units) => client.submitPatch({ generation, game: 'poe1', units,
+    getSnapshotUnits() { assert.fail('Ordinary patches must reuse the compiled index.'); } });
+  client.submitSnapshot({ ...snapshot(1), units: [all] });
+  await client.waitReady({ generation: 1 });
+  submit(2, [learned]); submit(3, [newSource]); submit(4, [corrected]);
+  await client.waitReady({ generation: 4 });
+  const exact = await client.query({ source: all.source, context: { filepath: 'current.txt', entryIndex: 0 } }, { threshold: 100 });
+  assert.deepEqual(exact.matches.map(match => [match.id, match.score, match.target, match.unit.revision]),
+    [[learned.id, 100, corrected.target, 1]]);
+  const adapted = await client.query({ source: 'Deals {1}% damage' });
+  assert.deepEqual([adapted.matches[0].kind, adapted.matches[0].target], ['adapted', 'แก้ไข {1}% แล้ว']);
+  const fuzzy = await client.query({ source: 'Cold Damge' });
+  assert.deepEqual([fuzzy.matches[0].kind, fuzzy.matches[0].id], ['fuzzy', newSource.id]);
+  submit(5, [{ ...corrected, deleted: true }, { ...newSource, deleted: true }]);
+  await client.waitReady({ generation: 5 });
+  assert.deepEqual((await client.query({ source: all.source }, { threshold: 100 })).matches.map(match => match.id), [all.id]);
+  assert.equal((await client.query({ source: 'Cold Damge' })).matches.some(match => match.id === newSource.id), false);
+  client.dispose();
+});
+
+test('worker crash recovers the full library after an accepted patch and retains a pending correction', async () => {
+  const { client, workers, runtimes, flush } = harness();
+  const epoch = client.setScope('Thai'), worker = workers[0];
+  const learned = { ...snapshot(1).units[0], id: 'learned' }, corrected = { ...learned, target: 'Corrected {0}%' };
+  client.submitSnapshot(snapshot(1)); worker.emit({ type: 'ready', scopeEpoch: epoch, generation: 1 });
+  client.submitPatch({ generation: 2, game: 'poe1', units: [learned], getSnapshotUnits: () => [...snapshot(1).units, learned] });
+  flush();
+  assert.equal(worker.messages.find(message => message.type === 'beginSnapshot' && message.generation === 2).baseGeneration, 1);
+  assert.deepEqual(worker.messages.find(message => message.type === 'appendUnits' && message.generation === 2).units, [learned]);
+  worker.emit({ type: 'ready', scopeEpoch: epoch, generation: 2 });
+  client.submitPatch({ generation: 3, game: 'poe1', units: [corrected], getSnapshotUnits: () => [...snapshot(1).units, corrected] });
+  worker.onerror({ preventDefault() {} });
+  const runtime = runtimes[0];
+  assert.deepEqual(runtime.messages.find(message => message.type === 'setSnapshot').units, [...snapshot(1).units, learned]);
+  runtime.ready(2, epoch);
+  assert.deepEqual(runtime.messages.findLast(message => message.type === 'setSnapshot').units, [...snapshot(1).units, corrected]);
+  runtime.ready(3, epoch);
+  assert.equal((await client.waitReady({ generation: 3 })).generation, 3);
+  client.dispose();
+});
+
 test('runtime builds large fragmented rows completely before publication and ignores foreign-scope packets', async () => {
   const messages = [], runtime = TM.createRuntime({ postMessage: message => messages.push(message) });
   runtime.handleMessage({ type: 'setScope', scopeEpoch: 2 });
@@ -131,12 +179,44 @@ test('runtime delays a third compiled generation until a pinned retired query re
   runtime.dispose();
 });
 
+test('runtime applies a patch after the query using its base generation finishes', async () => {
+  const messages = [], scheduled = [];
+  const runtime = TM.createRuntime({ postMessage: message => messages.push(message), schedule: callback => scheduled.push(callback), sliceMs: 0 });
+  const send = message => runtime.handleMessage({ scopeEpoch: 1, ...message });
+  const drain = async () => {
+    await new Promise(resolve => setImmediate(resolve));
+    while (scheduled.length) { scheduled.shift()(); await new Promise(resolve => setImmediate(resolve)); }
+  };
+  const initial = snapshot(1).units[0];
+  send({ type: 'setScope' });
+  send({ type: 'setSnapshot', ...snapshot(1), units: [initial, ...Array.from({ length: 80 }, (_, index) => ({
+    ...initial, id: 'peer-' + index, context: { entryIndex: index },
+  }))] });
+  await drain();
+  send({ type: 'query', requestId: 1, query: { source: initial.source } });
+  assert.ok(scheduled.length, 'The query must yield with the base generation pinned.');
+  const next = { ...initial, revision: 1, target: 'Corrected {0}%' };
+  send({ type: 'setSnapshot', patch: true, baseGeneration: 1, ...snapshot(2), units: [next] });
+  await Promise.resolve();
+  assert.equal(messages.some(message => message.type === 'ready' && message.generation === 2), false);
+  await drain();
+  const originalReply = messages.find(message => message.requestId === 1);
+  assert.equal(originalReply.generation, 1);
+  assert.equal(originalReply.matches.find(match => match.id === initial.id).target, initial.target);
+  send({ type: 'query', requestId: 2, query: { source: initial.source } });
+  await drain();
+  const patchedReply = messages.find(message => message.requestId === 2);
+  assert.equal(patchedReply.generation, 2);
+  assert.equal(patchedReply.matches.find(match => match.id === initial.id).target, next.target);
+  runtime.dispose();
+});
+
 test('classic worker entrypoint prepares PoE2 German matches with shared translation validation', async () => {
   const messages = [], sandbox = vm.createContext({ setTimeout, performance, postMessage: message => messages.push(message) });
   sandbox.self = sandbox;
   sandbox.importScripts = (...files) => files.forEach(file => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8'), sandbox, { filename: file }));
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'tmWorker.js'), 'utf8'), sandbox);
-  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{ type: 'started', version: 1 }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{ type: 'started', version: 2 }]);
   assert.equal(typeof sandbox.extractGGGVarTags, 'function'); assert.equal(typeof sandbox.self.onmessage, 'function');
   const source = 'Blood Expulsion Duration@{0}s', target = 'Dauer des Blut-Ausstoßes@{0}s';
   const send = message => sandbox.self.onmessage({ data: { scopeEpoch: 1, ...message } });

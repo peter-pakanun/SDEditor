@@ -20,6 +20,10 @@ const fixtureSource = [
     translations: { English: ['Deals {0} Damage\\nfor {1} seconds', 'Health@Mana', 'First\\nSecond@Third\\nFourth'], Thai: ['', '', ''], German: ['', '', ''] } },
   { filepath: 'tm-fixture/04_seed.txt', stats: ['fixture_mana_cost'], variables: ['#'], remarks: [''],
     translations: { English: ['{0}% reduced Mana Cost'], Thai: ['ลดค่าใช้งานมานา {0}%'], German: ['{0}% verringerte Manakosten'] } },
+  { filepath: 'tm-fixture/05_learn.txt', stats: ['fixture_totem_resistance'], variables: ['#'], remarks: [''],
+    translations: { English: ['Totems gain {0}% Fire Resistance'], Thai: [''], German: [''] } },
+  { filepath: 'tm-fixture/06_reuse.txt', stats: ['fixture_totem_fire_resistance'], variables: ['1|#'], remarks: [''],
+    translations: { English: ['Totems gain {0}% Fire Resistance'], Thai: [''], German: [''] } },
 ].map(desc => ({ ...desc, name: '', filedir: 'tm-fixture', filename: desc.filepath.split('/').pop(), isDNT: false }));
 
 async function browserBootstrap({ account, secret, openEditor = true }) {
@@ -234,6 +238,22 @@ async function check(fixture) {
     });
     await a.evaluate(async () => { const vm = window.__tmFixtureApp; await vm.finishInlineSession({ promote: false }); vm.inlineEditor = false; });
     results.push('Inline double-click preserves replacement confirmation, cancellation and target focus without closing the row');
+    await a.evaluate(async () => {
+      const vm = window.__tmFixtureApp;
+      await vm.editFile('tm-fixture/05_learn.txt', true); await vm.openEditorTM(0);
+    });
+    const learnedTarget = 'โทเทมได้รับค่าต้านทานไฟ {0}%';
+    await a.locator('[data-editor-ref="translation_0"]').fill(learnedTarget);
+    await a.evaluate(async () => {
+      const vm = window.__tmFixtureApp;
+      await vm.editorSave({ close: false });
+      await vm.waitForPendingSaves();
+      await vm.editorExit(); await vm.editFile('tm-fixture/06_reuse.txt', true); await vm.openEditorTM(0);
+    });
+    assert.ok((await snapshot(a)).units.some(unit => unit.target === learnedTarget), 'The normal Save must commit the TM unit');
+    await a.waitForFunction(target => window.__tmFixtureApp.tmMatches.some(match => match.score === 100
+      && match.target === target && match.unit.context.filepath === 'tm-fixture/05_learn.txt'), learnedTarget, { timeout: 6000 });
+    results.push('A freshly saved translation appears as a 100% match in a different file and stat context without reloading');
     await freezeAutomaticTM(a); await freezeAutomaticTM(b);
     const added = { id: 'tm-client-shared', source: 'Cold Damage', target: 'ความเสียหายน้ำแข็ง', gameScope: 'poe1', context: null, note: '', provenance: { origin: 'manual' } };
     await put(a, added); await sync(a); await catchup(b);

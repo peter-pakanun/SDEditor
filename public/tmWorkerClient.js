@@ -10,7 +10,7 @@
   const PACKET_BYTES = 64 * 1024;
   function* transferPackets(snapshot) {
     const base = { scopeEpoch: snapshot.scopeEpoch, generation: snapshot.generation };
-    yield { type: 'beginSnapshot', ...base, game: snapshot.game };
+    yield { type: 'beginSnapshot', ...base, game: snapshot.game, patch: snapshot.patch, baseGeneration: snapshot.baseGeneration };
     let units = [], bytes = 0, position = 0;
     for (const unit of snapshot.units) {
       const size = 256 + (String(unit.source || '').length + String(unit.target || '').length + String(unit.note || '').length
@@ -100,14 +100,21 @@
         try { initializeRuntime(); } catch (error) { fail(error); return; }
       }
       building = queued; queued = null;
-      if (mode === 'fallback') send({ type: 'setSnapshot', ...building });
-      else { transport = { scopeEpoch: epoch, iterator: transferPackets(building) }; pump(); }
+      const input = building.patch && compiledGeneration
+        ? { scopeEpoch: epoch, generation: building.generation, game: building.game, patch: true,
+          units: [...building.units.values()], baseGeneration: compiledGeneration }
+        : fullSnapshot(building);
+      if (mode === 'fallback') send({ type: 'setSnapshot', ...input });
+      else { transport = { scopeEpoch: epoch, iterator: transferPackets(input) }; pump(); }
+    }
+    function fullSnapshot({ scopeEpoch, generation, game, units, getSnapshotUnits }) {
+      return { scopeEpoch, generation, game, units: getSnapshotUnits ? getSnapshotUnits() : units };
     }
     function receive(message) {
       if (disposed || !message) return;
       if (message.type === 'started') {
         if (mode !== 'starting') return;
-        if (message.version !== 1) { fallback(); return; }
+        if (message.version !== 2) { fallback(); return; }
         clearTimer(handshake); handshake = null; mode = 'worker';
         send({ type: 'setScope', scopeEpoch: epoch, scopeKey }); startQueued(); return;
       }
@@ -115,7 +122,9 @@
       if (message.type === 'ready') {
         if (!building || message.generation !== building.generation) return;
         const restored = bootstrap;
-        compiledGeneration = message.generation; ready = building; building = null; bootstrap = false; lastError = null;
+        compiledGeneration = message.generation;
+        ready = building.getSnapshotUnits ? { ...building, units: undefined } : building;
+        building = null; bootstrap = false; lastError = null;
         settle();
         if (!restored) options.onReady?.(message);
         for (const request of requests.values()) sendRequest(request);
@@ -132,6 +141,11 @@
           const request = requests.get(message.requestId); requests.delete(message.requestId); request?.reject(error); return;
         }
         if (building && message.generation === building.generation) {
+          if (building.patch) {
+            queued ||= building;
+            queued = fullSnapshot(queued);
+            building = null; startQueued(); return;
+          }
           building = null; bootstrap = false; fail(error); startQueued();
         }
       }
@@ -142,17 +156,17 @@
       if (worker) { worker.onmessage = worker.onerror = worker.onmessageerror = null; worker.terminate?.(); worker = null; }
       mode = 'fallback'; compiledGeneration = 0;
       for (const request of requests.values()) request.sent = false;
-      const latest = queued || building; building = null; queued = latest;
+      const latest = queued || building; building = null; queued = latest && fullSnapshot(latest);
       try {
         initializeRuntime();
-        if (ready) { bootstrap = true; building = ready; send({ type: 'setSnapshot', ...ready }); }
+        if (ready) { bootstrap = true; building = fullSnapshot(ready); send({ type: 'setSnapshot', ...building }); }
         else startQueued();
       } catch (error) { runtime?.dispose?.(); runtime = null; fail(error); }
     }
 
     const client = {
       get scopeEpoch() { return epoch; }, get scopeKey() { return scopeKey; },
-      get readyGeneration() { return ready?.generation || 0; }, get readySnapshot() { return ready; },
+      get readyGeneration() { return ready?.generation || 0; }, get readySnapshot() { return ready && fullSnapshot(ready); },
       get compiledReadyGeneration() { return compiledGeneration; }, get buildingGeneration() { return building?.generation || 0; },
       get fallback() { return mode === 'fallback'; },
       setScope(key) {
@@ -171,6 +185,16 @@
         if (generation <= Math.max(ready?.generation || 0, building?.generation || 0, queued?.generation || 0)) return generation;
         queued = { scopeEpoch: epoch, generation, game: snapshot.game || 'poe1', units: snapshot.units || [] };
         lastError = null; startQueued(); return generation;
+      },
+      submitPatch({ generation, game, units, getSnapshotUnits }) {
+        if (disposed) throw aborted();
+        if (generation <= Math.max(ready?.generation || 0, building?.generation || 0, queued?.generation || 0)) return;
+        // If a full snapshot is already queued, fold the patch into that build.
+        const patch = !queued || queued.patch;
+        const updates = queued?.patch ? queued.units : new Map();
+        for (const unit of units) updates.set(unit.id, unit);
+        queued = { scopeEpoch: epoch, generation, game, patch, units: updates, getSnapshotUnits };
+        lastError = null; startQueued();
       },
       waitReady({ generation = 0 } = {}) {
         if (disposed) return Promise.reject(aborted());
