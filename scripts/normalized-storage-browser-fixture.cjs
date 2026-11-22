@@ -1651,14 +1651,14 @@ async function keyboardChecks(page, { origin, apiOrigin, secret, results, onPage
     await page.waitForFunction(() => window.__normalizedApp?.offlineStoreReady && window.__normalizedApp?.startupReady
         && window.__normalizedApp?._cloud?.state && !window.__normalizedApp._cloudInitializing && !window.__normalizedApp._cloudApplying);
     await page.waitForFunction(() => !window.__normalizedApp?._storageMigrations?.size);
-    const fastNotice = await page.evaluate(async () => {
+    const fastConversion = await page.evaluate(async () => {
         const vm = window.__normalizedApp, event = { id: 'fixture-fast-migration', kind: 'workspace', scope: { game: vm.gameVersion } };
         vm.storageMigrationChanged({ ...event, state: 'started' });
         vm.storageMigrationChanged({ ...event, state: 'completed', durationMs: 1 });
         await vm.$nextTick();
-        return { message: vm.storageMigrationMessage, busy: vm.storageMigrationBusy, visible: !!document.querySelector('.storageMigrationNotice') };
+        return { work: vm.browserWorkItems['migration:conversion'] || null, visible: !!document.querySelector('.storageMigrationNotice') };
     });
-    assert.deepEqual(fastNotice, { message: '', busy: false, visible: false }, 'Quick conversion never flashes a notice');
+    assert.deepEqual(fastConversion, { work: null, visible: false }, 'Quick conversion shows no notice or work indicator');
     await page.evaluate(() => {
         const input = window.__migrationFocusInput = document.createElement('input');
         input.value = 'Preserved selection'; input.setAttribute('aria-label', 'Migration fixture focus'); document.body.append(input);
@@ -1666,42 +1666,26 @@ async function keyboardChecks(page, { origin, apiOrigin, secret, results, onPage
         const vm = window.__normalizedApp;
         vm.storageMigrationChanged({ id: 'fixture-slow-migration', kind: 'workspace', scope: { game: vm.gameVersion }, state: 'started' });
     });
-    await page.waitForFunction(() => window.__normalizedApp.storageMigrationBusy && !!document.querySelector('.storageMigrationNotice'));
-    const shownNotice = await page.evaluate(() => {
-        const vm = window.__normalizedApp, element = document.querySelector('.storageMigrationNotice'), input = window.__migrationFocusInput;
-        const themes = ['light', 'grey', 'dark', 'modern-dark'], originalTheme = document.documentElement.getAttribute('data-theme');
-        const styles = themes.map(theme => {
-            document.documentElement.setAttribute('data-theme', theme);
-            const style = getComputedStyle(element);
-            return { theme, color: style.color, background: style.backgroundColor, pointerEvents: style.pointerEvents, display: style.display };
-        });
-        document.documentElement.setAttribute('data-theme', originalTheme);
-        return { text: element.textContent, role: element.getAttribute('role'), busy: vm.storageMigrationBusy,
-            focusRetained: document.activeElement === input, selection: [input.selectionStart, input.selectionEnd],
-            browserWork: vm.browserWorkItems['migration:conversion'], styles };
+    await page.waitForFunction(() => !!window.__normalizedApp.browserWorkItems['migration:conversion']);
+    const duringConversion = await page.evaluate(() => {
+        const vm = window.__normalizedApp, input = window.__migrationFocusInput;
+        return { visible: !!document.querySelector('.storageMigrationNotice'), focusRetained: document.activeElement === input,
+            selection: [input.selectionStart, input.selectionEnd], browserWork: vm.browserWorkItems['migration:conversion'] };
     });
-    assert.match(shownNotice.text, /one-time update/); assert.equal(shownNotice.role, 'status'); assert.equal(shownNotice.busy, true);
-    assert.equal(shownNotice.focusRetained, true); assert.deepEqual(shownNotice.selection, [2, 8], 'Slow migration notice preserves selection');
-    assert.equal(shownNotice.browserWork, 'Updating existing local work', 'Slow migration activates the established work indicator');
-    for (const style of shownNotice.styles) {
-        assert.equal(style.pointerEvents, 'none', style.theme + ': migration notice never intercepts pointer input');
-        assert.notEqual(style.display, 'none', style.theme + ': migration notice stays visible');
-        assert.notEqual(style.color, style.background, style.theme + ': migration notice text differs from its background');
-        assert.notEqual(style.background, 'rgba(0, 0, 0, 0)', style.theme + ': migration notice retains its theme background');
-    }
-    const completedNotice = await page.evaluate(async () => {
+    assert.equal(duringConversion.visible, false, 'Slow conversion does not show a notification');
+    assert.equal(duringConversion.focusRetained, true); assert.deepEqual(duringConversion.selection, [2, 8]);
+    assert.equal(duringConversion.browserWork, 'Updating existing local work');
+    const completedConversion = await page.evaluate(async () => {
         const vm = window.__normalizedApp;
         vm.storageMigrationChanged({ id: 'fixture-slow-migration', state: 'completed', durationMs: 1000 });
         await vm.$nextTick();
-        const result = { text: document.querySelector('.storageMigrationNotice').textContent, busy: vm.storageMigrationBusy,
-            focusRetained: document.activeElement === window.__migrationFocusInput, browserWork: vm.browserWorkItems['migration:conversion'] };
-        clearTimeout(vm._storageMigrationHideTimer); vm._storageMigrationHideTimer = null; vm.storageMigrationMessage = '';
+        const result = { visible: !!document.querySelector('.storageMigrationNotice'), focusRetained: document.activeElement === window.__migrationFocusInput,
+            browserWork: vm.browserWorkItems['migration:conversion'] || null };
         window.__migrationFocusInput.remove(); delete window.__migrationFocusInput;
         return result;
     });
-    assert.match(completedNotice.text, /update complete/); assert.equal(completedNotice.busy, false);
-    assert.equal(completedNotice.focusRetained, true); assert.equal(completedNotice.browserWork, undefined);
-    results.push({ scenario: 'real Vue slow-conversion notice preserves focus and selection in all four themes' });
+    assert.deepEqual(completedConversion, { visible: false, focusRetained: true, browserWork: null });
+    results.push({ scenario: 'real Vue conversion indicator preserves focus without a notification' });
     const count = Number(process.env.NORMALIZED_FILE_COUNT || 20000), dictionaryCount = Number(process.env.NORMALIZED_DICTIONARY_COUNT || 8000);
     const imported = await page.evaluate(async ({ secret, count, dictionaryCount }) => {
         const vm = window.__normalizedApp;

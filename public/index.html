@@ -1718,11 +1718,7 @@
     </app-notice>
   </script>
   <script type="text/x-template" id="workspace-alerts-template">
-    <div v-if="($root.storageMigrationMessage && !$root.workspaceInitializationActive) || $root.localSaveError || $root.dictionaryWorkerError || ($root.cloudStorageError && !$root.dictionaryPreparationOwnsStorageError) || $root.inlineDraftError || $root.deferredDraftSaveError || ($root.ctMtlVisible && !$root.ctActive && $root.sdMtlError)" class="workspaceAlerts" role="group" aria-label="Workspace notices">
-      <app-notice v-if="$root.storageMigrationMessage && !$root.workspaceInitializationActive" dismiss-key="storageMigrationMessage" tone="info" class="storageMigrationNotice" role="status" aria-atomic="true">
-        <span v-if="$root.storageMigrationBusy" class="browserWorkSpinner" aria-hidden="true"></span>
-        <span>{{ $root.storageMigrationMessage }}</span>
-      </app-notice>
+    <div v-if="$root.localSaveError || $root.dictionaryWorkerError || ($root.cloudStorageError && !$root.dictionaryPreparationOwnsStorageError) || $root.inlineDraftError || $root.deferredDraftSaveError || ($root.ctMtlVisible && !$root.ctActive && $root.sdMtlError)" class="workspaceAlerts" role="group" aria-label="Workspace notices">
       <app-notice v-if="$root.localSaveError" dismiss-key="localSaveError" tone="error" class="cloudStorageError" role="alert">
         <span>Could not finish saving your translations. Your edits remain in this tab. {{ $root.localSaveError }}</span>
         <template #actions><button @click="$root.retryPendingSaves">Retry saving</button><button @click="$root.downloadPendingSaves">Download pending edits</button></template>

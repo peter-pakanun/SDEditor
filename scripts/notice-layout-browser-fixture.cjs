@@ -20,7 +20,6 @@ function setErrors(active) {
     localSaveError: active ? detail : '', dictionaryWorkerError: active ? detail : '',
     cloudStorageError: active ? detail : '', inlineDraftError: active ? detail : '',
     inlineDraftFindings: active ? { fixture: [{ level: 'error', deferredSave: true, message: detail }] } : {},
-    storageMigrationMessage: active ? 'Local storage preparation is waiting for the retained operation. ' + detail : '',
     collaborationNotice: active ? 'Review shared recovery. ' + detail : '',
     ctError: active ? 'Workbook translation could not save. ' + detail : '',
     ctNotice: active ? 'Workbook recovery is retained. ' + detail : '',

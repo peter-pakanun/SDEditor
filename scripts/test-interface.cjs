@@ -2014,58 +2014,46 @@ test('a short completed task cannot reveal a stale delayed browser work indicato
   assert.equal(e.browserWorkTooltip, '');
 });
 
-test('migration notice appears only for slow conversion and briefly confirms completion', () => {
+test('migration work indicator appears only for slow conversion and clears on completion', () => {
   const { editor: e, timers } = loadEditor();
   let reveals = 0;
   e.finishStartup = () => { reveals++; };
   e.storageMigrationChanged({ id: 'fast', state: 'started' });
   timers.advance(749);
-  assert.equal(e.storageMigrationMessage, '');
+  assert.equal(e.browserWorkTooltip, '');
   e.storageMigrationChanged({ id: 'fast', state: 'completed' });
   timers.advance(5000);
-  assert.equal(e.storageMigrationMessage, '');
+  assert.equal(e.browserWorkTooltip, '');
   assert.equal(reveals, 0);
   e.storageMigrationChanged({ id: 'workspace', state: 'started' });
   timers.advance(750);
-  assert.match(e.storageMigrationMessage, /one-time update/);
-  assert.equal(e.storageMigrationBusy, true);
   assert.match(e.browserWorkTooltip, /Updating existing local work/);
-  assert.equal(reveals, 1, 'Slow initial activation must reveal the app and notice');
+  assert.equal(reveals, 1, 'Slow initial activation reveals the app');
   e.storageMigrationChanged({ id: 'workspace', state: 'completed' });
-  assert.equal(e.storageMigrationBusy, false);
-  assert.match(e.storageMigrationMessage, /update complete/);
   assert.equal(e.browserWorkTooltip, '');
-  timers.advance(4999);
-  assert.notEqual(e.storageMigrationMessage, '');
-  timers.advance(1);
-  assert.equal(e.storageMigrationMessage, '');
+  assert.equal(e.storageMigrationMessage, undefined, 'Conversion never posts a completion banner');
 });
 
-test('overlapping migration operations share one notice and late completion cannot end another operation', () => {
+test('overlapping conversions keep the work indicator until all finish', () => {
   const { editor: e, timers } = loadEditor();
   e.startupReady = true;
   e.storageMigrationChanged({ id: 'workspace', state: 'started' });
   e.storageMigrationChanged({ id: 'history', state: 'started' });
   timers.advance(750);
   e.storageMigrationChanged({ id: 'workspace', state: 'completed' });
-  assert.equal(e.storageMigrationBusy, true);
   e.storageMigrationChanged({ id: 'old-account', state: 'completed' });
-  timers.advance(5000);
-  assert.equal(e.storageMigrationBusy, true);
+  assert.match(e.browserWorkTooltip, /Updating existing local work/);
   e.storageMigrationChanged({ id: 'history', state: 'completed' });
-  timers.advance(2500);
+  assert.equal(e.browserWorkTooltip, '');
   e.storageMigrationChanged({ id: 'room', state: 'started' });
-  timers.advance(2500);
-  assert.equal(e.storageMigrationBusy, true);
-  assert.match(e.storageMigrationMessage, /one-time update/);
+  timers.advance(750);
   e.storageMigrationChanged({ id: 'history', state: 'completed' });
-  assert.equal(e.storageMigrationBusy, true);
+  assert.match(e.browserWorkTooltip, /Updating existing local work/);
   e.storageMigrationChanged({ id: 'room', state: 'completed' });
-  timers.advance(5000);
-  assert.equal(e.storageMigrationMessage, '');
+  assert.equal(e.browserWorkTooltip, '');
 });
 
-test('failed conversion ends its notice without success wording or clearing actionable errors', () => {
+test('failed conversion preserves actionable errors and unrelated work', () => {
   const { editor: e, timers } = loadEditor();
   e.startupReady = true;
   e.cloudStorageError = 'Original source is unavailable';
@@ -2074,20 +2062,14 @@ test('failed conversion ends its notice without success wording or clearing acti
   e.storageMigrationChanged({ id: 'room', state: 'started' });
   timers.advance(750);
   e.storageMigrationChanged({ id: 'workspace', state: 'failed' });
-  assert.equal(e.storageMigrationBusy, true);
+  assert.match(e.browserWorkTooltip, /Updating existing local work/);
   e.storageMigrationChanged({ id: 'room', state: 'completed' });
-  assert.equal(e.storageMigrationMessage, '');
-  assert.equal(e.storageMigrationBusy, false);
   assert.equal(e.cloudStorageError, 'Original source is unavailable');
   assert.match(e.browserWorkTooltip, /Updating Dictionary/);
   assert.doesNotMatch(e.browserWorkTooltip, /Updating existing local work/);
-  e.storageMigrationChanged({ id: 'retry', state: 'started' });
-  timers.advance(750);
-  e.storageMigrationChanged({ id: 'retry', state: 'completed' });
-  assert.match(e.storageMigrationMessage, /update complete/);
 });
 
-test('migration notice disposal unsubscribes and cancels delayed presentation', () => {
+test('migration disposal unsubscribes and cancels delayed presentation', () => {
   const { editor: e, timers } = loadEditor();
   let unsubscribed = 0;
   e._storageMigrationUnsubscribe = () => { unsubscribed++; };
@@ -2096,7 +2078,6 @@ test('migration notice disposal unsubscribes and cancels delayed presentation', 
   timers.advance(10000);
   e.storageMigrationChanged({ id: 'late', state: 'started' });
   assert.equal(unsubscribed, 1);
-  assert.equal(e.storageMigrationMessage, '');
   assert.equal(e.browserWorkTooltip, '');
   assert.equal(timers.pendingCount, 0);
 });
@@ -2112,12 +2093,12 @@ test('a stale migration timer cannot reveal a newer conversion before its own de
   e.storageMigrationChanged({ id: 'new-version', state: 'started' });
   const currentTimer = e._storageMigrationShowTimer;
   stale();
-  assert.equal(e.storageMigrationMessage, '');
+  assert.equal(e.browserWorkTooltip, '');
   assert.equal(e._storageMigrationShowTimer, currentTimer);
   timers.advance(749);
-  assert.equal(e.storageMigrationMessage, '');
+  assert.equal(e.browserWorkTooltip, '');
   timers.advance(1);
-  assert.equal(e.storageMigrationBusy, true);
+  assert.match(e.browserWorkTooltip, /Updating existing local work/);
 });
 
 test('tooltip pointer movement preserves its state object while updating only its contents and position', () => {
