@@ -6,6 +6,8 @@
   const mark = value => typeof Vue !== 'undefined' && Vue.markRaw ? Vue.markRaw(value) : value;
   const readable = value => String(value ?? '').replace(/\\n/g, '\n');
   const uuid = () => 'tm_' + crypto.randomUUID();
+  const encodeSDLines = value => value.replace(/\r\n?|\n/g, '\\n');
+  const tmxWorkbookContext = { role: 'tmx', sheet: 'TMX', recordId: 'TMX', fieldId: 'segment' };
   const mixin = {
     data() { return {
       tmUnits: [], tmTombstones: [], tmConflicts: [], tmMatches: [], tmSelectedIndex: 0, tmThreshold: 60,
@@ -133,6 +135,8 @@
       tmGameLabel(game) { return ({ poe1: 'PoE1', poe2: 'PoE2', all: 'All' })[game] || game; },
       tmMatchContext(unit) {
         const context = unit?.context;
+        if (context?.contentMode === 'clienttext' && context.role === tmxWorkbookContext.role)
+          return ['Imported TMX', context.form].filter(Boolean).join(' · ');
         if(context?.contentMode==='clienttext')return [context.role,context.sheet,context.recordId,context.fieldName,context.form].filter(Boolean).join(' · ');
         return context?.filepath ? `${context.filepath} · Entry ${context.entryIndex + 1}${context.condition ? ' · ' + context.condition : ''}` : 'No file context';
       },
@@ -485,7 +489,8 @@
       async applyTMSeed() {
         if (this.tmBusy || this.tmSeedKey !== this.tmSeedContextKey() || this.ctActive && (this.ctBusy || this._ctSaveJob || this.ctOfflineTest && !this.ctResourceSyncEnabled)) return;
         this.tmBusy = true;
-        const selected = this.tmSeedRows.filter(row => row.selected && !row.imported), key = this.tmSeedKey, scopeKey = this.tmScopeKey;
+        const selected = this.tmSeedRows.filter(row => row.selected && !row.imported && (!row.variants || row.variantIndex !== ''));
+        const key = this.tmSeedKey, scopeKey = this.tmScopeKey;
         try {
           for (let offset = 0; offset < selected.length; offset += 100) {
             if (key !== this.tmSeedContextKey()) return;
@@ -499,46 +504,116 @@
         } catch (error) { if (!error.stale && this.tmCurrent(scopeKey)) this.tmSetIssue('seed', 'TM import stopped; completed batches are retained. Review the remaining entries: ' + error.message); }
         finally { await this.tmFinishWork(scopeKey); if (this.tmCurrent(scopeKey)) await this.loadTranslationMemory(); }
       },
+      tmChooseSeedVariant(row, value) {
+        if (this.tmBusy || row.imported) return;
+        const unit = value === '' ? null : row.variants?.[Number(value)];
+        if (unit) row.unit = unit;
+        row.variantIndex = unit ? value : '';
+        row.selected = !!unit;
+      },
       exportTM() {
         const body = { format: 'sdeditor-tm', version: 1, language: this.lang, units: clone(this.tmUnits), tombstones: clone(this.tmTombstones) };
         saveAs(new Blob([JSON.stringify(body, null, 2)], { type: 'application/json' }), `sdeditor_tm_${this.lang}.json`);
       },
+      exportTMTmx() {
+        if (this.tmBusy || this.ctOfflineTest && !this.ctResourceSyncEnabled) return;
+        try {
+          const units = this.tmUnits.filter(unit => unit.enabled !== false && !unit.deleted && !unit.suppressed)
+            .map(unit => ({ source: unit.source, target: unit.target, gameScope: unit.gameScope, note: unit.note,
+              context: { contentMode: 'statdescription', ...unit.context } }));
+          const xml = window.Tmx.writeTmx(units, this.lang, 'SDEditor');
+          saveAs(new Blob([xml], { type: 'application/x-tmx+xml;charset=utf-8' }), `sdeditor_tm_${this.lang}.tmx`);
+          this.tmSetIssue('tmx-export');
+        } catch (error) { this.tmSetIssue('tmx-export', 'Could not export TMX: ' + error.message); }
+      },
+      tmTmxUnit(raw) {
+        const declaredMode = raw.context?.contentMode ?? '';
+        if (typeof declaredMode !== 'string') return null;
+        const mode = declaredMode.toLowerCase();
+        if (!['', 'clienttext', 'statdescription'].includes(mode)) return null;
+        const workbook = mode === 'clienttext' || !mode && this.ctActive;
+        const { filepath, stats, condition, remarks, entryIndex } = raw.context || {};
+        const context = workbook ? { ...tmxWorkbookContext, fieldKind: 'text', ...raw.context, contentMode: 'clienttext' }
+          : { filepath, stats, condition, remarks, entryIndex };
+        const encode = !workbook && !mode ? encodeSDLines : value => value;
+        const source = encode(raw.source), target = encode(raw.target);
+        if (workbook) {
+          const state = window.ClientTextState;
+          if (!context.fieldName && context.fieldKind === 'form' && ['Normal Translation', 'Possessive Translation'].includes(context.form))
+            context.fieldName = 'Display Name';
+          const field = { kind: context.fieldKind, name: context.fieldName, form: context.form };
+          if (!['text', 'form'].includes(field.kind) || field.kind === 'form' && !field.form?.trim()
+              || !['role', 'sheet', 'recordId', 'fieldId'].every(key => typeof context[key] === 'string' && context[key].trim())
+              || /\bDNT\b/i.test(source) || state.audioOnly(source)
+              || target.trim() === 'NONEXISTENT' && !state.isNamedForm(field)) return null;
+        }
+        return TM().normalizeUnit({ source, target, context, note: raw.note, gameScope: raw.gameScope ?? this.gameVersion,
+          language: this.lang, provenance: { origin: 'tmx' } });
+      },
       exportLegacyRegex() { saveAs(new Blob([JSON.stringify({ format: 'sdeditor-legacy-regex', editorRegexes: clone(this.editorRegexes || []) }, null, 2)], { type: 'application/json' }), 'sdeditor_legacy_regex.json'); },
-      async importTMFile(event) {
+      async importTMFile(event, format = 'json') {
         const key = this.tmSeedContextKey();
         const scopeKey = this.tmScopeKey;
-        if (this.tmBusy || !event.target.files?.[0]) { event.target.value = ''; return; }
+        const file = event.target.files?.[0], tmx = format === 'tmx';
+        const available = () => !this.ctOfflineTest || this.ctResourceSyncEnabled;
+        if (this.tmBusy || !file || tmx && !available()) { event.target.value = ''; return; }
         this.tmBusy = true;
         const epoch = this._tmSeedPreviewEpoch = (this._tmSeedPreviewEpoch || 0) + 1;
-        const current = () => epoch === this._tmSeedPreviewEpoch && key === this.tmSeedContextKey();
-        this.setBrowserWork?.('tm-prepare', { active: true, label: 'Preparing TM import' });
+        const current = () => epoch === this._tmSeedPreviewEpoch && key === this.tmSeedContextKey() && (!tmx || available());
+        this.setBrowserWork?.('tm-prepare', { active: true, label: tmx ? 'Preparing TMX import' : 'Preparing TM import' });
+        let previewed = false;
         try {
-          const file = event.target.files?.[0]; if (!file) return;
-          const data = JSON.parse(await file.text());
+          const data = tmx ? await window.Tmx.readTmx(file, this.lang) : JSON.parse(await file.text());
           if (!current()) return;
-          if (data.format !== 'sdeditor-tm' || data.version !== 1 || data.language !== this.lang || !Array.isArray(data.units)) throw new Error('Choose a TM JSON backup for the selected language.');
+          if (!tmx && (data.format !== 'sdeditor-tm' || data.version !== 1 || data.language !== this.lang || !Array.isArray(data.units))) throw new Error('Choose a TM JSON backup for the selected language.');
           const existing = new Map(this.tmUnits.map(unit => [TM().identityFor(unit), unit]));
           const suppressed = new Map(this.tmTombstones.map(unit => [TM().identityFor(unit), unit]));
           const usedIds = new Map([...this.tmUnits, ...this.tmTombstones].map(unit => [unit.id, unit]));
-          const identities = new Set(), rows = []; let skipped = 0;
+          const conflicts = tmx ? new Set(this.tmConflicts.map(conflict => conflict.id)) : null;
+          const identities = new Map(), rows = [];
+          let skipped = tmx ? data.skipped : 0;
           let sliceStart = Date.now();
           for (const raw of data.units) {
             if (Date.now() - sliceStart >= 4) { await new Promise(resolve => setTimeout(resolve, 0)); sliceStart = Date.now(); if (!current()) return; }
-            const unit = TM().normalizeUnit(raw), identity = TM().identityFor(unit);
-            if (!this.tmValidateUnit(unit).valid) { skipped++; continue; }
-            if (identities.has(identity)) throw new Error('The backup contains duplicate source/context identities.');
-            identities.add(identity);
+            let unit;
+            try { unit = tmx ? this.tmTmxUnit(raw) : TM().normalizeUnit(raw); }
+            catch (error) { if (!tmx || error.name !== 'TypeError') throw error; skipped++; continue; }
+            if (!unit || !this.tmValidateUnit(unit).valid) { skipped++; continue; }
+            const identity = TM().identityFor(unit);
+            const group = identities.get(identity);
+            if (group && !tmx) throw new Error('The backup contains duplicate source/context identities.');
             const previous = existing.get(identity), deleted = suppressed.get(identity);
-            if (previous?.target === unit.target && previous?.note === unit.note) continue;
-            rows.push({ unit: { ...unit, id: this.tmImportId(unit, previous, deleted, usedIds) }, existing: clone(previous || deleted || null), selected: !previous && !deleted,
-              restore: !!deleted, action: deleted ? 'Restore deleted entry' : previous ? 'Replace remembered translation' : 'Add entry' });
+            const remembered = previous || deleted;
+            if (conflicts?.has(remembered?.id)) { skipped++; continue; }
+            if (tmx && remembered) {
+              if (raw.note === undefined) unit.note = remembered.note || '';
+              if (remembered.enabled === false) unit.enabled = false;
+            }
+            if (!group) {
+              identities.set(identity, { candidates: [unit], previous, deleted });
+              continue;
+            }
+            const targets = group.targets ||= new Set([group.candidates[0].target]);
+            if (targets.has(unit.target)) { skipped++; continue; }
+            targets.add(unit.target);
+            group.candidates.push(unit);
+          }
+          for (const { candidates, previous, deleted } of identities.values()) {
+            if (Date.now() - sliceStart >= 4) { await new Promise(resolve => setTimeout(resolve, 0)); sliceStart = Date.now(); if (!current()) return; }
+            const [unit] = candidates, competing = candidates.length > 1, remembered = previous || deleted;
+            if (!competing && previous?.target === unit.target && (previous.note || '') === unit.note) continue;
+            const id = this.tmImportId(unit, previous, deleted, usedIds);
+            const variants = competing ? candidates.map(candidate => ({ ...candidate, id })) : null;
+            rows.push({ unit: variants?.[0] || { ...unit, id }, ...(variants ? { variants, variantIndex: '' } : {}),
+              existing: clone(remembered || null), selected: !remembered && !competing, restore: !!deleted,
+              action: deleted ? 'Restore deleted entry' : previous ? 'Replace remembered translation' : 'Add entry' });
           }
           if (data.tombstones != null && !Array.isArray(data.tombstones)) throw new Error('Invalid TM deletion records.');
           for (const raw of data.tombstones || []) {
             if (Date.now() - sliceStart >= 4) { await new Promise(resolve => setTimeout(resolve, 0)); sliceStart = Date.now(); if (!current()) return; }
             const unit = TM().normalizeUnit({ ...raw, target: raw.target?.trim() ? raw.target : '_' }), identity = TM().identityFor(unit);
             if (identities.has(identity)) throw new Error('The backup contains an active and deleted copy of the same source/context.');
-            identities.add(identity);
+            identities.set(identity, null);
             const previous = existing.get(identity), deleted = suppressed.get(identity);
             if (deleted) continue;
             rows.push({ unit: { ...unit, id: this.tmImportId(unit, previous, deleted, usedIds), deleted: true }, existing: clone(previous || null), deletion: true,
@@ -547,8 +622,19 @@
           if (!current()) return;
           this.tmSeedRows = rows; this.tmSeedSkipped = skipped; this.tmSeedKey = key; this.tmSeedPage = 1; this.tmSeedVisible = true;
           this.tmSetIssue('seed');
-        } catch (error) { if (current()) this.tmSetIssue('seed', 'Could not import TM: ' + error.message); }
-        finally { event.target.value = ''; if (epoch === this._tmSeedPreviewEpoch) { this.setBrowserWork?.('tm-prepare', { active: false }); await this.tmFinishWork(scopeKey); } }
+          previewed = true;
+        } catch (error) { if (current()) this.tmSetIssue('seed', `Could not import ${tmx ? 'TMX' : 'TM'}: ` + error.message); }
+        finally {
+          event.target.value = '';
+          if (epoch === this._tmSeedPreviewEpoch) {
+            this.setBrowserWork?.('tm-prepare', { active: false });
+            await this.tmFinishWork(scopeKey);
+            if (tmx && previewed) {
+              await this.$nextTick();
+              if (current() && this.tmSeedVisible) this.$refs?.tmSeedClose?.focus?.();
+            }
+          }
+        }
       },
       async resolveTMConflict(conflict, choice) {
         const key = this.tmScopeKey;

@@ -1397,7 +1397,12 @@
           <article v-for="conflict in tmConflicts" :key="conflict.id"><div class="tmConflictColumns"><section><h4>My correction</h4><small>{{ tmGameLabel(conflict.local?.gameScope) }} · {{ tmMatchContext(conflict.local) }}</small><pre>{{ tmText(conflict.local?.source) }}</pre><pre>{{ tmText(conflict.local?.deleted ? 'Deleted' : conflict.local?.target) }}</pre><button @click="resolveTMConflict(conflict, 'local')">{{ conflict.local?.deleted ? 'Keep my deletion' : 'Use my correction' }}</button></section><section><h4>Shared correction</h4><template v-if="conflict.shared"><small>{{ tmGameLabel(conflict.shared.gameScope) }} · {{ tmMatchContext(conflict.shared) }}</small><pre>{{ tmText(conflict.shared.source) }}</pre><pre>{{ tmText(conflict.shared.deleted ? 'Deleted' : conflict.shared.target) }}</pre></template><p v-else>Entry absent from shared TM.</p><button @click="resolveTMConflict(conflict, 'shared')">{{ !conflict.shared ? 'Keep shared absence' : conflict.shared.deleted ? 'Keep shared deletion' : 'Use shared correction' }}</button></section></div></article>
         </div>
         <div class="tmManagerToolbar"><input type="search" v-model="tmManageQuery" ref="tmManagerSearch" placeholder="Search English, translation, note or filepath…" aria-label="Search TM" @keydown.esc.stop="tmManageQuery = ''"><select v-model="tmManageGame" aria-label="TM game filter"><option value="current">Current game + All</option><option value="any">All games</option><option value="poe1">PoE1</option><option value="poe2">PoE2</option><option value="all">All fallback</option></select><button @click="tmEditUnit()" :disabled="tmBusy">Add entry</button></div>
-        <div class="tmManagerToolbar"><label><input type="checkbox" v-model="tmSeedIncludeZip">{{ ctActive ? 'Include original workbook translations when building TM' : 'Include original ZIP translations when building TM' }}</label><button @click="previewTMSeed" :disabled="tmBusy || !tmCanBuildSeed">Build TM from workspace…</button><button @click="exportTM">Export JSON</button><label class="tmFileButton">Import JSON<input type="file" accept=".json,application/json" @change="importTMFile" :disabled="tmBusy"></label></div>
+        <div class="tmManagerToolbar"><label><input type="checkbox" v-model="tmSeedIncludeZip">{{ ctActive ? 'Include original workbook translations when building TM' : 'Include original ZIP translations when building TM' }}</label><button @click="previewTMSeed" :disabled="tmBusy || !tmCanBuildSeed">Build TM from workspace…</button></div>
+        <div class="tmManagerToolbar tmFileActions">
+          <button @click="exportTMTmx" :disabled="tmBusy">Export TMX</button><button @click="$refs.tmTmxFile.click()" :disabled="tmBusy">Import TMX</button>
+          <input ref="tmTmxFile" type="file" accept=".tmx,application/x-tmx+xml,application/xml,text/xml" @change="importTMFile($event, 'tmx')" hidden>
+          <button @click="exportTM">Export JSON</button><label class="tmFileButton">Import JSON<input type="file" accept=".json,application/json" @change="importTMFile" :disabled="tmBusy"></label>
+        </div>
         <form v-if="tmEditing" class="tmEditForm" @submit.prevent="saveTMUnit">
           <div class="tmEditColumns"><label>English<textarea v-model="tmEditing.source" rows="4" lang="en" required></textarea></label><label>Translation<textarea v-model="tmEditing.target" rows="4" :lang="translationEditorBcp47" required></textarea></label></div>
           <div class="tmEditColumns"><label>Game<select v-model="tmEditing.gameScope"><option value="poe1">PoE1</option><option value="poe2">PoE2</option><option value="all">All</option></select></label><label>Translator note<textarea v-model="tmEditing.note" rows="2" :lang="translationEditorBcp47"></textarea></label></div>
@@ -1413,10 +1418,23 @@
 
     <div v-if="tmSeedVisible" class="cloudResolverBackdrop tmBackdrop tmPreviewBackdrop" data-inline-focus-surface @keydown.stop @keydown.esc.prevent="tmSeedVisible = false">
       <section class="cloudResolver tmDialog" role="dialog" aria-modal="true" aria-labelledby="tmSeedTitle">
-        <div class="tmDialogHeading"><div><h2 id="tmSeedTitle">Review TM import</h2><p>{{ lang }} · {{ tmSeedSelectedCount }} selected · {{ tmSeedSkipped }} blank or incompatible entries skipped</p></div><button @click="tmSeedVisible = false" :disabled="tmBusy" aria-label="Close TM import">✕</button></div>
-        <app-notice tone="error" v-if="tmLocalIssue" class="tmIssue" role="alert">{{ tmLocalIssue }}</app-notice><p>New entries are selected. Corrections and deleted entries require your selection. Importing TM does not change workspace translations.</p>
-        <div class="tmToolbar"><button @click="tmSeedRows.forEach(row => row.selected = !row.existing && !row.imported)" :disabled="tmBusy">Select additions</button><button @click="tmSeedRows.forEach(row => row.selected = false)" :disabled="tmBusy">Clear selection</button><button @click="applyTMSeed" :disabled="tmBusy || !tmSeedSelectedCount">{{ tmBusy ? 'Importing…' : 'Import selected entries' }}</button></div>
-        <article class="tmSeedRow" v-for="(row, rowIndex) in tmVisibleSeedRows" :key="row.unit.id"><label><input type="checkbox" v-model="row.selected" :disabled="tmBusy || row.imported">{{ row.action }} · {{ tmGameLabel(row.unit.gameScope) }}</label><pre>{{ tmText(row.unit.source) }}</pre><div class="tmEditColumns"><section v-if="row.existing"><h4>Remembered translation</h4><pre>{{ tmText(row.existing.target) }}</pre></section><section><h4>Incoming translation</h4><pre>{{ tmText(row.unit.target) }}</pre></section></div><small>{{ tmMatchContext(row.unit) }}</small></article>
+        <div class="tmDialogHeading"><div><h2 id="tmSeedTitle">Review TM import</h2><p>{{ lang }} · {{ tmSeedSelectedCount }} selected · {{ tmSeedSkipped }} skipped</p></div><button ref="tmSeedClose" @click="tmSeedVisible = false" :disabled="tmBusy" aria-label="Close TM import">✕</button></div>
+        <app-notice tone="error" v-if="tmLocalIssue" class="tmIssue" role="alert">{{ tmLocalIssue }}</app-notice><p>New entries with one translation are selected. Review corrections and deleted entries, and choose a translation for any entry with alternatives.</p>
+        <div class="tmToolbar"><button @click="tmSeedRows.forEach(row => row.selected = !row.existing && !row.imported && !row.variants)" :disabled="tmBusy">Select additions</button><button @click="tmSeedRows.forEach(row => row.selected = false)" :disabled="tmBusy">Clear selection</button><button @click="applyTMSeed" :disabled="tmBusy || !tmSeedSelectedCount">{{ tmBusy ? 'Importing…' : 'Import selected entries' }}</button></div>
+        <article class="tmSeedRow" v-for="row in tmVisibleSeedRows" :key="row.unit.id">
+          <label><input type="checkbox" v-model="row.selected" :disabled="tmBusy || row.imported || row.variants && row.variantIndex === ''">{{ row.action }} · {{ tmGameLabel(row.unit.gameScope) }}</label><pre>{{ tmText(row.unit.source) }}</pre>
+          <div class="tmEditColumns">
+            <section v-if="row.existing"><h4>Remembered translation</h4><pre>{{ tmText(row.existing.target) }}</pre><p v-if="row.existing.note">{{ row.existing.note }}</p></section>
+            <section><h4>Incoming translation</h4>
+              <select v-if="row.variants" class="tmVariantSelect" :aria-label="'Translation for ' + row.unit.source" :value="row.variantIndex" @change="tmChooseSeedVariant(row, $event.target.value)" :disabled="tmBusy || row.imported">
+                <option value="">Choose a translation</option>
+                <option v-for="(variant, index) in row.variants" :key="index" :value="String(index)">{{ tmText(variant.target) }}</option>
+              </select>
+              <template v-if="!row.variants || row.variantIndex !== ''"><pre>{{ tmText(row.unit.target) }}</pre><p v-if="row.unit.note">{{ row.unit.note }}</p></template>
+            </section>
+          </div>
+          <small>{{ tmMatchContext(row.unit) }}</small>
+        </article>
         <p v-if="!tmSeedRows.length" class="tmEmpty">No new or changed eligible pairs.</p><div class="tmToolbar"><span>Page {{ tmSeedPage }} of {{ Math.max(1, Math.ceil(tmSeedRows.length / 40)) }}</span><div><button @click="tmSeedPage--" :disabled="tmSeedPage <= 1">Previous</button> <button @click="tmSeedPage++" :disabled="tmSeedPage * 40 >= tmSeedRows.length">Next</button></div></div>
       </section>
     </div>
@@ -1706,6 +1724,7 @@
   <script src="clientTextUndo.js"></script>
   <script src="clientTextFieldFill.js"></script>
   <script src="editorSession.js"></script>
+  <script src="tmx.js"></script>
   <script src="tmUi.js"></script>
   <script type="text/x-template" id="collaboration-warning-template">
     <app-notice v-if="$root.collaborationNeedsAttention" dismiss-key="collaborationWarningMessage" :tone="$root.collaborationState.error ? 'error' : 'warning'" class="collaborationStatus" role="alert" aria-label="Translation collaboration warning">

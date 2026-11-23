@@ -26,7 +26,7 @@ function editorBlock(source, target) {
     tableColumns: isTable ? translation.split('@').map(value => ({ translation: value })) : [], words: [], translationReplace: '' };
 }
 
-function harness({ desc = description(), units = [], testMode = true, store = {}, query } = {}) {
+function harness({ desc = description(), units = [], testMode = true, store = {}, query, tmx } = {}) {
   const calls = { queries: [], saved: 0, drafts: 0, focus: 0, confirms: 0, publications: [], patches: [], exported: [] };
   let app, currentSnapshot = { generation: 1, game: 'poe1', units };
   const worker = {
@@ -50,7 +50,7 @@ function harness({ desc = description(), units = [], testMode = true, store = {}
   };
   const window = {
     TranslationMemory: TM, TranslationMemoryWorkerClient: { create: () => worker }, OfflineStore: store,
-    ClientTextState, ContentAdapters,
+    ClientTextState, ContentAdapters, Tmx: tmx,
     WorkspaceState: { workspaceFile(workspace, baseline) { return workspace.states?.[baseline.filepath]
       || { staged: false, candidate: null, translations: baseline.translations.Thai || [] }; } },
   };
@@ -425,6 +425,109 @@ test('JSON import remaps a repurposed backup ID and duplicate imported IDs witho
   assert.equal(app.tmUnits.find(unit => unit.id === 'reused').source, 'Life');
   assert.equal(app.tmUnits.find(unit => unit.id === 'reused').target, 'life');
   assert.deepEqual(new Set(app.tmUnits.map(unit => unit.source)), new Set(['Life', 'Damage', 'Cold']));
+});
+
+test('TMX import previews compatible pairs, requires selected corrections and preserves workspace text', async () => {
+  const existing = row('local', 'Damage', 'old', null, { note: 'Keep this note' });
+  const unchanged = row('unchanged', 'Lightning', 'lightning', null, { note: 'Keep this note too' });
+  const deleted = row('deleted', 'Life', 'old life', null, { deleted: true });
+  const unresolved = row('conflict', 'Armour', 'local armour');
+  const desc = description(['Untouched'], ['คงเดิม']);
+  const file = new Blob(['fixture']), event = { target: { value: 'fixture.tmx', files: [file] } };
+  const incoming = [
+    { source: 'Damage', target: 'new' }, { source: 'Life', target: 'new life' }, { source: 'Lightning', target: 'lightning' },
+    { source: 'Cold\nDamage@{0}', target: 'ความเย็น\nความเสียหาย@{0}', note: 'Keep the full table' },
+    { source: 'Cold\nDamage@{0}', target: 'ความเย็น\nความเสียหาย@{0}' },
+    { source: 'Conflicting', target: 'first' }, { source: 'Conflicting', target: 'second' },
+    { source: 'Armour', target: 'incoming armour' }, { source: 'Mana {0}', target: 'Mana {1}' },
+  ];
+  const tmx = { async readTmx(input, language) { assert.equal(input, file); assert.equal(language, 'Thai'); return { units: incoming, skipped: 1 }; } };
+  const { app, calls } = harness({ desc, units: [existing, unchanged, unresolved], tmx });
+  app.editorReady = false; app.tmTombstones = [deleted]; app.tmConflicts = [{ id: unresolved.id }];
+  await app.importTMFile(event, 'tmx');
+  assert.equal(event.target.value, ''); assert.equal(app.tmSeedVisible, true); assert.equal(app.tmSeedSkipped, 4);
+  assert.deepEqual(copy(app.tmSeedRows.map(item => [item.unit.source, item.selected, item.restore])), [
+    ['Damage', false, false], ['Life', false, true], ['Cold\\nDamage@{0}', true, false], ['Conflicting', false, false],
+  ]);
+  assert.equal(app.tmSeedRows[0].unit.note, 'Keep this note');
+  assert.equal(app.tmSeedRows[2].unit.note, 'Keep the full table');
+  assert.equal(app.tmSeedRows[2].unit.gameScope, 'poe1');
+  assert.equal(app.tmSeedRows[2].unit.provenance.origin, 'tmx');
+  assert.equal(app.tmUnits.length, 3); assert.equal(app.tmTombstones.length, 1);
+  const choice = app.tmSeedRows[3];
+  assert.equal(choice.variantIndex, '');
+  assert.deepEqual(copy(choice.variants.map(unit => [unit.id, unit.target])), [[choice.unit.id, 'first'], [choice.unit.id, 'second']]);
+  app.tmChooseSeedVariant(choice, '0'); assert.equal(choice.selected, true); assert.equal(choice.unit.target, 'first');
+  app.tmChooseSeedVariant(choice, ''); assert.equal(choice.selected, false);
+  app.tmChooseSeedVariant(choice, '1'); assert.equal(choice.selected, true); assert.equal(choice.unit.target, 'second');
+  await app.applyTMSeed();
+  assert.equal(app.tmUnits.find(unit => unit.id === existing.id).target, 'old');
+  assert.equal(app.tmUnits.find(unit => unit.source === 'Cold\\nDamage@{0}').target, 'ความเย็น\\nความเสียหาย@{0}');
+  assert.deepEqual(copy(app.tmUnits.filter(unit => unit.source === 'Conflicting').map(unit => unit.target)), ['second']);
+  assert.equal(app.tmTombstones[0].id, deleted.id);
+  assert.deepEqual(desc.translations, { English: ['Untouched'], Thai: ['คงเดิม'] });
+  assert.equal(calls.saved, 0);
+});
+
+test('TMX imports retain app context and map context-free workbook material to ordinary text', async () => {
+  const nativeContext = TM.contextFor(description(['Native\\nEnglish']), 0);
+  const imported = [
+    { source: 'External\nEnglish', target: 'คำแปล\nภายนอก' },
+    { source: 'Native\\nEnglish', target: 'คำแปล\\nภายใน', gameScope: 'all', context: { ...nativeContext, contentMode: 'statdescription', fieldKind: 'text' } },
+    { source: 'Name', target: 'ชื่อ', context: { contentMode: 'clienttext', fieldKind: 'form', form: 'Male' } },
+    { source: 'Name', target: 'NONEXISTENT', context: { contentMode: 'clienttext', fieldKind: 'form', form: 'Normal Translation' } },
+    { source: 'Gender', target: 'เพศ', context: { contentMode: 'ClientText', fieldKind: 'gender' } },
+    { source: 'Unknown mode', target: 'ไม่ทราบ', context: { contentMode: 'other' } },
+  ];
+  const tmx = { readTmx: async () => ({ units: imported, skipped: 0 }) };
+  const { app } = harness({ tmx });
+  app.ctActive = true; app.gameVersion = 'poe2';
+  const event = { target: { value: 'fixture.tmx', files: [new Blob()] } };
+  await app.importTMFile(event, 'tmx');
+  assert.equal(app.tmSeedSkipped, 2); assert.equal(app.tmSeedRows.length, 4);
+  const [external, native, form, namedForm] = app.tmSeedRows.map(row => row.unit);
+  assert.equal(external.source, 'External\nEnglish'); assert.equal(external.target, 'คำแปล\nภายนอก');
+  assert.equal(external.gameScope, 'poe2'); assert.equal(external.context.fieldKind, 'text');
+  assert.equal(external.context.contentMode, 'clienttext'); assert.equal(app.tmMatchContext(external), 'Imported TMX');
+  for (const key of ['role', 'sheet', 'recordId', 'fieldId']) assert.ok(external.context[key]);
+  assert.equal(native.source, 'Native\\nEnglish'); assert.equal(native.gameScope, 'all');
+  assert.deepEqual(copy(native.context), nativeContext);
+  assert.equal(form.context.fieldKind, 'form'); assert.equal(form.context.form, 'Male');
+  assert.equal(namedForm.context.fieldName, 'Display Name');
+});
+
+test('TMX import discards a read after the selected game changes and reports current format errors', async () => {
+  const file = deferred();
+  const tmx = { readTmx: () => file.promise };
+  const { app } = harness({ tmx });
+  const event = () => ({ target: { value: 'fixture.tmx', files: [new Blob()] } });
+  const pending = app.importTMFile(event(), 'tmx');
+  app.gameVersion = 'poe2'; file.resolve({ units: [{ source: 'Source', target: 'Target' }], skipped: 0 });
+  await pending;
+  assert.equal(app.tmSeedVisible, false); assert.equal(app.tmLocalIssue, '');
+  app.tmBusy = false; tmx.readTmx = async () => { throw new Error('malformed XML'); };
+  await app.importTMFile(event(), 'tmx');
+  assert.equal(app.tmSeedVisible, false); assert.match(app.tmLocalIssue, /Could not import TMX: malformed XML/);
+});
+
+test('TMX export includes all usable game scopes and metadata while leaving deletion history to JSON', async () => {
+  const context = TM.contextFor(description(['Damage']), 0);
+  const workbook = { contentMode: 'clienttext', fieldKind: 'text', role: 'normal', sheet: 'Test', recordId: 'Record', fieldId: 'Name' };
+  const units = [row('sd', 'Damage', 'ความเสียหาย', context, { note: 'Translator note' }),
+    row('ct', 'Mana', 'มานา', workbook, { gameScope: 'poe2' }), row('disabled', 'Fire', 'ไฟ', null, { enabled: false })];
+  const tmx = { writeTmx(pairs, language, creationTool) {
+    assert.equal(language, 'Thai'); assert.equal(creationTool, 'SDEditor');
+    assert.deepEqual(copy(pairs), [
+      { source: 'Damage', target: 'ความเสียหาย', gameScope: 'poe1', note: 'Translator note', context: { ...context, contentMode: 'statdescription' } },
+      { source: 'Mana', target: 'มานา', gameScope: 'poe2', context: workbook },
+    ]);
+    return '<tmx version="1.4"/>';
+  } };
+  const { app, calls } = harness({ units, tmx });
+  app.tmTombstones = [row('deleted', 'Cold', 'ความเย็น', null, { deleted: true })];
+  app.exportTMTmx();
+  assert.equal(app.tmLocalIssue, ''); assert.equal(calls.exported[0].filename, 'sdeditor_tm_Thai.tmx');
+  assert.equal(await calls.exported[0].blob.text(), '<tmx version="1.4"/>');
 });
 
 test('workspace seed stops when pending durable saves cannot finish', async () => {

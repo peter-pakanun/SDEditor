@@ -39,6 +39,8 @@ For a local workbook opened through **Offline → ClientText**, select **Sync Di
 
 **Export JSON** creates an `sdeditor-tm` version-1 backup for the selected language, including deletion records. **Import JSON** requires that language and previews additions, corrections, restores and preserved deletions. Deleting a currently active entry requires selection. Import rejects duplicate source/context identities and excludes incompatible pairs. TM is separate from ordinary settings JSON and translated ZIP exports.
 
+Use **Export TMX** in **Manage TM** to download the selected language's active English/translation pairs across game scopes as a plain-text TMX 1.4 file. **Import TMX** previews English pairs with the selected target language. Pairs from other tools without SDEditor metadata use the current game and content mode. The preview counts unusable pairs, including incompatible translations, missing languages and segments with TMX inline codes. New entries start selected. Corrections and restores require selection. If several translations share one TM entry, choose the one to keep. JSON remains the backup format for deletion records.
+
 ## Bulk ClientText suggestions
 
 Row-selection controls are hidden by default. In the inline **TM** panel, open **TM options → Show row selection** to show the bar and checkboxes beside workbook row numbers. Leaving the TM panel hides them again and clears the checked rows and TM-only filter, while retaining prepared suggestions and review text. In either an Offline or published ClientText workbook, Shift-click marks a range. The header checkbox selects the current page; **Select all filtered rows** explicitly includes other pages. Selection survives page changes and clears when the workbook or filters change.
