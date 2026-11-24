@@ -8,12 +8,17 @@
   const uuid = () => 'tm_' + crypto.randomUUID();
   const encodeSDLines = value => value.replace(/\r\n?|\n/g, '\\n');
   const tmxWorkbookContext = { role: 'tmx', sheet: 'TMX', recordId: 'TMX', fieldId: 'segment' };
+  const bytesPerMb = 1_000_000;
+  const tmxBlob = xml => new Blob([xml], { type: 'application/x-tmx+xml;charset=utf-8' });
+  const tmxUnits = units => units.filter(unit => unit.enabled !== false && !unit.deleted && !unit.suppressed)
+    .map(unit => ({ source: unit.source, target: unit.target, gameScope: unit.gameScope, note: unit.note,
+      context: { contentMode: 'statdescription', ...unit.context } }));
   const mixin = {
     data() { return {
       tmUnits: [], tmTombstones: [], tmConflicts: [], tmMatches: [], tmSelectedIndex: 0, tmThreshold: 60,
       tmIssue: '', tmLocalIssue: '', tmGeneration: 0, tmLastMatchKey: '', tmManagerVisible: false,
       tmManageQuery: '', tmManageAppliedQuery: '', tmManageGame: 'current', tmManagePage: 1,
-      tmDeletedPage: 1,
+      tmDeletedPage: 1, tmTmxPartsVisible: false, tmTmxPartMb: '',
       tmEditing: null, tmEditingBase: null, tmBusy: false, tmSeedVisible: false, tmSeedIncludeZip: false,
       tmSeedRows: [], tmSeedPage: 1, tmSeedSkipped: 0, tmSeedKey: '', tmHistoryVisible: false,
       tmHistoryEvents: [], tmHistoryUnit: null, tmHistoryRemote: false, tmHistoryCursor: null, tmHistoryLoading: false,
@@ -52,6 +57,11 @@
         this.tmLastMatchKey = ''; this.tmIssue = ''; this.tmLocalIssue = '';
         this._tmLocalIssues = {}; this._tmActiveQuery?.cancel(); this._tmReloadNeeded = false;
         this.tmManagerVisible = false; this.tmSeedVisible = false; this.tmPrefillVisible = false; this.tmHistoryVisible = false;
+        this.tmTmxPartsVisible = false;
+        if (this._tmTmxExport) {
+          this._tmTmxExport = null;
+          this.setBrowserWork?.('tmx-export', { active: false });
+        }
         this.tmBusy = false; this.tmHistoryLoading = false;
         this.tmEditing = null; this._tmWorker?.setScope(this.tmScopeKey);
         this.loadTranslationMemory();
@@ -378,7 +388,7 @@
       async openTMManager() {
         if (this.ctOfflineTest && !this.ctResourceSyncEnabled) return;
         const key = this.tmScopeKey;
-        this.tmManagerVisible = true; this.tmEditing = null;
+        this.tmManagerVisible = true; this.tmEditing = null; this.tmTmxPartsVisible = false;
         await this.$nextTick();
         if (this.tmCurrent(key) && this.tmManagerVisible) this.$refs?.tmManagerSearch?.focus?.();
         await this.loadTranslationMemory();
@@ -518,13 +528,55 @@
       exportTMTmx() {
         if (this.tmBusy || this.ctOfflineTest && !this.ctResourceSyncEnabled) return;
         try {
-          const units = this.tmUnits.filter(unit => unit.enabled !== false && !unit.deleted && !unit.suppressed)
-            .map(unit => ({ source: unit.source, target: unit.target, gameScope: unit.gameScope, note: unit.note,
-              context: { contentMode: 'statdescription', ...unit.context } }));
-          const xml = window.Tmx.writeTmx(units, this.lang, 'SDEditor');
-          saveAs(new Blob([xml], { type: 'application/x-tmx+xml;charset=utf-8' }), `sdeditor_tm_${this.lang}.tmx`);
+          const xml = window.Tmx.writeTmx(tmxUnits(this.tmUnits), this.lang, 'SDEditor');
+          saveAs(tmxBlob(xml), `sdeditor_tm_${this.lang}.tmx`);
           this.tmSetIssue('tmx-export');
         } catch (error) { this.tmSetIssue('tmx-export', 'Could not export TMX: ' + error.message); }
+      },
+      async openTMXPartsExport() {
+        if (this.tmBusy || this.ctOfflineTest && !this.ctResourceSyncEnabled) return;
+        const scopeKey = this.tmScopeKey;
+        this.tmTmxPartMb = window.Tmx.WEBLATE_TMX_PART_BYTES / bytesPerMb;
+        this.tmTmxPartsVisible = true;
+        await this.$nextTick();
+        if (this.tmTmxPartsVisible && this.tmCurrent(scopeKey)) this.$refs?.tmTmxPartSize?.focus?.();
+      },
+      async exportTMXParts() {
+        if (this.tmBusy || this.ctOfflineTest && !this.ctResourceSyncEnabled) return;
+        const maxBytes = Math.floor(Number(this.tmTmxPartMb) * bytesPerMb);
+        if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+          this.tmSetIssue('tmx-export', 'Enter a positive TMX file size in MB.');
+          return;
+        }
+        const scopeKey = this.tmScopeKey, language = this.lang, filename = `sdeditor_tm_${language}`;
+        const run = this._tmTmxExport = Symbol();
+        const current = () => this._tmTmxExport === run && this.tmCurrent(scopeKey)
+          && (!this.ctOfflineTest || this.ctResourceSyncEnabled);
+        this.tmBusy = true;
+        this.setBrowserWork?.('tmx-export', { active: true, label: 'Preparing TMX parts' });
+        try {
+          const parts = window.Tmx.splitTmx(tmxUnits(this.tmUnits), language, maxBytes, 'SDEditor');
+          if (parts.length === 1) {
+            saveAs(tmxBlob(parts[0]), `${filename}.tmx`);
+          } else {
+            const zip = new window.JSZip();
+            const width = Math.max(3, String(parts.length).length);
+            parts.forEach((part, index) => zip.file(`sd1-part-${String(index + 1).padStart(width, '0')}-${language}.tmx`, part));
+            const archive = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 5 } });
+            if (!current()) return;
+            saveAs(archive, `${filename}_parts.zip`);
+          }
+          this.tmTmxPartsVisible = false;
+          this.tmSetIssue('tmx-export');
+        } catch (error) {
+          if (current()) this.tmSetIssue('tmx-export', 'Could not export TMX parts: ' + error.message);
+        } finally {
+          if (this._tmTmxExport === run) {
+            this._tmTmxExport = null;
+            this.setBrowserWork?.('tmx-export', { active: false });
+            await this.tmFinishWork(scopeKey);
+          }
+        }
       },
       tmTmxUnit(raw) {
         const declaredMode = raw.context?.contentMode ?? '';

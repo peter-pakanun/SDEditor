@@ -26,7 +26,7 @@ function editorBlock(source, target) {
     tableColumns: isTable ? translation.split('@').map(value => ({ translation: value })) : [], words: [], translationReplace: '' };
 }
 
-function harness({ desc = description(), units = [], testMode = true, store = {}, query, tmx } = {}) {
+function harness({ desc = description(), units = [], testMode = true, store = {}, query, tmx, zip } = {}) {
   const calls = { queries: [], saved: 0, drafts: 0, focus: 0, confirms: 0, publications: [], patches: [], exported: [] };
   let app, currentSnapshot = { generation: 1, game: 'poe1', units };
   const worker = {
@@ -50,7 +50,7 @@ function harness({ desc = description(), units = [], testMode = true, store = {}
   };
   const window = {
     TranslationMemory: TM, TranslationMemoryWorkerClient: { create: () => worker }, OfflineStore: store,
-    ClientTextState, ContentAdapters, Tmx: tmx,
+    ClientTextState, ContentAdapters, Tmx: tmx, JSZip: zip,
     WorkspaceState: { workspaceFile(workspace, baseline) { return workspace.states?.[baseline.filepath]
       || { staged: false, candidate: null, translations: baseline.translations.Thai || [] }; } },
   };
@@ -528,6 +528,55 @@ test('TMX export includes all usable game scopes and metadata while leaving dele
   app.exportTMTmx();
   assert.equal(app.tmLocalIssue, ''); assert.equal(calls.exported[0].filename, 'sdeditor_tm_Thai.tmx');
   assert.equal(await calls.exported[0].blob.text(), '<tmx version="1.4"/>');
+});
+
+test('TMX parts export uses the editable byte limit and downloads a single part directly', async () => {
+  const units = [row('enabled', 'Damage', 'ความเสียหาย'), row('disabled', 'Life', 'พลังชีวิต', null, { enabled: false })];
+  const xml = '<tmx version="1.4"/>';
+  const tmx = { WEBLATE_TMX_PART_BYTES: 5_000_000, splitTmx(pairs, language, maxBytes, creationTool) {
+    assert.equal(language, 'Thai'); assert.equal(maxBytes, 750_000); assert.equal(creationTool, 'SDEditor');
+    assert.deepEqual(copy(pairs), [{ source: 'Damage', target: 'ความเสียหาย', gameScope: 'poe1', context: { contentMode: 'statdescription' } }]);
+    return [xml];
+  } };
+  const { app, calls } = harness({ units, tmx });
+  await app.openTMXPartsExport();
+  assert.equal(app.tmTmxPartMb, 5); assert.equal(app.tmTmxPartsVisible, true);
+  app.tmTmxPartMb = 0.75;
+  await app.exportTMXParts();
+  assert.equal(app.tmBusy, false); assert.equal(app.tmTmxPartsVisible, false);
+  assert.equal(calls.exported[0].filename, 'sdeditor_tm_Thai.tmx');
+  assert.equal(await calls.exported[0].blob.text(), xml);
+});
+
+test('TMX parts export puts distinct, numbered standalone files in one ZIP download', async () => {
+  const archive = new Blob(['zip fixture']), files = new Map();
+  class Zip {
+    file(name, text) { files.set(name, text); }
+    async generateAsync(options) { assert.equal(options.type, 'blob'); return archive; }
+  }
+  const parts = ['<tmx>First</tmx>', '<tmx>Second</tmx>'];
+  const { app, calls } = harness({ tmx: { WEBLATE_TMX_PART_BYTES: 5_000_000, splitTmx: () => parts }, zip: Zip });
+  app.lang = 'Traditional Chinese';
+  await app.openTMXPartsExport(); await app.exportTMXParts();
+  assert.deepEqual([...files], [['sd1-part-001-Traditional Chinese.tmx', parts[0]], ['sd1-part-002-Traditional Chinese.tmx', parts[1]]]);
+  assert.deepEqual(calls.exported, [{ filename: 'sdeditor_tm_Traditional Chinese_parts.zip', blob: archive }]);
+});
+
+test('TMX parts export drops a late ZIP from an earlier language scope', async () => {
+  const packaging = deferred();
+  class Zip {
+    file() {}
+    generateAsync() { return packaging.promise; }
+  }
+  const { app, calls, mixin } = harness({ tmx: { WEBLATE_TMX_PART_BYTES: 5_000_000, splitTmx: () => ['<tmx/>', '<tmx/>'] }, zip: Zip });
+  await app.openTMXPartsExport();
+  const pending = app.exportTMXParts();
+  assert.equal(app.tmBusy, true);
+  app.lang = 'German'; mixin.watch.tmScopeKey.call(app);
+  app.lang = 'Thai'; mixin.watch.tmScopeKey.call(app);
+  packaging.resolve(new Blob(['old archive'])); await pending;
+  assert.equal(app.tmBusy, false); assert.equal(app.tmTmxPartsVisible, false);
+  assert.deepEqual(calls.exported, []);
 });
 
 test('workspace seed stops when pending durable saves cannot finish', async () => {

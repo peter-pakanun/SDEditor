@@ -19,6 +19,9 @@
   const TMX_NAMESPACES = new Set([null, 'http://www.lisa.org/tmx', 'http://www.lisa.org/tmx14']);
   const GAME_PROP = 'x-sdeditor-game-scope';
   const CONTEXT_PROP = 'x-sdeditor-context';
+  const WEBLATE_TMX_PART_BYTES = 5_000_000;
+  const WEBLATE_TMX_MAX_UNITS = 100_000;
+  const TMX_END = '  </body>\n</tmx>\n';
   function languageTag(language) {
     const tag = LANGUAGE_TAGS.get(language);
     if (!tag) throw new Error('Select a supported target language to use TMX.');
@@ -155,17 +158,19 @@
       .replace(/'/g, '&apos;')
       .replace(/\r/g, '&#13;');
   }
-  function writeTmx(units, targetLanguage, creationTool = 'SDEditor') {
-    const targetTag = languageTag(targetLanguage);
-    const lines = [
+  function tmxStart(creationTool) {
+    return [
       '<?xml version="1.0" encoding="UTF-8"?>',
       '<tmx version="1.4">',
       `  <header creationtool="${xmlText(creationTool)}" creationtoolversion="1" segtype="block" o-tmf="SDEditor" adminlang="en" srclang="en" datatype="PlainText"/>`,
-      '  <body>'
-    ];
+      '  <body>',
+      ''
+    ].join('\n');
+  }
+  function* tmxEntries(units, targetTag) {
     for (const unit of units) {
       if (!unit.source.trim() || !unit.target.trim()) continue;
-      lines.push('    <tu>');
+      const lines = ['    <tu>'];
       if (unit.note) lines.push(`      <note>${xmlText(unit.note)}</note>`);
       if (isGameScope(unit.gameScope))
         lines.push(`      <prop type="${GAME_PROP}">${unit.gameScope}</prop>`);
@@ -176,14 +181,48 @@
       lines.push(
         `      <tuv xml:lang="en"><seg>${xmlText(unit.source)}</seg></tuv>`,
         `      <tuv xml:lang="${targetTag}"><seg>${xmlText(unit.target)}</seg></tuv>`,
-        '    </tu>'
+        '    </tu>',
+        ''
       );
+      yield lines.join('\n');
     }
-    lines.push('  </body>', '</tmx>', '');
-    return lines.join('\n');
+  }
+  function writeTmx(units, targetLanguage, creationTool = 'SDEditor') {
+    return (
+      tmxStart(creationTool) +
+      Array.from(tmxEntries(units, languageTag(targetLanguage))).join('') +
+      TMX_END
+    );
+  }
+  function splitTmx(units, targetLanguage, maxBytes, creationTool = 'SDEditor') {
+    const targetTag = languageTag(targetLanguage);
+    const start = tmxStart(creationTool);
+    const encoder = new TextEncoder();
+    const frameBytes = encoder.encode(start + TMX_END).length;
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < frameBytes)
+      throw new Error('Choose a file size limit large enough for a TMX header.');
+    const parts = [];
+    let entries = [];
+    let bytes = frameBytes;
+    for (const entry of tmxEntries(units, targetTag)) {
+      const entryBytes = encoder.encode(entry).length;
+      if (frameBytes + entryBytes > maxBytes)
+        throw new Error(
+          'A single translation entry exceeds this file size limit. Increase the limit to include it.'
+        );
+      if (bytes + entryBytes > maxBytes || entries.length === WEBLATE_TMX_MAX_UNITS) {
+        parts.push(start + entries.join('') + TMX_END);
+        bytes = frameBytes;
+        entries = [];
+      }
+      entries.push(entry);
+      bytes += entryBytes;
+    }
+    parts.push(start + entries.join('') + TMX_END);
+    return parts;
   }
 
-  const api = { readTmx, writeTmx };
+  const api = { readTmx, writeTmx, splitTmx, WEBLATE_TMX_PART_BYTES };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.Tmx = api;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -1465,10 +1465,18 @@
         <div class="tmManagerToolbar"><input type="search" v-model="tmManageQuery" ref="tmManagerSearch" placeholder="Search English, translation, note or filepath…" aria-label="Search TM" @keydown.esc.stop="tmManageQuery = ''"><select v-model="tmManageGame" aria-label="TM game filter"><option value="current">Current game + All</option><option value="any">All games</option><option value="poe1">PoE1</option><option value="poe2">PoE2</option><option value="all">All fallback</option></select><button @click="tmEditUnit()" :disabled="tmBusy">Add entry</button></div>
         <div class="tmManagerToolbar"><label><input type="checkbox" v-model="tmSeedIncludeZip">{{ ctActive ? 'Include original workbook translations when building TM' : 'Include original ZIP translations when building TM' }}</label><button @click="previewTMSeed" :disabled="tmBusy || !tmCanBuildSeed">Build TM from workspace…</button></div>
         <div class="tmManagerToolbar tmFileActions">
-          <button @click="exportTMTmx" :disabled="tmBusy">Export TMX</button><button @click="$refs.tmTmxFile.click()" :disabled="tmBusy">Import TMX</button>
+          <button @click="exportTMTmx" :disabled="tmBusy">Export TMX</button><button @click="openTMXPartsExport" :disabled="tmBusy || tmTmxPartsVisible">Export TMX parts…</button><button @click="$refs.tmTmxFile.click()" :disabled="tmBusy">Import TMX</button>
           <input ref="tmTmxFile" type="file" accept=".tmx,application/x-tmx+xml,application/xml,text/xml" @change="importTMFile($event, 'tmx')" hidden>
           <button @click="exportTM">Export JSON</button><label class="tmFileButton">Import JSON<input type="file" accept=".json,application/json" @change="importTMFile" :disabled="tmBusy"></label>
         </div>
+        <form v-if="tmTmxPartsVisible" class="tmEditForm" @submit.prevent="exportTMXParts">
+          <div class="tmManagerToolbar tmFileActions">
+            <label>Maximum TMX file size (MB) <input ref="tmTmxPartSize" v-model="tmTmxPartMb" type="number" min="0.000001" step="any" required :disabled="tmBusy"></label>
+            <button type="submit" :disabled="tmBusy">{{ tmBusy ? 'Preparing…' : 'Download TMX parts' }}</button>
+            <button type="button" @click="tmTmxPartsVisible = false" :disabled="tmBusy">Cancel</button>
+          </div>
+          <p>For Weblate, use your site's file size limit. If you get a ZIP, extract it and upload each .tmx file separately in Translation Memory.</p>
+        </form>
         <form v-if="tmEditing" class="tmEditForm" @submit.prevent="saveTMUnit">
           <div class="tmEditColumns"><label>English<textarea v-model="tmEditing.source" rows="4" lang="en" required></textarea></label><label>Translation<textarea v-model="tmEditing.target" rows="4" :lang="translationEditorBcp47" required></textarea></label></div>
           <div class="tmEditColumns"><label>Game<select v-model="tmEditing.gameScope"><option value="poe1">PoE1</option><option value="poe2">PoE2</option><option value="all">All</option></select></label><label>Translator note<textarea v-model="tmEditing.note" rows="2" :lang="translationEditorBcp47"></textarea></label></div>
