@@ -42,7 +42,7 @@ async function run() {
     frontend.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
     frontend.post('/fixture/session', (req, res) => {
         if (req.get('X-Fixture-Key') !== secret) return res.sendStatus(403);
-        res.json(store.createSession('fixture-admin'));
+        res.json(store.createSession(req.query.account === 'translator' ? 'fixture-thai' : 'fixture-admin'));
     });
     const vendor = {
         'https://cdnjs.cloudflare.com/ajax/libs/vue/3.0.11/vue.global.prod.js': ['vue.js', process.env.FIXTURE_VUE_PATH || join(parent, 'clienttext-fixture-vue.min.js')],
@@ -63,7 +63,7 @@ async function run() {
         translations: { English: [english], ...(target === undefined ? {} : { Thai: [target] }), German: ['German ' + name] } });
     const first = [file('carry', 'Fire damage', 'Original carry'), file('recover', 'Old cold damage', 'Original recovery'), file('recall', 'Original lightning damage', 'Historical untouched target')];
     const previous = [file('carry', 'Fire damage', 'Upstream carry'), file('recover', 'Changed cold damage', 'Upstream recovery'), file('recall', 'Original lightning damage', 'Historical untouched target')];
-    const incoming = [file('carry', 'Fire damage', 'Current upstream carry'), file('recover', 'Changed cold damage', undefined), file('recall', 'New lightning damage', undefined)];
+    const incoming = [file('carry', 'Fire damage', undefined), file('recover', 'Changed cold damage', undefined), file('recall', 'New lightning damage', undefined)];
     const zipBytes = async files => {
         const zip = new JSZip();
         for (const row of files) zip.file(row.filepath, codec.descEncode(row), { date: new Date('2000-01-01T00:00:00Z'), createFolders: false });
@@ -94,13 +94,27 @@ async function run() {
         assert.equal(recoveryBefore.length, 1);
         await content.collect(old.group.id, 'Thai', 'fixture-admin', { idempotencyKey: randomUUID(), endWindow: true });
         const bytes = await zipBytes(incoming);
+        const { archive } = await parseArchive(bytes, { expectedGame: 'poe2' });
+        const auth = { Origin: origin, Authorization: 'Bearer ' + store.createSession('fixture-thai').token };
+        const claimResponse = await fetch(apiOrigin + '/v1/sd-originals/poe2/claim', { method: 'POST',
+            headers: { ...auth, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ zipHash: archive.zipHash, zipSize: archive.zipSize, archive }) });
+        const claim = await claimResponse.json();
+        assert.equal(claim.status, 'upload', JSON.stringify(claim));
+        const put = await fetch(apiOrigin + '/v1/sd-originals/poe2/' + archive.zipHash + '?uploadId=' + claim.uploadId,
+            { method: 'PUT', headers: { ...auth, 'Content-Type': 'application/zip' }, body: bytes });
+        assert.equal((await put.json()).status, 'ready');
         let forbiddenServerParses = 0;
         api.locals.versions.parser = async () => { forbiddenServerParses++; throw new Error('New publication must not parse an SD ZIP on the API.'); };
         content.prepareSDCarry = async () => { forbiddenServerParses++; throw new Error('New publication must compute source carry in the browser.'); };
         browser = await playwright.chromium.launch({ executablePath, headless: true, args: ['--disable-gpu'] });
         const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, acceptDownloads: true });
-        const page = await context.newPage(), errors = [];
+        const page = await context.newPage(), errors = [], originalWrites = [];
         page.on('pageerror', error => errors.push(error.message));
+        page.on('request', request => {
+            if (/\/v1\/content-uploads\/[^/]+\/(?:assets\/source|sd-original)(?:\?|$)/.test(request.url()))
+                originalWrites.push(request.method());
+        });
         await page.goto(origin + '/?cloudApi=' + encodeURIComponent(apiOrigin), { waitUntil: 'domcontentloaded' });
         await page.waitForFunction(() => window.__sdFixtureApp?.offlineStoreReady && window.__sdFixtureApp?._cloud?.state, { timeout: 30000 });
         await page.evaluate(async ({ secret }) => {
@@ -124,11 +138,12 @@ async function run() {
             await vm.ctPublishPrepared();
             if (vm.ctUploadError || vm.ctError) throw new Error(vm.ctUploadError || vm.ctError);
         }, { bytes: [...bytes] });
+        assert.deepEqual(originalWrites, ['POST'], 'The manager attaches the Thai team’s retained original without transferring ZIP bytes');
         const groupRow = db.prepare("SELECT g.* FROM content_groups g JOIN content_versions v ON v.id=g.version_id WHERE v.name='Fixture client prepared'").get();
         assert.ok(groupRow, 'The browser published the prepared group');
         assert.equal(groupRow.storage_protocol, 'sd-client-publication-v1');
         const published = content.publicGroup(groupRow, 'fixture-admin'), newRoom = published.teams[0].roomId;
-        assert.deepEqual(collaboration.file(newRoom, path('carry')).translations, ['Accepted authored carry']);
+        assert.deepEqual(collaboration.file(newRoom, path('carry')).translations, ['Accepted authored carry'], 'An absent target carries when English and metadata match');
         assert.equal(db.prepare("SELECT COUNT(*) n FROM collaboration_dropped_candidates WHERE content_group_id=? AND filepath=? AND status='dropped'").get(published.id, path('recall')).n, 0, 'Untouched old ZIP text stays recallable without automatic Dropped creation');
         assert.equal(db.prepare("SELECT COUNT(*) n FROM collaboration_dropped_candidates WHERE content_group_id=? AND filepath=? AND status='dropped'").get(published.id, path('recover')).n, 1, 'Existing recovery survives source advancement');
         assert.deepEqual(collaboration.file(oldRoom, path('carry')), oldSaved, 'Existing Saved work remains unchanged');
@@ -162,7 +177,10 @@ async function run() {
         await page.locator('.appDialogConfirm').click();
         await page.getByRole('button', { name: 'Resume promotion', exact: true }).waitFor();
         assert.equal(api.locals.versions.branch('poe2').head_version_id, published.version.id, 'A lost acknowledgement does not undo committed HEAD');
+        const replayed = page.waitForResponse(response => response.url().endsWith('/v1/versions/' + published.version.id + '/promote')
+            && response.request().method() === 'POST' && response.ok());
         await page.getByRole('button', { name: 'Resume promotion', exact: true }).click();
+        await replayed;
         await page.waitForFunction(id => window.__sdFixtureApp.managedBranch?.headVersionId === id && !window.__sdFixtureApp.managedVersionBusy, published.version.id);
         assert.equal(promotionRequests.length, 2); assert.deepEqual(promotionRequests[1], promotionRequests[0], 'Lost promotion responses retry the exact durable command');
         await candidateRow.getByText('HEAD', { exact: true }).waitFor();
@@ -235,8 +253,100 @@ async function run() {
         assert.equal(await dialog.locator('#sdRecallTarget-0').inputValue(), 'Accepted authored carry', 'Historical Saved work takes precedence over ZIP target');
         await dialog.getByRole('button', { name: 'Close', exact: true }).click();
         assert.deepEqual(errors, [], 'No unhandled browser errors');
+        const translatorContext = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+        const translator = await translatorContext.newPage(), translatorErrors = [];
+        translator.on('pageerror', error => translatorErrors.push(error.message));
+        await translator.goto(origin + '/?cloudApi=' + encodeURIComponent(apiOrigin), { waitUntil: 'domcontentloaded' });
+        await translator.waitForFunction(() => window.__sdFixtureApp?.offlineStoreReady && window.__sdFixtureApp?._cloud?.state);
+        await translator.evaluate(async key => {
+            const vm = window.__sdFixtureApp;
+            const session = await fetch('/fixture/session?account=translator', { method: 'POST', headers: { 'X-Fixture-Key': key } });
+            await vm._cloud.acceptLogin(await session.json());
+            await vm.cloudApply(vm._cloud.snapshot());
+            vm.lang = 'Thai'; vm.needsInitialSettings = false; vm.showSetting = false;
+            await vm.saveSettings(); await OfflineStore.setMigratedFromSingleVersion(true);
+            await vm.activateGameVersion('poe2', { checkMigration: false });
+            vm.confirmProceedByTypingYes = async () => true;
+            vm.appAlert = message => { window.__sdTeamAlert = String(message); };
+            await vm.showVersionChooser();
+        }, secret);
+        await translator.waitForFunction(id => window.__sdFixtureApp.sdTeamBranch?.origin?.versionId === id, published.version.id);
+        await translator.getByRole('button', { name: 'Open working version', exact: true }).focus();
+        await translator.keyboard.press('Enter');
+        await translator.waitForFunction(id => window.__sdFixtureApp.sourceIdentity === id && !window.__sdFixtureApp.sdTeamBusy, archive.baselineId);
+        const team10 = await zipBytes([...incoming, file('team-ten', 'Ten', undefined)]);
+        const team10Archive = (await parseArchive(team10, { expectedGame: 'poe2' })).archive;
+        await translator.evaluate(() => window.__sdFixtureApp.showVersionChooser());
+        await translator.locator('.sdTeamPanel input[type=file]').setInputFiles({ name: 'Team-v10.zip', mimeType: 'application/zip', buffer: team10 });
+        const waitForTeam = async id => {
+            try {
+                await translator.waitForFunction(id => window.__sdFixtureApp.sdTeamBranch?.head?.baselineId === id
+                    || window.__sdFixtureApp.sdTeamSyncError || window.__sdFixtureApp.sdTeamActionError || window.__sdTeamAlert, id, { timeout: 12000 });
+            } catch (error) {
+                const state = await translator.evaluate(() => {
+                    const vm = window.__sdFixtureApp;
+                    return { sourceIdentity: vm.sourceIdentity, sourceLoaded: vm.sourceLoaded, busy: vm.sdTeamBusy, installing: vm._importingSource,
+                        team: vm.sdTeamBranch?.head?.baselineId, checkpoints: vm.sdTeamCheckpoints, catalogError: vm.sdTeamCatalogError,
+                        alert: window.__sdTeamAlert, dialog: document.querySelector('.appDialogMessage')?.textContent, initialization: vm.workspaceInitializationRows };
+                });
+                throw new Error(error.message + '\n' + JSON.stringify(state) + '\n' + translatorErrors.join('\n'));
+            }
+        };
+        const readTeam = () => translator.evaluate(() => ({ branch: window.__sdFixtureApp.sdTeamBranch,
+            error: window.__sdFixtureApp.sdTeamSyncError || window.__sdFixtureApp.sdTeamActionError || window.__sdTeamAlert }));
+        await waitForTeam(team10Archive.baselineId);
+        let teamState = await readTeam();
+        assert.equal(teamState.branch.head?.baselineId, team10Archive.baselineId, teamState.error);
+        assert.equal(teamState.branch.head.parentRoomId, newRoom);
+        assert.deepEqual(collaboration.file(teamState.branch.head.roomId, path('carry'))?.translations, ['Accepted authored carry']);
+        const team11 = await zipBytes([...incoming, file('team-eleven', 'Eleven', undefined)]);
+        const team11Archive = (await parseArchive(team11, { expectedGame: 'poe2' })).archive;
+        await translatorContext.setOffline(true);
+        await translator.evaluate(() => window.__sdFixtureApp.showVersionChooser());
+        await translator.locator('.sdTeamPanel input[type=file]').setInputFiles({ name: 'Team-v11.zip', mimeType: 'application/zip', buffer: team11 });
+        await translator.waitForFunction(id => window.__sdFixtureApp.sdTeamCheckpoints.some(node => node.baselineId === id), team11Archive.baselineId);
+        assert.equal(await translator.evaluate(() => window.__sdFixtureApp.sdTeamBranch.head.baselineId), team10Archive.baselineId);
+        await translatorContext.setOffline(false);
+        await waitForTeam(team11Archive.baselineId);
+        teamState = await readTeam();
+        assert.equal(teamState.branch.head?.baselineId, team11Archive.baselineId, teamState.error);
+        assert.equal(teamState.branch.head.parentId, teamState.branch.history.find(node => node.baselineId === team10Archive.baselineId)?.id);
+        assert.equal(api.locals.versions.branch('poe2').head_version_id, published.version.id, 'A translator advances their team while Origin stays on the published release');
+
+        await content.collect(published.id, 'Thai', 'fixture-admin', { idempotencyKey: randomUUID(), endWindow: true });
+        const writesBeforeMatch = originalWrites.length;
+        await page.evaluate(async bytes => {
+            const vm = window.__sdFixtureApp;
+            if (!await vm.ctOpenUpload()) throw new Error(vm.managedNextVersionBlockedReason || vm.managedError || 'Upload dialog did not open');
+            vm.ctUploadName = 'Fixture matching team version';
+            vm.ctUploadAssignments = ['Thai'];
+            vm.ctUploadFiles = [{ file: new File([new Uint8Array(bytes)], 'StatDescriptions.zip', { type: 'application/zip' }) }];
+            await vm.ctPrepareUpload();
+            if (vm.ctUploadError) throw new Error(vm.ctUploadError);
+            await vm.ctPublishPrepared();
+            if (vm.ctUploadError || vm.ctError) throw new Error(vm.ctUploadError || vm.ctError);
+        }, [...team11]);
+        const matched = db.prepare(`SELECT g.id, v.id versionId, t.room_id roomId FROM content_groups g
+            JOIN content_versions v ON v.id=g.version_id JOIN content_group_teams t ON t.group_id=g.id
+            WHERE v.name='Fixture matching team version' AND t.language='Thai'`).get();
+        assert.ok(matched, 'The manager published the exact team version');
+        assert.equal(matched.roomId, teamState.branch.head.roomId, 'Publication uses the existing Thai room');
+        assert.deepEqual(originalWrites.slice(writesBeforeMatch), ['POST']);
+        assert.equal(api.locals.versions.branch('poe2').head_version_id, published.version.id, 'The team match takes effect before HEAD promotion');
+        await translator.evaluate(() => window.__sdFixtureApp.showVersionChooser());
+        await translator.waitForFunction(id => window.__sdFixtureApp.sdTeamBranch?.linked?.groupId === id, matched.id);
+        assert.deepEqual(collaboration.file(matched.roomId, path('carry'))?.translations, ['Accepted authored carry']);
+        await translator.locator('.sdTeamLanes section').first().waitFor();
+        assert.equal(await translator.locator('.sdTeamLanes section').count(), 2);
+        for (const theme of ['light', 'grey', 'dark', 'modern-dark']) {
+            await translator.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+            await translator.setViewportSize({ width: 1160, height: 850 });
+            const bounds = await translator.locator('.sdTeamLanes').boundingBox();
+            assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 1161, theme + ': both lanes fit the desktop chooser');
+        }
+        assert.deepEqual(translatorErrors, [], 'No unhandled translator browser errors');
         writeFileSync(join(directory, 'result.json'), JSON.stringify({ published: published.id, serverParses: forbiddenServerParses, errors, diagnostics }, null, 2));
-        console.log('Client SD publication, preserved Saved/recovery/history, full/inline recall, diff, themes and reviewed Save checks passed.');
+        console.log('SD publication and ZIP reuse, preserved work, recall, and independent team advancement with offline replay passed.');
     } finally {
         if (browser) await browser.close();
         await api.locals.versions.idle(); await api.locals.collaborationRealtime.close();

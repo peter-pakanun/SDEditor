@@ -1162,30 +1162,61 @@
     return [...candidates.values()];
   }
 
-  async function saveSourceWorkspaceWithRevisions(source, workspace, revisions, version, baseline) {
+  function sdTeamCheckpointPrefix(scope) {
+    if (!scope?.accountId || !['poe1', 'poe2'].includes(scope.game) || !scope.language)
+      throw new Error('A team branch checkpoint requires an account, game and language.');
+    return 'sd_team_branch_checkpoint:' + JSON.stringify([scope.accountId, scope.game, scope.branchId || DEFAULT_BRANCH,
+      scope.language, scope.logicalKey || 'statdescription']) + ':';
+  }
+
+  function verifiedZipRows(hash, blob, evidence) {
+    if (!/^[a-f0-9]{64}$/.test(hash) || evidence?.verified !== true || !Number.isSafeInteger(evidence.zipSize)
+      || evidence.zipSize <= 0 || (blob?.size ?? blob?.byteLength) !== evidence.zipSize) throw new Error('Verified immutable ZIP bytes are required.');
+    const rows = [{ key: hash, blob, zipSize: evidence.zipSize, verified: true }];
+    if (evidence.archive?.baselineId && evidence.archive.zipHash === hash)
+      rows.push({ key: 'archive:' + evidence.archive.baselineId, archive: evidence.archive });
+    return rows;
+  }
+
+  async function saveSourceWorkspaceWithRevisions(source, workspace, revisions, version, baseline, branchCheckpoint) {
     if (!Array.isArray(revisions)) throw new TypeError('Revisions must be an array');
     const gameVersion = normalizeGameVersion(version);
     const captured = captureWorkspaceScope({ ...(typeof version === 'object' ? version : { game: gameVersion }),
       sourceHash: workspace.sourceHash, branchId: workspace.branchId || (typeof version === 'object' ? version.branchId : undefined) });
     const contextAtStart = workspaceContext;
     const revisionsStore = revisionStoreName(gameVersion);
+    let branchImport;
+    if (branchCheckpoint) {
+      const { originalZip, ...value } = branchCheckpoint, archive = baseline?.archive;
+      if (!value.id || !archive || value.baselineId !== archive.baselineId || value.baselineId !== captured?.sourceHash
+        || value.zipHash !== archive.zipHash || value.zipSize !== archive.zipSize || value.accountId !== captured.accountId
+        || value.game !== captured.game || (value.branchId || DEFAULT_BRANCH) !== captured.branchId)
+        throw new Error('The team branch checkpoint identifies another source workspace.');
+      branchImport = { checkpoint: { key: sdTeamCheckpointPrefix(value) + value.id, value }, zipStore: STORE_SD_ZIPS,
+        zipRows: originalZip ? verifiedZipRows(value.zipHash, originalZip, { verified: true, zipSize: value.zipSize, archive }) : [] };
+    }
     if (await usesRecords(captured)) {
       if (baseline && baseline.archive?.baselineId !== workspace.sourceHash) throw new Error('Imported baseline and workspace identity differ');
       const metadata = { createdAt: Date.now(), ...await kvGet(versionMetadataKey(captured)), ...captured,
         ...(workspace.versionName ? { name: workspace.versionName } : {}), updatedAt: Date.now() };
       const committed = await normalized.importScope(captured, source, { ...workspace, accountId: captured.accountId, game: captured.game, branchId: captured.branchId, ...contentScope(captured) }, revisions, baseline, [
         { key: activeKey(captured), value: captured }, { key: versionMetadataKey(captured), value: metadata },
-        { key: versionIndexKey(captured), value: versionIndexRecord(metadata, captured) }]);
+        { key: versionIndexKey(captured), value: versionIndexRecord(metadata, captured) }], branchImport);
       activeScopes.set(activeKey(captured), captured);
       if (workspaceContext === contextAtStart && workspaceContext?.accountId === captured.accountId && workspaceContext.game === captured.game && workspaceContext.branchId === captured.branchId) workspaceContext = { ...captured };
       return committed;
     }
     const db = await openDb();
-    const tx = db.transaction([STORE_KV, revisionsStore], 'readwrite');
+    const tx = db.transaction([STORE_KV, revisionsStore, ...(branchImport?.zipRows.length ? [STORE_SD_ZIPS] : [])], 'readwrite');
     const done = txDone(tx);
     let committed = workspace, importFailure;
     try {
       const kv = tx.objectStore(STORE_KV);
+      if (branchImport) {
+        const checkpointRead = kv.get(branchImport.checkpoint.key);
+        checkpointRead.onsuccess = () => { if (!checkpointRead.result) kv.put(branchImport.checkpoint); };
+        for (const row of branchImport.zipRows) tx.objectStore(STORE_SD_ZIPS).put(row);
+      }
       kv.put({ key: sourceKey(captured || gameVersion), value: source });
       const destinationKey = workspaceKey(captured || gameVersion), incoming = captured ? { ...workspace,
         accountId: captured.accountId, game: captured.game, branchId: captured.branchId, ...contentScope(captured) } : workspace;
@@ -1847,15 +1878,33 @@
     // Callers verify bytes in the SD source worker before marking an original
     // ready. Blob records are shared by content hash, never by selected scope.
     putStatDescriptionZip: async (hash, blob, evidence) => {
-      if (!/^[a-f0-9]{64}$/.test(hash) || evidence?.verified !== true || !Number.isSafeInteger(evidence.zipSize)
-        || evidence.zipSize <= 0 || (blob?.size ?? blob?.byteLength) !== evidence.zipSize) throw new Error('Verified immutable ZIP bytes are required.');
+      const rows = verifiedZipRows(hash, blob, evidence);
       return withStore(STORE_SD_ZIPS, 'readwrite', store => {
-        store.put({ key: hash, blob, zipSize: evidence.zipSize, verified: true });
-        if (evidence.archive?.baselineId && evidence.archive.zipHash === hash) {
-          store.put({ key: 'archive:' + evidence.archive.baselineId, archive: evidence.archive });
-        }
+        for (const row of rows) store.put(row);
       });
     },
+    listSDTeamBranchCheckpoints: async scope => {
+      const prefix = sdTeamCheckpointPrefix(scope);
+      return withStore(STORE_KV, 'readonly', async store => {
+        const rows = await requestToPromise(store.getAll(IDBKeyRange.bound(prefix, prefix + '\uffff')));
+        return rows.map(row => row.value).sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+      });
+    },
+    ackSDTeamBranchCheckpoint: (scope, id) => kvDel(sdTeamCheckpointPrefix(scope) + id),
+    getSDTeamBranchView: scope => kvGet('view:' + sdTeamCheckpointPrefix(scope)),
+    putSDTeamBranchView: (scope, view) => kvSet('view:' + sdTeamCheckpointPrefix(scope), view),
+    updateSDTeamBranchCheckpoint: (scope, id, patch) => withStore(STORE_KV, 'readwrite', async store => {
+      const key = sdTeamCheckpointPrefix(scope) + id, row = await requestToPromise(store.get(key));
+      if (row) {
+        for (const field of Object.keys(patch)) {
+          if (Object.hasOwn(row.value, field) && JSON.stringify(row.value[field]) !== JSON.stringify(patch[field]))
+            throw new Error('A prepared team branch checkpoint cannot be changed.');
+        }
+        row.value = { ...row.value, ...patch };
+        store.put(row);
+        return row.value;
+      }
+    }),
     getStatDescriptionZip: async hash => {
       if (!/^[a-f0-9]{64}$/.test(hash || '')) return null;
       const row = await withStore(STORE_SD_ZIPS, 'readonly', store => requestToPromise(store.get(hash)));

@@ -369,9 +369,66 @@
         <div class="versionActions"><button v-if="cloudCanAccessAllLanguages && managedOnlineAvailable" class="primaryAction" @click="ctOpenUpload()" :disabled="managedVersionBusy || ctUploading || !!managedNextVersionBlockedReason" v-tooltip="managedNextVersionBlockedReason">Upload next version</button><button @click="openSettings()">Settings</button><span v-if="browserWorkTooltip" class="browserWorkStatus" role="img" :aria-label="browserWorkTooltip" v-tooltip="browserWorkTooltip"><span class="browserWorkSpinner" aria-hidden="true"></span></span></div>
       </header>
       <app-notice tone="error" v-if="managedVisibleError" class="versionError" role="alert">{{ managedVisibleError }}</app-notice>
+      <section v-if="sdTeamBranchVisible" class="versionPanel sdTeamPanel" aria-labelledby="sdTeamTitle">
+        <header class="versionPanelHeading">
+          <div><h2 id="sdTeamTitle">StatDescription · {{ sdTeamScope.language }}</h2><p>Team versions</p></div>
+          <div class="versionActions">
+            <button v-if="sdTeamWorkingNode" class="primaryAction" @click="sdTeamOpenVersion(sdTeamWorkingNode)" :disabled="sdTeamBusy || managedVersionBusy">Open working version</button>
+            <button :class="{ primaryAction: !sdTeamWorkingNode }" @click="$refs.sdTeamZipFile.click()" :disabled="sdTeamBusy || managedVersionBusy">Import next ZIP</button>
+            <input ref="sdTeamZipFile" type="file" accept=".zip,application/zip" hidden @change="sdTeamImportSelected">
+          </div>
+        </header>
+        <app-notice v-if="sdTeamActionError || sdTeamSyncError || sdTeamCatalogError || sdTeamReconcileError" tone="error" class="versionError" role="alert">{{ [sdTeamActionError, sdTeamSyncError, sdTeamCatalogError, sdTeamReconcileError].filter(Boolean).join('\n') }}</app-notice>
+        <div v-if="sdTeamGraphRows.length" class="sdTeamLanes" aria-label="Team and Origin source history"><section v-for="lane in sdTeamGraphLanes" :key="lane.title" :aria-label="lane.title">
+        <h3>{{ lane.title }}</h3>
+        <ol v-if="lane.nodes.length" class="sdTeamGraph">
+          <li v-for="node in lane.nodes" :key="node.id" :class="['sdTeamNode-' + node.type, {active:sdTeamNodeActive(node)}]">
+            <span class="sdTeamNodeDot" aria-hidden="true"></span>
+            <div class="sdTeamNodeInfo">
+              <div class="versionNameLine"><strong>{{ sdTeamNodeName(node) }}</strong><span v-if="node.type === 'pending'" class="versionBadge">On this device · awaiting team sync</span><span v-else-if="node.id === sdTeamBranch?.head?.id" class="versionBadge">Team head</span></div>
+              <small class="versionHash" :title="node.zipHash">{{ node.zipHash?.slice(0, 16) }}<template v-if="sdTeamNodeParent(node)"> · From {{ sdTeamNodeParent(node) }}</template><template v-if="sdTeamNodeActive(node)"> · Open here</template></small>
+              <details v-if="sdTeamEntryLink(node)?.linked || sdTeamEntryLink(node)?.choices?.length" class="sdTeamEntryLinks">
+                <summary>{{ sdTeamEntryLink(node).linked ? 'Origin link · ' + sdTeamEntryLink(node).linked.name : sdTeamEntryLink(node).requiresChoice ? 'Choose an Origin workspace' : 'Origin link is detached' }}</summary>
+                <div class="versionActions">
+                  <button v-if="sdTeamEntryLink(node).linked" @click="sdTeamOpenVersion(sdTeamEntryLink(node).linked)" :disabled="sdTeamBusy || managedVersionBusy">Open linked Origin</button>
+                  <button v-if="sdTeamEntryLink(node).linked && !sdTeamEntryLink(node).linked.sharedRoom && !sdTeamEntryLink(node).linked.ended" @click="sdTeamReconcile(undefined, false, node.id)" :disabled="sdTeamBusy || sdTeamReconcileBusy || !managedOnlineAvailable">Reconcile Saved work</button>
+                  <button v-if="sdTeamEntryLink(node).linked && !sdTeamEntryLink(node).linked.sharedRoom" @click="sdTeamLinkAction(node, 'detach')" :disabled="sdTeamBusy || !managedOnlineAvailable">Detach Origin</button>
+                  <button v-for="choice in sdTeamEntryLink(node).choices?.filter(item=>item.groupId!==sdTeamEntryLink(node).linked?.groupId)" :key="choice.groupId" @click="sdTeamLinkAction(node, 'link', choice.groupId)" :disabled="sdTeamBusy || !managedOnlineAvailable">Link {{ choice.name }}</button>
+                </div>
+              </details>
+            </div>
+            <button type="button" @click="sdTeamOpenVersion(node)" :disabled="sdTeamBusy || managedVersionBusy">Open</button>
+          </li>
+        </ol>
+        <p v-else class="versionMuted">{{ lane.title === 'Origin' ? 'No published source for this team.' : 'No team advance yet.' }}</p>
+        </section></div>
+        <p v-else class="versionMuted">Import a StatDescriptions ZIP to start this team’s source history.</p>
+        <div v-if="sdTeamSyncConflict" class="versionActions sdTeamLink"><button @click="sdTeamKeepLocal" :disabled="sdTeamBusy">Keep queued versions on this device</button><button v-if="sdTeamBranch?.head" @click="sdTeamOpenVersion(sdTeamBranch.head)" :disabled="sdTeamBusy">Open team head</button></div>
+        <p v-if="sdTeamBranch?.originAhead" class="versionMuted">Origin has a newer version. The team can continue from its current source.</p>
+        <div v-if="sdTeamReconcileResult" class="sdTeamLink" aria-live="polite">
+          <span v-if="sdTeamReconcileResult.copied">{{ sdTeamReconcileResult.copied }} Saved files reconciled.</span>
+          <span v-else-if="!sdTeamReconcileResult.conflicts.length">Saved work checked.</span>
+          <details v-if="sdTeamReconcileResult.conflicts.length"><summary>{{ sdTeamReconcileResult.conflicts.length }} files need review</summary><ul><li v-for="file in sdTeamReconcileResult.conflicts" :key="file.filepath">{{ file.filepath }}<small v-if="file.reason">{{ file.reason }}</small><div class="versionActions"><button v-if="sdTeamReconcileResult.entry" @click="sdTeamOpenVersion(sdTeamReconcileResult.entry,file.filepath)" :disabled="sdTeamBusy">Open team file</button><button v-if="sdTeamReconcileResult.linked" @click="sdTeamOpenVersion(sdTeamReconcileResult.linked,file.filepath)" :disabled="sdTeamBusy">Open Origin file</button></div></li></ul></details>
+          <button v-if="sdTeamReconcileResult.nextCursor" @click="sdTeamReconcile(sdTeamReconcileResult.nextCursor,false,sdTeamReconcileResult.entry?.id)" :disabled="sdTeamBusy || sdTeamReconcileBusy">Check more files</button>
+        </div>
+        <details v-if="sdTeamSharedOriginalsVisible" class="versionOfflineDisclosure" @toggle="$event.target.open && sdTeamLoadOriginals()">
+          <summary>Shared original ZIPs</summary>
+          <div class="versionOfflineDisclosureBody sdTeamOriginals">
+            <app-notice v-if="sdTeamOriginalsError" tone="error" role="alert">{{ sdTeamOriginalsError }}</app-notice>
+            <p v-if="sdTeamOriginalsLoaded && !sdTeamOriginals.length" class="versionMuted">No shared originals are available for this game.</p>
+            <ul v-if="sdTeamOriginals.length"><li v-for="original in sdTeamOriginals" :key="original.zipHash"><span><strong>{{ original.releaseName || original.filename || 'StatDescriptions.zip' }}</strong><small class="versionHash" :title="original.zipHash">{{ original.zipHash.slice(0, 16) }} · {{ sdTeamOriginalDetails(original) }}</small></span><button type="button" @click="sdTeamImportNext(null, original)" :disabled="sdTeamBusy || managedVersionBusy || original.zipHash === sdTeamWorkingNode?.zipHash">Import from shared ZIP</button></li></ul>
+            <button v-if="sdTeamOriginalsCursor !== null" @click="sdTeamLoadOriginals(true)" :disabled="sdTeamOriginalsBusy">Show more originals</button>
+          </div>
+        </details>
+        <details v-if="sdTeamEarlierLocalVersions.length" class="versionOfflineDisclosure">
+          <summary>Earlier workspace versions</summary>
+          <div class="versionOfflineDisclosureBody sdTeamOriginals"><ul><li v-for="version in sdTeamEarlierLocalVersions" :key="version.sourceHash"><span><strong>{{ version.name || 'StatDescriptions.zip' }}</strong><small class="versionHash" :title="version.sourceHash">{{ version.sourceHash.slice(0, 16) }}</small></span><div class="versionActions"><button type="button" @click="sdTeamOpenVersion({baselineId:version.sourceHash})" :disabled="sdTeamBusy || managedVersionBusy">Open</button><button type="button" @click="sdTeamUseLocalVersion(version)" :disabled="sdTeamBusy || managedVersionBusy">Use as team source</button></div></li></ul></div>
+        </details>
+        <div v-if="sdTeamRestoreSource" class="sdTeamLink"><label>Choose the original ZIP for {{ sdTeamRestoreSource.version.name || sdTeamRestoreSource.version.sourceHash.slice(0, 16) }} <input type="file" accept=".zip,application/zip" @change="sdTeamRestoreOriginalSelected" :disabled="sdTeamBusy"></label><button type="button" @click="sdTeamRestoreSource = null">Cancel</button></div>
+      </section>
       <div class="versionChooserColumns">
-        <section class="versionPanel onlineVersions" aria-label="Online versions">
-          <header class="versionPanelHeading"><h2>Online</h2><label v-if="managedManagerAccess"><input type="checkbox" v-model="managedShowWithdrawn"> Show withdrawn</label></header>
+        <section class="versionPanel onlineVersions" :aria-label="sdTeamBranchVisible ? 'Origin versions' : 'Online versions'">
+          <header class="versionPanelHeading"><h2>{{ sdTeamBranchVisible ? 'Origin' : 'Online' }}</h2><label v-if="managedManagerAccess"><input type="checkbox" v-model="managedShowWithdrawn"> Show withdrawn</label></header>
           <template v-if="!cloudSignedIn">
             <p class="versionMuted">Sign in to select manager-published versions. Your offline workspace remains available.</p>
             <button class="primaryAction" @click="cloudLogin" :disabled="cloudBusy">Sign in with Google</button>
@@ -419,16 +476,16 @@
           <p v-else-if="managedOnlineAvailable && managedCatalogLoaded && !managedVisibleVersions.length" class="versionMuted">No source versions have been published for this game.</p>
           </template>
         </section>
-        <section class="versionPanel offlineVersion" aria-label="Offline workspace">
-          <h2>Offline</h2>
-          <div class="versionOfflineTabs" role="tablist" aria-label="Offline content mode" @keydown="managedOfflineModeKeydown">
+        <section class="versionPanel offlineVersion" :aria-label="sdTeamBranchVisible ? 'Local workbooks' : 'Offline workspace'">
+          <h2>{{ sdTeamBranchVisible ? 'Local workbooks' : 'Offline' }}</h2>
+          <div v-if="!sdTeamBranchVisible" class="versionOfflineTabs" role="tablist" aria-label="Offline content mode" @keydown="managedOfflineModeKeydown">
             <button id="offlineSdTab" type="button" role="tab" aria-controls="offlineSdPanel" :aria-selected="managedOfflineContentMode === 'statdescription'" :tabindex="managedOfflineContentMode === 'statdescription' ? 0 : -1" @click="managedOfflineContentMode = 'statdescription'">StatDescription</button>
             <button id="offlineCtTab" type="button" role="tab" aria-controls="offlineCtPanel" :aria-selected="managedOfflineContentMode === 'clienttext'" :tabindex="managedOfflineContentMode === 'clienttext' ? 0 : -1" @click="managedOfflineContentMode = 'clienttext'">ClientText</button>
           </div>
           <app-notice v-if="ctLocalIssue" tone="error" role="alert">{{ ctLocalIssue }}</app-notice>
           <app-notice v-if="ctError" tone="error" role="alert">{{ ctError }}</app-notice>
           <app-notice v-for="draft in ctLocalEmergencyDrafts.filter(draft=>draft.scope.accountId === ctRequestScope().accountId &amp;&amp; draft.scope.game === gameVersion &amp;&amp; draft.scope.branchId === (branchId || 'default'))" :key="draft.id" tone="error" role="alert">{{ draft.pending ? 'Checkpoint pending' : 'Draft was not stored' }} for {{ draft.scope.language }} · {{ draft.scope.groupId.slice(-8) }}. Keep this tab open. <button @click="ctDownloadEmergencyDraft(draft)">Download unstored draft</button></app-notice>
-          <div id="offlineSdPanel" v-show="managedOfflineContentMode === 'statdescription'" role="tabpanel" aria-labelledby="offlineSdTab" tabindex="0">
+          <div v-if="!sdTeamBranchVisible" id="offlineSdPanel" v-show="managedOfflineContentMode === 'statdescription'" role="tabpanel" aria-labelledby="offlineSdTab" tabindex="0">
           <template v-if="managedOfflineVersion"><label for="offlineVersionName">Version name</label><div class="versionNameField"><input id="offlineVersionName" v-model="offlineVersionName" @keydown.enter.prevent="saveOfflineVersionName" placeholder="Name this local version"><button @click="saveOfflineVersionName">Save name</button></div><p class="versionHash" tabindex="0" v-tooltip="'Source hash: ' + managedOfflineVersion.sourceHash" :aria-label="'Source hash: ' + managedOfflineVersion.sourceHash">{{ managedOfflineVersion.sourceHash?.slice(0, 16) }}</p><button class="primaryAction" @click="continueOfflineVersion" :disabled="managedVersionBusy">Continue offline workspace</button></template>
           <p v-else-if="managedLocalVersionsLoading && !managedLocalVersionsLoaded" class="versionLoading versionMuted" role="status"><span class="browserWorkSpinner" aria-hidden="true"></span> Loading offline workspace…</p>
           <template v-else-if="managedOfflineAssociatedVersion">
@@ -442,7 +499,7 @@
           </template>
           <div v-if="managedOfflineVersion" class="versionActions"><button @click="managedImportOffline(false)" :disabled="managedVersionBusy || !managedLocalVersionsLoaded">Import next/update</button><button @click="managedImportOffline(true)" :disabled="managedVersionBusy">Import translated</button></div>
           </div>
-          <div id="offlineCtPanel" v-show="managedOfflineContentMode === 'clienttext'" role="tabpanel" aria-labelledby="offlineCtTab" tabindex="0">
+          <div id="offlineCtPanel" v-show="sdTeamBranchVisible || managedOfflineContentMode === 'clienttext'" :role="sdTeamBranchVisible ? undefined : 'tabpanel'" :aria-labelledby="sdTeamBranchVisible ? undefined : 'offlineCtTab'" tabindex="0">
             <p class="versionMuted versionOfflineIntro">Edit XLSX/XLSM workbooks locally. Saved work and drafts stay in this browser for the selected account and game. Download recovery backups regularly.</p>
             <button :class="{ primaryAction: !ctPrivateLocalWorkspaces.length }" @click="ctOpenOfflineTest" :disabled="managedVersionBusy || ctBusy || ctUploading || ctLocalBackupBusy">Open new workbook…</button>
             <p class="versionMuted versionWorkbookDropHint">Or drop workbook files here.</p>
@@ -555,6 +612,15 @@
         <template v-else>
           <div class="ctUploadSelectors">
             <label class="ctUploadField">Select files (multiple allowed)<input type="file" multiple accept=".zip,.xlsx,.xlsm,.txt" @change="ctChooseFiles" :disabled="ctUploading"></label>
+            <details v-if="!ctUploadLocal && sdTeamSharedOriginalsVisible" class="versionOfflineDisclosure" @toggle="$event.target.open && sdTeamLoadOriginals()">
+              <summary>Use a shared StatDescription original</summary>
+              <div class="versionOfflineDisclosureBody sdTeamOriginals">
+                <app-notice v-if="sdTeamOriginalsError" tone="error" role="alert">{{ sdTeamOriginalsError }}</app-notice>
+                <p v-if="sdTeamOriginalsLoaded && !sdTeamOriginals.length" class="versionMuted">No shared originals are available for this game.</p>
+                <ul v-if="sdTeamOriginals.length"><li v-for="original in sdTeamOriginals" :key="original.zipHash"><span><strong>{{ original.releaseName || original.filename || 'StatDescriptions.zip' }}</strong><small class="versionHash" :title="original.zipHash">{{ original.zipHash.slice(0, 16) }} · {{ sdTeamOriginalDetails(original) }}</small></span><button type="button" @click="ctAddSharedStatDescriptionOriginal(original)" :disabled="ctUploading">Use this ZIP</button></li></ul>
+                <button v-if="sdTeamOriginalsCursor !== null" @click="sdTeamLoadOriginals(true)" :disabled="sdTeamOriginalsBusy || ctUploading">Show more originals</button>
+              </div>
+            </details>
             <label class="ctUploadField">Select a folder<input type="file" multiple webkitdirectory @change="ctChooseFiles" :disabled="ctUploading"></label>
           </div>
           <table v-if="ctUploadFiles.length" class="ctUploadFiles"><thead><tr><th>Original file</th><th>Team</th><th>Role</th></tr></thead><tbody><tr v-for="(candidate,index) in ctUploadFiles" :key="index"><td>{{ candidate.file.webkitRelativePath || candidate.file.name }}</td><template v-if="!candidate.file.name.toLowerCase().endsWith('.zip')"><td><select v-model="candidate.language" :disabled="ctUploading || ctPrepared.length"><option value="">Select team…</option><option v-for="team in ctTeamOptions" :key="team">{{ team }}</option></select></td><td><select v-model="candidate.role" :disabled="ctUploading || ctPrepared.length"><option value="normal">Normal</option><option value="gender">Gender</option></select></td></template><td v-else colspan="2">StatDescription</td></tr></tbody></table>
@@ -1690,6 +1756,7 @@
   <script src="entryAlignmentUi.js"></script>
   <script src="managedCollectionExports.js"></script>
   <script src="managedVersions.js"></script>
+  <script src="sdTeamBranches.js"></script>
   <script src="clientTextFormatting.js"></script>
   <script src="clientTextComparisons.js"></script>
   <script src="privateAssets.js"></script>
@@ -1737,7 +1804,8 @@
     </app-notice>
   </script>
   <script type="text/x-template" id="workspace-alerts-template">
-    <div v-if="$root.localSaveError || $root.dictionaryWorkerError || ($root.cloudStorageError && !$root.dictionaryPreparationOwnsStorageError) || $root.inlineDraftError || $root.deferredDraftSaveError || ($root.ctMtlVisible && !$root.ctActive && $root.sdMtlError)" class="workspaceAlerts" role="group" aria-label="Workspace notices">
+    <div v-if="$root.localSaveError || $root.dictionaryWorkerError || ($root.cloudStorageError && !$root.dictionaryPreparationOwnsStorageError) || $root.inlineDraftError || $root.deferredDraftSaveError || ($root.ctMtlVisible && !$root.ctActive && $root.sdMtlError) || (!$root.versionChooserVisible && !$root.ctActive && ($root.sdTeamSyncError || $root.sdTeamReconcileError))" class="workspaceAlerts" role="group" aria-label="Workspace notices">
+      <app-notice v-if="!$root.versionChooserVisible && !$root.ctActive && ($root.sdTeamSyncError || $root.sdTeamReconcileError)" tone="warning" role="status">{{ [$root.sdTeamSyncError, $root.sdTeamReconcileError].filter(Boolean).join('\n') }}<template #actions><button @click="$root.showVersionChooser()">Open source versions</button></template></app-notice>
       <app-notice v-if="$root.localSaveError" dismiss-key="localSaveError" tone="error" class="cloudStorageError" role="alert">
         <span>Could not finish saving your translations. Your edits remain in this tab. {{ $root.localSaveError }}</span>
         <template #actions><button @click="$root.retryPendingSaves">Retry saving</button><button @click="$root.downloadPendingSaves">Download pending edits</button></template>

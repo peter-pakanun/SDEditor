@@ -1513,13 +1513,14 @@
         return next;
       });
     }
-    async function importScope(scope, source, workspace, revisions, assets, metadataRows = []) {
+    async function importScope(scope, source, workspace, revisions, assets, metadataRows = [], branchImport) {
       if (!Array.isArray(source)) throw new TypeError('A source import requires its immutable files.');
       W.initializeWorkspace(workspace, { source, sourceHash: scope.sourceHash, game: scope.game, branchId: scope.branchId, accountId: scope.accountId });
       W.pruneWorkspaceStatus(workspace);
       const id = scopeKey(scope), baseId = baselineKey(scope), originals = new Map(source.map(file => [file.filepath, file]));
       let committed;
-      await transaction([stores.meta, stores.baseline, stores.assets, stores.files, stores.records, stores.migration, 'kv', revisionStoreName(scope.game)], 'readwrite', async tx => {
+      await transaction([stores.meta, stores.baseline, stores.assets, stores.files, stores.records, stores.migration, 'kv', revisionStoreName(scope.game),
+        ...(branchImport?.zipRows.length ? [branchImport.zipStore] : [])], 'readwrite', async tx => {
         // Existing identities are immutable. An import may update staged facts,
         // but cannot change an accepted source under the same identity.
         const previousAssets = await get(tx, stores.assets, baseId);
@@ -1546,6 +1547,11 @@
         if (!same(previousAssets, retained)) tx.objectStore(stores.assets).put({ key: baseId, scope: baseId, value: retained });
         for (const revision of revisions || []) tx.objectStore(revisionStoreName(scope.game)).add(scopedRevision(revision, scope));
         for (const item of metadataRows) tx.objectStore('kv').put(item);
+        if (branchImport) {
+          const kv = tx.objectStore('kv');
+          if (!await request(kv.get(branchImport.checkpoint.key))) kv.put(branchImport.checkpoint);
+          for (const zip of branchImport.zipRows) tx.objectStore(branchImport.zipStore).put(zip);
+        }
         tx.objectStore(stores.migration).put({ key: id, scope: id, value: { state: 'ready' } });
         tx.objectStore(stores.migration).delete(carryRepairKey(scope));
         tx.objectStore(stores.migration).delete(invalidRepairKey(scope));

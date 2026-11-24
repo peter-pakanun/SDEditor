@@ -118,12 +118,21 @@
                 const intent = record.englishIntent;
                 if (valid && intent.englishHash === facts.englishHash && intent.metadataHash === facts.metadataHash && await hash(target) === facts.englishHash
                     && (!incoming.some(text => !codec.isBlankTranslation(text)) || same(incoming, target))) action = 'carry';
-            } else if (valid && previous.englishHash === facts.englishHash && codec.translationIssues(incoming, facts.entryCount).valid) {
-                action = previous.metadataHash && previous.metadataHash === facts.metadataHash && same(incoming, target) ? 'baseline' : 'carry';
+            } else if (valid && previous.englishHash === facts.englishHash) {
+                if (codec.translationIssues(incoming, facts.entryCount).valid) {
+                    if (!options.blankOriginalCarry || same(incoming, target)
+                        || previous.originalHashes?.[language] === facts.originalHashes[language]) {
+                        action = previous.metadataHash && previous.metadataHash === facts.metadataHash && same(incoming, target) ? 'baseline' : 'carry';
+                    }
+                } else if (options.blankOriginalCarry && previous.metadataHash === facts.metadataHash
+                    && (!facts.originalLanguages.includes(language) || incoming.length === facts.entryCount)
+                    && incoming.every(text => codec.isBlankTranslation(text))) {
+                    action = 'carry-blank';
+                }
             }
         }
         check(options);
-        return { recordId: record.id, action, nextFacts: facts, ...(['carry', 'baseline'].includes(action) ? { originalTranslations: [...(file.translations[language] || [])] } : {}) };
+        return { recordId: record.id, action, nextFacts: facts, ...(['carry', 'carry-blank', 'baseline'].includes(action) ? { originalTranslations: [...(file.translations[language] || [])] } : {}) };
     }
 
     async function buildDispositions(snapshot, readPage, prepared, options = {}) {

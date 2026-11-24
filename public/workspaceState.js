@@ -289,7 +289,7 @@
   const sameSource = (left, right) => !!left && !!right && equal(snapshot(left, 'English', []), snapshot(right, 'English', []));
   const sourceMetadata = desc => ({ variables: copy(desc?.variables || []), remarks: copy(desc?.remarks || []),
     stats: copy(desc?.stats || []), name: String(desc?.name || '') });
-  function classifySourceCarry(previous, current, language, translations, { englishIntent } = {}) {
+  function classifySourceCarry(previous, current, language, translations, { englishIntent, blankOriginalCarry = false } = {}) {
     if (!current) return { action: 'remove', reason: 'File removed from source' };
     if (codec().validEnglishIntent(englishIntent) && !sameSource(previous, current))
       return { action: 'drop', reason: 'Use English source or entry metadata changed' };
@@ -303,8 +303,16 @@
     if (!previous || !equal(lines(previous.translations?.English), lines(current.translations?.English)))
       return { action: 'drop', reason: 'English source changed' };
     const carried = lines(translations), baseline = lines(current.translations?.[language]);
-    if (carried.some(text => text.trim()) && !complete(baseline, current.translations?.English?.length || 0))
+    const entryCount = current.translations?.English?.length || 0;
+    if (blankOriginalCarry && sameSource(previous, current) && complete(carried, entryCount)
+      && (!own(current.translations, language) || baseline.length === entryCount)
+      && baseline.every(text => codec().isBlankTranslation(text))) {
+      return { action: 'carry', reason: 'Translation carried to unchanged source with a blank original' };
+    }
+    if (carried.some(text => text.trim()) && !complete(baseline, entryCount))
       return { action: 'drop', reason: 'Translation missing from new source' };
+    if (blankOriginalCarry && !equal(baseline, carried) && !equal(baseline, lines(previous.translations?.[language])))
+      return { action: 'drop', reason: 'Incoming translation differs from previous work' };
     const before = sourceMetadata(previous), after = sourceMetadata(current);
     if (!equal(before, after)) return { action: 'carry', reason: 'Source metadata corrected', metadataCorrection: { before, after } };
     return sameBaselineTranslation(current, language, carried) ? { action: 'baseline', reason: 'Translation included in new source' }
@@ -857,7 +865,8 @@
       if (!next.has(filepath)) { delete entries[filepath]; continue; }
       const desc = old.get(filepath) || (workspace.descs || []).find(desc => desc.filepath === filepath);
       if (archiveInvalidTranslation(workspace, entry, language, { filepath, source: desc })) { delete entries[filepath]; continue; }
-      const decision = classifySourceCarry(desc, next.get(filepath), language, entry.translations, { englishIntent: entry.englishIntent });
+      const decision = classifySourceCarry(desc, next.get(filepath), language, entry.translations,
+        { englishIntent: entry.englishIntent, blankOriginalCarry: options.blankOriginalCarry });
       if (decision.action === 'carry') {
         entry.sourceCarry = { fromSourceHash: entry.sourceHash || options.previousSourceHash || workspace.sourceHash,
           toSourceHash: options.sourceHash, fromSavedAt: entry.savedAt,

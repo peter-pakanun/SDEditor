@@ -123,5 +123,35 @@
 .versionStatusName:focus-visible, .versionStatusIdentity [tabindex="0"]:focus-visible, .editorVersionContext [tabindex="0"]:focus-visible, .versionDeadline:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; }
 .versionDeadline { color: var(--ui-muted); font-size: 12px; line-height: 1.4; white-space: nowrap; border-radius: 3px; }
 .editorVersionContext { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; margin-left: 12px; vertical-align: middle; font-size: 12px; line-height: 1.4; font-weight: 400; }
+.sdTeamPanel { margin: 20px 0; }
+.sdTeamPanel .versionPanelHeading p { margin-bottom: 0; }
+.sdTeamLanes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr); gap: 14px; }
+.sdTeamLanes > section { min-width: 0; padding: 10px; border: 1px solid var(--ui-border); border-radius: 8px; }
+.sdTeamLanes h3 { margin: 3px 12px 7px; font-size: 13px; color: var(--ui-muted); }
+.sdTeamLanes > section > p { margin: 6px 12px; }
+.sdTeamGraph { list-style: none; padding: 0; margin: 0; }
+.sdTeamGraph > li { position: relative; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 13px; min-height: 53px; padding: 8px 12px; }
+.sdTeamGraph > li:not(.sdTeamNode-origin)::before { content: ''; position: absolute; inset: 0 auto 0 20px; width: 2px; background: var(--ui-border); }
+.sdTeamGraph > li:first-child::before { top: 50%; }
+.sdTeamGraph > li:last-child::before { bottom: 50%; }
+.sdTeamGraph > li.active { background: var(--ui-accent-soft); border-radius: 6px; }
+.sdTeamNodeDot { position: relative; width: 12px; height: 12px; margin: auto; border: 2px solid var(--ui-accent); border-radius: 50%; background: var(--color-element); }
+.sdTeamNode-team .sdTeamNodeDot { background: var(--ui-accent); }
+.sdTeamNode-pending .sdTeamNodeDot { border-style: dashed; }
+.sdTeamNode-origin .sdTeamNodeDot { border-radius: 3px; border-color: var(--ui-muted); }
+.sdTeamNodeInfo { min-width: 0; overflow-wrap: anywhere; }
+.sdTeamNodeInfo small, .sdTeamOriginals small, .sdTeamLink li small { display: block; margin-top: 4px; }
+.sdTeamEntryLinks { margin-top: 5px; font-size: 12px; color: var(--ui-muted); }
+.sdTeamEntryLinks summary { width: fit-content; cursor: pointer; }
+.sdTeamEntryLinks .versionActions { margin-top: 7px; }
+.sdTeamLink { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 10px; margin-top: 12px; padding: 10px 12px; border: 1px solid var(--ui-border); border-radius: 6px; font-size: 13px; }
+.sdTeamLink > span { align-self: center; }
+.sdTeamLink li { overflow-wrap: anywhere; }
+.sdTeamOriginals { padding-bottom: 12px; }
+.sdTeamOriginals ul { list-style: none; margin: 0 0 12px; padding: 0; max-height: 320px; overflow: auto; }
+.sdTeamOriginals li { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 0; border-bottom: 1px solid var(--ui-border); }
+.sdTeamOriginals li > span { min-width: 0; overflow-wrap: anywhere; }
+.sdTeamOriginals li button { flex: none; }
 @media (max-width: 1050px) { .versionChooserColumns { grid-template-columns: minmax(0, 1fr); } .versionCatalog { padding: 18px; } .versionCatalogHeader, .versionPanelHeading { flex-wrap: wrap; } }
 @media (max-width: 1400px) { .versionSecondaryActions { display: none; } .versionActionMenu { display: block; } .versionRowActions { align-items: flex-start; min-width: 0; } }
+@media (max-width: 800px) { .sdTeamLanes { grid-template-columns: minmax(0, 1fr); } }

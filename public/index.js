@@ -167,7 +167,7 @@ function formatPageRange(total, page, pageSize) {
 }
 
   const config = Vue.defineComponent({
-  mixins: [window.PrivateMediaUI?.mixin || {}, window.PreviewFonts?.mixin || {}, window.ClientTextSkillCardUI?.mixin || {}, window.KeywordPopups?.mixin || {}, window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.SDRecall?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.ClientTextUI?.mixin || {}, window.ClientTextFieldFill?.mixin || {}, window.ClientTextResourceSync?.mixin || {}, window.ClientTextTmUI?.mixin || {}, window.ClientTextMtlUI?.mixin || {}, window.ClientTextMtlSettingsUI?.mixin || {}, window.ClientTextToneNotesUI?.mixin || {}, window.ClientTextMtlDebug?.mixin || {}, window.MtlConnectionUI?.mixin || {}, window.MtlLimitsUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}, window.SDEditorTools?.mixin || {}],
+  mixins: [window.PrivateMediaUI?.mixin || {}, window.PreviewFonts?.mixin || {}, window.ClientTextSkillCardUI?.mixin || {}, window.KeywordPopups?.mixin || {}, window.WorkspaceInitialization?.mixin || {}, window.CloudUI.mixin, window.CloudHistoryUI?.mixin || {}, window.CollaborationUI?.mixin || {}, window.CollaborationIntegration?.mixin || {}, window.SDBaselineUI?.mixin || {}, window.SDRecall?.mixin || {}, window.CommentsUI?.mixin || {}, window.EditorLookup?.mixin || {}, window.InlineEditor?.mixin || {}, window.EntryAlignmentUI?.mixin || {}, window.ManagedVersions?.mixin || {}, window.SDTeamBranches?.mixin || {}, window.ClientTextUI?.mixin || {}, window.ClientTextFieldFill?.mixin || {}, window.ClientTextResourceSync?.mixin || {}, window.ClientTextTmUI?.mixin || {}, window.ClientTextMtlUI?.mixin || {}, window.ClientTextMtlSettingsUI?.mixin || {}, window.ClientTextToneNotesUI?.mixin || {}, window.ClientTextMtlDebug?.mixin || {}, window.MtlConnectionUI?.mixin || {}, window.MtlLimitsUI?.mixin || {}, window.DictionaryWorkerUI?.mixin || {}, window.TranslationMemoryUI?.mixin || {}, window.EditorSession?.mixin || {}, window.SDEditorTools?.mixin || {}],
   data() {
     return {
       offlineStoreReady: false,
@@ -5562,7 +5562,7 @@ function formatPageRange(total, page, pageSize) {
       const groups = this.duplicateLangImportWarning?.groups || [];
       return groups.filter(group => !group.selectedOptionId).length;
     },
-    startDuplicateLangResolution(parsed, file, { mode, importMode, isPostMigrationImport, rawSource, identity, generation } = {}) {
+    startDuplicateLangResolution(parsed, file, { mode, importMode, isPostMigrationImport, rawSource, identity, generation, teamImport } = {}) {
       const groups = this.collectDuplicateLangGroups(parsed);
       if (groups.length === 0) return false;
       this.loadingProgress = this.sourceLoaded ? 100 : 0;
@@ -5573,6 +5573,7 @@ function formatPageRange(total, page, pageSize) {
         rawSource: rawSource || this.toPlainForStorage(parsed),
         identity,
         generation,
+        teamImport,
         context: this.captureCollaborationContext?.(),
         workspace: this.localDescs,
         source: this.descs,
@@ -5627,7 +5628,7 @@ function formatPageRange(total, page, pageSize) {
       if (pending.mode === 'update') {
         await this.importUpdateZipFile(pending.file, pending.parsed, {
           isPostMigrationImport: pending.isPostMigrationImport, rawSource: pending.rawSource,
-          identity: pending.identity, decisions, generation: pending.generation
+          identity: pending.identity, decisions, generation: pending.generation, teamImport: pending.teamImport
         });
         return;
       }
@@ -5774,6 +5775,11 @@ function formatPageRange(total, page, pageSize) {
         }
         if (!parseCurrent()) return;
         const detectedGameVersion = this.detectGameVersionFromZip(zip);
+        if (options.teamImport && detectedGameVersion && detectedGameVersion !== this.gameVersion) {
+          this.loadingProgress = this.sourceLoaded ? 100 : 0;
+          this.appAlert('This ZIP belongs to a different game. Import it from that game’s team branch.');
+          return;
+        }
         if (txtFileCount >= ZIP_TXT_FILE_COUNT_THRESHOLD && detectedGameVersion && detectedGameVersion !== this.gameVersion) {
           const detectedLabel = this.formatGameVersion(detectedGameVersion);
           const currentLabel = this.formatGameVersion(this.gameVersion);
@@ -5833,7 +5839,7 @@ function formatPageRange(total, page, pageSize) {
           this.importBaselineHashing = true;
           identity = await this.readImportZipIdentity(file, zip);
           if (!parseCurrent()) return;
-          acceptedArchive = await prepare('Checking published import choices', () => this.lookupImportArchive(identity));
+          acceptedArchive ||= await prepare('Checking published import choices', () => this.lookupImportArchive(identity));
           if (!parseCurrent()) return;
           if (acceptedArchive) parsed = await this.sourceWithImportDecisions(rawSource, acceptedArchive.decisions);
         } catch (error) {
@@ -5844,7 +5850,7 @@ function formatPageRange(total, page, pageSize) {
         } finally { if (importCurrent()) this.importBaselineHashing = false; }
         if (!parseCurrent()) return;
         if (!acceptedArchive && this.startDuplicateLangResolution(parsed, file, { mode: 'update', importMode: 'Import Next Version',
-          isPostMigrationImport, rawSource, identity, generation })) return;
+          isPostMigrationImport, rawSource, identity, generation, teamImport: options.teamImport })) return;
       }
       let nextSource = parsed.filter(Boolean);
       if (!nextSource.length) { this.loadingProgress = this.sourceLoaded ? 100 : 0; this.appAlert('No valid source descriptions found.'); return; }
@@ -5890,12 +5896,18 @@ function formatPageRange(total, page, pageSize) {
       }
       const carryForward = this.beginWorkspaceInitializationTask?.('Carrying translations and preserved copies into the new source', options.initialization);
       const advancesSource = sourceHash !== this.sourceIdentity;
+      const branchCheckpoint = advancesSource && this.sdTeamCheckpointForImport?.(importedBaseline?.archive, file, options.teamImport);
+      if (options.teamImport && advancesSource && !branchCheckpoint) {
+        this.loadingProgress = this.sourceLoaded ? 100 : 0;
+        this.appAlert('The team source or account changed during import. Choose the next source again.');
+        return;
+      }
       let nextWorkspace = this.toPlainForStorage(this.localDescs);
       nextWorkspace.descs ||= []; nextWorkspace.status ||= {};
       const baselineSource = importedBaseline?.source || this.toPlainForStorage(nextSource);
       const prevSource = this.workspaceSource();
       if (advancesSource) window.WorkspaceState.upgradeSource(nextWorkspace, { previousSource: prevSource, source: baselineSource,
-        previousSourceHash: this.sourceIdentity, sourceHash, game });
+        previousSourceHash: this.sourceIdentity, sourceHash, game, blankOriginalCarry: Boolean(branchCheckpoint) });
       if (advancesSource) {
         nextWorkspace.workspaceOrigin = 'local';
         // Old groups retain their own generations and retry evidence. New local
@@ -5988,7 +6000,7 @@ function formatPageRange(total, page, pageSize) {
 
       this.finishWorkspaceInitializationTask?.(carryForward);
       try {
-        const committedWorkspace = await prepare('Saving source, translations and recovery history', () => window.OfflineStore.saveSourceWorkspaceWithRevisions(this.toPlainForStorage(baselineSource), nextWorkspace, sourceRevisions, game, importedBaseline));
+        const committedWorkspace = await prepare('Saving source, translations and recovery history', () => window.OfflineStore.saveSourceWorkspaceWithRevisions(this.toPlainForStorage(baselineSource), nextWorkspace, sourceRevisions, game, importedBaseline, branchCheckpoint || undefined));
         if (committedWorkspace?.sourceHash === sourceHash && committedWorkspace?.stagedVersion >= 1) nextWorkspace = committedWorkspace;
       } catch (error) {
         if (!workspaceCurrent()) return;
@@ -6012,6 +6024,7 @@ function formatPageRange(total, page, pageSize) {
       const summaries = [advancesSource && this.getSourceImportCarrySummary(importWorkspace, prevSource, baselineSource, importContext?.source || importWorkspace.sourceHash),
         this.getImportRepairSummary(parsed)].filter(Boolean);
       if (summaries.length) this.appAlert('Source import completed.\n\n' + summaries.join('\n\n'));
+      if (branchCheckpoint) this.sdTeamCheckpointCommitted?.(branchCheckpoint);
     },
 
     async importTranslatedZipFile(file, resolvedParsed = null) {

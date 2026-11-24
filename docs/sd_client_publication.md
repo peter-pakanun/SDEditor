@@ -1,7 +1,8 @@
 # Client-prepared StatDescription publication and recall
 
 Implemented in browser/API source, not confirmation of hosted deployment.
-Deploy API schema **33** before the companion frontend. Retain the pre-upgrade
+Deploy API schema **34** before the companion frontend for shared originals and
+team branches. Retain the pre-upgrade
 database/configuration backup and required artifacts. Do not clear browser data.
 
 ## Publication and source authority

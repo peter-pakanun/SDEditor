@@ -79,6 +79,35 @@ test('existing recovery generations remain frozen and only authoritative filepat
     }
 });
 
+test('new SD carry disposition accepts an absent or exactly sized blank target after an exact source match', async () => {
+    const { SDClientPublication } = await import(pathToFileURL(path.join(owner, 'sd-client-publication.js')).href);
+    const Workspace = require('../public/workspaceState.js');
+    const previous = file(), sourceFacts = await Publication.sourceFacts(previous);
+    const target = ['Authored target'];
+    const record = { id: 'saved', kind: 'saved', filepath: previous.filepath, translations: target, sourceFacts };
+    const exactCases = [file({ translations: { English: ['Fire damage'] } }),
+        file({ translations: { English: ['Fire damage'], Thai: [' '] } })];
+    for (const next of exactCases) {
+        const built = await prepared([next]);
+        const decision = await Publication.disposition(record, 'Thai', built, { blankOriginalCarry: true });
+        assert.equal(decision.action, 'carry-blank');
+        assert.equal(SDClientPublication.prototype.disposition(record, 'Thai', decision).action, 'carry');
+        assert.equal((await Publication.disposition(record, 'Thai', built)).action, 'drop');
+        assert.equal(Workspace.classifySourceCarry(previous, next, 'Thai', target, { blankOriginalCarry: true }).action, 'carry');
+    }
+    const reviewCases = [file({ name: 'corrected', translations: { English: ['Fire damage'] } }),
+        file({ translations: { English: ['Fire damage'], Thai: ['', ''] } }),
+        file({ translations: { English: ['Fire damage'], Thai: ['Competing original'] } })];
+    for (const next of reviewCases) {
+        const decision = await Publication.disposition(record, 'Thai', await prepared([next]), { blankOriginalCarry: true });
+        assert.equal(decision.action, 'drop');
+        assert.equal(Workspace.classifySourceCarry(previous, next, 'Thai', target, { blankOriginalCarry: true }).action, 'drop');
+        assert.throws(() => SDClientPublication.prototype.disposition(record, 'Thai', {
+            ...decision, action: 'carry-blank', originalTranslations: next.translations.Thai || [],
+        }), error => error.code === 'SD_DISPOSITION_INVALID');
+    }
+});
+
 test('frozen records are paged and sent in bounded deterministic chunks without historical ZIP reads or client target replacements',async()=>{
     const desc=file(),built=await prepared([desc]),facts=await Publication.sourceFacts(desc),records=Array.from({length:205},(_,index)=>({id:'saved-'+index,kind:'saved',filepath:desc.filepath,translations:['Saved '+index],sourceFacts:facts})),
         snapshot={id:'frozen',recordCount:records.length,teams:[{language:'Thai',recordCount:records.length}]},calls=[],read=async(language,cursor)=>{

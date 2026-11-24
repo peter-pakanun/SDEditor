@@ -3454,6 +3454,23 @@
                 this[list] = raw(this.ctUploadTest ? [...this[list], ...selected] : selected);
                 return true;
             },
+            async ctAddSharedStatDescriptionOriginal(original) {
+                if (this.ctUploading || !this.managedManagerAccess || original?.game !== this.gameVersion) return;
+                const key = this.managedCatalogScope, run = this._ctUploadOpenRun;
+                try {
+                    if (!original.archive) {
+                        ({ original } = await this._cloud.request('/v1/sd-originals/' + original.game + '/' + original.zipHash));
+                    }
+                    const blob = await this.sdTeamGetOriginalZip(original);
+                    if (!blob || key !== this.managedCatalogScope || run !== this._ctUploadOpenRun || this.ctUploading || !this.ctUploadVisible) return;
+                    const file = new File([blob], /\.zip$/i.test(original.filename || '') ? original.filename : 'StatDescriptions.zip', { type: 'application/zip' });
+                    this.ctPrepared = raw([]);
+                    this.ctUploadFiles = raw([...this.ctUploadFiles.filter(candidate => !/\.zip$/i.test(candidate.file.name)), { file, sdArchive: original.archive }]);
+                    this.ctUploadError = '';
+                } catch (error) {
+                    if (key === this.managedCatalogScope && run === this._ctUploadOpenRun) this.ctUploadError = error.message;
+                }
+            },
             ctRemoveTestFile(index, history = false) {
                 if(!this.ctUploadTest || this.ctUploading)return;
                 const list=history ? 'ctUploadHistoryFiles' : 'ctUploadFiles';
@@ -3481,11 +3498,28 @@
                                 if(!policy.statDescriptionPublicationProtocols?.includes(sdPublication.STORAGE_PROTOCOL))throw new Error('This server needs the browser-prepared StatDescription publication API update. Existing prepared uploads remain resumable.');
                                 this.ctPolicy=policy;
                             }
-                            const parsed=await sdPublication.parse(candidate.file,{JSZip:root.JSZip,game:this.gameVersion,language:this.lang || 'Thai',signal:this._ctAbort.signal,current:()=>key===this.managedCatalogScope,onProgress:progress=>this.ctReport(progress)}),duplicateGroups=parsed.duplicateGroups;
+                            const parsed=await sdPublication.parse(candidate.file,{JSZip:root.JSZip,game:this.gameVersion,language:this.lang || 'Thai',signal:this._ctAbort.signal,current:()=>key===this.managedCatalogScope,onProgress:progress=>this.ctReport(progress)});
+                            const reuse = this.ctPolicy?.statDescriptionOriginals === 'sd-originals-v1';
+                            let canonical = candidate.sdArchive;
+                            if (reuse && !canonical) {
+                                try {
+                                    const existing = await this._cloud.request('/v1/sd-originals/' + this.gameVersion + '/' + parsed.identity.zipHash, { signal: this._ctAbort.signal });
+                                    canonical = existing.original.archive;
+                                } catch (error) { if (error.code !== 'SD_ORIGINAL_UNAVAILABLE') throw error; }
+                            }
+                            if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
                             candidate.file=new File([parsed.original],candidate.file.name,{type:'application/zip'});
+                            const duplicateGroups = canonical ? [] : parsed.duplicateGroups;
+                            if (reuse && root.OfflineStore?.putStatDescriptionZip) {
+                                await root.OfflineStore.putStatDescriptionZip(parsed.identity.zipHash, parsed.original,
+                                    { verified: true, zipSize: parsed.identity.zipSize, archive: canonical });
+                                candidate.sdZipHash = parsed.identity.zipHash;
+                            }
+                            if (canonical) candidate.sdArchive = canonical;
                             const parent=(await this.ctFindPreviousGroup({contentMode:'statdescription'}))?.group;
                             if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
-                            prepared.push({ contentMode: 'statdescription', storageProtocol:sdPublication.STORAGE_PROTOCOL,_sdParsed:raw(parsed),candidates: [candidate], assignments: this.ctUploadAssignments.slice(),parentGroupId:parent?.id,duplicateGroups }); continue;
+                            prepared.push({ contentMode: 'statdescription', storageProtocol:sdPublication.STORAGE_PROTOCOL,_sdParsed:raw(parsed),candidates: [candidate], assignments: this.ctUploadAssignments.slice(),parentGroupId:parent?.id,duplicateGroups,
+                                blankOriginalCarry: this.ctPolicy?.statDescriptionBlankOriginalCarry === 'sd-blank-original-carry-v1' }); continue;
                         }
                         if (!candidate.language) throw new Error('Confirm the language team for ' + candidate.file.name + '.');
                         if (this.ctUploadTest && !['previous','current'].includes(candidate.testVersion || 'current')) throw new Error('Choose Previous or Current for ' + candidate.file.name + '.');
@@ -3565,8 +3599,9 @@
                 }
                 const groups=this.ctPrepared.map(prepared=>({contentMode:prepared.contentMode,language:prepared.language,storageProtocol:prepared.storageProtocol,assignments:prepared.assignments,parentGroupId:prepared.parentGroupId,predecessorCutoffs:prepared.predecessorCutoffs,cacheScope:prepared.cacheScope,carry:prepared.carry,
                     requestId:prepared.requestId,uploadId:prepared.uploadId,createBody:prepared.createBody,finalizeBody:prepared.finalizeBody,published:prepared.published,
-                    candidates:prepared.contentMode==='statdescription'?prepared.candidates:undefined,warnings:prepared.warnings,duplicateGroups:prepared.duplicateGroups,
-                    ...(prepared.contentMode==='statdescription' && sdPublication && prepared.storageProtocol===sdPublication.STORAGE_PROTOCOL?{sdPublication:prepared.sdPublication,sdDispositions:prepared.sdDispositions}:{} )}));
+                    candidates:prepared.contentMode==='statdescription'?prepared.candidates.map(candidate=>candidate.sdZipHash
+                        ? {sdZipHash:candidate.sdZipHash,sdArchive:candidate.sdArchive,filename:candidate.file.name} : candidate):undefined,warnings:prepared.warnings,duplicateGroups:prepared.duplicateGroups,
+                    ...(prepared.contentMode==='statdescription' && sdPublication && prepared.storageProtocol===sdPublication.STORAGE_PROTOCOL?{sdPublication:prepared.sdPublication,sdDispositions:prepared.sdDispositions,blankOriginalCarry:prepared.blankOriginalCarry}:{} )}));
                 if(key!==this.managedCatalogScope || signal.aborted)throw Object.assign(new Error('Publication context changed'),{stale:true});
                 await this._ctStore.putRequest(this.ctRequestScope(),this._ctPublicationRequest,{kind:'publication',name:this.ctUploadName,deadline:this.ctUploadDeadline,version:this.ctUploadVersion ? copy(this.ctUploadVersion) : null,predecessor:copy(this.ctUploadPredecessor),releaseRequest:this._ctReleaseRequest,releaseCommand:this._ctReleaseCommand,duplicateChoices:copy(this.ctDuplicateChoices),groups},{immutablePublicationData:true,guard:()=>key===this.managedCatalogScope && !signal.aborted});
             },
@@ -3587,6 +3622,19 @@
                             for(const descriptor of metadata.descriptors)assets.push(await this._ctStore.getAsset(group.cacheScope,descriptor.role,{guard:current}));
                             const originals={storageProtocol:trustedProtocol,descriptors:metadata.descriptors,summaries:metadata.summaries};
                             prepared.push({...group,units,assets,originals,candidates:assets.map(asset=>({file:new File([assetBytes(asset)],asset.name),role:asset.role,language:group.language}))});
+                        }else if(group.contentMode==='statdescription' && group.candidates?.some(candidate=>candidate.sdZipHash)){
+                            const candidates=[];
+                            for(const candidate of group.candidates){
+                                if(!candidate.sdZipHash){candidates.push(candidate);continue;}
+                                let blob=await root.OfflineStore.getStatDescriptionZip(candidate.sdZipHash);
+                                if(!blob){
+                                    const {original}=await this._cloud.request('/v1/sd-originals/'+this.gameVersion+'/'+candidate.sdZipHash);
+                                    blob=await this.sdTeamGetOriginalZip(original);
+                                }
+                                if(!blob || !current())return;
+                                candidates.push({...candidate,file:new File([blob],candidate.filename,{type:'application/zip'})});
+                            }
+                            prepared.push({...group,candidates});
                         }else prepared.push(group);
                     }
                     if(current())this.ctPrepared=raw(prepared);
@@ -3684,6 +3732,36 @@
                     expectedMembershipRevision:version.membershipRevision || 0,idempotencyKey:prepared.requestId};
                 await this.ctRememberPublication();
             },
+            async ctPublicationDuplicateDecisions(prepared) {
+                const decisions = [];
+                for (const duplicate of prepared.duplicateGroups || []) {
+                    const language = duplicate.language || duplicate.lang;
+                    const choice = this.ctDuplicateChoices[duplicate.filepath + '|' + language];
+                    const option = duplicate.options.find(option => String(option.occurrence) === String(choice));
+                    if (!option) throw new Error('Choose one block for ' + duplicate.filepath + ' · ' + language);
+                    decisions.push({ filepath: duplicate.filepath, language, occurrence: option.occurrence,
+                        blockHash: option.blockHash || await root.CollaborationProtocol.blockHash(option) });
+                }
+                return decisions;
+            },
+            async ctAttachStatDescriptionOriginal(upload, candidate, current) {
+                const signal = this._ctAbort.signal, client = this._cloud;
+                const zipHash = candidate.sdZipHash;
+                try {
+                    const attached = await client.request('/v1/content-uploads/' + encodeURIComponent(upload.id) + '/sd-original', {
+                        method: 'POST', body: { zipHash, filename: candidate.file.name }, signal, timeout: 180000,
+                    });
+                    if (!current() || signal.aborted) return;
+                    const archive = attached.upload?.canonicalArchive;
+                    if (archive?.zipHash !== zipHash || archive.zipSize !== candidate.file.size)
+                        throw new Error('SDE1 could not verify the shared StatDescriptions ZIP.');
+                    candidate.sdArchive = archive;
+                    return attached;
+                } catch (error) {
+                    if (error.code !== 'SD_ORIGINAL_UNAVAILABLE') throw error;
+                    return null;
+                }
+            },
             async ctPrepareStatPublication(prepared,upload,decisions,current) {
                 if(!sdPublication)throw new Error('Reload the editor to resume browser-prepared StatDescription publication.');
                 const signal=this._ctAbort.signal,options={signal,current,onProgress:progress=>this.ctReport(progress)},base='/v1/content-uploads/'+encodeURIComponent(upload.id);
@@ -3699,8 +3777,9 @@
                 if(!prepared.sdDispositions || !retained.archive){
                     const parsed=prepared._sdParsed || await sdPublication.parse(prepared.candidates[0].file,{...options,JSZip:root.JSZip,game:this.gameVersion,language:this.lang || 'Thai'});
                     if(!current() || signal.aborted)return;
-                    const source=await sdPublication.prepare(parsed,decisions,{...options,canonicalArchive:upload.canonicalArchive || retained.snapshot?.canonicalArchive});
-                    const chunks=await sdPublication.buildDispositions(retained.snapshot,(language,cursor)=>this._cloud.request(base+'/sd-snapshot/records?language='+encodeURIComponent(language)+'&cursor='+encodeURIComponent(cursor)+'&limit=100',{signal,timeout:180000}),source,options);
+                    const source=await sdPublication.prepare(parsed,decisions,{...options,canonicalArchive:upload.canonicalArchive || prepared.candidates[0].sdArchive || retained.snapshot?.canonicalArchive});
+                    const chunks=await sdPublication.buildDispositions(retained.snapshot,(language,cursor)=>this._cloud.request(base+'/sd-snapshot/records?language='+encodeURIComponent(language)+'&cursor='+encodeURIComponent(cursor)+'&limit=100',{signal,timeout:180000}),source,
+                        {...options,blankOriginalCarry:prepared.blankOriginalCarry === true});
                     if(!current() || signal.aborted)return;
                     retained.archive=source.archive;retained.summary=source.summary;prepared.sdDispositions=raw(chunks);
                     // Only compact aggregate metadata and sparse affected-file
@@ -3812,7 +3891,11 @@
                             if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
                             publicationPhase='Uploading original '+candidate.file.name;
                             this.ctReport({ phase: 'Uploading original', workbook: candidate.file.name, sheet: '', completed: 0, total: candidate.file.size });
-                            const acceptedAsset=await this._cloud.request('/v1/content-uploads/' + encodeURIComponent(upload.id) + '/assets/' + encodeURIComponent(prepared.contentMode === 'statdescription' ? 'source' : candidate.role) + '?filename='+encodeURIComponent(candidate.file.name), { method: 'PUT', rawBody: candidate.file,signal:this._ctAbort.signal, timeout: 180000, onUploadProgress: (completed, total) => this.ctReport({ completed, total }) });
+                            let acceptedAsset;
+                            if (candidate.sdZipHash && this.ctPolicy?.statDescriptionOriginals === 'sd-originals-v1')
+                                acceptedAsset = await this.ctAttachStatDescriptionOriginal(upload, candidate, current);
+                            if (!current() || controller.signal.aborted) return;
+                            if (!acceptedAsset) acceptedAsset = await this._cloud.request('/v1/content-uploads/' + encodeURIComponent(upload.id) + '/assets/' + encodeURIComponent(prepared.contentMode === 'statdescription' ? 'source' : candidate.role) + '?filename='+encodeURIComponent(candidate.file.name), { method: 'PUT', rawBody: candidate.file,signal:this._ctAbort.signal, timeout: 180000, onUploadProgress: (completed, total) => this.ctReport({ completed, total }) });
                             if(acceptedAsset?.upload?.canonicalArchive)upload.canonicalArchive=acceptedAsset.upload.canonicalArchive;
                         }
                         for(let start=0,index=0;start<(prepared.carry?.length||0);index++){
@@ -3821,7 +3904,7 @@
                             await this._cloud.request('/v1/content-uploads/'+encodeURIComponent(upload.id)+'/carry/chunks',{method:'POST',body:{storageProtocol:trustedProtocol,index,units:prepared.carry.slice(start,end)},compressJson:this.ctPolicy.uploadEncodings?.includes('gzip'),signal:this._ctAbort.signal,timeout:180000});start=end;
                             if(key!==this.managedCatalogScope || this._ctAbort.signal.aborted)return;
                         }
-                        const decisions=[];for(const duplicate of prepared.duplicateGroups || []){const choice=this.ctDuplicateChoices[duplicate.filepath+'|'+(duplicate.language || duplicate.lang)],option=duplicate.options.find(option=>String(option.occurrence)===String(choice));if(!option)throw new Error('Choose one block for '+duplicate.filepath+' · '+(duplicate.language || duplicate.lang));decisions.push({filepath:duplicate.filepath,language:duplicate.language || duplicate.lang,occurrence:option.occurrence,blockHash:option.blockHash || await root.CollaborationProtocol.blockHash(option)});}
+                        const decisions = prepared.candidates[0]?.sdArchive ? [] : await this.ctPublicationDuplicateDecisions(prepared);
                         const browserSD=prepared.contentMode==='statdescription' && sdPublication && prepared.createBody.storageProtocol===sdPublication.STORAGE_PROTOCOL;
                         let sdBody;
                         if(browserSD){reportPublication('Preparing StatDescription publication');sdBody=await this.ctPrepareStatPublication(prepared,upload,decisions,current);if(!current() || controller.signal.aborted)return;}
