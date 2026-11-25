@@ -1347,7 +1347,12 @@
     const keys = [batchWorkspaceKey, receiptKey, ...(batch.collaboration ? ['collaboration_v1'] : []), ...(checkpoint ? [checkpoint.key] : []), ...(recordMode ? [batchSourceKey] : [])];
     let remaining = keys.length;
     const stale = message => Object.assign(new Error(message), { stale: true, code: 'SAVE_SCOPE_CHANGED' });
-    const fail = error => { failure = error; try { tx.abort(); } catch (_) {} };
+    const fail = error => {
+      const rootError = (error?.name === 'AbortError' && (tx._normalizedError && tx._normalizedError.name !== 'AbortError'
+        ? tx._normalizedError : tx.error && tx.error.name !== 'AbortError' ? tx.error : null)) || error;
+      if (!failure || (failure.name === 'AbortError' && rootError && rootError.name !== 'AbortError')) failure = rootError;
+      try { tx.abort(); } catch (_) {}
+    };
     const apply = () => {
       try {
         const receipts = values[receiptKey] || [];
@@ -1677,7 +1682,10 @@
         read.onsuccess = () => { values[key] = read.result?.value; if (--remaining === 0) apply(); };
       }
     } catch (error) { fail(error); }
-    try { await done; } catch (error) { throw failure || tx._normalizedError || error; }
+    try { await done; } catch (error) {
+      const candidates = [failure, tx._normalizedError, tx.error, error].filter(Boolean);
+      throw candidates.find(item => item.name !== 'AbortError') || candidates[0];
+    }
     return result;
   }
 
@@ -1715,12 +1723,15 @@
               // The projection may bind an operation to the latest candidate
               // receipt from this same transaction. Persist the final state.
               kv.put({ key: 'collaboration_v1', value: result });
-            } catch (error) { failure = error; tx.abort(); }
+            } catch (error) { if (!failure || failure.name === 'AbortError') failure = error; try { tx.abort(); } catch (_) {} }
           };
         }
-      } catch (error) { failure = error; tx.abort(); }
+      } catch (error) { if (!failure || failure.name === 'AbortError') failure = error; try { tx.abort(); } catch (_) {} }
     };
-    try { await done; } catch (error) { throw failure || error; }
+    try { await done; } catch (error) {
+      const candidates = [failure, tx.error, error].filter(Boolean);
+      throw candidates.find(item => item.name !== 'AbortError') || candidates[0];
+    }
     return result;
   }
 

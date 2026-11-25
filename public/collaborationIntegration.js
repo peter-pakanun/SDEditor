@@ -4,7 +4,7 @@
   const initializationTask = (app, label, callback, session) => typeof app.runWorkspaceInitializationTask === 'function'
     ? app.runWorkspaceInitializationTask(label, callback, session) : callback();
   const mixin = {
-    data() { return { editorSaving: false, navigationBusy: false, collaborationNotice: '', sourceIdentity: '', importBaseline: null, importBaselineHashing: false, pendingLocalSaves: 0, localSaveError: '', stagedDeletionReviewBusy: false }; },
+    data() { return { editorSaving: false, navigationBusy: false, collaborationNotice: '', sourceIdentity: '', importBaseline: null, importBaselineHashing: false, pendingLocalSaves: 0, localSaveError: '', canDeferFailedSaves: false, deferringFailedSaves: false, stagedDeletionReviewBusy: false }; },
     computed: {
       hasStagedDeletionReview() {
         return Object.values(this.inlineDraftFindings || {}).some(findings => findings.some(finding => finding.deferredSave && finding.submissionReset));
@@ -391,7 +391,12 @@
             };
             return client ? client.withLocalWrite(write) : write();
           },
-          onChange: state => { this.pendingLocalSaves = state.pending; this.localSaveError = state.error || ''; this.updateLeaveProtection(); },
+          onChange: state => {
+            this.pendingLocalSaves = state.pending;
+            this.canDeferFailedSaves = Boolean(state.deferrableFailures);
+            this.localSaveError = state.error || '';
+            this.updateLeaveProtection();
+          },
           onCommit: async (job, ack) => {
             if (ack.tmChanged) {
               const tmScope = { profile: job.batch.accountId || 'guest', language: job.batch.language };
@@ -487,7 +492,41 @@
       },
       async retryPendingSaves() {
         try { await this._pendingSaves?.retry(); }
-        catch (_) { /* The retained queue displays the actionable failure. */ }
+        catch (_) {
+          // The retained queue displays the actionable failure; re-reveal if previously dismissed.
+          window.EditorComponents?.revealNotice?.(this, 'localSaveError');
+        }
+      },
+      async deferFailedPendingSaves() {
+        if (this.deferringFailedSaves || !this._pendingSaves || !window.OfflineStore?.updateSaveSubmission) return false;
+        const failed = this._pendingSaves.snapshot().jobs.filter(job =>
+          job.journaled && !job.durable && job.status === 'failed' && !job.error?.durableUnknown);
+        if (!failed.length) return false;
+        this.deferringFailedSaves = true;
+        try {
+          for (const job of failed) {
+            const error = { code: job.error?.code || 'SAVE_FAILED', message: job.error?.message || String(job.error) };
+            const review = await window.OfflineStore.updateSaveSubmission(job.batch, { state: 'review', error });
+            if (!review || !['review', 'cancelled'].includes(review.state)) {
+              throw new Error('Could not move the failed save to retained drafts.');
+            }
+            if (review.state === 'cancelled') {
+              if (this.collaborationContextCurrent(job.context)) this.clearStagedDeletionReview(job.batch);
+            } else {
+              if (this.collaborationContextCurrent(job.context)) this.showSaveSubmissionReview({ batch: job.batch, error });
+              await job.onRejected?.(job.error);
+              if (!job.batch.resetStaging && this.collaborationContextCurrent(job.context)) await this.loadEditorDrafts?.();
+            }
+            this._pendingSaves.discardReviewedFailure(job.id);
+          }
+          return true;
+        } catch (error) {
+          this.localSaveError = error?.message || String(error);
+          window.EditorComponents?.revealNotice?.(this, 'localSaveError');
+          return false;
+        } finally {
+          this.deferringFailedSaves = false;
+        }
       },
       downloadPendingSaves() {
         const jobs = this._pendingSaves?.snapshot().jobs || [];
@@ -496,7 +535,10 @@
       },
       async waitForPendingSaves() {
         try { await this._pendingSaves?.drain(); return true; }
-        catch (_) { return false; }
+        catch (_) {
+          window.EditorComponents?.revealNotice?.(this, 'localSaveError');
+          return false;
+        }
       },
       pendingSaveScope() {
         return { game: this.gameVersion, branchId: this.branchId || 'default', language: this.lang, sourceHash: this.sourceIdentity, accountId: this.cloudUser?.id || '',

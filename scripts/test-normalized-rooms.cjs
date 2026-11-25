@@ -469,3 +469,52 @@ test('granular commands reject changed account, branch, source and language befo
     });
   }
 });
+
+test('updateRecords preserves S.shared manifest and shared state when an outbox operation adds an unselected filepath', async () => {
+  const stores = { rooms: 'rooms', shared: 'shared', operations: 'operations', roomRecords: 'records',
+    meta: 'workspaces', files: 'files', records: 'workspaceRecords', baseline: 'baseline', migration: 'migration', assets: 'assets' };
+  const data = Object.fromEntries(Object.values(stores).map(name => [name, new Map()]));
+  const key = (...parts) => JSON.stringify(parts), baseId = key(identity.game, identity.sourceHash);
+  const request = value => { const req = {}; queueMicrotask(() => { req.result = copy(value); req.onsuccess(); }); return req; };
+  const tx = { objectStore(name) { return {
+    get(id) { return request(data[name].get(id)); },
+    index() { return { getAll(path) {
+      return request([...data[name].values()].filter(row => row.pathKey === path || row.paths?.includes(path)));
+    } }; },
+    put(value) { data[name].set(value.key, copy(value)); },
+    delete(id) { data[name].delete(id); },
+  }; } };
+  data.migration.set(key('room', roomKey), { key: key('room', roomKey), value: { state: 'ready' } });
+  const rooms = create({
+    stores, copy, key, same: (a, b) => JSON.stringify(a) === JSON.stringify(b), baselineKey: () => baseId,
+    row: (scope, id, value, extra = {}) => ({ key: key(scope, id), scope, value: copy(value), ...extra }),
+    async transaction(_names, _mode, fn) { return fn(tx); },
+    async get(_tx, name, id) { return copy(data[name].get(id)?.value); },
+    async all(_tx, name, scope) { return [...data[name].values()].filter(row => row.scope === scope).map(value => copy(value)); },
+    async ensure() {},
+    async readWorkspace() { return { descs: [], staged: {} }; },
+    async writeWorkspace() {},
+    dependencies: { normalizeScope: s => s, revisionStoreName: g => 'revisions_' + g },
+  });
+  await rooms.writeRoom(tx, roomKey, {
+    identity,
+    manifest: { files: [{ filepath: 'a.txt', english: ['A'] }, { filepath: 'b.txt', english: ['B'] }] },
+    shared: {
+      'a.txt': { filepath: 'a.txt', translations: ['Thai A'], revision: 1, needsReview: false, trackedForExport: true },
+      'b.txt': { filepath: 'b.txt', translations: ['Thai B'], revision: 2, needsReview: false, trackedForExport: true },
+    },
+    outbox: [], conflicts: [], recovery: [],
+  });
+  await rooms.updateRecords({ key: roomKey, scope: identity, filepaths: ['a.txt'] }, (_state, room) => {
+    room.outbox.push({
+      id: 'op-b', kind: 'edit', origin: 'save',
+      files: [{ base: { filepath: 'b.txt', translations: ['Thai B'], revision: 2 },
+        yours: { filepath: 'b.txt', translations: ['Updated B'], revision: 2, trackedForExport: true, needsReview: false } }],
+    });
+  });
+  const cold = await rooms.readRoom(tx, roomKey);
+  assert.deepEqual(cold.room.manifest.files, [{ filepath: 'a.txt', english: ['A'] }, { filepath: 'b.txt', english: ['B'] }]);
+  assert.equal(cold.room.shared['b.txt'].revision, 2);
+  assert.deepEqual(cold.room.shared['b.txt'].translations, ['Thai B']);
+  assert.equal(cold.room.outbox.length, 1);
+});

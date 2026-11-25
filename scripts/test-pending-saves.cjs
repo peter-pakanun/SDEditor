@@ -341,8 +341,8 @@ test('uncertain, unjournaled or durable failed submissions cannot be removed as 
   }
 });
 
-test('captured scope and stale deletion rejections require review before journaled jobs release', async () => {
-  for (const code of ['SAVE_SCOPE_CHANGED', 'DROPPED_PROMOTION_CHANGED', 'DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT', 'DELETE_STAGED_CANCELLED']) {
+test('captured scope, MTL review and stale deletion rejections require review before journaled jobs release', async () => {
+  for (const code of ['SAVE_SCOPE_CHANGED', 'DROPPED_PROMOTION_CHANGED', 'MTL_REVIEW_CHANGED', 'DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT', 'DELETE_STAGED_CANCELLED']) {
     const error = Object.assign(new Error('A fresh decision is required'), { code });
     assert.equal(PendingSaves.requiresReview(error), true);
     assert.equal(PendingSaves.requiresReview({ ...error, durableUnknown: true }), false);
@@ -354,6 +354,38 @@ test('captured scope and stale deletion rejections require review before journal
     assert.equal(queue.snapshot().pending, 0); queue.dispose();
   }
   assert.equal(PendingSaves.requiresReview({ code: 'QUOTA_EXCEEDED' }), false);
+});
+
+test('discardReviewedFailure unblocks only journaled non-durable failed saves with known commit state', async () => {
+  const calls = [];
+  const queue = PendingSaves.create({ save: async payload => {
+    calls.push(payload.jobId);
+    if (payload.jobId === 'wedged') throw new Error('Unexpected invariant failure');
+    return {};
+  } });
+  const wedged = queue.enqueue(batch('wedged', 'Preserved translation')); wedged.journaled = true;
+  queue.enqueue(batch('after', 'Unblocked next save'));
+  await assert.rejects(queue.drain(), /Unexpected invariant failure/);
+  assert.equal(queue.snapshot().deferrableFailures, 1);
+  assert.equal(queue.discardRejectedSubmission(wedged.id), false);
+  assert.equal(queue.discardReviewedFailure(wedged.id), true);
+  await queue.drain();
+  assert.deepEqual(calls, ['wedged', 'after']);
+  assert.equal(queue.snapshot().pending, 0);
+  assert.equal(queue.snapshot().deferrableFailures, 0);
+  queue.dispose();
+
+  for (const extra of [{}, { journaled: true, error: { durableUnknown: true } }, { journaled: true, durable: true }]) {
+    const guardQueue = PendingSaves.create({ save: async () => { throw new Error('Failed'); } });
+    const job = guardQueue.enqueue(batch('guard'));
+    await assert.rejects(guardQueue.drain());
+    if (extra.journaled) job.journaled = true;
+    if (extra.error) Object.assign(job.error, extra.error);
+    if (extra.durable) job.durable = true;
+    assert.equal(guardQueue.snapshot().deferrableFailures, 0);
+    assert.equal(guardQueue.discardReviewedFailure(job.id), false);
+    guardQueue.dispose();
+  }
 });
 
 test('disposing a queue cancels deferred intake without erasing recovery records', async () => {

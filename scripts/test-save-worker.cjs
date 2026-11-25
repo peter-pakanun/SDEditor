@@ -795,3 +795,85 @@ test('checkpoint replacements reject malformed identity, flags and newer revisio
     assert.deepEqual(copy([...f.kv]), before); assert.equal(f.revisions.length, 0);
   }
 });
+
+test('secondary AbortError from concurrent transaction requests cannot mask root review codes in saveTranslationBatch', async () => {
+  const kv = new Map([['workspace_poe1', { sourceHash: 'source', collaborationAccountId: 'account', stagedVersion: 1,
+    descs: [{ filepath: 'stat.txt', translations: { English: ['source text'], Thai: ['old'] } }], status: {}, staged: {}, dropped: {}, droppedArchive: {} }]]);
+  const abortErr = () => Object.assign(new Error('The transaction was aborted, so the request cannot be fulfilled.'), { name: 'AbortError' });
+  const db = { transaction() {
+    let aborted = false; const abortListeners = [];
+    const tx = {
+      error: null,
+      objectStore(name) {
+        if (name === 'sd_mtl') return {
+          get() {
+            const req = {};
+            queueMicrotask(() => {
+              // Simulate sd_mtl check firing first with MTL_REVIEW_CHANGED (missing row -> aborts tx),
+              // or firing second with AbortError after another check already aborted tx!
+              if (aborted) { req.error = abortErr(); req.onerror?.(); }
+              else { req.result = undefined; req.onsuccess?.(); }
+            });
+            return req;
+          },
+          put() {},
+        };
+        return {
+          get(k) { const req = {}; queueMicrotask(() => { req.result = kv.has(k) ? { key: k, value: structuredClone(kv.get(k)) } : undefined; req.onsuccess?.(); }); return req; },
+          put() {}, add() {},
+        };
+      },
+      abort() {
+        if (aborted) return;
+        aborted = true;
+        this.error = abortErr();
+        for (const fn of abortListeners.splice(0)) queueMicrotask(fn);
+        queueMicrotask(() => this.onabort?.());
+      },
+      onAbort(fn) { abortListeners.push(fn); },
+    };
+    return tx;
+  } };
+  const indexedDB = { open() { const req = {}; queueMicrotask(() => { req.result = db; req.onsuccess(); }); return req; } };
+  const root = { StatDescCodec: require('../public/statDescCodec.js'), NormalizedStore: {
+    upgrade() {},
+    create() {
+      return {
+        tmStores: ['tm'],
+        async available() { return false; },
+        tmCapture(tx) {
+          return new Promise((_, reject) => tx.onAbort(() => reject(abortErr())));
+        },
+      };
+    },
+  } };
+  const context = vm.createContext({ self: root, indexedDB, console: { log() {} } });
+  for (const f of ['statDescCodec.js', 'workspaceState.js', 'offlineStore.js']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8'), context);
+  }
+  // 1) MTL_REVIEW_CHANGED aborts tx while concurrent tmCapture rejects into fail() with secondary AbortError:
+  await assert.rejects(
+    root.OfflineStore.saveTranslationBatch(batch({
+      sdMtl: [{ key: 'mtl-1', requestId: 'req-1', revision: 1, text: 'new', sourceHash: 'source' }],
+      tmCapture: [{ source: 'source text', target: 'new' }],
+    })),
+    error => {
+      assert.notEqual(error.name, 'AbortError');
+      assert.equal(error.code, 'MTL_REVIEW_CHANGED');
+      assert.equal(require('../public/pendingSaves.js').requiresReview(error), true);
+      return true;
+    }
+  );
+  // 2) Stale Dropped promotion aborts tx while tx.error becomes AbortError:
+  await assert.rejects(
+    root.OfflineStore.saveTranslationBatch(batch({
+      promoteDropped: { id: 'missing-candidate', revision: 1, targetSourceHash: 'source', ownership: 'local' },
+    })),
+    error => {
+      assert.notEqual(error.name, 'AbortError');
+      assert.equal(error.code, 'DROPPED_PROMOTION_CHANGED');
+      assert.equal(require('../public/pendingSaves.js').requiresReview(error), true);
+      return true;
+    }
+  );
+});

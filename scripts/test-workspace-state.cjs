@@ -1463,3 +1463,27 @@ test('old keyed Dropped records retain their exact payload when language and fil
   assert.equal(workspace.dropped.Thai[source.filepath], undefined);
   assert.equal(W.quarantineInvalidDroppedTranslations(workspace).changed, false);
 });
+
+test('team-branch carry retains complete Saved alignments when upstream keeps the same excess or incomplete original', () => {
+  const previous = sourceDesc('Bathed in the blood of # sacrificed in the name of Xibaqua', {
+    'Traditional Chinese': ['old variant 1', 'old variant 2', 'old variant 3'],
+  });
+  const unchangedNext = structuredClone(previous);
+  const aligned = ['在夏巴夸之名下獻祭 # 人的鮮血沐浴'];
+  // Without blankOriginalCarry (regular offline ZIP import), incomplete baseline still drops:
+  assert.equal(W.classifySourceCarry(previous, unchangedNext, 'Traditional Chinese', aligned).action, 'drop');
+  // With blankOriginalCarry (team-branch advance) and unchanged English + unchanged excess original, complete alignment carries:
+  const carried = W.classifySourceCarry(previous, unchangedNext, 'Traditional Chinese', aligned, { blankOriginalCarry: true });
+  assert.equal(carried.action, 'carry');
+  const workspace = modern(previous, 'prev-hash');
+  W.stageTranslation(workspace, { filepath: previous.filepath, translations: aligned }, 'Traditional Chinese',
+    { source: previous, sourceHash: 'prev-hash' });
+  W.upgradeSource(workspace, { previousSource: [previous], source: [unchangedNext], previousSourceHash: 'prev-hash',
+    sourceHash: 'next-hash', game: 'poe1', blankOriginalCarry: true });
+  assert.deepEqual(workspace.staged['Traditional Chinese'][previous.filepath].translations, aligned);
+  assert.equal(W.droppedForFile(workspace, previous.filepath, 'Traditional Chinese'), null);
+  // If upstream changed the incomplete original, blankOriginalCarry still drops for review:
+  const changedUpstream = structuredClone(previous);
+  changedUpstream.translations['Traditional Chinese'] = ['different variant 1', 'different variant 2'];
+  assert.equal(W.classifySourceCarry(previous, changedUpstream, 'Traditional Chinese', aligned, { blankOriginalCarry: true }).action, 'drop');
+});

@@ -3882,3 +3882,38 @@ test('raw TXT original and draft downloads preserve foreign layouts and ignore a
   assert.equal(e.$refs.rawFileDialog.open, false); assert.equal(e.rawFilePreview, null);
   assert.equal(e._rawFilePreparing, null);
 });
+
+test('failed pending saves re-reveal dismissed error notices on gated actions and can be moved to retained drafts without data loss', async () => {
+  const h = await pendingDraftFixture(), { editor: e, window, calls, acknowledge } = h;
+  const revealed = [];
+  window.EditorComponents = { ...(window.EditorComponents || {}), revealNotice: (_root, key) => { revealed.push(key); } };
+  assert.equal(await e.editorSave(), true);
+  const drained = e._pendingSaves.drain(); await pendingTick();
+  calls[0].reject(new Error('Unexpected transaction abort'));
+  await assert.rejects(drained, /Unexpected transaction abort/);
+  assert.equal(e.canDeferFailedSaves, true);
+  assert.equal(await e.waitForPendingSaves(), false);
+  assert.deepEqual(revealed, ['localSaveError']);
+  const retryDone = e.retryPendingSaves(); await pendingTick();
+  calls[1].reject(new Error('Unexpected transaction abort'));
+  await retryDone;
+  assert.deepEqual(revealed, ['localSaveError', 'localSaveError']);
+
+  assert.equal(await e.deferFailedPendingSaves(), true);
+  assert.equal(e.pendingLocalSaves, 0);
+  assert.equal(e.canDeferFailedSaves, false);
+  assert.equal(e.localSaveError, '');
+  assert.equal(h.submissions.get(h.journals[0].batch.jobId).state, 'review');
+  assert.ok(e.inlineDraftFindings[h.desc.filepath]?.some(finding => finding.deferredSave));
+
+  // Subsequent saves are now unblocked and commit normally:
+  const other = description(2); e.descs.push(other);
+  e.editorCurrentEditingDesc = other; e.editorVisible = true;
+  e.editorBlocks = [{ english: 'Original', translation: 'บันทึกใหม่สำเร็จ' }, { english: 'Second', translation: 'สอง' }];
+  e.editorOriginalTranslations = ['เดิม', 'สอง'];
+  e._draftSession = null;
+  const queued = await e.persistTranslationBatch([{ desc: other, lines: ['บันทึกใหม่สำเร็จ', 'สอง'] }], 'save', { deferCommit: true });
+  assert.equal(queued.status, 'queued');
+  await pendingTick(); acknowledge(calls[2]); await e._pendingSaves.drain();
+  assert.equal(other.translations.Thai[0], 'บันทึกใหม่สำเร็จ');
+});
