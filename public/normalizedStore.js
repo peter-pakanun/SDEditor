@@ -628,7 +628,11 @@
     async function transaction(selected, mode, action) {
       const db = await openDb(), tx = db.transaction([...new Set(selected)], mode), completion = done(tx);
       try { const result = await action(tx); await completion; return result; }
-      catch (error) { try { tx.abort(); } catch (_) {} await completion.catch(() => {}); throw error; }
+      catch (error) {
+        try { tx.abort(); } catch (_) {}
+        await completion.catch(() => {});
+        throw error?.name === 'AbortError' && tx.error && tx.error.name !== 'AbortError' ? tx.error : error;
+      }
     }
     async function available() { return !!(await openDb()).objectStoreNames?.contains(stores.meta); }
     async function normalizeHistory(game, selectedStore) {
@@ -813,7 +817,7 @@
         if (String(origin.accountId) !== String(scope.accountId) || origin.game !== scope.game
           || (origin.branchId || 'default') !== (scope.branchId || 'default') || origin.sourceHash !== scope.sourceHash
           || origin.groupId || origin.workspaceGroupId || origin.versionId || origin.workspaceVersionId)
-          throw new Error('The local recovery belongs to another workspace.');
+          throw Object.assign(new Error('The local recovery belongs to another workspace.'), { code: 'DROPPED_PROMOTION_CHANGED', stale: true });
         // The local disposition and this workspace's save/receipt share the
         // same transaction. Returning to the standalone workspace cannot revive
         // a copy already resolved from its managed recovery chooser.
@@ -1630,7 +1634,13 @@
         stores.rooms, stores.shared, stores.operations, stores.roomRecords, stores.submissions, stores.receipts, revisionStoreName(scope.game),
         ...(batch.sdMtl?.length?['sd_mtl']:[]), ...(batch.tmCapture?.length ? tmStores : [])], 'readwrite');
       let roomSelection;
-      const fail = error => { tx._normalizedError = error; try { tx.abort(); } catch (_) {} };
+      const fail = error => {
+        const rootError = error?.name === 'AbortError' && tx.error && tx.error.name !== 'AbortError' ? tx.error : error;
+        if (!tx._normalizedError || (tx._normalizedError.name === 'AbortError' && rootError && rootError.name !== 'AbortError')) {
+          tx._normalizedError = rootError;
+        }
+        try { tx.abort(); } catch (_) {}
+      };
       const synthetic = work => {
         const req = {};
         Promise.resolve().then(work).then(value => { req.result = { value }; req.onsuccess?.(); }, fail);
@@ -1848,13 +1858,15 @@
         }
         const value = { ...current, ...copy(patch), batch: current.batch, createdAt: current.createdAt };
         if (!same(value, current)) tx.objectStore(stores.submissions).put(row(id, batch.jobId, value, { paths: batch.files.map(file => key(id, batch.language, file.filepath)) }));
-        if (patch.state === 'review' && !batch.resetStaging && batch.files.length === 1) {
-          const path = batch.files[0].filepath, checkpoint = batch.checkpoint || batch.draft;
-          const draftKey = checkpoint?.key || 'translation_draft_v1:' + key(scope.accountId, scope.game, scope.sourceHash, batch.language, path, ...(scope.branchId === 'default' ? [] : [scope.branchId]), ...contentParts(scope));
+        if (patch.state === 'review' && !batch.resetStaging) for (const file of batch.files) {
+          const path = file.filepath, checkpoint = batch.checkpoint || batch.draft;
+          const matchingCheckpoint = checkpoint && (!checkpoint.filepath || checkpoint.filepath === path) && batch.files.length === 1 ? checkpoint : null;
+          const draftKey = matchingCheckpoint?.key || 'translation_draft_v1:' + key(scope.accountId, scope.game, scope.sourceHash, batch.language, path, ...(scope.branchId === 'default' ? [] : [scope.branchId]), ...contentParts(scope));
           const previous = await hydrateDraft(tx, await get(tx, stores.drafts, draftKey));
           const recovered = { profile: scope.accountId, game: scope.game, sourceHash: scope.sourceHash, language: batch.language, filepath: path,
             ...(scope.branchId === 'default' ? {} : { branchId: scope.branchId }), ...contentScope(scope), key: draftKey, id: 'submission:' + batch.jobId, revision: 'submission:' + batch.jobId,
-            state: 'active', submissionJobId: batch.jobId, translations: batch.files[0].translations, base: batch.bases?.[path] || batch.draft?.base || { translations: [] },
+            state: 'active', submissionJobId: batch.jobId, translations: file.translations,
+            base: batch.bases?.[path] || (batch.files.length === 1 ? batch.draft?.base : null) || { translations: [] },
             sourceRef: { game: scope.game, sourceHash: scope.sourceHash, filepath: path }, updatedAt: Date.now() };
           const submissionJobIds = [...new Set([previous?.submissionJobId, ...(previous?.submissionJobIds || []), batch.jobId].filter(Boolean))];
           if (!previous || previous.state !== 'active') tx.objectStore(stores.drafts).put(draftRow({ ...recovered, submissionJobIds,

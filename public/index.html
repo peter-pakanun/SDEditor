@@ -1816,7 +1816,7 @@
       <app-notice v-if="!$root.versionChooserVisible && !$root.ctActive && ($root.sdTeamSyncError || $root.sdTeamReconcileError)" tone="warning" role="status">{{ [$root.sdTeamSyncError, $root.sdTeamReconcileError].filter(Boolean).join('\n') }}<template #actions><button @click="$root.showVersionChooser()">Open source versions</button></template></app-notice>
       <app-notice v-if="$root.localSaveError" dismiss-key="localSaveError" tone="error" class="cloudStorageError" role="alert">
         <span>Could not finish saving your translations. Your edits remain in this tab. {{ $root.localSaveError }}</span>
-        <template #actions><button @click="$root.retryPendingSaves">Retry saving</button><button @click="$root.downloadPendingSaves">Download pending edits</button></template>
+        <template #actions><button @click="$root.retryPendingSaves">Retry saving</button><button v-if="$root.canDeferFailedSaves" @click="$root.deferFailedPendingSaves" :disabled="$root.deferringFailedSaves">Move failed edits to drafts</button><button @click="$root.downloadPendingSaves">Download pending edits</button></template>
       </app-notice>
       <app-notice v-if="$root.dictionaryWorkerError" dismiss-key="dictionaryWorkerError" tone="error" class="cloudStorageError" role="alert">
         <span>Could not prepare Dictionary matches. {{ $root.dictionaryWorkerError }}</span>

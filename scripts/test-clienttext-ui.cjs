@@ -3905,14 +3905,25 @@ test('scanner reads exact committed raw values across hidden worklist records an
     assert.equal(app.ctDiagnostics[excluded.id].length,0);assert.ok(app.ctDiagnostics[hidden.id].some(issue=>issue.code==='clienttext-token-identity'));
     assert.deepEqual(app.ctUnits,original);assert.deepEqual(app.ctSaved,saved);assert.equal(app.ctValues[fieldId],draft);
 });
-test('optional ClientText consistency and terminology stay manual and scan only saved values',async()=>{
+test('optional ClientText consistency and terminology stay manual and preserve results across Dictionary edits',async()=>{
     const first=namedUnit('One','Power','Incorrect'),second=namedUnit('Two','Power','Force'),{app,mixin}=scanHarness([first,second]);
-    app.getActiveDictionaryEntries=()=>[{find:'Power',replace:'Force'}];let runs=0;const scan=app.ctScan;app.ctScan=(...args)=>{runs++;return scan(...args);};
-    onlyScanChecks(app,'keywords');await app.ctStartScan();assert.equal(app.ctScanIssueCounts.warnings,0);
-    app.ctScanChecks.consistency=true;app.ctScanChecks.terminology=true;assert.equal(runs,1,'checking optional boxes does not run them');
+    let entries=[{find:'Power',replace:'Force'}];
+    app.getActiveDictionaryEntries=()=>entries;let runs=0;const scan=app.ctScan;app.ctScan=(...args)=>{runs++;return scan(...args);};
+    onlyScanChecks(app,'consistency');await app.ctStartScan();assert.equal(app.ctScanWarningFileCount,2);assert.equal(app.ctScanDictionaryStale,false);
+    app.editorDictionaryRevision++;mixin.watch.editorDictionaryRevision.call(app);
+    assert.equal(runs,1);assert.equal(app.ctScanDone,true);assert.equal(app.ctScanWarningFileCount,2);assert.equal(app.ctScanDictionaryStale,false,'non-terminology scans are unaffected by Dictionary edits');
+    app.ctScanChecks.terminology=true;assert.equal(runs,1,'checking optional boxes does not run them');
     await app.ctStartScan();assert.equal(runs,2);assert.ok(app.ctDiagnostics[first.id].some(issue=>issue.code==='clienttext-consistency'));
     assert.ok(app.ctDiagnostics[first.id].some(issue=>issue.code==='dictionary-terminology'));assert.ok(!app.ctDiagnostics[second.id].some(issue=>issue.code==='dictionary-terminology'));
-    app.ctScanResultsPage=2;mixin.watch.editorDictionaryRevision.call(app);assert.equal(runs,2);assert.equal(app.ctScanDone,false);assert.equal(Object.keys(app.ctDiagnostics).length,0);
+    app.ctScanResultsPage=2;entries=[{find:'Power',replace:'Force',alts:[{find:'Power',replace:'Incorrect'}]}];app.editorDictionaryRevision++;mixin.watch.editorDictionaryRevision.call(app);
+    assert.equal(runs,2,'Dictionary edits must not trigger an automatic scan');assert.equal(app.ctScanDone,true);assert.equal(app.ctScanResultsPage,2);
+    assert.equal(app.ctScanDictionaryStale,true);assert.equal(app.ctDiagnosticScanController.diagnosticScanDictionaryStale,true);
+    assert.ok(app.ctDiagnostics[first.id].some(issue=>issue.code==='dictionary-terminology'),'existing findings stay visible until refreshed or rescanned');
+    let opened=null;app.ctSelect=async(row,full)=>{opened={row,full};return true;};
+    assert.equal(await app.ctOpenDiagnosticResult(first.id),true,'opening a finding still works after Dictionary edits');assert.equal(opened.row.id,first.id);
+    app.ctRefreshDiagnostics([first.id]);assert.equal(app.ctScanDone,true);
+    assert.ok(!app.ctDiagnostics[first.id].some(issue=>issue.code==='dictionary-terminology'),'saving a record checks it against the updated Dictionary');
+    await app.ctStartScan();assert.equal(app.ctScanDictionaryStale,false,'a new scan clears the stale Dictionary notice');
 });
 test('ClientText consistency results identify grammatical forms and exclude other forms from the comparison',async()=>{
     const first=namedUnit('MasculineOne','Power','Force'),second=namedUnit('MasculineTwo','Power','Strength'),other=namedUnit('Feminine','Power','Different'),
@@ -3969,15 +3980,29 @@ for(const change of ['Stop','account change'])test('ClientText consistency phase
     assert.equal(app.ctScanRunning,false);assert.equal(app.ctScanDone,false);assert.equal(Object.keys(app.ctDiagnostics).length,0);assert.equal(app.ctScanWarningFileCount,0);
     assert.equal(abort.signal.aborted,false);assert.equal(app._ctScanCache,null);
 });
-for(const changed of ['account','game','branch','language','group','version','mode','units','saved','dictionary','dictionary-revision','hideDNT'])
+for(const changed of ['account','game','branch','language','group','version','mode','units','saved','hideDNT'])
 test('ClientText scanner rejects a late '+changed+' scope without publishing partial results',async()=>{
     const pending=deferred(),{app}=scanHarness(undefined,{$nextTick:()=>pending.promise});const scanning=app.ctStartScan();
     if(changed==='account')app.cloudProfileId='other';else if(changed==='game')app.gameVersion='poe1';else if(changed==='branch')app.branchId='other';
     else if(changed==='language')app.lang='German';else if(changed==='group')app.ctWorkspace={scope:{...scope,groupId:'other'}};
     else if(changed==='version')app.ctWorkspace={scope:{...scope,versionId:'other'}};else if(changed==='mode')app.ctActive=false;
-    else if(changed==='units')app.ctUnits=app.ctUnits.slice();else if(changed==='saved')app.ctSaved={};else if(changed==='dictionary')app.dictionary=[];
-    else if(changed==='dictionary-revision')app.editorDictionaryRevision++;else app.hideDNT=true;
+    else if(changed==='units')app.ctUnits=app.ctUnits.slice();else if(changed==='saved')app.ctSaved={};else app.hideDNT=true;
     pending.resolve();assert.equal(await scanning,false);assert.equal(app.ctScanRunning,false);assert.equal(app.ctScanDone,false);assert.equal(Object.keys(app.ctDiagnostics).length,0);
+});
+for(const includeTerminology of [false,true])
+test('ClientText scanner finishes across mid-scan Dictionary changes and marks stale only when terminology=' + includeTerminology,async()=>{
+    const rows=Array.from({length:26},(_,i)=>namedUnit('Row'+i,'Power','Incorrect')),{app,mixin}=scanHarness(rows);
+    app.getActiveDictionaryEntries=()=>[{find:'Power',replace:'Force'}];
+    onlyScanChecks(app,includeTerminology?'terminology':'variables');
+    let mutated=false;const analyze=app.ctAnalyzeScanUnit;
+    app.ctAnalyzeScanUnit=(...args)=>{
+        const result=analyze(...args);
+        if(!mutated && app.ctScanProcessed===24){mutated=true;app.dictionary=[{find:'Power',replace:'Incorrect'}];app.editorDictionaryRevision++;mixin.watch.editorDictionaryRevision.call(app);}
+        return result;
+    };
+    assert.equal(await app.ctStartScan(),true);assert.equal(app.ctScanDone,true);assert.equal(app.ctScanProcessed,26);
+    assert.equal(app.ctScanDictionaryStale,includeTerminology);
+    if(includeTerminology)assert.equal(app.ctScanWarningFileCount,26,'mid-scan Dictionary edits keep the captured terminology snapshot consistent');
 });
 test('ClientText result cards keep exact issue counts, bounded details, pages and guarded record identities',async()=>{
     const rows=Array.from({length:23},(_,i)=>namedUnit('Row'+i,'{0}','Wrong')),{app}=scanHarness(rows);

@@ -138,7 +138,7 @@
             ctSelection: '', ctEditor: false, ctInlineClosed: false, ctAudioController:null, ctValues: {}, ctReviewed: {}, ctDraftDirty: false, ctDraftStageFailure: null, ctCompletion: null,
             ctVariantSelections: {},
             ctBusy: false, ctNavigationBusy: false, ctInitializing:false, ctProgress: null, ctError: '', ctNotice: '', ctDiagnostics: raw({}), ctScanDone: false,
-            ctScanTypes:scanTypes,ctScanChecks:defaultScanChecks(),ctScanAppliedChecks:null,ctScanRunning:false,ctScanStopped:false,
+            ctScanTypes:scanTypes,ctScanChecks:defaultScanChecks(),ctScanAppliedChecks:null,ctScanRunning:false,ctScanStopped:false,ctScanDictionaryStale:false,
             ctScanProcessed:0,ctScanTotal:0,ctScanRunId:0,ctScanError:'',ctScanPhase:'',ctScanErrorFileCount:0,ctScanWarningFileCount:0,
             ctScanResultsPage:1,ctScanResultsPageSize:20,
             ctHistory: [], ctHistoryLoading: false, ctHistoryPreviousLoading: false, ctHistoryError: '', ctHistoryCursor: null, ctHistoryLocalMore: false,
@@ -439,7 +439,7 @@
             ctDiagnosticScanController() {
                 if(this._ctDiagnosticScanController)return this._ctDiagnosticScanController;
                 const host=this,aliases={diagnosticScanTypes:'ctScanTypes',diagnosticScanChecks:'ctScanChecks',diagnosticScanAppliedChecks:'ctScanAppliedChecks',
-                    diagnosticScanRunning:'ctScanRunning',diagnosticScanCompleted:'ctScanDone',diagnosticScanStopped:'ctScanStopped',diagnosticScanProcessed:'ctScanProcessed',
+                    diagnosticScanRunning:'ctScanRunning',diagnosticScanCompleted:'ctScanDone',diagnosticScanStopped:'ctScanStopped',diagnosticScanDictionaryStale:'ctScanDictionaryStale',diagnosticScanProcessed:'ctScanProcessed',
                     diagnosticScanTotal:'ctScanTotal',diagnosticScanRunId:'ctScanRunId',diagnosticScanError:'ctScanError',diagnosticScanPhase:'ctScanPhase',
                     diagnosticScanErrorFileCount:'ctScanErrorFileCount',diagnosticScanWarningFileCount:'ctScanWarningFileCount',diagnosticScanResultsPage:'ctScanResultsPage',
                     diagnosticScanResultsPageSize:'ctScanResultsPageSize',hasDiagnosticScanSelection:'ctHasScanSelection',diagnosticScanPercent:'ctScanPercent',
@@ -663,7 +663,8 @@
             ctPageCount(value) { this.ctPage = Math.min(this.ctPage, value); },
             ctScanResultPageCount(value) {this.ctScanResultsPage=Math.min(this.ctScanResultsPage,value);},
             ctScanScopeKey() {this.ctCloseScanDialog(false);this.ctClearScanResults();},
-            editorDictionaryRevision() {if(this.ctActive)this.ctClearScanResults();},
+            editorDictionaryRevision() {this.ctMarkScanDictionaryChanged();},
+            dictionary() {this.ctMarkScanDictionaryChanged();},
             hideDNT: {flush:'sync',handler() {
                 if(!this.ctActive)return;
                 this.ctRebuildSheets();this.ctClearScanResults();this.ctPage=1;
@@ -2959,14 +2960,29 @@
                 this.ctDraftDirty = true;
                 return await this.ctSave(false,{origin:'restore'});
             },
+            ctMarkScanDictionaryChanged() {
+                if(!this.ctActive)return;
+                const usesTerminology=this.ctScanRunning
+                    ? !!this._ctScanRunningChecks?.terminology
+                    : !!(this.ctScanDone && this.ctScanAppliedChecks?.terminology);
+                if(usesTerminology)this.ctScanDictionaryStale=true;
+            },
             ctRefreshDiagnostics(ids) {
                 if(this.ctScanRunning){this.ctClearScanResults();return;}
                 if (!this.ctScanDone) return;
                 if(!this._ctScanCache || !this.ctScanEnvironmentCurrent(this._ctScanCache.environment,false)){this.ctClearScanResults();return;}
                 const next = { ...this.ctDiagnostics };
+                let terminology=this._ctScanCache.terminology;
+                if(this.ctScanAppliedChecks?.terminology && (unproxy(this.dictionary)!==this._ctScanCache.dictionary || this.editorDictionaryRevision!==this._ctScanCache.dictionaryRevision)){
+                    terminology=this.terminologyDictionary || root.TerminologyDiagnostics.compileDictionary(this.getActiveDictionaryEntries?.() || []);
+                    this._ctScanCache.terminology=terminology;
+                    this._ctScanCache.dictionary=unproxy(this.dictionary);
+                    this._ctScanCache.dictionaryRevision=this.editorDictionaryRevision;
+                    this.ctScanDictionaryStale=true;
+                }
                 const affected=new Set(ids),keys=new Set(ids.flatMap(id=>[...(this._ctConsistencyByUnit?.get(id) || [])]));
                 for(const key of keys)for(const entry of this._ctConsistencyIndex.get(key))affected.add(entry.unitId);
-                for (const id of affected) { const unit = this._ctScanCache.units.get(id); if (unit) next[id] = this.ctAnalyzeScanUnit(unit,this.ctScanAppliedChecks,this._ctScanCache.terminology); }
+                for (const id of affected) { const unit = this._ctScanCache.units.get(id); if (unit) next[id] = this.ctAnalyzeScanUnit(unit,this.ctScanAppliedChecks,terminology); }
                 if(this._ctConsistencyIndex){const allKeys=new Set([...affected].flatMap(id=>[...(this._ctConsistencyByUnit.get(id) || [])]));for(const key of allKeys)this.ctAddConsistency(next,key,affected);}
                 this.ctDiagnostics = raw(next);this.ctUpdateScanCounts(next);
             },
@@ -2985,8 +3001,8 @@
             },
             ctClearScanResults() {
                 this.ctScanRunId++;this.ctDiagnostics=raw({});this.ctScanDone=false;this.ctScanAppliedChecks=null;this.ctScanRunning=false;
-                this.ctScanStopped=false;this.ctScanProcessed=0;this.ctScanTotal=0;this.ctScanErrorFileCount=0;this.ctScanWarningFileCount=0;
-                this.ctScanError='';this.ctScanPhase='';this.ctScanResultsPage=1;this._ctScanCache=null;this._ctConsistencyIndex=null;this._ctConsistencyByUnit=null;
+                this.ctScanStopped=false;this.ctScanDictionaryStale=false;this.ctScanProcessed=0;this.ctScanTotal=0;this.ctScanErrorFileCount=0;this.ctScanWarningFileCount=0;
+                this.ctScanError='';this.ctScanPhase='';this.ctScanResultsPage=1;this._ctScanCache=null;this._ctScanRunningChecks=null;this._ctConsistencyIndex=null;this._ctConsistencyByUnit=null;
             },
             ctStopScan() {
                 if(!this.ctScanRunning)return false;
@@ -2994,13 +3010,12 @@
                 this.ctScanStopped=true;this.ctScanProcessed=processed;this.ctScanTotal=total;return true;
             },
             ctScanEnvironment() {
-                return {ctx:this.ctContext(),units:unproxy(this.ctUnits),saved:unproxy(this.ctSaved),dictionary:unproxy(this.dictionary),dictionaryRevision:this.editorDictionaryRevision,
+                return {ctx:this.ctContext(),units:unproxy(this.ctUnits),saved:unproxy(this.ctSaved),
                     language:this.lang,game:this.gameVersion,branch:this.branchId || 'default',account:this.cloudProfileId || this.cloudUser?.id || 'guest',hideDNT:this.hideDNT};
             },
             ctScanEnvironmentCurrent(environment,includeSaved=true) {
                 return this.ctActive && this.ctCurrent(environment.ctx) && unproxy(this.ctUnits)===environment.units
-                    && (!includeSaved || unproxy(this.ctSaved)===environment.saved) && unproxy(this.dictionary)===environment.dictionary
-                    && this.editorDictionaryRevision===environment.dictionaryRevision && this.lang===environment.language && this.gameVersion===environment.game
+                    && (!includeSaved || unproxy(this.ctSaved)===environment.saved) && this.lang===environment.language && this.gameVersion===environment.game
                     && (this.branchId || 'default')===environment.branch && (this.cloudProfileId || this.cloudUser?.id || 'guest')===environment.account && this.hideDNT===environment.hideDNT;
             },
             ctAnalyzeScanUnit(unit,checks,terminology) {
@@ -3037,12 +3052,15 @@
                 const environment=this.ctScanEnvironment(),units=this.ctUnits.filter(unit=>this.ctFieldsFor(unit).length),
                     unitMap=new Map(units.map(unit=>[unit.id,unit])),results={},consistencyMap=new Map(),byUnit=new Map(),warningUnits=new Set();
                 this.ctClearScanResults();const runId=this.ctScanRunId;
+                this._ctScanRunningChecks=checks;
                 const current=()=>runId===this.ctScanRunId && this.ctScanEnvironmentCurrent(environment);
                 const check=()=>{if(current())return true;if(runId===this.ctScanRunId)this.ctClearScanResults();return false;};
                 this.ctScanRunning=true;this.ctScanTotal=units.length;this.ctScanPhase='Preparing checks…';
                 try {
                     await this.$nextTick?.();await new Promise(resolve=>setTimeout(resolve,0));if(!check())return false;
                     let terminology=null;
+                    const scannedDictionary=unproxy(this.dictionary),scannedDictionaryRevision=this.editorDictionaryRevision;
+                    this.ctScanDictionaryStale=false;
                     if(checks.terminology){
                         if(!root.TerminologyDiagnostics?.analyze || !root.TerminologyDiagnostics?.compileDictionary)throw new Error('Dictionary terminology checks are unavailable.');
                         terminology=this.terminologyDictionary || root.TerminologyDiagnostics.compileDictionary(this.getActiveDictionaryEntries?.() || []);
@@ -3081,8 +3099,10 @@
                         }
                     }
                     if(!check())return false;
+                    if(checks.terminology && (unproxy(this.dictionary)!==scannedDictionary || this.editorDictionaryRevision!==scannedDictionaryRevision))this.ctScanDictionaryStale=true;
+                    this._ctScanRunningChecks=null;
                     this._ctConsistencyIndex=checks.consistency ? raw(consistencyMap) : null;this._ctConsistencyByUnit=checks.consistency ? raw(byUnit) : null;
-                    this._ctScanCache=raw({environment,units:unitMap,terminology});this.ctScanAppliedChecks=raw({...checks});
+                    this._ctScanCache=raw({environment,units:unitMap,terminology,dictionary:scannedDictionary,dictionaryRevision:scannedDictionaryRevision});this.ctScanAppliedChecks=raw({...checks});
                     this.ctDiagnostics=raw(results);this.ctUpdateScanCounts(results);this.ctScanDone=true;this.ctScanRunning=false;this.ctScanPhase='';return true;
                 } catch(error) {
                     if(check()){this.ctClearScanResults();this.ctScanError=error.message || 'The diagnostic scan failed.';}return false;

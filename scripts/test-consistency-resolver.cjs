@@ -474,7 +474,7 @@ test('resolution does not restore a scan invalidated while storage was committin
   await editor.openConsistencyResolver(0);
   const applying = editor.applyConsistencyVersion(editor.consistencyCurrentChoice.text);
   await Promise.resolve();
-  editor.scheduleDictionaryDiagnosticScan();
+  editor.clearDiagnosticScanResults();
   release();
   assert.equal(await applying, true);
   assert.equal(editor.diagnosticScanCompleted, false);

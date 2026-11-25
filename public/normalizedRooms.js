@@ -476,8 +476,19 @@
         if (Object.hasOwn(options, 'workspace')) workspace = copy(options.workspace);
         if (options.projectWorkspace) workspace = options.projectWorkspace(workspace, finalState);
         if (workspace?.then) throw new Error('Workspace projection must be synchronous.');
-        const paths = result.selection.filepaths;
-        for (const entry of room?.outbox || []) for (const file of entry.files || []) if (!paths.includes(file.yours.filepath)) paths.push(file.yours.filepath);
+        const paths = result.selection.filepaths, extraPaths = [];
+        for (const entry of room?.outbox || []) for (const file of entry.files || []) if (!paths.includes(file.yours.filepath)) {
+          paths.push(file.yours.filepath); extraPaths.push(file.yours.filepath);
+        }
+        if (command.filepaths != null && extraPaths.length && room) {
+          const manifestPaths = new Set((room.manifest?.files || []).map(item => item.filepath));
+          for (const item of await selectedPathRows(tx, S.shared, command.key, extraPaths)) {
+            if (item.value.shared && !Object.hasOwn(room.shared ||= {}, item.value.filepath)) room.shared[item.value.filepath] = copy(item.value.shared);
+            if (item.value.manifest && room.manifest && !manifestPaths.has(item.value.filepath)) {
+              room.manifest.files.push(copy(item.value.manifest)); manifestPaths.add(item.value.filepath);
+            }
+          }
+        }
         for (const operation of room?.outbox || []) if (!result.selection.operationIds.includes(operation.id)) result.selection.operationIds.push(operation.id);
         if (workspace !== undefined && (options.projectWorkspace || Object.hasOwn(options, 'workspace'))) await writeWorkspace(tx, scope, workspace, command.filepaths == null ? undefined : paths);
         await writeRoom(tx, command.key, room, command.filepaths == null ? undefined : paths, result.selection.operationIds);

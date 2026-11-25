@@ -304,10 +304,15 @@
       return { action: 'drop', reason: 'English source changed' };
     const carried = lines(translations), baseline = lines(current.translations?.[language]);
     const entryCount = current.translations?.English?.length || 0;
-    if (blankOriginalCarry && sameSource(previous, current) && complete(carried, entryCount)
-      && (!own(current.translations, language) || baseline.length === entryCount)
-      && baseline.every(text => codec().isBlankTranslation(text))) {
-      return { action: 'carry', reason: 'Translation carried to unchanged source with a blank original' };
+    if (blankOriginalCarry && sameSource(previous, current) && complete(carried, entryCount)) {
+      if ((!own(current.translations, language) || baseline.length === entryCount)
+        && baseline.every(text => codec().isBlankTranslation(text))) {
+        return { action: 'carry', reason: 'Translation carried to unchanged source with a blank original' };
+      }
+      if (!complete(baseline, entryCount) && own(previous.translations, language)
+        && equal(baseline, lines(previous.translations?.[language]))) {
+        return { action: 'carry', reason: 'Translation carried to unchanged source with an unchanged incomplete original' };
+      }
     }
     if (carried.some(text => text.trim()) && !complete(baseline, entryCount))
       return { action: 'drop', reason: 'Translation missing from new source' };

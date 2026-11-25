@@ -672,19 +672,59 @@ test('saved changes without a manual scan do not start either manual-only analyz
   assert.equal(timers.length, 0);
 });
 
-test('changing the dictionary invalidates results without scheduling a rescan', async () => {
+test('changing the dictionary preserves completed scan results without scheduling a rescan', async () => {
   const { editor, config, calls, timers } = loadEditor();
-  conflictingEntries(editor);
-  editor.diagnosticScanChecks = only('consistency', 'terminology');
+  const { first, second } = conflictingEntries(editor);
+  let filtering = 0;
+  editor.filterDesc = () => { filtering++; };
+
+  // Non-terminology scan: Dictionary edits must not clear results or mark them stale.
+  editor.diagnosticScanChecks = only('consistency');
   await editor.scanAllDiagnostics();
-  const beforeDictionaryChange = { ...calls };
-  const timerCount = timers.length;
+  const nonTermResults = editor.diagnosticScanResults;
+  const beforeNonTermEdit = { ...calls };
+  const nonTermTimers = timers.length;
+  const nonTermFiltering = filtering;
   editor.dictionary[0].replace = 'เปลวไฟ';
   config.watch.dictionary.handler.call(editor);
-  assert.equal(editor.diagnosticScanCompleted, false);
-  assert.deepEqual(Object.keys(editor.diagnosticScanResults), []);
-  assert.deepEqual(calls, beforeDictionaryChange);
-  assert.equal(timers.length, timerCount, 'Dictionary edits must not schedule an automatic scan.');
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanResults, nonTermResults);
+  assert.equal(editor.diagnosticScanWarningFileCount, 2);
+  assert.equal(editor.diagnosticScanDictionaryStale, false);
+  assert.equal(filtering, nonTermFiltering, 'Dictionary edits must not rebuild the file list.');
+  assert.deepEqual(calls, beforeNonTermEdit);
+  assert.equal(timers.length, nonTermTimers, 'Dictionary edits must not schedule an automatic scan.');
+
+  // Terminology scan: Dictionary edits preserve results, mark terminology stale,
+  // and later saved-file refreshes use the updated Dictionary without rescanning everything.
+  editor.dictionary = [{ find: 'Fire', replace: 'ไฟ' }];
+  editor.diagnosticScanChecks = only('consistency', 'terminology');
+  await editor.scanAllDiagnostics();
+  assert.equal(editor.diagnosticScanDictionaryStale, false);
+  const termResults = editor.diagnosticScanResults;
+  const secondBefore = termResults[second.filepath];
+  assert.equal(termResults[first.filepath].terminologyDiagnostics.length, 1);
+  const beforeTermEdit = { ...calls };
+  const termTimers = timers.length;
+  const termFiltering = filtering;
+  editor.dictionary = [{ find: 'Fire', replace: 'ไฟ', alts: [{ find: 'Fire', replace: 'ผิด' }] }];
+  config.watch.dictionary.handler.call(editor);
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanResults, termResults);
+  assert.equal(editor.diagnosticScanWarningFileCount, 2);
+  assert.equal(editor.diagnosticScanDictionaryStale, true);
+  assert.equal(filtering, termFiltering);
+  assert.deepEqual(calls, beforeTermEdit);
+  assert.equal(timers.length, termTimers, 'Dictionary edits must not schedule an automatic scan.');
+
+  editor.updateScannedDescDiagnostics(first);
+  assert.equal(editor.diagnosticScanCompleted, true);
+  assert.equal(editor.diagnosticScanResults[first.filepath].terminologyDiagnostics.length, 0,
+    'Saving a file after a Dictionary edit checks that file against the updated Dictionary.');
+  assert.equal(editor.diagnosticScanResults[second.filepath], secondBefore);
+
+  await editor.scanAllDiagnostics();
+  assert.equal(editor.diagnosticScanDictionaryStale, false, 'A fresh scan clears the stale Dictionary notice.');
 });
 
 test('Dictionary edits without a diagnostic scan keep the file list and diagnostic state untouched', () => {
@@ -701,24 +741,37 @@ test('Dictionary edits without a diagnostic scan keep the file list and diagnost
   assert.equal(filtering, 0);
   assert.equal(editor.diagnosticScanResults, results);
   assert.equal(editor.diagnosticScanRunId, run);
+  assert.equal(editor.diagnosticScanDictionaryStale, false);
   assert.deepEqual(calls, { terminology: 0, consistencyIndex: 0, consistency: 0 });
   assert.equal(timers.length, 0);
 });
 
-test('Dictionary edits remove existing diagnostic rows once and cancel a scan without unnecessary file filtering', () => {
-  const { editor } = loadEditor();
-  let filtering = 0;
-  editor.filterDesc = () => { filtering++; };
-  editor.diagnosticScanResults = { 'test/first.txt': { hasDiagnosticWarning: true } };
-  editor.scheduleDictionaryDiagnosticScan();
-  assert.equal(filtering, 1);
-  assert.deepEqual(Object.keys(editor.diagnosticScanResults), []);
-  editor.diagnosticScanRunning = true;
-  const run = editor.diagnosticScanRunId;
-  editor.scheduleDictionaryDiagnosticScan();
-  assert.equal(editor.diagnosticScanRunning, false);
-  assert.equal(editor.diagnosticScanRunId, run + 1);
-  assert.equal(filtering, 1, 'Cancelling a scan with no published results must not rebuild the file list.');
+test('Dictionary edits during a yielded scan preserve it and mark stale only when terminology is enabled', async () => {
+  for (const includeTerminology of [false, true]) {
+    const { editor, config } = loadEditor();
+    editor.descs = Array.from({ length: 26 }, (_, index) => description(`entry-${index}`, 'Fire damage', `ผิด ${index}`));
+    editor.diagnosticScanChecks = includeTerminology ? only('terminology') : only('whitespace');
+    let filtering = 0;
+    editor.filterDesc = () => { filtering++; };
+    const scanning = editor.scanAllDiagnostics();
+    while (editor.diagnosticScanRunning && editor.diagnosticScanProcessed < 25) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+    assert.equal(editor.diagnosticScanProcessed, 25);
+    const filteringMidScan = filtering;
+    editor.dictionary = [{ find: 'Fire', replace: 'ผิด' }];
+    config.watch.dictionary.handler.call(editor);
+    assert.equal(editor.diagnosticScanRunning, true, 'Dictionary edits must not cancel a running scan.');
+    assert.equal(filtering, filteringMidScan);
+    await scanning;
+    assert.equal(editor.diagnosticScanCompleted, true);
+    assert.equal(editor.diagnosticScanProcessed, 26);
+    assert.equal(editor.diagnosticScanDictionaryStale, includeTerminology);
+    if (includeTerminology) {
+      assert.equal(editor.diagnosticScanWarningFileCount, 26,
+        'A running terminology scan evaluates every file against its captured Dictionary snapshot.');
+    }
+  }
 });
 
 test('deselecting scan checks does not disable automatic editor errors', async () => {

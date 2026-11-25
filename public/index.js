@@ -248,6 +248,7 @@ function formatPageRange(total, page, pageSize) {
       diagnosticScanRunId: 0,
       diagnosticScanError: '',
       diagnosticScanStopped: false,
+      diagnosticScanDictionaryStale: false,
       diagnosticScanPhase: '',
       diagnosticScanResultsPage: 1,
       diagnosticScanResultsPageSize: 20,
@@ -2697,7 +2698,7 @@ function formatPageRange(total, page, pageSize) {
       const analysis = this.addTagIdentityDiagnostics(result, english, text, checks);
       // Terminology is opt-in for a manual scan, never part of editor/save validation.
       const terminology = !checks?.terminology || english == null ? [] : window.TerminologyDiagnostics.analyze(
-        english, text, this.terminologyDictionary, { lang }
+        english, text, options.terminology || this.terminologyDictionary, { lang }
       );
       return {
         diagnostics: [...analysis.diagnostics, ...terminology],
@@ -2777,14 +2778,14 @@ function formatPageRange(total, page, pageSize) {
               translationColumns[columnIndex] ?? "",
               englishColumns[columnIndex] ?? "",
               lang,
-              checks, { translationFragment: true }
+              checks, { translationFragment: true, terminology: options.terminology }
             );
             warningCount += Number(result.warningCount || 0);
             errorCount += Number(result.errorCount || 0);
             collectDiagnostics(result, i, columnIndex);
           }
         } else {
-          const result = this.analyzeTranslationDiagnostics(translation, english, lang, checks);
+          const result = this.analyzeTranslationDiagnostics(translation, english, lang, checks, { terminology: options.terminology });
           warningCount += Number(result.warningCount || 0);
           errorCount += Number(result.errorCount || 0);
           collectDiagnostics(result, i);
@@ -2828,6 +2829,7 @@ function formatPageRange(total, page, pageSize) {
     clearDiagnosticScanResults() {
       this.diagnosticScanRunId++;
       this._diagnosticScanCache = null;
+      this._diagnosticScanRunningChecks = null;
       this.diagnosticScanResults = {};
       this.diagnosticScanAppliedChecks = null;
       this.diagnosticScanRunning = false;
@@ -2838,6 +2840,7 @@ function formatPageRange(total, page, pageSize) {
       this.diagnosticScanWarningFileCount = 0;
       this.diagnosticScanError = '';
       this.diagnosticScanStopped = false;
+      this.diagnosticScanDictionaryStale = false;
       this.diagnosticScanPhase = '';
       this.diagnosticScanResultsPage = 1;
     },
@@ -2846,11 +2849,12 @@ function formatPageRange(total, page, pageSize) {
       this.updateScannedDescDiagnostics(resolver.entries.map(entry => entry.filepath));
     },
     scheduleDictionaryDiagnosticScan() {
-      // Dictionary edits invalidate the snapshot; only the scan button starts a new scan.
-      const hadResults = Object.keys(this.diagnosticScanResults || {}).length > 0;
-      if (!hadResults && !this.diagnosticScanRunning && !this.diagnosticScanCompleted && !this.diagnosticScanStopped) return;
-      this.clearDiagnosticScanResults();
-      if (hadResults) this.filterDesc();
+      // Preserve running and completed scan results across Dictionary edits so
+      // translators keep their warning list while updating terms.
+      const usesTerminology = this.diagnosticScanRunning
+        ? !!this._diagnosticScanRunningChecks?.terminology
+        : !!(this.diagnosticScanCompleted && this.diagnosticScanAppliedChecks?.terminology);
+      if (usesTerminology) this.diagnosticScanDictionaryStale = true;
     },
     updateScannedDescDiagnostics(changedDescs = []) {
       // An unfinished scan may have read translations that have just changed.
@@ -2992,8 +2996,10 @@ function formatPageRange(total, page, pageSize) {
     stopDiagnosticScan() {
       if (!this.diagnosticScanRunning) return;
       this.diagnosticScanRunId++;
+      this._diagnosticScanRunningChecks = null;
       this.diagnosticScanRunning = false;
       this.diagnosticScanStopped = true;
+      this.diagnosticScanDictionaryStale = false;
       this.diagnosticScanPhase = '';
     },
     openDiagnosticResult(filepath) {
@@ -3021,6 +3027,7 @@ function formatPageRange(total, page, pageSize) {
 
       this.diagnosticScanResults = {};
       this._diagnosticScanCache = null;
+      this._diagnosticScanRunningChecks = checks;
       this.diagnosticScanAppliedChecks = null;
       this.diagnosticScanRunning = true;
       this.diagnosticScanCompleted = false;
@@ -3030,6 +3037,7 @@ function formatPageRange(total, page, pageSize) {
       this.diagnosticScanWarningFileCount = 0;
       this.diagnosticScanError = '';
       this.diagnosticScanStopped = false;
+      this.diagnosticScanDictionaryStale = false;
       this.diagnosticScanPhase = 'Preparing checks…';
       this.diagnosticScanResultsPage = 1;
       this.filterDesc();
@@ -3039,6 +3047,10 @@ function formatPageRange(total, page, pageSize) {
         await this.$nextTick?.();
         await new Promise(resolve => setTimeout(resolve, 0));
         if (runId !== this.diagnosticScanRunId || scanLang !== this.lang) return;
+        const scannedDictionary = Vue.toRaw ? Vue.toRaw(this.dictionary) : this.dictionary;
+        const scannedDictionaryRevision = this.editorDictionaryRevision;
+        this.diagnosticScanDictionaryStale = false;
+        const terminology = checks.terminology ? this.terminologyDictionary : null;
         const consistencyIndex = checks.consistency
           ? window.TranslationDiagnostics.createConsistencyIndex(descs.filter(desc => this.committedTranslationIssues(desc, scanLang).languageBlockPresent), scanLang) : null;
         this.diagnosticScanPhase = 'Checking files…';
@@ -3046,7 +3058,7 @@ function formatPageRange(total, page, pageSize) {
         for (let i = 0; i < descs.length; i++) {
           if (runId !== this.diagnosticScanRunId || scanLang !== this.lang) return;
           const desc = descs[i];
-          const result = this.analyzeDescDiagnostics(desc, scanLang, consistencyIndex, checks);
+          const result = this.analyzeDescDiagnostics(desc, scanLang, consistencyIndex, checks, { terminology });
           results[desc.filepath] = result;
           if (result.hasDiagnosticError) errorFileCount++;
           if (result.hasDiagnosticWarning) warningFileCount++;
@@ -3061,6 +3073,11 @@ function formatPageRange(total, page, pageSize) {
         }
 
         if (runId !== this.diagnosticScanRunId || scanLang !== this.lang) return;
+        if (checks.terminology && ((Vue.toRaw ? Vue.toRaw(this.dictionary) : this.dictionary) !== scannedDictionary
+          || this.editorDictionaryRevision !== scannedDictionaryRevision)) {
+          this.diagnosticScanDictionaryStale = true;
+        }
+        this._diagnosticScanRunningChecks = null;
         this.diagnosticScanResults = results;
         const cache = { runId, descriptions, lang: scanLang, game: scanGame, source: scanSource, hideDNT: scanHideDNT,
           account: scanAccount, branch: scanBranch,
@@ -3076,6 +3093,8 @@ function formatPageRange(total, page, pageSize) {
       } catch (error) {
         if (runId !== this.diagnosticScanRunId) return;
         console.error("Diagnostic scan failed:", error);
+        this._diagnosticScanRunningChecks = null;
+        this.diagnosticScanDictionaryStale = false;
         this.diagnosticScanRunning = false;
         this.diagnosticScanPhase = '';
         this.diagnosticScanError = `The scan could not be completed. ${error.message || error}`;

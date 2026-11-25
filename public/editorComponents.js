@@ -857,6 +857,7 @@
               <span v-if="diagnosticScanCompleted" class="diagnosticScanCount"><strong>{{ diagnosticScanTotal - diagnosticScanResultFiles.length }}</strong> {{ diagnosticScanUnitLabel(diagnosticScanTotal - diagnosticScanResultFiles.length) }} without findings</span>
             </div>
             <p v-if="diagnosticScanRunning" class="diagnosticScanBackgroundHint">You can close this window while the scan runs and reopen it from Scan diagnostics.</p>
+            <p v-if="diagnosticScanCompleted && diagnosticScanDictionaryStale" class="diagnosticScanStaleHint">Dictionary changed since this scan. Terminology findings reflect the earlier Dictionary until you scan again.</p>
           </section>
           <details class="diagnosticScanChecksDisclosure" :open="!diagnosticScanRunning && !diagnosticScanCompleted">
             <summary>Diagnostic checks <span>{{ diagnosticScanTypes.filter(type => diagnosticScanChecks[type.key]).length }} selected</span></summary>

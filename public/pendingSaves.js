@@ -9,7 +9,7 @@
   const plain = value => JSON.parse(JSON.stringify(value));
   const asError = value => value instanceof Error ? value : new Error(value?.message || String(value));
   const reviewCodes = new Set(['DRAFT_BASE_CHANGED', 'DRAFT_CHANGED', 'DRAFT_CONFLICT', 'SAVE_SCOPE_CHANGED', 'DROPPED_PROMOTION_CHANGED',
-    'DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT', 'DELETE_STAGED_CANCELLED', 'SD_TRANSLATION_INVALID']);
+    'DELETE_STAGED_BASE_CHANGED', 'DELETE_STAGED_NOT_FOUND', 'DELETE_STAGED_CONFLICT', 'DELETE_STAGED_CANCELLED', 'SD_TRANSLATION_INVALID', 'MTL_REVIEW_CHANGED']);
   const requiresReview = error => reviewCodes.has(error?.code) && !error?.durableUnknown;
   let fallbackId = 0;
   const contentScope = value => value.workspaceScope || value;
@@ -45,8 +45,10 @@
     let running = false;
     let disposed = false;
 
+    const canDeferFailure = job => Boolean(job && job.journaled && !job.durable && job.status === 'failed' && !job.error?.durableUnknown);
     function snapshot() {
       return { pending: jobs.filter(job => !job.durable).length,
+        deferrableFailures: jobs.filter(canDeferFailure).length,
         error: jobs.find(job => job.error)?.error?.message || '', jobs: [...jobs] };
     }
     function notify() {
@@ -149,7 +151,7 @@
       const index = jobs.findIndex(job => job.id === id);
       const job = jobs[index];
       if (!job || job.durable || job.status !== 'failed' || !job.batch.draft
-        || !['DRAFT_BASE_CHANGED', 'DRAFT_CHANGED', 'DRAFT_CONFLICT'].includes(job.error?.code)) return false;
+        || !['DRAFT_BASE_CHANGED', 'DRAFT_CHANGED', 'DRAFT_CONFLICT', 'MTL_REVIEW_CHANGED'].includes(job.error?.code)) return false;
       // These transactional rejections made no durable change. The separate
       // local draft remains recoverable and needs a fresh, reviewed submission.
       jobs.splice(index, 1);
@@ -160,6 +162,12 @@
       const index = jobs.findIndex(job => job.id === id), job = jobs[index];
       if (!job || !job.journaled || job.durable || job.status !== 'failed' || !requiresReview(job.error)) return false;
       // The durable journal now retains this command for explicit review.
+      jobs.splice(index, 1); notify(); settle(); schedule(); return true;
+    }
+    function discardReviewedFailure(id) {
+      const index = jobs.findIndex(job => job.id === id), job = jobs[index];
+      if (!canDeferFailure(job)) return false;
+      // Caller has durably persisted this failed submission in review/drafts.
       jobs.splice(index, 1); notify(); settle(); schedule(); return true;
     }
     function discardRejectedReset(id) {
@@ -190,7 +198,7 @@
       const error = new Error('The local save queue is closed.');
       for (const waiter of waiters.splice(0)) waiter.reject(error);
     }
-    return { enqueue, retry, drain, hold, discardRejectedDraft, discardRejectedSubmission, discardRejectedReset, overlay, pendingFor: overlay, snapshot, dispose };
+    return { enqueue, retry, drain, hold, discardRejectedDraft, discardRejectedSubmission, discardReviewedFailure, discardRejectedReset, overlay, pendingFor: overlay, snapshot, dispose };
   }
 
   return { create, scopeKey, requiresReview };

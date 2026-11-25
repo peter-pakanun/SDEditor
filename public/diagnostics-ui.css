@@ -63,6 +63,7 @@
 .diagnosticScanCountError { border-left: 3px solid var(--color-diagnostic-error-border); }
 .diagnosticScanCountWarning { border-left: 3px solid var(--color-diagnostic-warning-border); }
 .diagnosticScanStatus .diagnosticScanBackgroundHint { margin: 12px 0 0; font-size: .92em; opacity: .75; }
+.diagnosticScanStatus .diagnosticScanStaleHint { margin: 12px 0 0; padding: 8px 10px; border-left: 3px solid var(--color-diagnostic-warning-border); border-radius: 6px; background: var(--color-element); font-size: .92em; }
 .diagnosticScanFailed { border-left: 3px solid var(--color-diagnostic-error-border); }
 .diagnosticScanFailed .diagnosticScanStatusText { margin-bottom: 0; }
 
